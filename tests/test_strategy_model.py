@@ -86,3 +86,12 @@ def test_load_missing_position_reports_error(tmp_path):
     with pytest.raises(StrategyValidationError) as ei:
         load_strategy(write(tmp_path, "name: x\nstatus: draft\n", name="nopos.yaml"))
     assert any("position" in e for e in ei.value.errors)
+
+
+def test_load_rejects_bad_condition_and_action(tmp_path):
+    bad = GOOD_YAML.replace('"price < 185"', '"__import__(\'os\')"').replace(
+        '"buy $3000"', '"hold everything"')
+    with pytest.raises(StrategyValidationError) as ei:
+        load_strategy(write(tmp_path, bad, name="badrules.yaml"))
+    joined = " ".join(ei.value.errors)
+    assert "stop-loss" in joined and "add-on-dip" in joined

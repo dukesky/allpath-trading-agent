@@ -5,6 +5,8 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
+from tradewind.strategy.actions import ActionError, parse_action
+from tradewind.strategy.conditions import ConditionError, parse_condition
 from tradewind.strategy.model import StrategyDoc
 
 
@@ -32,4 +34,16 @@ def load_strategy(path: Path) -> StrategyDoc:
             loc = ".".join(str(p) for p in e["loc"])
             errors.append(f"{loc}: {e['msg']}")
         raise StrategyValidationError(strategy_id, errors) from exc
+
+    for rule in doc.rules:
+        try:
+            parse_condition(rule.condition)
+        except ConditionError as exc:
+            errors.append(f"rule {rule.id}: {exc}")
+        try:
+            parse_action(rule.action)
+        except ActionError as exc:
+            errors.append(f"rule {rule.id}: {exc}")
+    if errors:
+        raise StrategyValidationError(strategy_id, errors)
     return doc
