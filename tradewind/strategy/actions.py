@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 
 from pydantic import BaseModel
@@ -44,7 +44,10 @@ def parse_action(text: str) -> ActionSpec:
             continue
         amount: Decimal | None = None
         if "num" in m.groupdict() and m.group("num") is not None:
-            amount = Decimal(m.group("num").replace(",", ""))
+            try:
+                amount = Decimal(m.group("num").replace(",", ""))
+            except InvalidOperation:
+                raise ActionError(f"invalid amount in action: {text!r}")
             if amount <= 0:
                 raise ActionError(f"amount must be positive: {text!r}")
             if kind == ActionKind.SELL_PCT and amount > 100:

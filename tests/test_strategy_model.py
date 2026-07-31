@@ -95,3 +95,10 @@ def test_load_rejects_bad_condition_and_action(tmp_path):
         load_strategy(write(tmp_path, bad, name="badrules.yaml"))
     joined = " ".join(ei.value.errors)
     assert "stop-loss" in joined and "add-on-dip" in joined
+
+
+def test_load_action_typo_collects_error_not_crash(tmp_path):
+    bad = GOOD_YAML.replace('"buy $3000"', '"buy $."')
+    with pytest.raises(StrategyValidationError) as ei:
+        load_strategy(write(tmp_path, bad, name="typo.yaml"))
+    assert any("add-on-dip" in e for e in ei.value.errors)

@@ -32,6 +32,12 @@ def test_parse_rejects(bad):
         parse_action(bad)
 
 
+@pytest.mark.parametrize("bad", ["sell .%", "sell ,%", "sell $.", "buy $,", "buy $1..2"])
+def test_degenerate_numbers_raise_action_error(bad):
+    with pytest.raises(ActionError):
+        parse_action(bad)
+
+
 def kw(**over):
     base = dict(strategy=STRAT, rule_id="r", price=Decimal("200"),
                 position=POS, equity=Decimal("10000"), reason="t")
