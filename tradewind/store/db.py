@@ -34,6 +34,23 @@ CREATE TABLE IF NOT EXISTS rule_states (
     updated_ts TEXT NOT NULL,
     PRIMARY KEY (strategy_id, rule_id)
 );
+
+CREATE TABLE IF NOT EXISTS pending_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    rule_type TEXT NOT NULL,
+    condition TEXT NOT NULL,
+    action TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    intent TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    resolved_ts TEXT,
+    resolution_note TEXT,
+    execution_result TEXT
+);
 """
 
 
