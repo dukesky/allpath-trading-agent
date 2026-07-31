@@ -148,6 +148,41 @@ review:
 - `action` 支持比例制（`sell 50%`）与金额制（`buy $3000`）。
 - `thesis` / `invalidation` 为 prose，归 LLM 在 review 时联网检验。
 
+## 5.1 Phase 2 详细设计：策略引擎 + 哨兵循环（2026-07-30 讨论定稿）
+
+**交互原则（全项目适用）**：用户的主要操作入口是 Web UI；terminal 是辅助入口；email 只做通知、不承载操作（邮件中不放操作链接）。Phase 2 的 CLI 处置命令是 Phase 5 UI 上线前的过渡，因此队列等能力一律实现为 service 层 API，CLI 只是薄壳。
+
+### 存储
+- `strategies/*.yaml` 每策略一文件（当前版本，人可读可直接编辑），策略 id = 文件名；
+- SQLite `strategy_versions` 表存每次生效版本的全文快照（版本号、时间、修订原因）。
+- 加载时全量校验（条件/动作可解析、字段合法），坏策略在加载时报错而非触发时。
+
+### 规则求值器（确定性，零 LLM）
+- 词汇表 v1：`price`、`position_weight`、`position_qty`、`avg_entry_price`、`pnl_pct`（相对建仓均价盈亏%）；
+- 运算符：`< > <= >= ==`、`and/or/not`、括号、数字字面量；
+- 实现：Python `ast.parse` + 节点白名单（仅比较/布尔/数字/白名单变量），无任意代码执行面；
+- Action 语法：`sell 50%` / `sell all` / `sell $5000` / `buy $3000` / `buy to target_weight`，结合当前价格与持仓换算为 OrderIntent。
+- 更丰富的表达式（均线/年线/K线函数等）列入 docs/TODO.md 的 Phase 2.5。
+
+### 触发语义
+- **一次性**：规则触发后 `state: armed → triggered`，不再评估；重新武装需显式操作（用户，或 Phase 3 后 agent 修订策略时）。
+- 处置矩阵 = 规则类型 × 策略授权级别：
+
+| 策略授权 | 硬规则触发 | 软规则触发 |
+|---|---|---|
+| `auto` | 立即经 Executor 执行 + 通知 | 入待处理队列 + 通知 |
+| `confirm` | 入待处理队列 + 通知 | 入待处理队列 + 通知 |
+| `notify` | 仅通知 | 仅通知 |
+
+### 待处理队列（UI 一等公民）
+- SQLite `pending_reviews`：触发详情、触发时快照（价格/持仓/换算好的订单意图）、状态（pending/approved/rejected/expired）、处置记录；
+- `ReviewQueue` service API（list/approve/reject），approve 经 Executor 执行；CLI、未来的 Web UI、Phase 3 的 agent 都调这套 API。
+
+### 运行形态
+- `tradewind run`：常驻进程（APScheduler），盘中每 2 小时哨兵（可配置），ET 9:30–16:00 工作日判断（节假日历法在 TODO）；每日反思任务位留待 Phase 6；
+- `tradewind check`：单次手动哨兵；`tradewind strategies`：列策略与规则状态；`tradewind rearm`：重新武装；`tradewind reviews list/approve/reject`：过渡期队列处置。
+- 通知层：SMTP 邮件（未配置时降级为日志），Phase 2 一并搭好。
+
 ## 6. 风控守门层
 
 所有订单意图的必经之路，纯确定性代码，LLM 不可绕过。检查项（用户可配）：单笔金额上限、单股仓位上限、当日交易次数上限、账户现金下限、授权级别匹配、live/paper 开关。任何检查不过 → 拒单 + 记录 + 通知。
