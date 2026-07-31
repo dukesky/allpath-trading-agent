@@ -58,7 +58,7 @@ The framework is distributed as the Python package **`tradewind`** and is design
 
 - **Three operating loops**
   1. **Conversation loop** — on demand: discuss stocks, create or revise strategies. Changes always follow *agent drafts → you approve → takes effect*.
-  2. **Sentinel loop** — every 2 hours during market hours (configurable): deterministic code evaluates prices against strategy rules at zero LLM cost. On a trigger, *hard rules* (e.g. stop-loss) execute immediately with no LLM in the path; *soft rules* (e.g. buy-the-dip) wake the agent to research conditions first.
+  2. **Sentinel loop** — hourly during market hours (configurable interval): deterministic code evaluates prices against strategy rules at zero LLM cost. On a trigger, *hard rules* (e.g. stop-loss) execute immediately with no LLM in the path; *soft rules* (e.g. buy-the-dip) wake the agent to research conditions first.
   3. **Reflection loop** — daily after close and after every trade: the agent re-validates each strategy's thesis against fresh information, reviews portfolio risk, and reports to you.
 
 - **Four-layer memory**

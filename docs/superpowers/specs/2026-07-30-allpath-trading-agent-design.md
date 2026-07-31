@@ -71,7 +71,7 @@
 ### 4.3 三个运行循环
 
 1. **对话循环**（用户发起，随时）：Web UI 聊天。上下文 = 用户画像 + 活跃策略 + 持仓 + 近期交易日志（按相关性组装，不全量注入）。场景：onboarding 访谈、讨论股票、共创/修订策略。策略变更流程：agent 起草 diff → 用户确认 → 版本 +1 生效。
-2. **哨兵循环**（盘中每 2 小时一次，频率可配置；廉价）：拉价格 → 评估规则 → 无触发仅记日志（零 LLM 成本）；有触发 → 硬规则直接进执行链路；软规则唤醒 agent 联网复核 → 按授权级别行动。
+2. **哨兵循环**（盘中每 1 小时一次，间隔为可调参数 `sentinel_interval_minutes`，默认 60；廉价）：拉价格 → 评估规则 → 无触发仅记日志（零 LLM 成本）；有触发 → 硬规则直接进执行链路；软规则唤醒 agent 联网复核 → 按授权级别行动。
 3. **反思循环**（每日 + 每次交易后）：
    - 每日深度 review（收盘后）：逐策略检验投资论点与证伪条件（联网搜索）、检视组合风险、发送 review 报告、提出修订建议。
    - 交易后复盘：记录完整决策链，定期归纳"哪类判断准/不准"写入记忆。
@@ -179,7 +179,7 @@ review:
 - `ReviewQueue` service API（list/approve/reject），approve 经 Executor 执行；CLI、未来的 Web UI、Phase 3 的 agent 都调这套 API。
 
 ### 运行形态
-- `tradewind run`：常驻进程（APScheduler），盘中每 2 小时哨兵（可配置），ET 9:30–16:00 工作日判断（节假日历法在 TODO）；每日反思任务位留待 Phase 6；
+- `tradewind run`：常驻进程（APScheduler），盘中每 1 小时哨兵（`sentinel_interval_minutes` 参数可调，默认 60），ET 9:30–16:00 工作日判断（节假日历法在 TODO）；每日反思任务位留待 Phase 6；
 - `tradewind check`：单次手动哨兵；`tradewind strategies`：列策略与规则状态；`tradewind rearm`：重新武装；`tradewind reviews list/approve/reject`：过渡期队列处置。
 - 通知层：SMTP 邮件（未配置时降级为日志），Phase 2 一并搭好。
 
@@ -192,7 +192,7 @@ review:
 - **Broker 层**：薄接口 `get_account / get_positions / get_orders / submit_order / cancel_order` + 能力标志；第一个适配器 Alpaca（paper 起步，live 为显式开关）。
 - **数据层**：yfinance 起步（日线 + 报价）；后续 Alpaca data、Tiingo（EOD）、Finnhub（新闻/情绪）。
 - **通知层**：SMTP 邮件 + Web UI 站内消息；事件：触发、成交、拒单、周报、待确认请求。
-- **调度器**：APScheduler；任务：哨兵循环（盘中每 2 小时，可配置）、每日 review（收盘后）。
+- **调度器**：APScheduler；任务：哨兵循环（盘中每 1 小时，`sentinel_interval_minutes` 可调）、每日 review（收盘后）。
 - **Web UI**：聊天窗 + 持仓/策略面板 + 交易与决策日志 + 待确认队列。服务端渲染/htmx，够用不上重框架。
 
 ## 8. 项目结构
