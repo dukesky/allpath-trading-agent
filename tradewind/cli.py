@@ -18,11 +18,17 @@ def _default_broker(settings: Settings) -> Broker:
 
 
 def cmd_status(settings: Settings, broker: Broker) -> int:
-    acct = broker.get_account()
-    mode = "PAPER" if broker.is_paper else "LIVE"
-    print(f"[{broker.name} / {mode.lower()}]")
-    print(f"equity: {acct.equity}  cash: {acct.cash}  buying_power: {acct.buying_power}")
-    positions = broker.get_positions()
+    try:
+        acct = broker.get_account()
+        mode = "PAPER" if broker.is_paper else "LIVE"
+        print(f"[{broker.name} / {mode.lower()}]")
+        print(f"equity: {acct.equity}  cash: {acct.cash}  buying_power: {acct.buying_power}")
+        positions = broker.get_positions()
+    except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit, never crash
+        print(f"Could not reach broker: {exc}. Check your Alpaca keys in .env.",
+              file=sys.stderr)
+        return 1
+
     if positions:
         print("\npositions:")
         for p in positions:

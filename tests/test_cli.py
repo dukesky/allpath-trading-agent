@@ -46,3 +46,35 @@ def test_status_without_keys_exits_2(tmp_path, capsys, monkeypatch):
     code = main(["status"])  # no factory: builds from (empty) settings
     assert code == 2
     assert "ALPACA_API_KEY" in capsys.readouterr().err
+
+
+class RaisingBroker(Broker):
+    name = "fake"
+    is_paper = True
+
+    def get_account(self):
+        raise RuntimeError("connection refused")
+
+    def get_positions(self):
+        return []
+
+    def get_order(self, order_id):
+        raise NotImplementedError
+
+    def get_orders(self, open_only=True):
+        return []
+
+    def submit_order(self, intent):
+        raise NotImplementedError
+
+    def cancel_order(self, order_id):
+        pass
+
+
+def test_status_broker_error_prints_friendly_message_and_returns_1(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    code = main(["status"], broker_factory=lambda settings: RaisingBroker())
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "Could not reach broker" in err
+    assert "connection refused" in err

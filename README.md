@@ -3,8 +3,8 @@
 An open-source, self-hosted, LLM-powered **mid/long-term** trading agent
 framework. It discusses your goals with you, co-creates strategies with
 explicit take-profit/stop-loss rules, monitors daily, executes through your
-own brokerage account under tiered authorization, and learns with you over
-time. Package name: `tradewind`.
+own brokerage account under tiered authorization (roadmap), and learns with
+you over time. Package name: `tradewind`.
 
 > Status: Phase 1 (execution foundation). Paper trading only by default.
 
@@ -40,3 +40,7 @@ uv run pytest        # unit tests
 uv run pytest -m integration   # needs Alpaca paper keys in env
 uv run ruff check .
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

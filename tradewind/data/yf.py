@@ -15,7 +15,12 @@ class YFinanceSource(DataSource):
 
     def get_quote(self, ticker: str) -> Quote:
         ticker = ticker.strip().upper()
-        price = self._ticker(ticker).fast_info["last_price"]
+        try:
+            price = self._ticker(ticker).fast_info["last_price"]
+        except KeyError:
+            price = None
+        if price is None:
+            raise ValueError(f"no price available for {ticker}")
         return Quote(ticker=ticker, price=Decimal(str(price)),
                      as_of=datetime.now(UTC))
 

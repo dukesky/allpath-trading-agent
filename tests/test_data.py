@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import ClassVar
 
 import pandas as pd
+import pytest
 
 from tradewind.data.yf import YFinanceSource
 
@@ -17,6 +18,13 @@ class StubTicker:
              "Close": [201.0, 202.5], "Volume": [1000, 1100]},
             index=idx,
         )
+
+
+class NoPriceTicker:
+    fast_info: ClassVar[dict] = {"last_price": None}
+
+    def history(self, period, interval="1d"):
+        return pd.DataFrame()
 
 
 def make_source():
@@ -35,3 +43,9 @@ def test_get_bars_maps_dataframe():
     assert len(bars) == 2
     assert bars[-1].close == 202.5
     assert bars[0].volume == 1000
+
+
+def test_get_quote_raises_when_no_price():
+    source = YFinanceSource(ticker_factory=lambda t: NoPriceTicker())
+    with pytest.raises(ValueError, match="no price available for AAPL"):
+        source.get_quote("aapl")

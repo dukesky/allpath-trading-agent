@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from pydantic import BaseModel
 
 from tradewind.broker.base import Broker, Order, OrderIntent
@@ -30,14 +32,28 @@ class Executor:
         self.data = data
 
     def execute(self, intent: OrderIntent) -> ExecutionResult:
-        quote = self.data.get_quote(intent.ticker)
+        # Notional intents don't need a price for the gate's checks (order_value
+        # comes straight from intent.notional), so only fetch a quote when qty
+        # sizing requires converting shares to dollars.
+        try:
+            price = (self.data.get_quote(intent.ticker).price
+                     if intent.qty is not None else Decimal(0))
+            account = self.broker.get_account()
+            positions = self.broker.get_positions()
+            trades_today = self.journal.trades_today()
+        except Exception as exc:
+            failed = RiskDecision(approved=False,
+                                  reasons=[f"data error: {exc}"])
+            self.journal.record(intent, failed, None, status_override="error")
+            raise ExecutionError(str(exc)) from exc
+
         decision = self.gate.check(
             intent,
-            account=self.broker.get_account(),
-            positions=self.broker.get_positions(),
-            trades_today=self.journal.trades_today(),
+            account=account,
+            positions=positions,
+            trades_today=trades_today,
             is_paper=self.broker.is_paper,
-            price=quote.price,
+            price=price,
         )
         if not decision.approved:
             self.journal.record(intent, decision, None)
@@ -48,7 +64,7 @@ class Executor:
         except Exception as exc:
             failed = RiskDecision(approved=False,
                                   reasons=[f"broker error: {exc}"])
-            self.journal.record(intent, failed, None)
+            self.journal.record(intent, failed, None, status_override="error")
             raise ExecutionError(str(exc)) from exc
 
         self.journal.record(intent, decision, order)

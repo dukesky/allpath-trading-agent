@@ -45,6 +45,23 @@ def test_trades_today_counts_only_executed_today(tmp_path):
     assert j.trades_today() == 1
 
 
+def test_record_status_override_wins(tmp_path):
+    j = make_journal(tmp_path)
+    j.record(INTENT, RiskDecision(approved=False, reasons=["boom"]), None,
+              status_override="error")
+    [row] = j.recent()
+    assert row["status"] == "error"
+    assert "boom" in row["risk_reasons"]
+
+
+def test_trades_today_excludes_error_status(tmp_path):
+    j = make_journal(tmp_path)
+    j.record(INTENT, RiskDecision(approved=True), ORDER)
+    j.record(INTENT, RiskDecision(approved=False, reasons=["data error: boom"]), None,
+              status_override="error")  # errored: not counted
+    assert j.trades_today() == 1
+
+
 def test_schema_is_idempotent(tmp_path):
     path = tmp_path / "t.db"
     connect(path)

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS trades (
     side TEXT NOT NULL,
     qty TEXT,
     notional TEXT,
-    status TEXT NOT NULL,            -- rejected | submitted | filled | ...
+    status TEXT NOT NULL,            -- rejected | error | submitted | filled | ...
     reason TEXT NOT NULL,            -- human-readable intent reason
     strategy_id TEXT,
     risk_reasons TEXT NOT NULL DEFAULT '[]',  -- JSON list
