@@ -1,0 +1,29 @@
+[project]
+name = "tradewind"
+version = "0.1.0"
+description = "All Path Trading Agent - an LLM-powered mid/long-term trading agent framework"
+requires-python = ">=3.11"
+dependencies = [
+    "alpaca-py>=0.33",
+    "yfinance>=0.2.50",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+tradewind = "tradewind.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+markers = ["integration: touches real network services; skipped unless credentials configured"]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+line-length = 100
