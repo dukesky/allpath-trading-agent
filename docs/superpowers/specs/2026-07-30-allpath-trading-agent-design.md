@@ -26,6 +26,8 @@
 
 安全性说明：真正安全关键的部分（认证、传输、下单）由券商官方 SDK（`alpaca-py`）承担；我们的适配层只有几百行、易审计。Credentials 只存本地环境变量/配置，永不上传。
 
+**配置管理**：LLM key 与券商 credentials 存于本地 `.env` 文件，由统一的 SettingsStore 读写；环境变量可覆盖。两种设置入口：① Web UI 设置页；② 直接告诉 agent（agent 经 `update_settings` 工具写入，仅限券商配置等）。**LLM key 必须先在 Web UI 设置**（bootstrap：没有 key 之前 agent 无法对话），券商配置两种方式皆可。
+
 ## 3. 整体架构
 
 ```
@@ -69,9 +71,9 @@
 ### 4.3 三个运行循环
 
 1. **对话循环**（用户发起，随时）：Web UI 聊天。上下文 = 用户画像 + 活跃策略 + 持仓 + 近期交易日志（按相关性组装，不全量注入）。场景：onboarding 访谈、讨论股票、共创/修订策略。策略变更流程：agent 起草 diff → 用户确认 → 版本 +1 生效。
-2. **哨兵循环**（每日，廉价）：拉价格 → 评估规则 → 无触发仅记日志（零 LLM 成本）；有触发 → 硬规则直接进执行链路；软规则唤醒 agent 联网复核 → 按授权级别行动。
-3. **反思循环**（每周 + 每次交易后）：
-   - 周度深度 review：逐策略检验投资论点与证伪条件（联网搜索）、检视组合风险、邮件发送 review 报告、提出修订建议。
+2. **哨兵循环**（盘中每 2 小时一次，频率可配置；廉价）：拉价格 → 评估规则 → 无触发仅记日志（零 LLM 成本）；有触发 → 硬规则直接进执行链路；软规则唤醒 agent 联网复核 → 按授权级别行动。
+3. **反思循环**（每日 + 每次交易后）：
+   - 每日深度 review（收盘后）：逐策略检验投资论点与证伪条件（联网搜索）、检视组合风险、发送 review 报告、提出修订建议。
    - 交易后复盘：记录完整决策链，定期归纳"哪类判断准/不准"写入记忆。
 
 ### 4.4 执行链路（发现 / 决定 / 执行 三段分离）
@@ -100,7 +102,7 @@
 
 ### 4.6 LLM 层与成本
 
-多 provider 抽象，第一版支持三家：**Claude（Anthropic 原生 API）/ OpenAI / OpenRouter**。实现上为两种客户端：Anthropic 原生 + OpenAI 兼容协议（OpenAI 与 OpenRouter 共用，仅 `base_url` 与 key 不同），配置里按 `provider + model + api_key` 声明。**开发与测试默认用 OpenRouter**（一个 key 可切换多家模型，便于对比）。策略讨论与周度 review 用强模型，哨兵触发复核可配中档模型，规则评估零 LLM。预估：日常 <$1/天，周度 review $1–3/次。
+多 provider 抽象，第一版支持三家：**Claude（Anthropic 原生 API）/ OpenAI / OpenRouter**。实现上为两种客户端：Anthropic 原生 + OpenAI 兼容协议（OpenAI 与 OpenRouter 共用，仅 `base_url` 与 key 不同），配置里按 `provider + model + api_key` 声明。**开发与测试默认用 OpenRouter**（一个 key 可切换多家模型，便于对比）。策略讨论与每日 review 用强模型，哨兵触发复核可配中档模型，规则评估零 LLM。预估：哨兵零成本，每日 review $1–3/次（取决于策略数量与模型选择）。
 
 ## 5. 策略文档格式
 
@@ -138,7 +140,7 @@ rules:
     action: "buy $3000"         # 亦支持: "buy to target_weight"
 
 review:
-  cadence: weekly
+  cadence: daily
   invalidation: "服务收入连续两季增速 <10%，或 AI 战略明显落后"
 ```
 
@@ -155,7 +157,7 @@ review:
 - **Broker 层**：薄接口 `get_account / get_positions / get_orders / submit_order / cancel_order` + 能力标志；第一个适配器 Alpaca（paper 起步，live 为显式开关）。
 - **数据层**：yfinance 起步（日线 + 报价）；后续 Alpaca data、Tiingo（EOD）、Finnhub（新闻/情绪）。
 - **通知层**：SMTP 邮件 + Web UI 站内消息；事件：触发、成交、拒单、周报、待确认请求。
-- **调度器**：APScheduler；任务：每日哨兵、周度 review、盘中可选检查频率。
+- **调度器**：APScheduler；任务：哨兵循环（盘中每 2 小时，可配置）、每日 review（收盘后）。
 - **Web UI**：聊天窗 + 持仓/策略面板 + 交易与决策日志 + 待确认队列。服务端渲染/htmx，够用不上重框架。
 
 ## 8. 项目结构

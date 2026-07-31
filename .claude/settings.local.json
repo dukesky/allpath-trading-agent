@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(git init *)",
+      "Bash(mkdir -p docs/superpowers/specs)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Add v1 design spec for All Path Trading Agent *)",
+      "Bash(git commit -q -m 'Spec: support Claude/OpenAI/OpenRouter providers, default to OpenRouter for testing *)",
+      "Bash(git commit -q -m 'Add Phase 1 implementation plan; loop cadence updates \\(sentinel 2h, daily review\\) *)",
+      "Bash(gh auth *)"
+    ]
+  }
+}
