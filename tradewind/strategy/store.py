@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from tradewind.strategy.loader import load_strategy
+from tradewind.strategy.loader import StrategyValidationError, load_strategy
 from tradewind.strategy.model import RuleState, StrategyDoc, StrategyStatus
 
 
@@ -19,11 +19,20 @@ class StrategyStore:
         self.directory = directory
         self._conn = conn
 
-    def load_all(self, status: StrategyStatus | None = StrategyStatus.ACTIVE
-                 ) -> list[StrategyDoc]:
+    def load_all(self, status: StrategyStatus | None = StrategyStatus.ACTIVE,
+                 errors: list[str] | None = None) -> list[StrategyDoc]:
+        """Load every strategy YAML in the directory. A single invalid file
+        must never take down monitoring for every other strategy, so bad
+        files are skipped (and, if `errors` is given, reported there) rather
+        than raising."""
         docs = []
         for path in sorted(self.directory.glob("*.yaml")):
-            doc = self._merge_states(load_strategy(path))
+            try:
+                doc = self._merge_states(load_strategy(path))
+            except StrategyValidationError as exc:
+                if errors is not None:
+                    errors.append(f"{path.name}: {exc}")
+                continue
             if status is None or doc.status == status:
                 docs.append(doc)
         return docs
@@ -67,4 +76,4 @@ class StrategyStore:
     def versions(self, strategy_id: str) -> list[sqlite3.Row]:
         return list(self._conn.execute(
             "SELECT * FROM strategy_versions WHERE strategy_id = ?"
-            " ORDER BY version DESC", (strategy_id,)))
+            " ORDER BY version DESC, id DESC", (strategy_id,)))

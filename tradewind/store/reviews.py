@@ -5,6 +5,8 @@ import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from pydantic import ValidationError
+
 from tradewind.broker.base import OrderIntent
 from tradewind.execution import ExecutionError, ExecutionResult, Executor
 
@@ -64,6 +66,14 @@ class ReviewQueue:
         if not row["intent"]:
             raise ReviewError(f"review {review_id} has no executable intent")
 
+        # Parse the intent BEFORE claiming: a corrupt intent must leave the
+        # review pending (not stuck "approved" with nothing executed).
+        try:
+            intent = OrderIntent.model_validate_json(row["intent"])
+        except (ValidationError, ValueError) as exc:
+            raise ReviewError(
+                f"review {review_id} has corrupt intent: {exc}") from exc
+
         # Atomically claim the review to prevent concurrent execution
         resolved_ts = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
@@ -77,7 +87,6 @@ class ReviewQueue:
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
 
         # Now execute and set execution_result
-        intent = OrderIntent.model_validate_json(row["intent"])
         try:
             result = self._executor.execute(intent)
         except ExecutionError as exc:
@@ -109,12 +118,3 @@ class ReviewQueue:
             # Someone else already claimed this review
             row = self.get(review_id)
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
-
-    def _resolve(self, review_id: int, status: str, note: str = "",
-                 execution_result: str | None = None) -> None:
-        self._conn.execute(
-            "UPDATE pending_reviews SET status=?, resolved_ts=?, resolution_note=?,"
-            " execution_result=? WHERE id=?",
-            (status, datetime.now(UTC).isoformat(), note,
-             execution_result, review_id))
-        self._conn.commit()

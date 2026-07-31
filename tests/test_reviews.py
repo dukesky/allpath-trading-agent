@@ -85,3 +85,15 @@ def test_approve_without_intent_raises(queue):
 def test_get_missing_raises(queue):
     with pytest.raises(ReviewError):
         queue.get(999)
+
+
+def test_approve_with_corrupt_intent_raises_and_leaves_pending(queue):
+    rid = add(queue)
+    queue._conn.execute("UPDATE pending_reviews SET intent=? WHERE id=?",
+                        ("not json", rid))
+    queue._conn.commit()
+    with pytest.raises(ReviewError):
+        queue.approve(rid)
+    row = queue.get(rid)
+    assert row["status"] == "pending"
+    assert queue._executor.calls == []

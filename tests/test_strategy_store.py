@@ -52,8 +52,26 @@ def test_snapshot_and_versions(store):
     assert "AAPL" in rows[0]["content"]
 
 
-def test_invalid_file_raises(tmp_path):
+def test_invalid_file_is_skipped_without_errors_param(tmp_path):
+    (tmp_path / "bad.yaml").write_text("name: x\nstatus: active\n")
+    s = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+    docs = s.load_all()  # must not raise: one bad file must not halt monitoring
+    assert docs == []
+
+
+def test_invalid_file_is_skipped_and_collected_good_still_loads(tmp_path):
+    (tmp_path / "bad.yaml").write_text("name: x\nstatus: active\n")
+    (tmp_path / "a.yaml").write_text(ACTIVE)
+    s = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+    errors: list[str] = []
+    docs = s.load_all(status=None, errors=errors)
+    assert [d.id for d in docs] == ["a"]
+    assert len(errors) == 1
+    assert "bad.yaml" in errors[0]
+
+
+def test_load_still_raises_for_invalid_file(tmp_path):
     (tmp_path / "bad.yaml").write_text("name: x\nstatus: active\n")
     s = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
     with pytest.raises(StrategyValidationError):
-        s.load_all()
+        s.load("bad")

@@ -43,7 +43,7 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
     gate = RiskGate(RiskLimits())
     executor = Executor(broker, gate, journal, data)
     queue = ReviewQueue(conn, executor)
-    settings.strategies_dir.mkdir(exist_ok=True)
+    settings.strategies_dir.mkdir(parents=True, exist_ok=True)
     strategies = StrategyStore(settings.strategies_dir, conn)
     notifier = build_notifier(settings)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier)

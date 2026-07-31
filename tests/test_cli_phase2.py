@@ -44,6 +44,37 @@ def test_rearm_command(tmp_path, capsys, monkeypatch):
     assert "armed" in out
 
 
+def test_rearm_missing_strategy_prints_friendly_message(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    code = main(["rearm", "nope", "r1"], broker_factory=lambda s: FakeBroker())
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "nope" in err
+    assert "Traceback" not in err
+
+
+def test_rearm_invalid_strategy_prints_friendly_message(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    (tmp_path / "strategies" / "bad.yaml").write_text("name: x\nstatus: active\n")
+    code = main(["rearm", "bad", "r1"], broker_factory=lambda s: FakeBroker())
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "bad" in err
+    assert "Traceback" not in err
+
+
+def test_strategies_command_reports_bad_yaml_and_still_lists_good(
+        tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    (tmp_path / "strategies" / "bad.yaml").write_text("name: x\nstatus: active\n")
+    code = main(["strategies"], broker_factory=lambda s: FakeBroker())
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert code == 0
+    assert "t" in out and "r1" in out
+    assert "bad.yaml" in err
+
+
 def test_reviews_flow(tmp_path, capsys, monkeypatch):
     setup_env(tmp_path, monkeypatch)
     (tmp_path / "strategies" / "t.yaml").write_text(

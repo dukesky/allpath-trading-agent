@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from tradewind.broker.base import Broker, Position
 from tradewind.data.base import DataSource
-from tradewind.execution import ExecutionError, Executor
+from tradewind.execution import Executor
 from tradewind.notify.base import Notifier
 from tradewind.store.reviews import ReviewQueue
 from tradewind.strategy.actions import parse_action, to_order_intent
@@ -23,7 +23,7 @@ from tradewind.strategy.store import StrategyStore
 class TriggerOutcome(BaseModel):
     strategy_id: str
     rule_id: str
-    disposition: str  # executed | queued | notified | skipped | error
+    disposition: str  # executed | rejected | queued | notified | skipped | error
     detail: str = ""
 
 
@@ -50,12 +50,15 @@ class Sentinel:
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
         try:
-            docs = self.strategies.load_all()
             account = self.broker.get_account()
             positions = {p.ticker: p for p in self.broker.get_positions()}
         except Exception as exc:  # noqa: BLE001 — a broken env must surface, not crash
             report.errors.append(f"setup failed: {exc}")
             return report
+
+        # A single invalid strategy YAML must not stop monitoring for every
+        # other strategy — collect its error and keep going.
+        docs = self.strategies.load_all(errors=report.errors)
 
         for doc in docs:
             try:
@@ -127,13 +130,16 @@ class Sentinel:
                 and rule_type == RuleType.HARD):
             try:
                 result = self.executor.execute(intent)
-            except ExecutionError as exc:
+            except Exception as exc:  # noqa: BLE001 — any executor failure must
+                # still be reported and notified, not crash the sentinel pass.
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                       disposition="error", detail=str(exc))
-            detail = ("submitted" if result.submitted
-                      else "; ".join(result.decision.reasons))
+            if result.submitted:
+                return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                      disposition="executed", detail="submitted")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                                  disposition="executed", detail=detail)
+                                  disposition="rejected",
+                                  detail="; ".join(result.decision.reasons))
         # confirm auth (both types), or auto+soft
         self.queue.add(strategy_id=doc.id, rule_id=rule_id, ticker=doc.position.ticker,
                        rule_type=rule_type.value, condition=condition, action=action,

@@ -74,15 +74,23 @@ class FakeBroker(Broker):
 
 
 class SpyExecutor:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, raise_exc=None, reject_reasons=None):
         self.fail = fail
+        self.raise_exc = raise_exc
+        self.reject_reasons = reject_reasons
         self.calls = []
 
     def execute(self, intent):
         if self.fail:
             raise ExecutionError("boom")
+        if self.raise_exc is not None:
+            raise self.raise_exc
         self.calls.append(intent)
         from tradewind.execution import ExecutionResult
+        if self.reject_reasons is not None:
+            return ExecutionResult(
+                submitted=False, order=None,
+                decision=RiskDecision(approved=False, reasons=self.reject_reasons))
         return ExecutionResult(submitted=True, order=None,
                                decision=RiskDecision(approved=True))
 
@@ -175,3 +183,43 @@ def test_bad_quote_collects_error_and_continues(tmp_path):
 def test_draft_strategy_ignored(tmp_path):
     s, *_ = make(tmp_path, strategy_yaml(status="draft"))
     assert s.run_once().strategies_checked == 0
+
+
+def test_hard_auto_gate_rejected_reported_as_rejected_not_executed(tmp_path):
+    (tmp_path / "t.yaml").write_text(strategy_yaml())
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    ex = SpyExecutor(reject_reasons=["exceeds max position size"])
+    n = SpyNotifier()
+    s = Sentinel(store, FakeData(), FakeBroker(), ex, ReviewQueue(conn, ex), n)
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "rejected"
+    assert "exceeds max position size" in o.detail
+    assert len(n.sent) == 1
+
+
+def test_hard_auto_unexpected_exception_reported_as_error_not_raised(tmp_path):
+    (tmp_path / "t.yaml").write_text(strategy_yaml())
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    ex = SpyExecutor(raise_exc=RuntimeError("db connection lost"))
+    n = SpyNotifier()
+    s = Sentinel(store, FakeData(), FakeBroker(), ex, ReviewQueue(conn, ex), n)
+    report = s.run_once()  # must not raise
+    [o] = report.outcomes
+    assert o.disposition == "error"
+    assert "db connection lost" in o.detail
+    assert len(n.sent) == 1
+
+
+def test_one_bad_yaml_does_not_halt_other_strategies(tmp_path):
+    (tmp_path / "bad.yaml").write_text("name: x\nstatus: active\n")
+    (tmp_path / "t.yaml").write_text(strategy_yaml(condition="price < 100"))
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    ex = SpyExecutor()
+    s = Sentinel(store, FakeData(), FakeBroker(), ex, ReviewQueue(conn, ex), SpyNotifier())
+    report = s.run_once()
+    assert report.strategies_checked == 1
+    assert report.errors and any("bad.yaml" in e for e in report.errors)

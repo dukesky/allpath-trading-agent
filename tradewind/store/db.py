@@ -55,7 +55,11 @@ CREATE TABLE IF NOT EXISTS pending_reviews (
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path))
+    # check_same_thread=False: APScheduler runs jobs on worker threads, not
+    # the thread that built the connection. We rely on a single-writer usage
+    # pattern (one Sentinel loop at a time); the CLI's one-shot commands run
+    # in separate processes, so there is no cross-process contention here.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     return conn

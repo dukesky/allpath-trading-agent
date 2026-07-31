@@ -59,7 +59,10 @@ def cmd_check(components) -> int:
 
 
 def cmd_strategies(components) -> int:
-    docs = components.strategies.load_all(status=None)
+    errors: list[str] = []
+    docs = components.strategies.load_all(status=None, errors=errors)
+    for err in errors:
+        print(f"warning: {err}", file=sys.stderr)
     if not docs:
         print("no strategies found in", components.settings.strategies_dir)
         return 0
@@ -72,7 +75,16 @@ def cmd_strategies(components) -> int:
 
 
 def cmd_rearm(components, strategy_id: str, rule_id: str) -> int:
-    doc = components.strategies.load(strategy_id)
+    from tradewind.strategy.loader import StrategyValidationError
+
+    try:
+        doc = components.strategies.load(strategy_id)
+    except FileNotFoundError:
+        print(f"strategy '{strategy_id}' not found", file=sys.stderr)
+        return 1
+    except StrategyValidationError as exc:
+        print(f"strategy '{strategy_id}' is invalid: {exc}", file=sys.stderr)
+        return 1
     if rule_id not in {r.id for r in doc.rules}:
         print(f"rule {rule_id} not found in {strategy_id}", file=sys.stderr)
         return 1

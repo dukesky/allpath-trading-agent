@@ -55,6 +55,34 @@ def test_email_failure_does_not_raise(capsys):
     n.send("s", "b")  # must not raise
 
 
+def test_default_smtp_factory_passes_timeout(monkeypatch):
+    calls = []
+
+    class RecordingSMTP:
+        def __init__(self, host, port, timeout=None):
+            calls.append((host, port, timeout))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, msg):
+            pass
+
+    monkeypatch.setattr("smtplib.SMTP", RecordingSMTP)
+    n = EmailNotifier("smtp.x.com", 587, "", "", "f@x.com", "t@x.com")
+    n.send("s", "b")
+    assert calls == [("smtp.x.com", 587, 10)]
+
+
 def test_build_notifier_selects(tmp_path):
     s = Settings(_env_file=tmp_path / "none.env")
     assert isinstance(build_notifier(s), ConsoleNotifier)
