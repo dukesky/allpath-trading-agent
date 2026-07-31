@@ -8,10 +8,10 @@ from tradewind.broker.base import Account, OrderIntent, OrderSide, Position
 
 
 class RiskLimits(BaseModel):
-    max_order_value: Decimal = Decimal("5000")
+    max_order_value: Decimal = Decimal(5000)
     max_position_weight: Decimal = Decimal("0.25")  # fraction of equity
     max_daily_trades: int = 10
-    min_cash_reserve: Decimal = Decimal("0")
+    min_cash_reserve: Decimal = Decimal(0)
     allow_live: bool = False
 
 
@@ -47,7 +47,7 @@ class RiskGate:
                 f"daily trade limit reached ({trades_today}/{lim.max_daily_trades})")
 
         if intent.side == OrderSide.BUY:
-            current = pos.market_value if pos else Decimal("0")
+            current = pos.market_value if pos else Decimal(0)
             if account.equity > 0:
                 weight = (current + order_value) / account.equity
                 if weight > lim.max_position_weight:
@@ -58,8 +58,8 @@ class RiskGate:
                 reasons.append(
                     f"buy would violate cash reserve minimum {lim.min_cash_reserve}")
         else:  # SELL — no shorting in v1
-            held_qty = pos.qty if pos else Decimal("0")
-            held_value = pos.market_value if pos else Decimal("0")
+            held_qty = pos.qty if pos else Decimal(0)
+            held_value = pos.market_value if pos else Decimal(0)
             if intent.qty is not None and intent.qty > held_qty:
                 reasons.append(
                     f"sell qty {intent.qty} exceeds position ({held_qty} held)")

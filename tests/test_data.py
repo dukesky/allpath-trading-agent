@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import ClassVar
 
 import pandas as pd
 
@@ -7,7 +8,7 @@ from tradewind.data.yf import YFinanceSource
 
 
 class StubTicker:
-    fast_info = {"last_price": 201.37}
+    fast_info: ClassVar[dict] = {"last_price": 201.37}
 
     def history(self, period, interval="1d"):
         idx = pd.to_datetime(["2026-07-28", "2026-07-29"])

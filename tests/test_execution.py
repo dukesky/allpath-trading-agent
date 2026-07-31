@@ -1,12 +1,18 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
 from tradewind.broker.base import (
-    Account, Broker, Order, OrderIntent, OrderSide, OrderStatus, Position,
+    Account,
+    Broker,
+    Order,
+    OrderIntent,
+    OrderSide,
+    OrderStatus,
+    Position,
 )
-from tradewind.data.base import Bar, DataSource, Quote
+from tradewind.data.base import DataSource, Quote
 from tradewind.execution import ExecutionError, Executor
 from tradewind.risk.gate import RiskGate, RiskLimits
 from tradewind.store.db import connect
@@ -15,8 +21,8 @@ from tradewind.store.journal import TradeJournal
 
 class FakeData(DataSource):
     def get_quote(self, ticker):
-        return Quote(ticker=ticker, price=Decimal("200"),
-                     as_of=datetime.now(timezone.utc))
+        return Quote(ticker=ticker, price=Decimal(200),
+                     as_of=datetime.now(UTC))
 
     def get_bars(self, ticker, days=365):
         return []
@@ -31,14 +37,14 @@ class FakeBroker(Broker):
         self.submitted = []
 
     def get_account(self):
-        return Account(equity=Decimal("10000"), cash=Decimal("8000"),
-                       buying_power=Decimal("10000"))
+        return Account(equity=Decimal(10000), cash=Decimal(8000),
+                       buying_power=Decimal(10000))
 
     def get_positions(self):
-        return [Position(ticker="AAPL", qty=Decimal("10"),
-                         avg_entry_price=Decimal("190"),
-                         market_value=Decimal("2000"),
-                         unrealized_pl=Decimal("100"))]
+        return [Position(ticker="AAPL", qty=Decimal(10),
+                         avg_entry_price=Decimal(190),
+                         market_value=Decimal(2000),
+                         unrealized_pl=Decimal(100))]
 
     def get_order(self, order_id):
         raise NotImplementedError
@@ -52,9 +58,9 @@ class FakeBroker(Broker):
         self.submitted.append(intent)
         return Order(id="o1", ticker=intent.ticker, side=intent.side,
                      qty=intent.qty, notional=intent.notional,
-                     status=OrderStatus.SUBMITTED, filled_qty=Decimal("0"),
+                     status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
                      filled_avg_price=None,
-                     submitted_at=datetime.now(timezone.utc))
+                     submitted_at=datetime.now(UTC))
 
     def cancel_order(self, order_id):
         pass
@@ -91,7 +97,7 @@ def test_rejected_intent_never_reaches_broker(tmp_path):
 
 
 def test_broker_failure_is_journaled_and_raised(tmp_path):
-    ex, broker, journal = make_executor(tmp_path, fail=True)
+    ex, _, journal = make_executor(tmp_path, fail=True)
     with pytest.raises(ExecutionError):
         ex.execute(buy())
     [row] = journal.recent()

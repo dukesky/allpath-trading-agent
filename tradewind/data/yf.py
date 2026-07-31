@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Callable
 
 import yfinance
 
@@ -17,7 +17,7 @@ class YFinanceSource(DataSource):
         ticker = ticker.strip().upper()
         price = self._ticker(ticker).fast_info["last_price"]
         return Quote(ticker=ticker, price=Decimal(str(price)),
-                     as_of=datetime.now(timezone.utc))
+                     as_of=datetime.now(UTC))
 
     def get_bars(self, ticker: str, days: int = 365) -> list[Bar]:
         ticker = ticker.strip().upper()

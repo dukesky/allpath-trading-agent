@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from tradewind.broker.base import Order, OrderIntent
 from tradewind.risk.gate import RiskDecision
@@ -20,7 +20,7 @@ class TradeJournal:
             " strategy_id, risk_reasons, broker_order_id)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 intent.ticker,
                 intent.side.value,
                 str(intent.qty) if intent.qty is not None else None,
@@ -36,7 +36,7 @@ class TradeJournal:
         return cur.lastrowid
 
     def trades_today(self, now: datetime | None = None) -> int:
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         day = now.date().isoformat()
         row = self._conn.execute(
             "SELECT COUNT(*) AS n FROM trades WHERE ts LIKE ? AND status != 'rejected'",

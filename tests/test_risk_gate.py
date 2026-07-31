@@ -1,13 +1,11 @@
 from decimal import Decimal
 
-import pytest
-
 from tradewind.broker.base import Account, OrderIntent, OrderSide, Position
 from tradewind.risk.gate import RiskGate, RiskLimits
 
-ACCT = Account(equity=Decimal("10000"), cash=Decimal("5000"), buying_power=Decimal("10000"))
-AAPL_POS = Position(ticker="AAPL", qty=Decimal("10"), avg_entry_price=Decimal("190"),
-                    market_value=Decimal("2000"), unrealized_pl=Decimal("100"))
+ACCT = Account(equity=Decimal(10000), cash=Decimal(5000), buying_power=Decimal(10000))
+AAPL_POS = Position(ticker="AAPL", qty=Decimal(10), avg_entry_price=Decimal(190),
+                    market_value=Decimal(2000), unrealized_pl=Decimal(100))
 
 
 def buy(notional="1000", ticker="AAPL"):
@@ -20,7 +18,7 @@ def sell(qty="5", ticker="AAPL"):
 
 
 def check(intent, limits=None, positions=None, trades_today=0, is_paper=True,
-          price=Decimal("200"), account=ACCT):
+          price=Decimal(200), account=ACCT):
     gate = RiskGate(limits or RiskLimits())
     return gate.check(intent, account=account, positions=positions if positions is not None else [AAPL_POS],
                       trades_today=trades_today, is_paper=is_paper, price=price)
@@ -49,8 +47,8 @@ def test_rejects_order_value_above_cap():
 
 
 def test_qty_order_value_uses_price():
-    intent = OrderIntent(ticker="AAPL", side=OrderSide.BUY, qty=Decimal("30"), reason="t")
-    d = check(intent, price=Decimal("200"))  # 30*200 = 6000 > 5000
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.BUY, qty=Decimal(30), reason="t")
+    d = check(intent, price=Decimal(200))  # 30*200 = 6000 > 5000
     assert not d.approved
 
 
@@ -73,7 +71,7 @@ def test_approves_buy_within_weight():
 
 
 def test_rejects_buy_breaking_cash_reserve():
-    limits = RiskLimits(min_cash_reserve=Decimal("4500"))
+    limits = RiskLimits(min_cash_reserve=Decimal(4500))
     d = check(buy("1000", ticker="MSFT"), limits=limits, positions=[])
     assert not d.approved
     assert any("cash reserve" in r.lower() for r in d.reasons)
@@ -99,13 +97,13 @@ def test_approves_order_value_exactly_at_cap():
     # order_value exactly at cap (using custom limit of 1000, not default 5000)
     # positions=[], ticker="MSFT" so weight rule doesn't interfere
     # weight = (0 + 1000) / 10000 = 10% < 25% ✓
-    d = check(buy("1000", ticker="MSFT"), limits=RiskLimits(max_order_value=Decimal("1000")), positions=[])
+    d = check(buy("1000", ticker="MSFT"), limits=RiskLimits(max_order_value=Decimal(1000)), positions=[])
     assert d.approved and d.reasons == []
 
 
 def test_rejects_order_value_just_above_cap():
     # order_value just above cap
-    d = check(buy("1000.01", ticker="MSFT"), limits=RiskLimits(max_order_value=Decimal("1000")), positions=[])
+    d = check(buy("1000.01", ticker="MSFT"), limits=RiskLimits(max_order_value=Decimal(1000)), positions=[])
     assert not d.approved
     assert any("order value" in r.lower() for r in d.reasons)
 
@@ -119,13 +117,13 @@ def test_approves_weight_exactly_at_cap():
 def test_approves_buy_leaving_exact_cash_reserve():
     # limits with min_cash_reserve=4000, buy 1000 ticker="MSFT" positions=[]
     # cash: 5000 - 1000 = 4000 == reserve (not below)
-    d = check(buy("1000", ticker="MSFT"), limits=RiskLimits(min_cash_reserve=Decimal("4000")), positions=[])
+    d = check(buy("1000", ticker="MSFT"), limits=RiskLimits(min_cash_reserve=Decimal(4000)), positions=[])
     assert d.approved and d.reasons == []
 
 
 def test_rejects_sell_notional_exceeding_position_value():
     # sell notional 2500 with AAPL_POS (value 2000): 2500 > 2000
-    intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal("2500"), reason="t")
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal(2500), reason="t")
     d = check(intent)
     assert not d.approved
     assert any("exceeds position value" in r.lower() for r in d.reasons)
@@ -133,6 +131,6 @@ def test_rejects_sell_notional_exceeding_position_value():
 
 def test_approves_sell_notional_within_position_value():
     # sell notional 1500 with AAPL_POS (value 2000): 1500 <= 2000
-    intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal("1500"), reason="t")
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal(1500), reason="t")
     d = check(intent)
     assert d.approved and d.reasons == []

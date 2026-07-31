@@ -52,7 +52,7 @@ class OrderIntent(BaseModel):
         return v.strip().upper()
 
     @model_validator(mode="after")
-    def _exactly_one_size(self) -> "OrderIntent":
+    def _exactly_one_size(self) -> OrderIntent:
         if (self.qty is None) == (self.notional is None):
             raise ValueError("exactly one of qty or notional is required")
         for val in (self.qty, self.notional):
