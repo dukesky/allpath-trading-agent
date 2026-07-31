@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from tradewind.broker.base import OrderIntent
@@ -34,7 +34,7 @@ class ReviewQueue:
             "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
             " rule_type, condition, action, snapshot, intent)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), strategy_id, rule_id, ticker,
+            (datetime.now(UTC).isoformat(), strategy_id, rule_id, ticker,
              rule_type, condition, action,
              json.dumps(snapshot, default=_json_default),
              intent.model_dump_json() if intent else None))
@@ -57,33 +57,64 @@ class ReviewQueue:
         return row
 
     def approve(self, review_id: int) -> ExecutionResult:
+        # Fetch row first to check existence and intent before claiming
         row = self.get(review_id)
         if row["status"] != "pending":
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
         if not row["intent"]:
             raise ReviewError(f"review {review_id} has no executable intent")
+
+        # Atomically claim the review to prevent concurrent execution
+        resolved_ts = datetime.now(UTC).isoformat()
+        cur = self._conn.execute(
+            "UPDATE pending_reviews SET status=?, resolved_ts=? "
+            "WHERE id=? AND status=?",
+            ("approved", resolved_ts, review_id, "pending"))
+        self._conn.commit()
+        if cur.rowcount == 0:
+            # Someone else already claimed this review
+            row = self.get(review_id)
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
+
+        # Now execute and set execution_result
         intent = OrderIntent.model_validate_json(row["intent"])
         try:
             result = self._executor.execute(intent)
         except ExecutionError as exc:
-            self._resolve(review_id, "approved",
-                          execution_result=json.dumps({"error": str(exc)}))
+            self._conn.execute(
+                "UPDATE pending_reviews SET execution_result=? WHERE id=?",
+                (json.dumps({"error": str(exc)}), review_id))
+            self._conn.commit()
             raise
-        self._resolve(review_id, "approved",
-                      execution_result=result.model_dump_json())
+        self._conn.execute(
+            "UPDATE pending_reviews SET execution_result=? WHERE id=?",
+            (result.model_dump_json(), review_id))
+        self._conn.commit()
         return result
 
     def reject(self, review_id: int, note: str = "") -> None:
+        # Fetch row first to check existence
         row = self.get(review_id)
         if row["status"] != "pending":
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
-        self._resolve(review_id, "rejected", note=note)
+
+        # Atomically claim the review to prevent concurrent execution
+        resolved_ts = datetime.now(UTC).isoformat()
+        cur = self._conn.execute(
+            "UPDATE pending_reviews SET status=?, resolved_ts=?, resolution_note=? "
+            "WHERE id=? AND status=?",
+            ("rejected", resolved_ts, note, review_id, "pending"))
+        self._conn.commit()
+        if cur.rowcount == 0:
+            # Someone else already claimed this review
+            row = self.get(review_id)
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
 
     def _resolve(self, review_id: int, status: str, note: str = "",
                  execution_result: str | None = None) -> None:
         self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?, resolution_note=?,"
             " execution_result=? WHERE id=?",
-            (status, datetime.now(timezone.utc).isoformat(), note,
+            (status, datetime.now(UTC).isoformat(), note,
              execution_result, review_id))
         self._conn.commit()

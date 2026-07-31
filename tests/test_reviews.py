@@ -14,13 +14,13 @@ class StubExecutor:
 
     def execute(self, intent):
         self.calls.append(intent)
-        from tradewind.risk.gate import RiskDecision
         from tradewind.execution import ExecutionResult
+        from tradewind.risk.gate import RiskDecision
         return ExecutionResult(submitted=True, order=None,
                                decision=RiskDecision(approved=True))
 
 
-INTENT = OrderIntent(ticker="AAPL", side=OrderSide.BUY, notional=Decimal("500"),
+INTENT = OrderIntent(ticker="AAPL", side=OrderSide.BUY, notional=Decimal("500"),  # noqa: FURB157
                      reason="dip", strategy_id="s1")
 
 
@@ -47,6 +47,7 @@ def test_approve_executes_and_resolves(queue):
     result = queue.approve(rid)
     assert result.submitted
     assert queue._executor.calls[0].ticker == "AAPL"
+    assert queue._executor.calls[0].notional == Decimal("500")  # noqa: FURB157
     row = queue.get(rid)
     assert row["status"] == "approved" and row["resolved_ts"]
     assert queue.list() == []
@@ -64,6 +65,15 @@ def test_approve_twice_raises(queue):
     queue.approve(rid)
     with pytest.raises(ReviewError):
         queue.approve(rid)
+
+
+def test_double_approve_claims_atomically(queue):
+    rid = add(queue)
+    queue.approve(rid)
+    with pytest.raises(ReviewError):
+        queue.approve(rid)
+    # executor must have run exactly once
+    assert len(queue._executor.calls) == 1
 
 
 def test_approve_without_intent_raises(queue):
