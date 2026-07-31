@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from decimal import Decimal
 
 VARIABLES = frozenset(
@@ -20,7 +21,10 @@ def parse_condition(text: str) -> ast.Expression:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
         raise ConditionError(f"syntax error in condition: {text!r}") from exc
-    _validate(tree.body, top=True)
+    try:
+        _validate(tree.body, top=True)
+    except RecursionError as exc:
+        raise ConditionError("condition too deeply nested") from exc
     return tree
 
 
@@ -50,6 +54,8 @@ def _validate_operand(node: ast.AST) -> None:
     elif isinstance(node, ast.Constant):
         if not isinstance(node.value, (int, float)) or isinstance(node.value, bool):
             raise ConditionError(f"only numeric literals allowed: {node.value!r}")
+        if isinstance(node.value, float) and not math.isfinite(node.value):
+            raise ConditionError(f"non-finite literal: {node.value!r}")
     elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         _validate_operand(node.operand)
     else:
@@ -58,7 +64,10 @@ def _validate_operand(node: ast.AST) -> None:
 
 def evaluate_condition(text: str, ctx: dict[str, Decimal]) -> bool:
     tree = parse_condition(text)
-    return bool(_eval(tree.body, ctx))
+    try:
+        return bool(_eval(tree.body, ctx))
+    except RecursionError as exc:
+        raise ConditionError("condition too deeply nested") from exc
 
 
 def _eval(node: ast.AST, ctx: dict[str, Decimal]) -> object:

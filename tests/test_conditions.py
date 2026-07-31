@@ -3,7 +3,9 @@ from decimal import Decimal
 import pytest
 
 from tradewind.strategy.conditions import (
-    ConditionError, evaluate_condition, parse_condition,
+    ConditionError,
+    evaluate_condition,
+    parse_condition,
 )
 
 CTX = {
@@ -52,3 +54,21 @@ def test_missing_context_key_raises():
 
 def test_decimal_precision():
     assert evaluate_condition("price == 0.1", {"price": Decimal("0.1")}) is True
+
+
+def test_deeply_nested_not_raises_condition_error():
+    expr = "not " * 2000 + "price > 1"
+    with pytest.raises(ConditionError):
+        parse_condition(expr)
+
+
+@pytest.mark.parametrize("bad", ["price != 1", "price in [1]", "price is 1",
+                                 "True", "price < True", "price < 1e400"])
+def test_rejects_more_adversarial_inputs(bad):
+    with pytest.raises(ConditionError):
+        parse_condition(bad)
+
+
+def test_chained_comparison_supported():
+    assert evaluate_condition("100 < price < 300", {"price": Decimal("200")}) is True
+    assert evaluate_condition("100 < price < 150", {"price": Decimal("200")}) is False
