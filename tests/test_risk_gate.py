@@ -93,3 +93,46 @@ def test_rejects_sell_of_unowned_ticker():
 def test_collects_multiple_reasons():
     d = check(buy("6000"), trades_today=99)
     assert len(d.reasons) >= 2
+
+
+def test_approves_order_value_exactly_at_cap():
+    # order_value exactly at cap (using custom limit of 1000, not default 5000)
+    # positions=[], ticker="MSFT" so weight rule doesn't interfere
+    # weight = (0 + 1000) / 10000 = 10% < 25% ✓
+    d = check(buy("1000", ticker="MSFT"), limits=RiskLimits(max_order_value=Decimal("1000")), positions=[])
+    assert d.approved and d.reasons == []
+
+
+def test_rejects_order_value_just_above_cap():
+    # order_value just above cap
+    d = check(buy("1000.01", ticker="MSFT"), limits=RiskLimits(max_order_value=Decimal("1000")), positions=[])
+    assert not d.approved
+    assert any("order value" in r.lower() for r in d.reasons)
+
+
+def test_approves_weight_exactly_at_cap():
+    # buy 500 with AAPL_POS (2000): (2000+500)/10000 = 25% exactly at cap
+    d = check(buy("500"))
+    assert d.approved and d.reasons == []
+
+
+def test_approves_buy_leaving_exact_cash_reserve():
+    # limits with min_cash_reserve=4000, buy 1000 ticker="MSFT" positions=[]
+    # cash: 5000 - 1000 = 4000 == reserve (not below)
+    d = check(buy("1000", ticker="MSFT"), limits=RiskLimits(min_cash_reserve=Decimal("4000")), positions=[])
+    assert d.approved and d.reasons == []
+
+
+def test_rejects_sell_notional_exceeding_position_value():
+    # sell notional 2500 with AAPL_POS (value 2000): 2500 > 2000
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal("2500"), reason="t")
+    d = check(intent)
+    assert not d.approved
+    assert any("exceeds position value" in r.lower() for r in d.reasons)
+
+
+def test_approves_sell_notional_within_position_value():
+    # sell notional 1500 with AAPL_POS (value 2000): 1500 <= 2000
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal("1500"), reason="t")
+    d = check(intent)
+    assert d.approved and d.reasons == []
