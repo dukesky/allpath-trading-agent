@@ -46,3 +46,10 @@ def test_order_intent_notional_coerces_float_precision_safely():
     """Regression test: OrderIntent.notional accepts float and coerces via str() for precision."""
     intent = OrderIntent(ticker="AAPL", side=OrderSide.BUY, notional=1.1, reason="test")
     assert intent.notional == Decimal("1.1")
+
+
+def test_intent_rejects_empty_or_whitespace_ticker():
+    with pytest.raises(ValidationError):
+        OrderIntent(ticker="", side=OrderSide.BUY, notional=Decimal("100"), reason="x")
+    with pytest.raises(ValidationError):
+        OrderIntent(ticker="   ", side=OrderSide.BUY, notional=Decimal("100"), reason="x")
