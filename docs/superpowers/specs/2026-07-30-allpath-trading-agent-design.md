@@ -100,7 +100,7 @@
 
 ### 4.6 LLM 层与成本
 
-多 provider 抽象（Claude / OpenAI / 可扩展）。策略讨论与周度 review 用强模型，哨兵触发复核可配中档模型，规则评估零 LLM。预估：日常 <$1/天，周度 review $1–3/次。
+多 provider 抽象，第一版支持三家：**Claude（Anthropic 原生 API）/ OpenAI / OpenRouter**。实现上为两种客户端：Anthropic 原生 + OpenAI 兼容协议（OpenAI 与 OpenRouter 共用，仅 `base_url` 与 key 不同），配置里按 `provider + model + api_key` 声明。**开发与测试默认用 OpenRouter**（一个 key 可切换多家模型，便于对比）。策略讨论与周度 review 用强模型，哨兵触发复核可配中档模型，规则评估零 LLM。预估：日常 <$1/天，周度 review $1–3/次。
 
 ## 5. 策略文档格式
 
