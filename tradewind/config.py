@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
     db_path: Path = Path("tradewind.db")
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    notify_to: str = ""
+    sentinel_interval_minutes: int = 60
+    strategies_dir: Path = Path("strategies")
 
 
 class SettingsStore:

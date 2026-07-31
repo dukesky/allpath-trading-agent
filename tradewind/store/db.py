@@ -17,11 +17,49 @@ CREATE TABLE IF NOT EXISTS trades (
     risk_reasons TEXT NOT NULL DEFAULT '[]',  -- JSON list
     broker_order_id TEXT
 );
+
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rule_states (
+    strategy_id TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    updated_ts TEXT NOT NULL,
+    PRIMARY KEY (strategy_id, rule_id)
+);
+
+CREATE TABLE IF NOT EXISTS pending_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    rule_type TEXT NOT NULL,
+    condition TEXT NOT NULL,
+    action TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    intent TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    resolved_ts TEXT,
+    resolution_note TEXT,
+    execution_result TEXT
+);
 """
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path))
+    # check_same_thread=False: APScheduler runs jobs on worker threads, not
+    # the thread that built the connection. We rely on a single-writer usage
+    # pattern (one Sentinel loop at a time); the CLI's one-shot commands run
+    # in separate processes, so there is no cross-process contention here.
+    conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     return conn

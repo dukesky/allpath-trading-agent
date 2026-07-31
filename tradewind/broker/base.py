@@ -49,7 +49,10 @@ class OrderIntent(BaseModel):
     @field_validator("ticker")
     @classmethod
     def _upper(cls, v: str) -> str:
-        return v.strip().upper()
+        v = v.strip().upper()
+        if not v:
+            raise ValueError("ticker must be non-empty")
+        return v
 
     @model_validator(mode="after")
     def _exactly_one_size(self) -> OrderIntent:

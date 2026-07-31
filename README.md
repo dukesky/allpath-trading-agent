@@ -23,7 +23,7 @@
 
 ---
 
-> **Project status:** Phase 1 (execution foundation) is complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts. The LLM agent core, strategy engine, memory system, and Web UI are under active development; see the [Roadmap](#roadmap). **Paper trading only by default.**
+> **Project status:** Phases 1-2 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts, and the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is now running. The LLM agent core is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
 
 ## Table of Contents
 
@@ -170,8 +170,8 @@ tradewind/
 | Phase | Scope | Status |
 |:---:|---|:---:|
 | 1 | **Execution foundation** — broker abstraction, Alpaca (paper) adapter, market data, risk gate, trade journal, executor, CLI | ✅ Complete |
-| 2 | **Strategy engine + sentinel loop** — YAML strategy documents, restricted-expression rule evaluator, versioning, scheduled monitoring, hard-rule auto-execution | 🔜 Next |
-| 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly | Planned |
+| 2 | **Strategy engine + sentinel loop** — YAML strategy documents, restricted-expression rule evaluator, versioning, scheduled monitoring, hard-rule auto-execution | ✅ Complete |
+| 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly | 🔜 Next |
 | 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | Planned |
 | 5 | **Web UI + notifications** — chat, dashboard, pending-confirmation queue, settings, email | Planned |
 | 6 | **Reflection loops** — daily deep review, post-trade retrospectives | Planned |

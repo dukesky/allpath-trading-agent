@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import re
+from decimal import Decimal, InvalidOperation
+from enum import Enum
+
+from pydantic import BaseModel
+
+from tradewind.broker.base import OrderIntent, OrderSide, Position
+from tradewind.strategy.model import StrategyDoc
+
+
+class ActionKind(str, Enum):
+    SELL_PCT = "sell_pct"
+    SELL_ALL = "sell_all"
+    SELL_VALUE = "sell_value"
+    BUY_VALUE = "buy_value"
+    BUY_TO_TARGET = "buy_to_target"
+
+
+class ActionSpec(BaseModel):
+    kind: ActionKind
+    amount: Decimal | None = None
+
+
+class ActionError(Exception):
+    pass
+
+
+_PATTERNS: list[tuple[re.Pattern[str], ActionKind]] = [
+    (re.compile(r"^sell\s+all$", re.IGNORECASE), ActionKind.SELL_ALL),
+    (re.compile(r"^sell\s+(?P<num>[\d,.]+)%$", re.IGNORECASE), ActionKind.SELL_PCT),
+    (re.compile(r"^sell\s+\$(?P<num>[\d,.]+)$", re.IGNORECASE), ActionKind.SELL_VALUE),
+    (re.compile(r"^buy\s+\$(?P<num>[\d,.]+)$", re.IGNORECASE), ActionKind.BUY_VALUE),
+    (re.compile(r"^buy\s+to\s+target_weight$", re.IGNORECASE), ActionKind.BUY_TO_TARGET),
+]
+
+
+def parse_action(text: str) -> ActionSpec:
+    stripped = text.strip()
+    for pattern, kind in _PATTERNS:
+        m = pattern.match(stripped)
+        if not m:
+            continue
+        amount: Decimal | None = None
+        if "num" in m.groupdict() and m.group("num") is not None:
+            try:
+                amount = Decimal(m.group("num").replace(",", ""))
+            except InvalidOperation:
+                raise ActionError(f"invalid amount in action: {text!r}")
+            if amount <= 0:
+                raise ActionError(f"amount must be positive: {text!r}")
+            if kind == ActionKind.SELL_PCT and amount > 100:
+                raise ActionError(f"sell percent > 100: {text!r}")
+        return ActionSpec(kind=kind, amount=amount)
+    raise ActionError(f"unrecognized action: {text!r}")
+
+
+def to_order_intent(spec: ActionSpec, *, strategy: StrategyDoc, rule_id: str,
+                    price: Decimal, position: Position | None, equity: Decimal,
+                    reason: str) -> OrderIntent | None:
+    ticker = strategy.position.ticker
+    held_qty = position.qty if position else Decimal(0)
+
+    if spec.kind in (ActionKind.SELL_ALL, ActionKind.SELL_PCT, ActionKind.SELL_VALUE):
+        if held_qty <= 0:
+            return None
+        if spec.kind == ActionKind.SELL_ALL:
+            return OrderIntent(ticker=ticker, side=OrderSide.SELL, qty=held_qty,
+                               reason=reason, strategy_id=strategy.id)
+        if spec.kind == ActionKind.SELL_PCT:
+            qty = (held_qty * spec.amount / Decimal(100)).quantize(Decimal("0.0001"))
+            if qty <= 0:
+                return None
+            return OrderIntent(ticker=ticker, side=OrderSide.SELL, qty=qty,
+                               reason=reason, strategy_id=strategy.id)
+        return OrderIntent(ticker=ticker, side=OrderSide.SELL, notional=spec.amount,
+                           reason=reason, strategy_id=strategy.id)
+
+    if spec.kind == ActionKind.BUY_VALUE:
+        return OrderIntent(ticker=ticker, side=OrderSide.BUY, notional=spec.amount,
+                           reason=reason, strategy_id=strategy.id)
+
+    # BUY_TO_TARGET
+    plan = strategy.position
+    target_value = (plan.target_value if plan.target_value is not None
+                    else plan.target_weight * equity)
+    current_value = held_qty * price
+    gap = (target_value - current_value).quantize(Decimal("0.01"))
+    if gap <= 0:
+        return None
+    return OrderIntent(ticker=ticker, side=OrderSide.BUY, notional=gap,
+                       reason=reason, strategy_id=strategy.id)

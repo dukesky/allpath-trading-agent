@@ -11,6 +11,8 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+    "apscheduler>=3.10",
 ]
 
 [dependency-groups]
