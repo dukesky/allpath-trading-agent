@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import smtplib
 import sys
+from collections.abc import Callable
 from email.message import EmailMessage
-from typing import Callable
 
 from tradewind.config import Settings
 from tradewind.notify.base import ConsoleNotifier, Notifier

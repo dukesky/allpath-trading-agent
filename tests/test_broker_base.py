@@ -50,6 +50,6 @@ def test_order_intent_notional_coerces_float_precision_safely():
 
 def test_intent_rejects_empty_or_whitespace_ticker():
     with pytest.raises(ValidationError):
-        OrderIntent(ticker="", side=OrderSide.BUY, notional=Decimal("100"), reason="x")
+        OrderIntent(ticker="", side=OrderSide.BUY, notional=Decimal(100), reason="x")
     with pytest.raises(ValidationError):
-        OrderIntent(ticker="   ", side=OrderSide.BUY, notional=Decimal("100"), reason="x")
+        OrderIntent(ticker="   ", side=OrderSide.BUY, notional=Decimal(100), reason="x")

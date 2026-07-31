@@ -4,7 +4,7 @@ import pytest
 
 from tradewind.store.db import connect
 from tradewind.strategy.loader import StrategyValidationError
-from tradewind.strategy.model import RuleState, StrategyStatus
+from tradewind.strategy.model import RuleState
 from tradewind.strategy.store import StrategyStore
 
 ACTIVE = """

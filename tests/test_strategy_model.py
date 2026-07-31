@@ -6,7 +6,13 @@ from pydantic import ValidationError
 
 from tradewind.strategy.loader import StrategyValidationError, load_strategy
 from tradewind.strategy.model import (
-    Authorization, PositionPlan, Rule, RuleState, RuleType, StrategyDoc, StrategyStatus,
+    Authorization,
+    PositionPlan,
+    Rule,
+    RuleState,
+    RuleType,
+    StrategyDoc,
+    StrategyStatus,
 )
 
 GOOD_YAML = """
@@ -56,9 +62,9 @@ def test_load_good_strategy(tmp_path):
 def test_percent_and_dollar_coercion():
     p = PositionPlan(ticker="MSFT", target_weight="10%", max_value="$9,000")
     assert p.target_weight == Decimal("0.10")
-    assert p.max_value == Decimal("9000")
+    assert p.max_value == Decimal(9000)
     p2 = PositionPlan(ticker="MSFT", target_value=15000)
-    assert p2.target_value == Decimal("15000")
+    assert p2.target_value == Decimal(15000)
 
 
 def test_position_requires_a_target():

@@ -28,11 +28,11 @@ class ActionError(Exception):
 
 
 _PATTERNS: list[tuple[re.Pattern[str], ActionKind]] = [
-    (re.compile(r"^sell\s+all$", re.I), ActionKind.SELL_ALL),
-    (re.compile(r"^sell\s+(?P<num>[\d,.]+)%$", re.I), ActionKind.SELL_PCT),
-    (re.compile(r"^sell\s+\$(?P<num>[\d,.]+)$", re.I), ActionKind.SELL_VALUE),
-    (re.compile(r"^buy\s+\$(?P<num>[\d,.]+)$", re.I), ActionKind.BUY_VALUE),
-    (re.compile(r"^buy\s+to\s+target_weight$", re.I), ActionKind.BUY_TO_TARGET),
+    (re.compile(r"^sell\s+all$", re.IGNORECASE), ActionKind.SELL_ALL),
+    (re.compile(r"^sell\s+(?P<num>[\d,.]+)%$", re.IGNORECASE), ActionKind.SELL_PCT),
+    (re.compile(r"^sell\s+\$(?P<num>[\d,.]+)$", re.IGNORECASE), ActionKind.SELL_VALUE),
+    (re.compile(r"^buy\s+\$(?P<num>[\d,.]+)$", re.IGNORECASE), ActionKind.BUY_VALUE),
+    (re.compile(r"^buy\s+to\s+target_weight$", re.IGNORECASE), ActionKind.BUY_TO_TARGET),
 ]
 
 
@@ -60,7 +60,7 @@ def to_order_intent(spec: ActionSpec, *, strategy: StrategyDoc, rule_id: str,
                     price: Decimal, position: Position | None, equity: Decimal,
                     reason: str) -> OrderIntent | None:
     ticker = strategy.position.ticker
-    held_qty = position.qty if position else Decimal("0")
+    held_qty = position.qty if position else Decimal(0)
 
     if spec.kind in (ActionKind.SELL_ALL, ActionKind.SELL_PCT, ActionKind.SELL_VALUE):
         if held_qty <= 0:
@@ -69,7 +69,7 @@ def to_order_intent(spec: ActionSpec, *, strategy: StrategyDoc, rule_id: str,
             return OrderIntent(ticker=ticker, side=OrderSide.SELL, qty=held_qty,
                                reason=reason, strategy_id=strategy.id)
         if spec.kind == ActionKind.SELL_PCT:
-            qty = (held_qty * spec.amount / Decimal("100")).quantize(Decimal("0.0001"))
+            qty = (held_qty * spec.amount / Decimal(100)).quantize(Decimal("0.0001"))
             if qty <= 0:
                 return None
             return OrderIntent(ticker=ticker, side=OrderSide.SELL, qty=qty,

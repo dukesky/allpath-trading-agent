@@ -1,10 +1,12 @@
+from typing import ClassVar
+
 from tradewind.config import Settings
 from tradewind.notify.base import ConsoleNotifier
 from tradewind.notify.email import EmailNotifier, build_notifier
 
 
 class StubSMTP:
-    instances = []
+    instances: ClassVar[list["StubSMTP"]] = []
 
     def __init__(self, host, port):
         self.host, self.port = host, port

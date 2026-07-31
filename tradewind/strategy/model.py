@@ -39,7 +39,7 @@ def _to_decimal(raw: object, *, percent: bool) -> Decimal:
         if text.endswith("%"):
             if not percent:
                 raise ValueError(f"percent not allowed here: {raw!r}")
-            return Decimal(text[:-1]) / Decimal("100")
+            return Decimal(text[:-1]) / Decimal(100)
         return Decimal(text)
     except InvalidOperation as exc:
         raise ValueError(f"not a number: {raw!r}") from exc
@@ -79,7 +79,7 @@ class PositionPlan(BaseModel):
         return None if v is None else _to_decimal(v, percent=False)
 
     @model_validator(mode="after")
-    def _has_target(self) -> "PositionPlan":
+    def _has_target(self) -> PositionPlan:
         if self.target_weight is None and self.target_value is None:
             raise ValueError("position requires target_weight or target_value")
         return self
@@ -102,7 +102,7 @@ class StrategyDoc(BaseModel):
     review: ReviewPolicy = ReviewPolicy()
 
     @model_validator(mode="after")
-    def _unique_rule_ids(self) -> "StrategyDoc":
+    def _unique_rule_ids(self) -> StrategyDoc:
         ids = [r.id for r in self.rules]
         if len(ids) != len(set(ids)):
             raise ValueError("rule ids must be unique")

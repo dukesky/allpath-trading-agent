@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from tradewind.broker.base import Broker, OrderIntent, Position
+from tradewind.broker.base import Broker, Position
 from tradewind.data.base import DataSource
 from tradewind.execution import ExecutionError, Executor
 from tradewind.notify.base import Notifier
@@ -12,7 +12,10 @@ from tradewind.store.reviews import ReviewQueue
 from tradewind.strategy.actions import parse_action, to_order_intent
 from tradewind.strategy.conditions import evaluate_condition
 from tradewind.strategy.model import (
-    Authorization, RuleState, RuleType, StrategyDoc,
+    Authorization,
+    RuleState,
+    RuleType,
+    StrategyDoc,
 )
 from tradewind.strategy.store import StrategyStore
 
@@ -91,14 +94,14 @@ class Sentinel:
     @staticmethod
     def _build_ctx(doc: StrategyDoc, price: Decimal, position: Position | None,
                    equity: Decimal) -> dict[str, Decimal]:
-        qty = position.qty if position else Decimal("0")
-        avg = position.avg_entry_price if position else Decimal("0")
-        weight = (qty * price / equity) if equity > 0 else Decimal("0")
-        pnl_pct = ((price - avg) / avg * 100) if avg > 0 else Decimal("0")
+        qty = position.qty if position else Decimal(0)
+        avg = position.avg_entry_price if position else Decimal(0)
+        weight = (qty * price / equity) if equity > 0 else Decimal(0)
+        pnl_pct = ((price - avg) / avg * 100) if avg > 0 else Decimal(0)
         plan = doc.position
         target_weight = (plan.target_weight if plan.target_weight is not None
                          else (plan.target_value / equity if equity > 0
-                               else Decimal("0")))
+                               else Decimal(0)))
         return {"price": price, "position_qty": qty, "position_weight": weight,
                 "avg_entry_price": avg, "pnl_pct": pnl_pct,
                 "target_weight": target_weight}

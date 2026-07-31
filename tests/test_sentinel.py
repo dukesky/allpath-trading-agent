@@ -1,13 +1,13 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 from tradewind.broker.base import (
-    Account, Broker, Order, OrderStatus, Position,
+    Account,
+    Broker,
+    Position,
 )
-from tradewind.data.base import Bar, DataSource, Quote
+from tradewind.data.base import DataSource, Quote
 from tradewind.execution import ExecutionError
 from tradewind.risk.gate import RiskDecision
 from tradewind.sentinel import Sentinel
@@ -35,7 +35,7 @@ class FakeData(DataSource):
 
     def get_quote(self, ticker):
         return Quote(ticker=ticker, price=self.price,
-                     as_of=datetime.now(timezone.utc))
+                     as_of=datetime.now(UTC))
 
     def get_bars(self, ticker, days=365):
         return []
@@ -49,16 +49,16 @@ class FakeBroker(Broker):
         self.qty = Decimal(qty)
 
     def get_account(self):
-        return Account(equity=Decimal("10000"), cash=Decimal("5000"),
-                       buying_power=Decimal("10000"))
+        return Account(equity=Decimal(10000), cash=Decimal(5000),
+                       buying_power=Decimal(10000))
 
     def get_positions(self):
         if self.qty <= 0:
             return []
         return [Position(ticker="AAPL", qty=self.qty,
-                         avg_entry_price=Decimal("180"),
-                         market_value=self.qty * Decimal("200"),
-                         unrealized_pl=Decimal("0"))]
+                         avg_entry_price=Decimal(180),
+                         market_value=self.qty * Decimal(200),
+                         unrealized_pl=Decimal(0))]
 
     def get_order(self, order_id):
         raise NotImplementedError
@@ -107,18 +107,18 @@ def make(tmp_path: Path, yaml_text: str, *, price="200", qty="10", fail=False):
 
 
 def test_no_trigger_no_noise(tmp_path):
-    s, store, ex, q, n = make(tmp_path, strategy_yaml(condition="price < 100"))
+    s, _store, ex, _q, n = make(tmp_path, strategy_yaml(condition="price < 100"))
     report = s.run_once()
     assert report.strategies_checked == 1
     assert report.outcomes == [] and n.sent == [] and ex.calls == []
 
 
 def test_hard_auto_executes_and_marks_triggered(tmp_path):
-    s, store, ex, q, n = make(tmp_path, strategy_yaml())
+    s, store, ex, _q, n = make(tmp_path, strategy_yaml())
     report = s.run_once()
     [o] = report.outcomes
     assert o.disposition == "executed"
-    assert len(ex.calls) == 1 and ex.calls[0].qty == Decimal("10")
+    assert len(ex.calls) == 1 and ex.calls[0].qty == Decimal(10)
     assert store.load("t").rules[0].state == RuleState.TRIGGERED
     assert len(n.sent) == 1
     # second run: rule stays triggered, nothing happens
@@ -126,33 +126,33 @@ def test_hard_auto_executes_and_marks_triggered(tmp_path):
 
 
 def test_soft_auto_enqueues(tmp_path):
-    s, store, ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
     report = s.run_once()
     assert report.outcomes[0].disposition == "queued"
     assert ex.calls == [] and len(q.list()) == 1
 
 
 def test_confirm_auth_enqueues_hard_rule(tmp_path):
-    s, store, ex, q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s, _store, ex, _q, _n = make(tmp_path, strategy_yaml(auth="confirm"))
     assert s.run_once().outcomes[0].disposition == "queued"
     assert ex.calls == []
 
 
 def test_notify_auth_only_notifies(tmp_path):
-    s, store, ex, q, n = make(tmp_path, strategy_yaml(auth="notify"))
+    s, _store, ex, q, n = make(tmp_path, strategy_yaml(auth="notify"))
     assert s.run_once().outcomes[0].disposition == "notified"
     assert ex.calls == [] and q.list() == [] and len(n.sent) == 1
 
 
 def test_no_position_sell_is_skipped(tmp_path):
-    s, store, ex, q, n = make(tmp_path, strategy_yaml(), qty="0")
+    s, store, _ex, _q, _n = make(tmp_path, strategy_yaml(), qty="0")
     report = s.run_once()
     assert report.outcomes[0].disposition == "skipped"
     assert store.load("t").rules[0].state == RuleState.TRIGGERED
 
 
 def test_execution_error_reported_not_raised(tmp_path):
-    s, store, ex, q, n = make(tmp_path, strategy_yaml(), fail=True)
+    s, _store, _ex, _q, _n = make(tmp_path, strategy_yaml(), fail=True)
     report = s.run_once()
     assert report.outcomes[0].disposition == "error"
     assert "boom" in report.outcomes[0].detail

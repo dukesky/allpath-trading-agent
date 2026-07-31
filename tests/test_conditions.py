@@ -9,10 +9,10 @@ from tradewind.strategy.conditions import (
 )
 
 CTX = {
-    "price": Decimal("200"),
+    "price": Decimal(200),
     "position_weight": Decimal("0.10"),
-    "position_qty": Decimal("5"),
-    "avg_entry_price": Decimal("180"),
+    "position_qty": Decimal(5),
+    "avg_entry_price": Decimal(180),
     "pnl_pct": Decimal("11.1"),
     "target_weight": Decimal("0.15"),
 }
@@ -70,5 +70,5 @@ def test_rejects_more_adversarial_inputs(bad):
 
 
 def test_chained_comparison_supported():
-    assert evaluate_condition("100 < price < 300", {"price": Decimal("200")}) is True
-    assert evaluate_condition("100 < price < 150", {"price": Decimal("200")}) is False
+    assert evaluate_condition("100 < price < 300", {"price": Decimal(200)}) is True
+    assert evaluate_condition("100 < price < 150", {"price": Decimal(200)}) is False

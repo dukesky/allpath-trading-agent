@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -48,7 +48,7 @@ class StrategyStore:
             " ON CONFLICT(strategy_id, rule_id) DO UPDATE SET state=excluded.state,"
             " updated_ts=excluded.updated_ts",
             (strategy_id, rule_id, state.value,
-             datetime.now(timezone.utc).isoformat()))
+             datetime.now(UTC).isoformat()))
         self._conn.commit()
 
     def rearm(self, strategy_id: str, rule_id: str) -> None:
@@ -60,7 +60,7 @@ class StrategyStore:
         self._conn.execute(
             "INSERT INTO strategy_versions (strategy_id, version, ts, reason, content)"
             " VALUES (?, ?, ?, ?, ?)",
-            (doc.id, doc.version, datetime.now(timezone.utc).isoformat(),
+            (doc.id, doc.version, datetime.now(UTC).isoformat(),
              reason, content))
         self._conn.commit()
 
