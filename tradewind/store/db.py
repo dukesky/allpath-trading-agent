@@ -17,6 +17,23 @@ CREATE TABLE IF NOT EXISTS trades (
     risk_reasons TEXT NOT NULL DEFAULT '[]',  -- JSON list
     broker_order_id TEXT
 );
+
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rule_states (
+    strategy_id TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    updated_ts TEXT NOT NULL,
+    PRIMARY KEY (strategy_id, rule_id)
+);
 """
 
 
