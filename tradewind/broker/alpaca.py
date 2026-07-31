@@ -44,8 +44,8 @@ class AlpacaBroker(Broker):
         return [
             Position(ticker=p.symbol, qty=Decimal(p.qty),
                      avg_entry_price=Decimal(p.avg_entry_price),
-                     market_value=Decimal(p.market_value),
-                     unrealized_pl=Decimal(p.unrealized_pl))
+                     market_value=Decimal(p.market_value or "0"),
+                     unrealized_pl=Decimal(p.unrealized_pl or "0"))
             for p in self._client.get_all_positions()
         ]
 
