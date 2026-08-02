@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from allpath_trade.agent.tools import ToolRegistry
@@ -24,14 +25,25 @@ class AgentSession:
         self.conversation_id = conversation_id
         self.max_iters = max_iters
         self.on_tool = on_tool
+        self.persistence_failed = False
         self.history: list[dict] = []
         if store is not None and conversation_id is not None:
             self.history = store.history(conversation_id)
 
     def _append(self, message: dict) -> None:
+        """Record a message. History lives in memory first: a persistence
+        failure (disk full, moved/locked db) degrades to an in-memory session
+        with one warning — it must never end a conversation in progress."""
         self.history.append(message)
-        if self.store is not None and self.conversation_id is not None:
+        if self.store is None or self.conversation_id is None:
+            return
+        try:
             self.store.append(self.conversation_id, message)
+        except Exception as exc:  # noqa: BLE001 — logging must not kill the chat
+            if not self.persistence_failed:
+                self.persistence_failed = True
+                print(f"[warning] conversation not being saved: {exc}",
+                      file=sys.stderr)
 
     def run_turn(self, user_text: str) -> str:
         self._append({"role": "user", "content": user_text})

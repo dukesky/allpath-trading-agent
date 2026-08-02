@@ -1,3 +1,5 @@
+import sqlite3
+
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.llm.base import LLMClient, LLMError, LLMResponse, ToolCall
@@ -113,3 +115,30 @@ def test_on_tool_callback_invoked():
     s = AgentSession(llm, make_registry(), "SYS", on_tool=seen.append)
     s.run_turn("go")
     assert [c.name for c in seen] == ["echo"]
+
+
+class BrokenStore:
+    """Simulates a database that has become unwritable mid-session."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def history(self, conversation_id):
+        return []
+
+    def append(self, conversation_id, message):
+        self.calls += 1
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+
+def test_persistence_failure_degrades_to_in_memory(capsys):
+    llm = ScriptedLLM([tool_response("echo", {"a": 1}), LLMResponse(text="still here"),
+                       LLMResponse(text="and still")])
+    store = BrokenStore()
+    s = AgentSession(llm, make_registry(), "SYS", store=store, conversation_id=1)
+    assert s.run_turn("go") == "still here"          # turn completes despite db failure
+    assert [m["role"] for m in s.history] == ["user", "assistant", "tool", "assistant"]
+    assert s.run_turn("again") == "and still"        # session stays usable
+    assert store.calls > 4                            # kept trying to persist
+    err = capsys.readouterr().err
+    assert err.count("not being saved") == 1          # warned exactly once, not per message
