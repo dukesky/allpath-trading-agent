@@ -3,6 +3,7 @@
 {% block content %}
 <h1>{{ doc.name }}</h1>
 <p class="muted">{{ doc.id }} · v{{ doc.version }} · {{ doc.status.value }} / {{ doc.authorization.value }}</p>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 <h2>Rules</h2>
 <table>

@@ -2,6 +2,7 @@
 {% block title %}Strategies · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Strategies</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% for d in docs %}
 <div class="card" style="margin-bottom:10px">
   <div class="row">

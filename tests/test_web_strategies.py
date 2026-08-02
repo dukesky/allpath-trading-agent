@@ -65,3 +65,45 @@ def test_detail_of_unparseable_yaml_returns_404_not_500(client):
         "not: [valid, yaml structure for a strategy")
     r = client.get("/strategies/broken")
     assert r.status_code == 404
+
+
+def test_rearm_of_well_formed_but_nonexistent_strategy_is_not_processed(client):
+    store = client.app.state.holder.get().strategies
+    r = client.post("/strategies/ghost/rules/r1/rearm")
+    assert r.status_code == 200
+    assert "not processed" in r.text.lower()
+    assert "ghost" in r.text
+    # No orphan row was written for a strategy that was never loaded.
+    rows = store._conn.execute(
+        "SELECT * FROM rule_states WHERE strategy_id = ?", ("ghost",)).fetchall()
+    assert rows == []
+
+
+def test_detail_page_caps_rendered_version_history(client):
+    store = client.app.state.holder.get().strategies
+    doc = next(d for d in store.load_all(status=None, errors=[]) if d.id == "semis")
+    for i in range(1, 26):
+        store.snapshot_version(doc.model_copy(update={"version": i}), reason=f"edit-{i}")
+    # The store itself keeps all 25 snapshots -- other callers (e.g. the
+    # action-tool tests) rely on getting everything back.
+    assert len(store.versions("semis")) == 25
+    body = client.get("/strategies/semis").text
+    assert body.count("edit-") <= 20
+    assert "edit-25</td>" in body  # most recent kept
+    assert "edit-5</td>" not in body  # oldest trimmed
+
+
+def test_rearm_of_bogus_rule_on_a_real_strategy_is_not_processed(client):
+    store = client.app.state.holder.get().strategies
+    r = client.post("/strategies/semis/rules/no-such-rule/rearm")
+    assert r.status_code == 200
+    assert "not processed" in r.text.lower()
+    assert "no-such-rule" in r.text
+    # The real strategy's real rule is untouched, and no orphan row for the
+    # bogus rule_id was written.
+    doc = next(d for d in store.load_all(status=None, errors=[]) if d.id == "semis")
+    assert doc.rules[0].state.value == "armed"
+    rows = store._conn.execute(
+        "SELECT * FROM rule_states WHERE strategy_id = ? AND rule_id = ?",
+        ("semis", "no-such-rule")).fetchall()
+    assert rows == []
