@@ -126,3 +126,58 @@ def test_serve_host_and_port_override_settings(tmp_path, monkeypatch):
 
     assert code == 0
     assert run_calls == {"host": "0.0.0.0", "port": 9000}
+
+
+def test_serve_prints_the_token_only_on_first_run(tmp_path, capsys, monkeypatch):
+    # No .env yet -- first start of a fresh install must generate and print
+    # the token so the operator can log in at all.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("allpath_trade.web.app.create_app", lambda settings, **kw: "THE-APP")
+    monkeypatch.setattr("uvicorn.run", lambda app, host, port, log_level: None)
+
+    code = main(["serve"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "[allpath-trade] access token: " in out
+    assert "unchanged" not in out
+    env_text = (tmp_path / ".env").read_text()
+    assert "WEB_TOKEN=" in env_text
+
+
+def test_serve_does_not_reprint_an_existing_token(tmp_path, capsys, monkeypatch):
+    # A token already lives in .env from a previous run -- don't put it in
+    # scrollback/log capture again on every subsequent start.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text('WEB_TOKEN="already-set-secret"\n')
+    monkeypatch.setattr("allpath_trade.web.app.create_app", lambda settings, **kw: "THE-APP")
+    monkeypatch.setattr("uvicorn.run", lambda app, host, port, log_level: None)
+
+    code = main(["serve"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "already-set-secret" not in out
+    assert "[allpath-trade] access token: unchanged" in out
+
+
+def test_serve_ensures_token_before_constructing_the_app(tmp_path, monkeypatch):
+    # ensure_token must run before create_app: create_app hands the Settings
+    # instance down to components that read web_token later (the auth
+    # middleware, in particular). If ensure_token ran after, a first-run
+    # server would come up with an empty token baked into anything that
+    # captured settings by value instead of by reference.
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def fake_create_app(settings, **kwargs):
+        seen["web_token"] = settings.web_token
+        return "THE-APP"
+
+    monkeypatch.setattr("allpath_trade.web.app.create_app", fake_create_app)
+    monkeypatch.setattr("uvicorn.run", lambda app, host, port, log_level: None)
+
+    code = main(["serve"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    assert seen["web_token"] != ""

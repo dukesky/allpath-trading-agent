@@ -90,3 +90,56 @@ def test_forged_cookie_value_is_rejected(client):
     r = client.get("/", follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/login"
+
+
+def test_non_ascii_login_token_is_rejected_not_500(client):
+    # hmac.compare_digest raises TypeError on non-ASCII `str` operands.
+    # A pasted token containing a smart quote or accent must fail closed
+    # with the normal "invalid token" page, not a 500.
+    r = client.post("/login", data={"token": "café"}, follow_redirects=False)
+    assert r.status_code == 401
+    assert "allpath_session" not in r.cookies
+
+
+def test_non_ascii_session_cookie_is_rejected_not_500(client):
+    # Same failure mode as above, on the cookie side of `_authorized`: a
+    # request carrying a non-ASCII cookie value must redirect to /login,
+    # not raise. httpx's own Cookies jar refuses to build a `str` header
+    # containing non-ASCII characters (it round-trips through ascii
+    # encoding), so `client.cookies.set(...)` can't reproduce the real
+    # wire condition -- passing the raw header as latin-1-encoded `bytes`
+    # bypasses that and reproduces what Starlette actually decodes off
+    # the wire (latin-1 bytes -> a non-ASCII `str`), matching how the
+    # reviewer triggered this against the real app.
+    r = client.get("/", follow_redirects=False,
+                    headers={"cookie": "allpath_session=caf\xe9".encode("latin-1")})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
+
+
+# -- The absent/present-Origin decision (see auth.py's comment in the
+# middleware): both must be reachable without ever hitting the 403 branch,
+# otherwise a future change that flips `if origin is not None` would pass
+# the rest of this suite while breaking every non-JS form post. --
+
+
+def test_absent_origin_post_is_allowed(client):
+    client.post("/login", data={"token": "secret"})
+    r = client.post("/logout", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.status_code != 403
+
+
+def test_same_origin_post_is_allowed(client):
+    client.post("/login", data={"token": "secret"})
+    r = client.post("/logout", headers={"origin": "http://testserver"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.status_code != 403
+
+
+def test_healthz_with_trailing_slash_is_still_public(client):
+    # A health probe configured with a trailing slash must still get the
+    # health response, not a 303 to /login.
+    r = client.get("/healthz/", follow_redirects=False)
+    assert r.status_code != 303

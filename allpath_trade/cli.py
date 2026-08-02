@@ -52,17 +52,29 @@ def cmd_serve(settings: Settings, host: str | None, port: int | None) -> int:
     import uvicorn
 
     from allpath_trade.web.app import create_app
+    from allpath_trade.web.auth import ensure_token
 
     host = host or settings.web_host
     port = port or settings.web_port
+
+    # Must run before create_app: `ensure_token` mutates `settings.web_token`
+    # in place, and `create_app` hands that same `Settings` instance down
+    # through `build_components`/`ComponentHolder`. Calling it first only
+    # works today because of that by-reference aliasing; calling it before
+    # construction means first-run auth doesn't depend on that fact holding.
+    had_token = bool(settings.web_token)
+    token = ensure_token(SettingsStore(), settings)
     app = create_app(settings, start_scheduler=True)
+
     shown = "localhost" if host in {"127.0.0.1", "localhost"} else host
     print(f"[allpath-trade] http://{shown}:{port}")
-
-    from allpath_trade.web.auth import ensure_token
-
-    token = ensure_token(SettingsStore(), settings)
-    print(f"[allpath-trade] access token: {token}")
+    # The token is the session cookie's value -- only worth printing (into
+    # terminal scrollback and any log capture) the moment it's generated.
+    # On later starts, point at where it already lives instead of repeating it.
+    if had_token:
+        print("[allpath-trade] access token: unchanged (see WEB_TOKEN in .env)")
+    else:
+        print(f"[allpath-trade] access token: {token}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 
