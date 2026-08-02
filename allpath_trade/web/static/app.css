@@ -59,6 +59,12 @@ input, select, textarea { background:var(--bg); color:var(--text);
    _chat_messages.html) -- pre-wrap keeps the model's own line breaks and
    paragraphing readable without turning its output into live HTML. */
 .msg.assistant { white-space:pre-wrap; word-wrap:break-word; }
+/* An approve/reject outcome echoed back by ChatService.note_resolution --
+   deliberately not styled like .msg.user's right-aligned bubble, so it never
+   reads as something the human typed (see _chat_messages.html). */
+.msg.system { display:flex; justify-content:center; }
+.msg.system span { color:var(--muted); font-size:12px; font-family:var(--mono);
+  background:var(--surface); border-radius:8px; padding:6px 12px; }
 .activity { color:var(--muted); font-size:12px; font-family:var(--mono); }
 pre { font-family:var(--mono); font-size:13px; overflow-x:auto;
   background:var(--surface); border:1px solid var(--line);

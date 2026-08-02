@@ -197,9 +197,11 @@ class SpyCompactor:
         self.store = store
         self.budget_tokens = budget_tokens
         self.on_before_compact = on_before_compact
+        self.calls = 0
         SpyCompactor.instances.append(self)
 
     def maybe_compact(self, conversation_id, history):
+        self.calls += 1
         return list(history), history
 
 
@@ -233,3 +235,10 @@ def test_chat_wires_a_compactor_from_the_configured_context_budget(tmp_path, mon
     assert code == 0
     assert len(SpyCompactor.instances) == 1
     assert SpyCompactor.instances[0].budget_tokens == 12345
+    # Finding 7: constructing a Compactor and never using it would also
+    # satisfy the assertions above. AgentSession.run_turn calls
+    # maybe_compact once per iteration whenever a compactor is wired in
+    # (allpath_trade/agent/loop.py) -- the "hello" turn above must have
+    # actually reached it, proving the object built here is the same one
+    # AgentSession runs against, not one built and dropped on the floor.
+    assert SpyCompactor.instances[0].calls >= 1

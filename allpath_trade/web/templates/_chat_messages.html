@@ -1,11 +1,26 @@
 <div id="messages">
 {% for m in messages %}
-  {% if m['role'] == 'user' %}
+  {% if m['role'] == 'user' and m.get('kind') == 'system_note' %}
+    {# An out-of-band event (approve/reject outcome), appended by
+       ChatService.note_resolution -- not something the human typed. Rendered
+       distinctly from a user bubble so it doesn't look like the human's own
+       words, and from `display` (plain text) rather than `content` (which
+       carries the fence_external-wrapped version sent to the model -- see
+       chat_service.py). #}
+    <div class="msg system"><span>{{ m['display'] }}</span></div>
+  {% elif m['role'] == 'user' %}
     <div class="msg user"><span>{{ m['content'] }}</span></div>
   {% elif m['role'] == 'assistant' and m['content'] %}
     <div class="msg assistant">{{ m['content'] }}</div>
   {% endif %}
 {% endfor %}
+{# Activity (tool names) appears only after a turn completes, not as it
+   streams. The brief's Interfaces block lists `GET /chat/events` (SSE) for
+   live activity, but nothing implements it -- deliberately deferred (see
+   Phase 5 leftovers in the plan doc / TODO). This full-refresh-after-turn
+   approach is what's actually wired: routes/chat.py only shows `activity`
+   on the response to the POST /chat/send that just ran, never on a plain
+   GET, so a page reload never renders a past turn's tools as if live. #}
 {% if activity %}<div class="activity">{{ activity | join(' · ') }}</div>{% endif %}
 {% for id, item in pending.items() %}
   {% if item['source'] == 'chat' %}

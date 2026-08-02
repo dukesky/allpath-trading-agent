@@ -9,7 +9,7 @@ from allpath_trade.agent.context import build_system_prompt, load_identity
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
-from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.memory.search import SessionSearch
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.web.order_sink import QueueingOrderSink
@@ -89,9 +89,35 @@ class ChatService:
 
     def note_resolution(self, line: str) -> None:
         """Record an out-of-band event (an approval, a fill) in the transcript
-        so the agent sees it on its next turn. Shares `_turn_lock` with
-        `send()`: an approval clicked mid-turn must not append into the
-        history while `run_turn` is iterating over it."""
+        so the agent sees it on its next turn.
+
+        `line` (built in reviews.py's `_echo_resolution`) can carry a
+        user-supplied reject note or a raw broker exception message -- text
+        this process didn't originate and can't fully trust. A bare
+        `"[system] "` text prefix would itself be exactly the kind of
+        forgeable marker that matters here: a `[system]`-looking line
+        smuggled inside a reject note would read to the model as a second,
+        indistinguishable system event. `fence_external` is the same
+        machinery already used to
+        wall off tool output and consolidation transcripts (readonly_tools.py,
+        memory/consolidate.py) -- it neutralizes any embedded fence-breakout
+        attempt and tells the model not to treat the contents as instructions,
+        so a forged marker inside `line` can't impersonate a real one. The
+        unfenced `line` is kept as `display` purely for the human-facing
+        transcript (see _chat_messages.html), which renders it distinctly
+        from a message the user actually typed rather than showing the raw
+        fence.
+
+        Shares `_turn_lock` with `send()`: an approval clicked mid-turn must
+        not append into the history while `run_turn` is iterating over it.
+        That does mean an approve/reject click during a long-running turn
+        waits for the whole turn to finish before the redirect returns --
+        state is safe either way (the queue row is committed before this is
+        ever called), but the browser hangs for the duration. Left as is:
+        the alternative (an out-of-band queue flushed independently of
+        `_turn_lock`) trades a UI stall for new interleaving cases this
+        module was written specifically to rule out."""
         with self._turn_lock:
             session = self.session()
-            session._append({"role": "user", "content": f"[system] {line}"})
+            session._append({"role": "user", "content": fence_external(line),
+                             "kind": "system_note", "display": line})

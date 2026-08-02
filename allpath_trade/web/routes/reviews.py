@@ -57,6 +57,13 @@ def _back_to_reviews(error: str | None = None) -> RedirectResponse:
 def _echo_resolution(request: Request, review_id: int, row_source: str, summary: str) -> None:
     # Only chat-sourced reviews have a live conversation to report back
     # into; a sentinel-triggered row has no ChatService turn waiting on it.
+    #
+    # `summary` isn't fully trusted text: the reject path folds in a
+    # user-supplied `note` and the execution-failure path folds in a raw
+    # broker exception message, either of which could contain a forged
+    # marker trying to impersonate a real system line. `note_resolution`
+    # fences the whole line (fence_external) before it reaches the model, so
+    # that's handled downstream rather than here.
     service = getattr(request.app.state, "chat", None)
     if service is not None and row_source == "chat":
         service.note_resolution(f"You resolved #{review_id}. Result: {summary}")

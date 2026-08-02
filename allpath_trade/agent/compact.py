@@ -70,6 +70,14 @@ class Compactor:
         self.on_before_compact = on_before_compact
         self._store_failure_warned = False
         self._alignment_warned = False
+        self._hook_failure_warned = False
+
+    def _warn_hook_failure(self, exc: Exception) -> None:
+        # One-shot per instance, same rationale as _warn_store_failure.
+        if not self._hook_failure_warned:
+            self._hook_failure_warned = True
+            print(f"[warning] compaction skipped: on_before_compact hook error: {exc}",
+                  file=sys.stderr)
 
     def _warn_store_failure(self, exc: Exception) -> None:
         # One-shot per instance, mirroring AgentSession._append: a wedged
@@ -146,8 +154,18 @@ class Compactor:
         if self.on_before_compact is not None:
             # Let the agent write durable conclusions to memory before the raw
             # messages leave the context. Compacting first would silently lose
-            # preferences the user stated once and never repeated.
-            self.on_before_compact(older)
+            # preferences the user stated once and never repeated. A raising
+            # hook must degrade the same way every other guarded step here
+            # does -- oversized-but-correct context, marker untouched -- not
+            # propagate out of maybe_compact and end the conversation. And it
+            # must not fall through to summarizing anyway: that would compact
+            # (and later cut) the very messages the flush was supposed to
+            # preserve, after the flush itself already failed.
+            try:
+                self.on_before_compact(older)
+            except Exception as exc:  # noqa: BLE001 — see _warn_store_failure
+                self._warn_hook_failure(exc)
+                return framed, history
 
         summary = self._summarize(previous, older)
         if summary is None:

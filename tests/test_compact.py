@@ -323,6 +323,36 @@ def test_set_summary_failure_leaves_marker_untouched_and_session_survives(tmp_pa
     assert err.count("compaction skipped") == 1  # warned once per instance, not per attempt
 
 
+def test_raising_flush_hook_degrades_without_dropping_messages(tmp_path, capsys):
+    """Reproduces the incident class the review named: a hook that raises
+    must not end the conversation, and -- unlike a plain LLM/store failure --
+    it must not fall through to summarizing anyway, or the messages the flush
+    was supposed to preserve get compacted (and later cut) right after the
+    flush that was meant to save them just failed."""
+    s = store(tmp_path)
+    cid = s.start()
+    for _ in range(6):
+        s.append(cid, big("user", 3000))
+    history = s.history(cid)
+
+    def _boom(msgs):
+        raise RuntimeError("memory flush exploded")
+
+    # If the hook's exception ever propagates instead of being caught, this
+    # never gets called and the test fails with the raw RuntimeError instead
+    # of a clean assertion -- exactly the "ends the conversation" incident.
+    llm = ScriptedLLM([LLMResponse(text="should never be reached")])
+    c = Compactor(llm, s, budget_tokens=2200, on_before_compact=_boom)
+
+    context, kept = c.maybe_compact(cid, history)
+
+    assert context == history
+    assert kept == history                # no messages dropped
+    assert s.summary(cid) == ("", 0)       # marker didn't move
+    assert len(llm.seen) == 0              # never reached summarizing
+    assert "compaction skipped" in capsys.readouterr().err
+
+
 def test_cut_zero_returns_the_oversized_context_unchanged(tmp_path):
     """Every message here is bigger on its own than `target`, so no
     user-boundary suffix ever fits — _cut_index returns 0 and maybe_compact
