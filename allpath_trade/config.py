@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     memory_model: str = "anthropic/claude-opus-5"
     memory_dir: Path = Path("memory")
     context_budget_tokens: int = 60000
+    web_host: str = "127.0.0.1"
+    web_port: int = 8791
+    web_token: str = ""
+    daily_consolidation: bool = True
+    consolidate_after_chat: bool = True
 
 
 class SettingsStore:

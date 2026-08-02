@@ -78,3 +78,51 @@ def test_status_broker_error_prints_friendly_message_and_returns_1(tmp_path, cap
     assert code == 1
     assert "Could not reach broker" in err
     assert "connection refused" in err
+
+
+def test_serve_without_keys_exits_2(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    code = main(["serve"])
+    assert code == 2
+
+
+def test_serve_starts_uvicorn_with_settings_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    created = {}
+    run_calls = {}
+
+    def fake_create_app(settings, **kwargs):
+        created["settings"] = settings
+        created["kwargs"] = kwargs
+        return "THE-APP"
+
+    def fake_run(app, host, port, log_level):
+        run_calls.update(app=app, host=host, port=port, log_level=log_level)
+
+    monkeypatch.setattr("allpath_trade.web.app.create_app", fake_create_app)
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    code = main(["serve"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    assert run_calls == {"app": "THE-APP", "host": "127.0.0.1",
+                         "port": 8791, "log_level": "warning"}
+    assert created["kwargs"]["start_scheduler"] is True
+
+
+def test_serve_host_and_port_override_settings(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_calls = {}
+
+    monkeypatch.setattr("allpath_trade.web.app.create_app", lambda settings, **kw: "THE-APP")
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, host, port, log_level: run_calls.update(host=host, port=port))
+
+    code = main(["serve", "--host", "0.0.0.0", "--port", "9000"],
+               broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    assert run_calls == {"host": "0.0.0.0", "port": 9000}

@@ -48,6 +48,20 @@ def cmd_status(settings: Settings, broker: Broker) -> int:
     return 0
 
 
+def cmd_serve(settings: Settings, host: str | None, port: int | None) -> int:
+    import uvicorn
+
+    from allpath_trade.web.app import create_app
+
+    host = host or settings.web_host
+    port = port or settings.web_port
+    app = create_app(settings, start_scheduler=True)
+    shown = "localhost" if host in {"127.0.0.1", "localhost"} else host
+    print(f"[allpath-trade] http://{shown}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
+
+
 def cmd_check(sentinel) -> int:
     report = sentinel.run_once()
     print(f"strategies checked: {report.strategies_checked}")
@@ -354,6 +368,12 @@ def main(argv: list[str] | None = None,
         description="Manually run the daily consolidation pass: recent trades, "
                     "triggers, and observations are distilled into the curated "
                     "memory layers. Normally runs automatically after close.")
+    p_serve = sub.add_parser(
+        "serve", help="run the web interface and sentinel",
+        description="Run the FastAPI web UI and the sentinel scheduler in one "
+                    "process. Requires Alpaca keys in .env.")
+    p_serve.add_argument("--host", default=None, help="bind address")
+    p_serve.add_argument("--port", type=int, default=None, help="port")
 
     if argv is not None and len(argv) == 0:
         parser.print_help()
@@ -364,7 +384,7 @@ def main(argv: list[str] | None = None,
 
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work without.
-    needs_broker = args.command in {"status", "check", "run", "chat"} or (
+    needs_broker = args.command in {"status", "check", "run", "chat", "serve"} or (
         args.command == "reviews" and getattr(args, "reviews_command", None) == "approve") or (
         args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
@@ -380,6 +400,9 @@ def main(argv: list[str] | None = None,
 
     if args.command == "status":
         return cmd_status(settings, broker)
+
+    if args.command == "serve":
+        return cmd_serve(settings, args.host, args.port)
 
     if broker is not None:
         from allpath_trade.app import build_components

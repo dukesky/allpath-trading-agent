@@ -1,7 +1,8 @@
 import threading
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
-from allpath_trade.scheduler import is_market_hours, run_daemon
+from allpath_trade.scheduler import build_jobs, is_market_hours, run_daemon
 from tests.test_sentinel import make, strategy_yaml
 
 # 2026-07-29 is a Wednesday. 15:00 UTC = 11:00 ET (EDT, UTC-4).
@@ -96,3 +97,153 @@ def test_run_daemon_fires_daily_job_after_close(monkeypatch):
     sched.run_daemon(lambda: None, 60, scheduler_cls=OneShotScheduler,
                      daily_job=lambda: calls.append(1))
     assert calls == [1]
+
+
+# -- build_jobs: same job body as run_daemon, wired to a live ComponentHolder
+# instead of a factory, and silent (the server process shouldn't spam stdout
+# on every sentinel/consolidation pass). --
+
+
+class FakeScheduler:
+    """Records the job APScheduler would have scheduled, without running it."""
+
+    def __init__(self):
+        self.job = None
+        self.trigger = None
+        self.kwargs = None
+
+    def add_job(self, fn, trigger, **kwargs):
+        self.job = fn
+        self.trigger = trigger
+        self.kwargs = kwargs
+
+
+class FakeSentinel:
+    def __init__(self):
+        self.calls = 0
+
+    def run_once(self):
+        self.calls += 1
+        return SimpleNamespace(strategies_checked=1, outcomes=[], errors=[])
+
+
+class FakeConsolidator:
+    def __init__(self, fail=False):
+        self.calls = 0
+        self.fail = fail
+
+    def run_daily(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("boom")
+        return "ok"
+
+
+class FakeHolder:
+    def __init__(self, components):
+        self._components = components
+
+    def get(self):
+        return self._components
+
+    def settings(self):
+        return self._components.settings
+
+
+def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5):
+    return SimpleNamespace(
+        sentinel=sentinel,
+        consolidator=consolidator,
+        settings=SimpleNamespace(daily_consolidation=daily_consolidation,
+                                 sentinel_interval_minutes=interval),
+    )
+
+
+def test_build_jobs_registers_interval_job_from_holder_settings():
+    scheduler = FakeScheduler()
+    holder = FakeHolder(_components(sentinel=FakeSentinel(), interval=17))
+
+    build_jobs(scheduler, holder)
+
+    assert scheduler.trigger == "interval"
+    assert scheduler.kwargs["minutes"] == 17
+    assert "next_run_time" in scheduler.kwargs
+
+
+def test_build_jobs_runs_sentinel_when_market_open(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    sentinel = FakeSentinel()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=sentinel)))
+
+    scheduler.job()
+
+    assert sentinel.calls == 1
+
+
+def test_build_jobs_skips_sentinel_when_market_closed(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    sentinel = FakeSentinel()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=sentinel)))
+
+    scheduler.job()
+
+    assert sentinel.calls == 0
+
+
+def test_build_jobs_runs_daily_consolidation_once_per_day_after_close(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    consolidator = FakeConsolidator()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(
+        _components(sentinel=FakeSentinel(), consolidator=consolidator)))
+
+    scheduler.job()
+    scheduler.job()
+
+    assert consolidator.calls == 1
+
+
+def test_build_jobs_skips_consolidation_when_setting_disabled(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    consolidator = FakeConsolidator()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=FakeSentinel(), consolidator=consolidator, daily_consolidation=False)))
+
+    scheduler.job()
+
+    assert consolidator.calls == 0
+
+
+def test_build_jobs_swallows_daily_consolidation_failure(monkeypatch, capsys):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    consolidator = FakeConsolidator(fail=True)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(
+        _components(sentinel=FakeSentinel(), consolidator=consolidator)))
+
+    scheduler.job()  # must not raise
+
+    assert consolidator.calls == 1
+    assert "failed" in capsys.readouterr().out
+
+
+def test_build_jobs_prints_nothing_on_a_normal_sentinel_pass(monkeypatch, capsys):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FakeSentinel())))
+
+    scheduler.job()
+
+    assert capsys.readouterr().out == ""
