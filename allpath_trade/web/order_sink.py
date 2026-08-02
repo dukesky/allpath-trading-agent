@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from allpath_trade.broker.base import Broker, OrderIntent
 from allpath_trade.data.base import DataSource
@@ -48,13 +50,24 @@ class QueueingOrderSink:
         can't see a pre-check is inconvenienced, a proposal that silently
         never reaches the queue is a lost instruction."""
         try:
-            price = self.data.get_price(intent.ticker)
+            # Mirrors Executor.execute: a notional-sized intent needs no quote
+            # at all (order_value comes straight from intent.notional), so
+            # skip the network call for the common chat case and keep it
+            # immune to quote-fetch flakiness.
+            price = (self.data.get_quote(intent.ticker).price
+                     if intent.qty is not None else Decimal(0))
             decision = self.gate.check(
                 intent, account=self.broker.get_account(),
                 positions=self.broker.get_positions(),
                 trades_today=self.journal.trades_today(),
                 is_paper=self.broker.is_paper, price=price)
         except Exception as exc:  # noqa: BLE001 — a failed preview must not block the proposal
+            # Log so a persistent programming error (wrong attribute, bad
+            # signature) is diagnosable from process output rather than by
+            # reading rows out of SQLite — the fail-open path is silent
+            # otherwise, which is how this bug survived once before.
+            print(f"[order_sink] risk preview failed for {intent.ticker}: {exc}",
+                  file=sys.stderr)
             return f"could not be checked ({exc})"
         if decision.approved:
             return "passes"

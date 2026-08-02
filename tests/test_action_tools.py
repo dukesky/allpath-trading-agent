@@ -128,8 +128,6 @@ def test_propose_order_invalid_never_prompts(tmp_path):
 
 
 def test_order_sink_takes_precedence_over_confirm(tmp_path):
-    from allpath_trade.agent.tools import ToolRegistry
-
     calls: list = []
 
     class Sink:

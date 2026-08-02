@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
@@ -16,7 +17,14 @@ from allpath_trade.strategy.loader import (
     parse_strategy_text,
 )
 from allpath_trade.strategy.store import StrategyStore
-from allpath_trade.web.order_sink import QueueingOrderSink
+
+# Import-time only: the agent package must not depend on the web package at
+# runtime (wrong dependency direction — the terminal CLI's tool layer would
+# drag in the web subpackage). A Protocol would decouple this fully, but the
+# annotation is the only use, and the test's duck-typed Sink shows a
+# structural type isn't needed here yet — TYPE_CHECKING is the smaller fix.
+if TYPE_CHECKING:
+    from allpath_trade.web.order_sink import QueueingOrderSink
 
 
 def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
