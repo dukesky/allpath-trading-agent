@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     notify_to: str = ""
     sentinel_interval_minutes: int = 60
     strategies_dir: Path = Path("strategies")
+    llm_provider: str = "openrouter"
+    openrouter_api_key: str = ""
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    chat_model: str = "anthropic/claude-sonnet-4.5"
+    review_model: str = "anthropic/claude-haiku-4.5"
 
 
 class SettingsStore:
