@@ -39,13 +39,15 @@ class Components:
     consolidator: Consolidator | None = None
 
 
-def build_components(settings: Settings, broker: Broker | None = None) -> Components:
+def build_components(settings: Settings, broker: Broker | None = None,
+                     conn: sqlite3.Connection | None = None) -> Components:
     if broker is None:
         from allpath_trade.broker.alpaca import AlpacaBroker
 
         broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
                               paper=settings.alpaca_paper)
-    conn = connect(settings.db_path)
+    if conn is None:
+        conn = connect(settings.db_path)
     data = YFinanceSource()
     journal = TradeJournal(conn)
     gate = RiskGate(RiskLimits())
