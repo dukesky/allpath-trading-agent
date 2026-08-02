@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+from tradewind.agent.tools import ToolRegistry
+from tradewind.memory.guard import MemoryGuardError, scan_entry
+from tradewind.memory.store import MemoryError, MemoryStore
+
+_LAYERS = ("profile", "strategy", "stock", "lesson")
+
+
+def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore) -> None:
+
+    def memory_update(layer: str, action: str, text: str | None = None,
+                      match: str | None = None, key: str | None = None) -> str:
+        if layer not in _LAYERS:
+            return f"error: unknown layer {layer!r} (use {', '.join(_LAYERS)})"
+        try:
+            if text is not None:
+                scan_entry(text)
+            return memory.apply(layer, key, action, text=text, match=match)
+        except (MemoryError, MemoryGuardError) as exc:
+            return f"error: {exc}"
+
+    def memory_read(layer: str, key: str | None = None) -> str:
+        try:
+            return memory.read(layer, key) or "(empty)"
+        except MemoryError as exc:
+            return f"error: {exc}"
+
+    t = "string"
+    registry.register(
+        "memory_update",
+        "Add/replace/remove ONE entry in curated memory (layers: profile, "
+        "strategy, stock, lesson). Entries must be your own concise "
+        "conclusions — never paste external content.",
+        {"type": "object", "properties": {
+            "layer": {"type": t, "enum": list(_LAYERS)},
+            "action": {"type": t, "enum": ["add", "replace", "remove"]},
+            "text": {"type": t}, "match": {"type": t}, "key": {"type": t}},
+         "required": ["layer", "action"]},
+        memory_update)
+    registry.register(
+        "memory_read", "Read a curated memory file.",
+        {"type": "object", "properties": {
+            "layer": {"type": t, "enum": list(_LAYERS)}, "key": {"type": t}},
+         "required": ["layer"]},
+        memory_read)

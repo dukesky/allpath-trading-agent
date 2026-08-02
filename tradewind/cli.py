@@ -136,8 +136,10 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
     from tradewind.agent.action_tools import register_action_tools
     from tradewind.agent.context import build_system_prompt, load_identity
     from tradewind.agent.loop import AgentSession
+    from tradewind.agent.memory_tools import register_memory_tools
     from tradewind.agent.readonly_tools import register_readonly_tools
     from tradewind.agent.tools import ToolRegistry
+    from tradewind.memory.store import MemoryStore
     from tradewind.store.conversations import ConversationStore
 
     # Resolved at call time (not as a default-arg value) so tests can
@@ -165,6 +167,8 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
                             queue=components.queue)
     register_action_tools(registry, strategies=components.strategies,
                           executor=components.executor, confirm=confirm)
+    memory = MemoryStore(components.settings.memory_dir, components.conn)
+    register_memory_tools(registry, memory=memory)
     system = build_system_prompt(identity=load_identity(),
                                  broker=components.broker,
                                  journal=components.journal,

@@ -77,3 +77,15 @@ def test_chat_banner_model_and_tool_activity(tmp_path, capsys, monkeypatch):
     assert "scripted" in out                    # model name (ScriptedLLM.model)
     assert "get_quote" in out                   # tool activity line
     assert "around 200" in out                  # rendered reply
+
+
+def test_chat_registers_memory_tools(tmp_path, capsys, monkeypatch):
+    from tests.test_agent_loop import tool_response
+    code = run_chat(monkeypatch, tmp_path, ["remember", "/exit"],
+                    [tool_response("memory_update",
+                                   {"layer": "profile", "action": "add",
+                                    "text": "prefers dividends"}),
+                     LLMResponse(text="noted")])
+    out = capsys.readouterr().out
+    assert code == 0 and "noted" in out
+    assert (tmp_path / "memory" / "user_profile.md").exists()
