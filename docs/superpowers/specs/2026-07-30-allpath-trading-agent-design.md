@@ -268,7 +268,7 @@ memory/
 - 默认端口 **8791**（避开 3000/5000/7000/8000/8080 等常见占用；5000/7000 在 macOS 被 AirPlay 占用），`WEB_PORT` 可配。
 
 ### 数据库并发（前置改造）
-现全局单连接 + `check_same_thread=False`，是 Phase 2 为单线程守护进程所做的妥协。Web 请求线程与调度线程并发写会互踩事务。改为 **WAL 模式 + 每线程连接**（请求依赖注入 / `threading.local`）。
+现全局单连接 + `check_same_thread=False`，是 Phase 2 为单线程守护进程所做的妥协。Web 请求线程与调度线程并发写会互踩事务。改为 **`LockedConnection`：一把锁串行化同一个共享连接** + **WAL 模式**，而非每线程各开一个连接。理由：全仓库每个 store 的写操作都是"单条语句 + 立即 commit"，没有需要跨语句保持的事务，一把锁围住共享连接已足够，也比给每个 store 构造函数改传连接池/`threading.local` 更省事；单用户应用本就无需写并发。WAL + `busy_timeout` 负责读端——读不再被写事务阻塞。
 
 ### 鉴权
 - `WEB_TOKEN` 存 `.env`；首次 `serve` 时若为空则自动生成并打印在终端。
