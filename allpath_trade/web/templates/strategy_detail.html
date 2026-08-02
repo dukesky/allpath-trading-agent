@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.name }} · AllPath Trade{% endblock %}
+{% block content %}
+<h1>{{ doc.name }}</h1>
+<p class="muted">{{ doc.id }} · v{{ doc.version }} · {{ doc.status.value }} / {{ doc.authorization.value }}</p>
+
+<h2>Rules</h2>
+<table>
+  <tr><th>Rule</th><th>Type</th><th>Condition</th><th>Action</th><th>State</th><th></th></tr>
+  {% for r in doc.rules %}
+  <tr>
+    <td>{{ r.id }}</td><td>{{ r.type.value }}</td>
+    <td><code>{{ r.condition }}</code></td><td>{{ r.action }}</td>
+    <td>{{ r.state.value }}</td>
+    <td class="num">
+      {% if r.state.value != 'armed' %}
+      <form method="post" action="/strategies/{{ doc.id }}/rules/{{ r.id }}/rearm">
+        <button type="submit" title="Re-arming makes this rule eligible to fire and place an order again.">Re-arm</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="hint">Re-arming a triggered rule makes it eligible to fire and place an order again — it is not a neutral reset.</p>
+
+<h2>Definition</h2>
+<pre>{{ yaml_text }}</pre>
+<p class="hint">To change a strategy, ask the agent in Chat — it drafts the revision and you approve the diff.</p>
+
+<h2>Version history</h2>
+<table>
+  <tr><th>Version</th><th>When</th><th>Reason</th></tr>
+  {% for v in versions %}
+  <tr><td>v{{ v['version'] }}</td><td class="muted">{{ v['ts'] | ago }}</td><td class="muted">{{ v['reason'] }}</td></tr>
+  {% else %}
+  <tr><td colspan="3" class="muted">No revisions recorded yet.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

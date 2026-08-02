@@ -58,11 +58,12 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     install_auth(app)
 
-    from allpath_trade.web.routes import chat, dashboard, reviews
+    from allpath_trade.web.routes import chat, dashboard, reviews, strategies
 
     app.include_router(dashboard.router)
     app.include_router(reviews.router)
     app.include_router(chat.router)
+    app.include_router(strategies.router)
 
     @app.get("/healthz")
     def healthz() -> dict:
