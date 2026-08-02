@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from tradewind.agent.tools import ToolRegistry
 from tradewind.memory.guard import MemoryGuardError, scan_entry
 from tradewind.memory.store import MemoryError, MemoryStore
 
+if TYPE_CHECKING:
+    from tradewind.memory.search import SessionSearch
+
 _LAYERS = ("profile", "strategy", "stock", "lesson")
 
 
-def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore) -> None:
+def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore,
+                          search: SessionSearch | None = None) -> None:
 
     def memory_update(layer: str, action: str, text: str | None = None,
                       match: str | None = None, key: str | None = None) -> str:
@@ -44,3 +50,17 @@ def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore) -> Non
             "layer": {"type": t, "enum": list(_LAYERS)}, "key": {"type": t}},
          "required": ["layer"]},
         memory_read)
+
+    if search is not None:
+        def session_search(query: str) -> str:
+            results = search.query(query)
+            if not results:
+                return "no matches"
+            return "\n".join(
+                f"[{r['kind']}/{r['subject']}] {r['snippet']}" for r in results)
+
+        registry.register(
+            "session_search",
+            "Full-text search past conversations and system observations.",
+            {"type": "object", "properties": {"query": {"type": t}},
+             "required": ["query"]}, session_search)

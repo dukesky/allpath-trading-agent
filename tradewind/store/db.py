@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS observations (
     subject TEXT,
     text TEXT NOT NULL
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+    kind, ref_id, subject, content
+);
 """
 
 

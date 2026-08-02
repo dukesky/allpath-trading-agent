@@ -15,6 +15,10 @@ class ObservationLog:
             "INSERT INTO observations (ts, source, subject, text)"
             " VALUES (?, ?, ?, ?)",
             (datetime.now(UTC).isoformat(), source, subject, text))
+        self._conn.execute(
+            "INSERT INTO search_index (kind, ref_id, subject, content)"
+            " VALUES ('observation', ?, ?, ?)",
+            (str(cur.lastrowid), source, text))
         self._conn.commit()
         return cur.lastrowid
 

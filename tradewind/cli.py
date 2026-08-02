@@ -139,6 +139,7 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
     from tradewind.agent.memory_tools import register_memory_tools
     from tradewind.agent.readonly_tools import register_readonly_tools
     from tradewind.agent.tools import ToolRegistry
+    from tradewind.memory.search import SessionSearch
     from tradewind.memory.store import MemoryStore
     from tradewind.store.conversations import ConversationStore
 
@@ -168,7 +169,8 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
     register_action_tools(registry, strategies=components.strategies,
                           executor=components.executor, confirm=confirm)
     memory = MemoryStore(components.settings.memory_dir, components.conn)
-    register_memory_tools(registry, memory=memory)
+    register_memory_tools(registry, memory=memory,
+                          search=SessionSearch(components.conn))
     system = build_system_prompt(identity=load_identity(),
                                  broker=components.broker,
                                  journal=components.journal,

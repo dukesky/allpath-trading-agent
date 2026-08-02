@@ -26,6 +26,12 @@ class ConversationStore:
             "INSERT INTO conversation_turns (conversation_id, ts, message)"
             " VALUES (?, ?, ?)",
             (conversation_id, datetime.now(UTC).isoformat(), json.dumps(message)))
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            self._conn.execute(
+                "INSERT INTO search_index (kind, ref_id, subject, content)"
+                " VALUES ('turn', ?, ?, ?)",
+                (str(conversation_id), message.get("role", ""), content))
         self._conn.commit()
 
     def history(self, conversation_id: int) -> list[dict]:
