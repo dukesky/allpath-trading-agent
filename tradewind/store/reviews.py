@@ -25,7 +25,9 @@ class ReviewQueue:
     """Service API for pending trigger reviews. The CLI today, the Web UI
     (Phase 5) and the agent (Phase 3) all operate this same interface."""
 
-    def __init__(self, conn: sqlite3.Connection, executor: Executor) -> None:
+    def __init__(self, conn: sqlite3.Connection, executor: Executor | None) -> None:
+        # executor may be None for read-only usage (list/reject);
+        # approve() requires one.
         self._conn = conn
         self._executor = executor
 
@@ -59,6 +61,8 @@ class ReviewQueue:
         return row
 
     def approve(self, review_id: int) -> ExecutionResult:
+        if self._executor is None:
+            raise ReviewError("approve requires broker credentials (no executor)")
         # Fetch row first to check existence and intent before claiming
         row = self.get(review_id)
         if row["status"] != "pending":

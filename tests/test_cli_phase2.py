@@ -86,3 +86,40 @@ def test_reviews_flow(tmp_path, capsys, monkeypatch):
     code = main(["reviews", "reject", "1", "--note", "no"],
                 broker_factory=lambda s: FakeBroker())
     assert code == 0
+
+
+def _clear_alpaca_env(monkeypatch):
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+
+
+def test_strategies_works_without_credentials(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    _clear_alpaca_env(monkeypatch)
+    code = main(["strategies"])  # no broker_factory, no keys
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "t" in out and "r1" in out
+
+
+def test_rearm_and_reviews_list_work_without_credentials(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    _clear_alpaca_env(monkeypatch)
+    assert main(["reviews", "list"]) == 0
+    assert "no pending reviews" in capsys.readouterr().out
+    code = main(["rearm", "t", "nope"])
+    assert code == 1  # rule not found — but reached the handler, not the gate
+
+
+def test_check_still_requires_credentials(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    _clear_alpaca_env(monkeypatch)
+    assert main(["check"]) == 2
+    assert "ALPACA_API_KEY" in capsys.readouterr().err
+
+
+def test_reviews_approve_still_requires_credentials(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    _clear_alpaca_env(monkeypatch)
+    assert main(["reviews", "approve", "1"]) == 2
+    assert "ALPACA_API_KEY" in capsys.readouterr().err

@@ -47,8 +47,8 @@ def cmd_status(settings: Settings, broker: Broker) -> int:
     return 0
 
 
-def cmd_check(components) -> int:
-    report = components.sentinel.run_once()
+def cmd_check(sentinel) -> int:
+    report = sentinel.run_once()
     print(f"strategies checked: {report.strategies_checked}")
     for o in report.outcomes:
         print(f"  {o.strategy_id}/{o.rule_id}: {o.disposition}"
@@ -58,13 +58,13 @@ def cmd_check(components) -> int:
     return 1 if report.errors else 0
 
 
-def cmd_strategies(components) -> int:
+def cmd_strategies(settings: Settings, store) -> int:
     errors: list[str] = []
-    docs = components.strategies.load_all(status=None, errors=errors)
+    docs = store.load_all(status=None, errors=errors)
     for err in errors:
         print(f"warning: {err}", file=sys.stderr)
     if not docs:
-        print("no strategies found in", components.settings.strategies_dir)
+        print("no strategies found in", settings.strategies_dir)
         return 0
     for d in docs:
         print(f"{d.id}  [{d.status.value}/{d.authorization.value}]  {d.name}")
@@ -74,11 +74,11 @@ def cmd_strategies(components) -> int:
     return 0
 
 
-def cmd_rearm(components, strategy_id: str, rule_id: str) -> int:
+def cmd_rearm(store, strategy_id: str, rule_id: str) -> int:
     from tradewind.strategy.loader import StrategyValidationError
 
     try:
-        doc = components.strategies.load(strategy_id)
+        doc = store.load(strategy_id)
     except FileNotFoundError:
         print(f"strategy '{strategy_id}' not found", file=sys.stderr)
         return 1
@@ -88,15 +88,14 @@ def cmd_rearm(components, strategy_id: str, rule_id: str) -> int:
     if rule_id not in {r.id for r in doc.rules}:
         print(f"rule {rule_id} not found in {strategy_id}", file=sys.stderr)
         return 1
-    components.strategies.rearm(strategy_id, rule_id)
+    store.rearm(strategy_id, rule_id)
     print(f"{strategy_id}/{rule_id} re-armed")
     return 0
 
 
-def cmd_reviews(components, args) -> int:
+def cmd_reviews(q, args) -> int:
     from tradewind.store.reviews import ReviewError
 
-    q = components.queue
     try:
         if args.reviews_command == "list":
             rows = q.list()
@@ -140,33 +139,55 @@ def main(argv: list[str] | None = None,
     args = parser.parse_args(argv)
 
     settings = SettingsStore().load()
-    if broker_factory is None and not (
-            settings.alpaca_api_key and settings.alpaca_secret_key):
-        print("Missing credentials: set ALPACA_API_KEY / ALPACA_SECRET_KEY "
-              "in .env (see .env.example)", file=sys.stderr)
-        return 2
-    broker = (broker_factory or _default_broker)(settings)
+
+    # Only commands that actually reach the broker require credentials;
+    # read-only commands (strategies, rearm, reviews list/reject) work without.
+    needs_broker = args.command in {"status", "check", "run"} or (
+        args.command == "reviews" and args.reviews_command == "approve")
+
+    broker: Broker | None = None
+    if broker_factory is not None:
+        broker = broker_factory(settings)
+    elif needs_broker:
+        if not (settings.alpaca_api_key and settings.alpaca_secret_key):
+            print("Missing credentials: set ALPACA_API_KEY / ALPACA_SECRET_KEY "
+                  "in .env (see .env.example)", file=sys.stderr)
+            return 2
+        broker = _default_broker(settings)
 
     if args.command == "status":
         return cmd_status(settings, broker)
 
-    from tradewind.app import build_components
+    if broker is not None:
+        from tradewind.app import build_components
 
-    components = build_components(settings, broker=broker)
+        components = build_components(settings, broker=broker)
+        store = components.strategies
+        queue = components.queue
+        sentinel = components.sentinel
+    else:
+        from tradewind.store.reviews import ReviewQueue
+        from tradewind.strategy.store import StrategyStore
+
+        conn = connect(settings.db_path)
+        settings.strategies_dir.mkdir(parents=True, exist_ok=True)
+        store = StrategyStore(settings.strategies_dir, conn)
+        queue = ReviewQueue(conn, executor=None)
+        sentinel = None
+
     if args.command == "check":
-        return cmd_check(components)
+        return cmd_check(sentinel)
     if args.command == "run":
         from tradewind.scheduler import run_daemon
 
-        run_daemon(lambda: components.sentinel,
-                   settings.sentinel_interval_minutes)
+        run_daemon(lambda: sentinel, settings.sentinel_interval_minutes)
         return 0
     if args.command == "strategies":
-        return cmd_strategies(components)
+        return cmd_strategies(settings, store)
     if args.command == "rearm":
-        return cmd_rearm(components, args.strategy_id, args.rule_id)
+        return cmd_rearm(store, args.strategy_id, args.rule_id)
     if args.command == "reviews":
-        return cmd_reviews(components, args)
+        return cmd_reviews(queue, args)
     return 1
 
 
