@@ -120,7 +120,13 @@ def cmd_reviews(q, args) -> int:
 
 def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
     if layer:
-        text = memory.read(layer, key)
+        from tradewind.memory.store import MemoryError as MemoryStoreError
+
+        try:
+            text = memory.read(layer, key)
+        except MemoryStoreError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         print(text if text.strip() else "(empty)")
         return 0
     root = memory.root

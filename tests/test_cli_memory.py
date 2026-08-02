@@ -36,3 +36,21 @@ def test_memory_consolidate_without_llm_exits_2(tmp_path, capsys, monkeypatch):
     code = main(["memory", "consolidate"], broker_factory=lambda s: FakeBroker())
     assert code == 2
     assert "LLM" in capsys.readouterr().err
+
+
+def test_memory_show_invalid_layer_friendly_error(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    code = main(["memory", "show", "--layer", "identity"])
+    assert code == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_memory_show_layer_without_key_friendly_error(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    code = main(["memory", "show", "--layer", "strategy"])
+    assert code == 1
+    assert "error:" in capsys.readouterr().err
