@@ -224,6 +224,39 @@ Phase 4 预案（记忆系统实现时采纳，防 OpenClaw 已知安全坑）�
 - 压缩前刷写：长对话接近上下文上限时，先让 agent 把持久性结论写盘再压缩。
 - lessons 带 YAML frontmatter（tags/triggers/confidence），决策前按 ticker/情境匹配预加载。
 
+## 5.3 Phase 4 详细设计：记忆系统（2026-07-31 讨论定稿）
+
+### 存储布局（用户可读、可编辑、可 git）
+```
+memory/
+├── user_profile.md          # 用户画像（预算 2000 字符）
+├── strategies/<id>.md       # 策略记忆（每文件 2000）
+├── stocks/<TICKER>.md       # 个股档案（每文件 3000）
+└── lessons/<slug>.md        # 经验教训（每文件 2000，YAML frontmatter: tags/tickers/confidence）
+```
+- 条目 = 以 `- ` 开头的段落（空行分隔），条目级增删改；SQLite `memory_log` 记录每次变更 diff（审计）。
+- 注入系统提示时按预算截断（文件本身不动），带 "(truncated — use session_search)" 标记。
+
+### 写入纪律（防注入，OpenClaw 教训）
+- 唯一写入口：`memory_update(layer, key, action=add|replace|remove, match, text)` 窄工具；layer=profile|strategy|stock|lesson；key 过 id 正则校验；IDENTITY.md 永不可写。
+- **注入扫描**：写入前过指令模式检测（"ignore previous"、"system:"、fence 标记等），命中即拒；单条目长度上限 500 字符；外部内容（搜索结果）不得原样写入——必须是 agent 自己的总结。
+- 两级写入：原始观察进 SQLite `observations`（哨兵触发、复核分析、对话备注自动落库；交易已有 trades 表），只有提炼步骤才写精选层。
+
+### 提炼（consolidation）
+- **每日完整提炼**（收盘后，挂 Phase 2 预留的调度位，强模型）：读当日 trades/触发/复核分析/observations + 当前记忆文件 → 经 memory_update 提出条目级变更（每条仍过扫描）。
+- **对话后轻提炼**（chat 退出时，REVIEW_MODEL 便宜模型）：只读本次对话，只沉淀用户明确表达的偏好/决定。
+- 提炼失败静默降级（观察still在库，下次再炼）；`tradewind memory consolidate` 可手动触发。
+
+### 记忆进上下文
+- chat 系统提示（冻结快照）注入：用户画像全文 + 持仓/活跃策略相关的个股档案 + 相关 lessons（按 ticker/tags 匹配），各按预算截断。
+- ReviewAgent 提示注入：该 ticker 的个股档案 + 匹配 lessons——复核质量随记忆积累提升。
+
+### 会话搜索
+- `conversation_turns` + `observations` 建 SQLite FTS5 索引；新工具 `session_search(query)` 返回命中消息及上下文窗口——历史按需搜索，不塞上下文；兼作审计。
+
+### CLI
+- `tradewind memory show [layer] [key]`（查看）、`tradewind memory consolidate`（手动提炼）。
+
 ## 6. 风控守门层
 
 所有订单意图的必经之路，纯确定性代码，LLM 不可绕过。检查项（用户可配）：单笔金额上限、单股仓位上限、当日交易次数上限、账户现金下限、授权级别匹配、live/paper 开关。任何检查不过 → 拒单 + 记录 + 通知。
