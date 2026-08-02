@@ -77,3 +77,22 @@ def test_run_daemon_skips_sentinel_when_market_closed(monkeypatch):
     run_daemon(sentinel_factory, 5, scheduler_cls=ImmediateScheduler)
 
     assert calls == []
+
+
+def test_run_daemon_fires_daily_job_after_close(monkeypatch):
+    import tradewind.scheduler as sched
+
+    calls = []
+
+    class OneShotScheduler:
+        def add_job(self, fn, *a, **k):
+            self.fn = fn
+
+        def start(self):
+            self.fn()
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda now=None: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    sched.run_daemon(lambda: None, 60, scheduler_cls=OneShotScheduler,
+                     daily_job=lambda: calls.append(1))
+    assert calls == [1]

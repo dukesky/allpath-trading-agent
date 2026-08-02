@@ -177,6 +177,7 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
                                  memory=components.memory)
     session = AgentSession(llm, registry, system, store=store,
                            conversation_id=cid, on_tool=on_tool)
+    initial_len = len(session.history)
 
     mode = "paper" if components.broker.is_paper else "LIVE"
     console.print(f"[bold cyan]{CHAT_BANNER}[/bold cyan]")
@@ -194,6 +195,14 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
             console.print()
             return 0
         if user.strip() in ("/exit", "/quit"):
+            if components.consolidator is not None:
+                new_msgs = session.history[initial_len:]
+                if new_msgs:
+                    try:
+                        note = components.consolidator.run_post_chat(new_msgs)
+                        console.print(f"[dim]memory: {note}[/dim]")
+                    except Exception:  # noqa: BLE001, S110 — exit must never fail
+                        pass
             console.print("[dim]bye — the sentinel keeps watching your rules.[/dim]")
             return 0
         if not user.strip():
@@ -271,7 +280,11 @@ def main(argv: list[str] | None = None,
     if args.command == "run":
         from tradewind.scheduler import run_daemon
 
-        run_daemon(lambda: sentinel, settings.sentinel_interval_minutes)
+        daily = None
+        if components.consolidator is not None:
+            daily = lambda: print("[memory] " + components.consolidator.run_daily())
+        run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
+                   daily_job=daily)
         return 0
     if args.command == "strategies":
         return cmd_strategies(settings, store)
