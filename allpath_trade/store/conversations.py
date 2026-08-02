@@ -22,10 +22,8 @@ class ConversationStore:
         return row["id"] if row else None
 
     def append(self, conversation_id: int, message: dict) -> None:
-        # Two INSERTs (turn + FTS index entry) must land as a unit — with
-        # separately-locked execute() calls another thread's commit could
-        # land between them and leave the FTS index permanently missing this
-        # row. transaction() holds the lock across both.
+        # The turn and its FTS index entry must land as a unit; see
+        # LockedConnection.transaction for why.
         with self._conn.transaction() as conn:
             conn.execute(
                 "INSERT INTO conversation_turns (conversation_id, ts, message)"

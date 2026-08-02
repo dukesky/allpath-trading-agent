@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 
 from allpath_trade.store.db import connect
@@ -116,15 +117,26 @@ def test_select_fetchone_and_fetchall_and_iteration(tmp_path):
 
 
 def test_transaction_commits_on_success(tmp_path):
-    conn = connect(tmp_path / "t.db")
+    # Read back through a *second*, independent connection: sqlite always
+    # shows a connection its own uncommitted work, so reading through `conn`
+    # (the connection that wrote the row) would pass even if the trailing
+    # commit() at the end of transaction() were silently dropped. WAL mode
+    # makes this concurrent read from a second connection clean.
+    path = tmp_path / "t.db"
+    conn = connect(path)
 
     with conn.transaction() as txn:
         txn.execute(
             "INSERT INTO observations (ts, source, subject, text)"
             " VALUES ('t', 's', NULL, 'committed')")
 
-    assert conn.execute(
-        "SELECT COUNT(*) AS c FROM observations").fetchone()["c"] == 1
+    other = sqlite3.connect(str(path))
+    try:
+        count = other.execute(
+            "SELECT COUNT(*) AS c FROM observations").fetchone()[0]
+    finally:
+        other.close()
+    assert count == 1
 
 
 def test_transaction_rolls_back_on_exception(tmp_path):
@@ -144,6 +156,72 @@ def test_transaction_rolls_back_on_exception(tmp_path):
 
     assert conn.execute(
         "SELECT COUNT(*) AS c FROM observations").fetchone()["c"] == 0
+
+
+def test_transaction_rollback_does_not_discard_other_threads_uncommitted_write(tmp_path):
+    # Pins the second-review-wave hazard: transaction()'s rollback used to
+    # call conn.rollback(), which rolls back the *whole* shared connection --
+    # including another thread's write that is sitting uncommitted because it
+    # released the lock between execute() and commit() (the pattern every
+    # store here uses, e.g. ReviewQueue.approve's atomic claim). A
+    # SAVEPOINT-scoped rollback must undo only the failing block's own
+    # statements and leave the other thread's pending write intact and still
+    # committable.
+    path = tmp_path / "t.db"
+    conn = connect(path)
+
+    write_issued = threading.Event()
+    txn_settled = threading.Event()
+    errors: list[Exception] = []
+
+    class Boom(Exception):
+        pass
+
+    def writer_thread() -> None:
+        try:
+            # execute() takes and releases the lock on its own; the write is
+            # issued but not yet committed when this returns.
+            conn.execute(
+                "INSERT INTO observations (ts, source, subject, text)"
+                " VALUES ('t', 'writer', NULL, 'uncommitted')")
+            write_issued.set()
+            txn_settled.wait(timeout=5)
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001 — surfaced by assertion below
+            errors.append(exc)
+
+    def txn_thread() -> None:
+        try:
+            write_issued.wait(timeout=5)
+            try:
+                with conn.transaction() as txn:
+                    txn.execute(
+                        "INSERT INTO observations (ts, source, subject, text)"
+                        " VALUES ('t', 'txn', NULL, 'should-be-rolled-back')")
+                    raise Boom
+            except Boom:
+                pass
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            txn_settled.set()
+
+    t1 = threading.Thread(target=writer_thread)
+    t2 = threading.Thread(target=txn_thread)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert errors == []
+
+    other = sqlite3.connect(str(path))
+    try:
+        rows = other.execute(
+            "SELECT source FROM observations ORDER BY id").fetchall()
+    finally:
+        other.close()
+    assert rows == [("writer",)]
 
 
 def test_transaction_allows_nested_execute_via_relock(tmp_path):
@@ -180,4 +258,22 @@ def test_rows_fetchone_advances_and_returns_none_past_end(tmp_path):
     assert cur.fetchone()["text"] == "1"
     assert cur.fetchone()["text"] == "2"
     assert cur.fetchone() is None
+    assert cur.fetchone() is None
+
+
+def test_rows_fetchall_returns_only_remaining_rows_after_fetchone(tmp_path):
+    # Matches sqlite3.Cursor's real behavior: fetchall() after some
+    # fetchone() calls returns only what's left, not the whole result set.
+    conn = connect(tmp_path / "t.db")
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO observations (ts, source, subject, text)"
+            " VALUES ('t', 's', NULL, ?)", (str(i),))
+        conn.commit()
+
+    cur = conn.execute("SELECT text FROM observations ORDER BY id")
+    assert cur.fetchone()["text"] == "0"
+    remaining = cur.fetchall()
+    assert [r["text"] for r in remaining] == ["1", "2"]
+    assert cur.fetchall() == []
     assert cur.fetchone() is None

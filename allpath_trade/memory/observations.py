@@ -11,10 +11,8 @@ class ObservationLog:
         self._conn = conn
 
     def add(self, source: str, text: str, subject: str | None = None) -> int:
-        # Two INSERTs (record + FTS index entry) must land as a unit — with
-        # separately-locked execute() calls another thread's commit could
-        # land between them and leave the FTS index permanently missing this
-        # row. transaction() holds the lock across both.
+        # The record and its FTS index entry must land as a unit; see
+        # LockedConnection.transaction for why.
         with self._conn.transaction() as conn:
             cur = conn.execute(
                 "INSERT INTO observations (ts, source, subject, text)"

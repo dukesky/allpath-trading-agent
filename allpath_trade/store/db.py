@@ -111,6 +111,7 @@ class LockedConnection:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
         self._lock = threading.RLock()
+        self._txn_depth = 0
 
     @property
     def row_factory(self):
@@ -150,14 +151,39 @@ class LockedConnection:
         Most writes here are one statement plus a commit, which `execute` and
         `commit` already serialize. A few write two rows that must land as a
         unit — a record plus its FTS index entry — and those must not have
-        another thread's commit interleaved between them."""
+        another thread's commit interleaved between them.
+
+        On failure, only the statements issued inside this block are undone.
+        `conn.rollback()` would roll back the *whole* shared connection,
+        including another thread's write that is sitting uncommitted because
+        it released the lock between its `execute()` and `commit()` calls
+        (every store does this) — that write would vanish out from under it
+        while its caller still believes the following `commit()` succeeded,
+        since sqlite3 captures `rowcount`/`lastrowid` at execute time, before
+        either thread's commit runs. A `SAVEPOINT`, scoped to this block via
+        `ROLLBACK TO`/`RELEASE`, undoes only what this block did. Savepoint
+        names are keyed by nesting depth (the lock is an `RLock`, so a
+        `transaction()` can legitimately nest on the same thread) so an inner
+        rollback can't target an outer savepoint by name collision. Only the
+        outermost call commits; a nested call's `RELEASE` on its own
+        savepoint is enough."""
         with self._lock:
+            depth = self._txn_depth
+            self._txn_depth += 1
+            savepoint = f"txn_sp_{depth}"
             try:
-                yield self
-            except BaseException:
-                self._conn.rollback()
-                raise
-            self._conn.commit()
+                self._conn.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    yield self
+                except BaseException:
+                    self._conn.execute(f"ROLLBACK TO {savepoint}")
+                    self._conn.execute(f"RELEASE {savepoint}")
+                    raise
+                self._conn.execute(f"RELEASE {savepoint}")
+                if depth == 0:
+                    self._conn.commit()
+            finally:
+                self._txn_depth -= 1
 
 
 class _Rows:
@@ -165,14 +191,23 @@ class _Rows:
     are captured, so nothing depends on the cursor staying valid once another
     thread takes the connection lock.
 
-    Eager `fetchall()` is safe for every statement this codebase issues
-    through `execute`/`executemany`/`executescript`: INSERT, UPDATE, and DDL
-    cursors have no result set, and `sqlite3` returns `[]` from `fetchall()`
-    on those rather than raising (verified empirically against this
-    project's sqlite3/Python version). `lastrowid` and `rowcount` are read
-    off the cursor before `fetchall()` runs, and neither value changes as a
-    result of fetching, so capture order is not load-bearing here — it is
-    kept first-then-fetch anyway as the more obviously correct order."""
+    Eager fetch is safe for every statement this codebase issues through
+    `execute`/`executemany`/`executescript`: INSERT, UPDATE, and DDL cursors
+    have no result set, and `sqlite3` returns `[]` from `fetchall()` on those
+    rather than raising (verified empirically against this project's
+    sqlite3/Python version). `lastrowid` and `rowcount` are read off the
+    cursor before fetching, and neither value changes as a result of
+    fetching, so capture order is not load-bearing here — it is kept
+    first-then-fetch anyway as the more obviously correct order.
+
+    `fetchone()`/`fetchall()` share one position like the real cursor: a
+    `fetchall()` after some `fetchone()` calls returns only the remaining
+    rows. `__iter__` does not — it always walks the full materialized list
+    regardless of `_pos`, diverging from `sqlite3.Cursor` (whose iterator and
+    `fetchone`/`fetchall` share position). No call site in this codebase
+    interleaves iteration with `fetchone`/`fetchall` on the same cursor, so
+    this has not mattered in practice; fix `__iter__` to consume from
+    `_pos` too if a future caller needs that."""
 
     def __init__(self, cursor: sqlite3.Cursor) -> None:
         self.lastrowid = cursor.lastrowid
@@ -188,7 +223,9 @@ class _Rows:
         return row
 
     def fetchall(self) -> list:
-        return list(self._rows)
+        rows = self._rows[self._pos:]
+        self._pos = len(self._rows)
+        return rows
 
     def __iter__(self):
         return iter(self._rows)
