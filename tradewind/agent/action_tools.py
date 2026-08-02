@@ -10,7 +10,11 @@ from pydantic import ValidationError
 from tradewind.agent.tools import ToolRegistry
 from tradewind.broker.base import OrderIntent, OrderSide
 from tradewind.execution import ExecutionError, Executor
-from tradewind.strategy.loader import StrategyValidationError, parse_strategy_text
+from tradewind.strategy.loader import (
+    StrategyValidationError,
+    is_valid_strategy_id,
+    parse_strategy_text,
+)
 from tradewind.strategy.store import StrategyStore
 
 
@@ -19,6 +23,8 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                           confirm: Callable[[str], bool]) -> None:
 
     def draft_strategy(strategy_id: str, yaml_text: str, reason: str) -> str:
+        if not is_valid_strategy_id(strategy_id):
+            return f"error: invalid strategy id {strategy_id!r}"
         try:
             doc = parse_strategy_text(strategy_id, yaml_text)
         except StrategyValidationError as exc:

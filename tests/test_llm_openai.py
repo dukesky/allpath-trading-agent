@@ -79,3 +79,15 @@ def test_malformed_tool_arguments_raise_llm_error():
     c, _ = make([_resp(tool_calls=[_tc("c1", "get_quote", "{not json")], finish="tool_calls")])
     with pytest.raises(LLMError):
         c.complete([{"role": "user", "content": "x"}])
+
+
+def test_empty_choices_raises_llm_error():
+    c, _ = make([SimpleNamespace(choices=[])])
+    with pytest.raises(LLMError):
+        c.complete([{"role": "user", "content": "x"}])
+
+
+def test_none_choices_raises_llm_error():
+    c, _ = make([SimpleNamespace(choices=None)])
+    with pytest.raises(LLMError):
+        c.complete([{"role": "user", "content": "x"}])

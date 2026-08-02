@@ -65,3 +65,29 @@ def test_history_conversion_tool_use_and_result():
     assert sent[2]["role"] == "user"
     assert sent[2]["content"][0]["type"] == "tool_result"
     assert sent[2]["content"][0]["tool_use_id"] == "t1"
+
+
+def test_parallel_tool_calls_merge_into_single_user_message():
+    c, stub = make([SimpleNamespace(content=[_text_block("done")], stop_reason="end_turn")])
+    messages = [
+        {"role": "user", "content": "price?"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [
+             {"id": "t1", "name": "get_quote", "arguments": {"ticker": "A"}},
+             {"id": "t2", "name": "get_quote", "arguments": {"ticker": "B"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "200"},
+        {"role": "tool", "tool_call_id": "t2", "content": "300"},
+    ]
+    c.complete(messages)
+    sent = stub.calls[0]["messages"]
+    # exactly one user message follows the assistant turn, carrying both results
+    tool_result_users = [m for m in sent if m["role"] == "user"
+                         and isinstance(m["content"], list)
+                         and m["content"] and m["content"][0].get("type") == "tool_result"]
+    assert len(tool_result_users) == 1
+    [merged] = tool_result_users
+    assert len(merged["content"]) == 2
+    assert merged["content"][0]["tool_use_id"] == "t1"
+    assert merged["content"][0]["content"] == "200"
+    assert merged["content"][1]["tool_use_id"] == "t2"
+    assert merged["content"][1]["content"] == "300"

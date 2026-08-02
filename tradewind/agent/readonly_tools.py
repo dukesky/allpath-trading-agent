@@ -7,6 +7,7 @@ from tradewind.broker.base import Broker
 from tradewind.data.base import DataSource
 from tradewind.store.journal import TradeJournal
 from tradewind.store.reviews import ReviewQueue
+from tradewind.strategy.loader import is_valid_strategy_id
 from tradewind.strategy.store import StrategyStore
 
 _OBJ = {"type": "object", "properties": {}}
@@ -67,6 +68,8 @@ def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
         return "\n".join(lines) or "no strategies"
 
     def read_strategy(strategy_id: str) -> str:
+        if not is_valid_strategy_id(strategy_id):
+            return f"error: invalid strategy id {strategy_id!r}"
         path = strategies.directory / f"{strategy_id}.yaml"
         return path.read_text()
 

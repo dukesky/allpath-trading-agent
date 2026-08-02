@@ -61,9 +61,13 @@ class AnthropicClient(LLMClient):
                     for c in m["tool_calls"])
                 out.append({"role": "assistant", "content": blocks})
             elif role == "tool":
-                out.append({"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": m["tool_call_id"],
-                     "content": m["content"]}]})
+                block = {"type": "tool_result", "tool_use_id": m["tool_call_id"],
+                         "content": m["content"]}
+                if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list) \
+                        and out[-1]["content"] and out[-1]["content"][0].get("type") == "tool_result":
+                    out[-1]["content"].append(block)
+                else:
+                    out.append({"role": "user", "content": [block]})
             else:
                 out.append({"role": role, "content": m["content"]})
         return "\n\n".join(system_parts), out

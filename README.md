@@ -23,7 +23,7 @@
 
 ---
 
-> **Project status:** Phases 1-3 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; and the LLM agent core (multi-provider chat client, tool-calling loop, `tradewind chat` REPL, and a ReviewAgent that annotates soft-rule triggers before they reach the queue) is now in place. The Web UI + memory system is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
+> **Project status:** Phases 1-3 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; and the LLM agent core (multi-provider chat client, tool-calling loop, `tradewind chat` REPL, and a ReviewAgent that researches queued soft-rule triggers, attaching its analysis for your review (and deciding execute/skip for auto-authorized strategies, still through the risk gate)) is now in place. The Web UI + memory system is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
 
 ## Table of Contents
 

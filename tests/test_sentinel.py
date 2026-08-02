@@ -288,6 +288,38 @@ def test_auto_soft_agent_execute_but_executor_fails_reports_error(tmp_path):
     assert len(n.sent) == 1                  # user still notified
 
 
+def test_auto_soft_with_unparseable_analysis_stays_pending(tmp_path):
+    from tradewind.agent.review import ReviewAnalysis
+
+    class UnparseableStub:
+        def analyze(self, review):
+            return ReviewAnalysis(recommendation="skip",
+                                  reasoning="unparseable analysis: garbage")
+
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = UnparseableStub()
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "queued"
+    assert "unparseable" in o.detail
+    row = q.get(1)
+    assert row["status"] == "pending"
+    assert ex.calls == []
+
+
+def test_auto_soft_agent_execute_but_gate_rejects_reports_rejected(tmp_path):
+    s, _store, ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    ex.reject_reasons = ["exceeds max position size"]
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "rejected"
+    assert "risk gate" in o.detail and "exceeds max position size" in o.detail
+    row = q.get(1)
+    assert row["status"] == "approved"       # agent's decision truthfully recorded
+    assert len(n.sent) == 1
+
+
 def test_confirm_detail_includes_recommendation_and_reasoning(tmp_path):
     s, _store, _ex, _q, _n = make(tmp_path, strategy_yaml(auth="confirm"))
     s.review_agent = StubReviewAgent("execute")

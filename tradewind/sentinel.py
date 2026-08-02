@@ -163,6 +163,14 @@ class Sentinel:
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
 
+        if analysis.reasoning.startswith("unparseable analysis:"):
+            # The LLM's output couldn't be parsed as a recommendation at all —
+            # this is not a genuine "skip" decision, so don't act on it.
+            # Leave the trigger pending for human review.
+            return TriggerOutcome(
+                **base, disposition="queued",
+                detail="analysis unparseable — left for human review")
+
         autonomous = (doc.authorization == Authorization.AUTO
                       and rule_type == RuleType.SOFT)
         if not autonomous:
@@ -188,7 +196,8 @@ class Sentinel:
             detail = ("agent-approved; submitted" if result.submitted else
                       "agent-approved; risk gate rejected: "
                       + "; ".join(result.decision.reasons))
-            return TriggerOutcome(**base, disposition="executed", detail=detail)
+            disposition = "executed" if result.submitted else "rejected"
+            return TriggerOutcome(**base, disposition=disposition, detail=detail)
 
         try:
             self.queue.reject(rid, note=analysis.reasoning[:500])

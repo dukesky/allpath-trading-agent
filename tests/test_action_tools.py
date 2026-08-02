@@ -76,6 +76,16 @@ def test_draft_strategy_invalid_yaml_never_prompts(tmp_path):
     assert prompts == []
 
 
+def test_draft_strategy_rejects_path_traversal(tmp_path):
+    reg, store, _, prompts = make(tmp_path, answers=[True])
+    out = call(reg, "draft_strategy", strategy_id="../evil", yaml_text=GOOD, reason="x")
+    assert out.startswith("error:") and "invalid strategy id" in out
+    assert prompts == []
+    assert not (tmp_path / "evil.yaml").exists()
+    assert not (tmp_path.parent / "evil.yaml").exists()
+    assert store.versions("../evil") == []
+
+
 def test_draft_strategy_revision_bumps_version(tmp_path):
     reg, store, _, _ = make(tmp_path, answers=[True, True])
     call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="v1")

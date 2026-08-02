@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -8,6 +9,12 @@ from pydantic import ValidationError
 from tradewind.strategy.actions import ActionError, parse_action
 from tradewind.strategy.conditions import ConditionError, parse_condition
 from tradewind.strategy.model import StrategyDoc
+
+_VALID_STRATEGY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def is_valid_strategy_id(strategy_id: str) -> bool:
+    return bool(_VALID_STRATEGY_ID.match(strategy_id))
 
 
 class StrategyValidationError(Exception):

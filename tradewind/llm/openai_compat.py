@@ -30,6 +30,8 @@ class OpenAICompatClient(LLMClient):
         except Exception as exc:  # SDK/network errors become LLMError
             raise LLMError(f"llm request failed: {exc}") from exc
 
+        if not getattr(resp, "choices", None):
+            raise LLMError("llm returned no choices")
         choice = resp.choices[0]
         msg = choice.message
         calls: list[ToolCall] = []

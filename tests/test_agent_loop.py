@@ -50,6 +50,24 @@ def test_tool_loop_executes_and_feeds_back():
     assert tool_msgs and "echo:" in tool_msgs[0]["content"]
 
 
+def test_multi_tool_call_in_one_response_executes_both_in_order():
+    llm = ScriptedLLM([
+        LLMResponse(tool_calls=[
+            ToolCall(id="c1", name="echo", arguments={"a": 1}),
+            ToolCall(id="c2", name="echo", arguments={"a": 2})],
+            stop_reason="tool_use"),
+        LLMResponse(text="done")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    assert s.run_turn("go") == "done"
+    tool_msgs = [m for m in s.history if m["role"] == "tool"]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0]["tool_call_id"] == "c1" and "'a': 1" in tool_msgs[0]["content"]
+    assert tool_msgs[1]["tool_call_id"] == "c2" and "'a': 2" in tool_msgs[1]["content"]
+    # second llm call saw both tool results
+    second_call_tool_msgs = [m for m in llm.seen[1] if m["role"] == "tool"]
+    assert len(second_call_tool_msgs) == 2
+
+
 def test_system_prompt_is_first_message_every_call():
     llm = ScriptedLLM([LLMResponse(text="a"), LLMResponse(text="b")])
     s = AgentSession(llm, make_registry(), "SYS")
