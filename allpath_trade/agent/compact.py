@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 
 from allpath_trade.llm.base import LLMClient, LLMError
@@ -20,23 +21,16 @@ If an earlier briefing is included below, fold it into the new one rather
 than repeating it separately.
 """
 
-# SUMMARY_PROMPT caps the briefing at 400 words. At ~6 chars/word (5-letter
-# average English word + a space) that's ~2400 chars, and estimate_tokens is
-# chars // 4, so a from-scratch summary costs on the order of 600 tokens even
-# though there's no previous frame yet to measure it from. Without this, a
-# conversation's first-ever compaction computes frame_cost=0 (nothing to
-# diff against), under-reserves for the summary about to be written, and can
-# land the post-compaction context back over budget by however big that
-# frame turns out to be.
+# SUMMARY_PROMPT's 400-word cap is ~600 tokens at estimate_tokens' rate. A
+# first-ever compaction has no previous frame to size against (the diff
+# below would be 0), so reserve that fixed amount instead of under-reserving
+# for the summary about to be written.
 FIRST_SUMMARY_RESERVE_TOKENS = 600
 
-# `target` must stay above zero even when frame_cost eats the whole budget
-# (e.g. a pathologically large stored summary at a small configured budget).
-# At target == 0, _cut_index can essentially never find a fitting
-# user-boundary suffix, so `cut` stays 0 forever and compaction permanently
-# stops advancing while the context keeps growing — not reachable at the
-# 60k default, but a smaller configured budget shouldn't be able to deadlock
-# compaction outright. This is a floor, not a guarantee a cut is found.
+# `target` must stay above zero even when frame_cost eats the whole budget,
+# or `_cut_index` can never find a fitting suffix and compaction deadlocks
+# permanently. Not reachable at the 60k default; guards small configured
+# budgets. A floor, not a guarantee a cut is found.
 MIN_CUT_TARGET_TOKENS = 500
 
 
@@ -74,6 +68,22 @@ class Compactor:
         self.store = store
         self.budget_tokens = budget_tokens
         self.on_before_compact = on_before_compact
+        self._store_failure_warned = False
+        self._alignment_warned = False
+
+    def _warn_store_failure(self, exc: Exception) -> None:
+        # One-shot per instance, mirroring AgentSession._append: a wedged
+        # session should say so once, not spam stderr every turn.
+        if not self._store_failure_warned:
+            self._store_failure_warned = True
+            print(f"[warning] compaction skipped: conversation store error: {exc}",
+                  file=sys.stderr)
+
+    def _warn_alignment_mismatch(self) -> None:
+        if not self._alignment_warned:
+            self._alignment_warned = True
+            print("[warning] compaction skipped: in-memory history has drifted "
+                  "from the stored conversation", file=sys.stderr)
 
     def maybe_compact(self, conversation_id: int,
                       history: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -86,51 +96,50 @@ class Compactor:
         marker returns `history` unchanged, and the one branch that does
         advance it returns the trimmed tail instead. That makes "the
         caller's copy stays aligned with the store" true by construction
-        rather than something each call site has to remember to uphold.
+        rather than something each call site has to remember to uphold. Every
+        store call below is guarded on that same basis: a persistence failure
+        must degrade like an LLM failure (oversized-but-correct context,
+        marker untouched), never propagate and end the conversation.
         """
-        previous, since = self.store.summary(conversation_id)
+        try:
+            previous, since = self.store.summary(conversation_id)
+        except Exception as exc:  # noqa: BLE001 — must never end the chat, see class docstring
+            self._warn_store_failure(exc)
+            return list(history), history
         framed = self._frame(previous, history)
         if estimate_tokens(framed) <= self.budget_tokens:
             return framed, history
 
         # The overflow check above counts the leading summary frame's tokens
         # toward the budget (it's part of `framed`), but a plain cut over
-        # `history` doesn't know that frame exists — so without this, the
-        # post-compaction context (new frame + newer) could land back over
-        # `target` by however big the summary frame is. Reserving that same
-        # cost here (using the current frame as a proxy for the new one, since
-        # both are bounded by the same summarization prompt) keeps the two
-        # checks measuring the same thing. When there's no previous summary
-        # yet, that diff is always 0 (there's no frame to measure), so fall
-        # back to a fixed reserve for the summary about to be written instead.
-        frame_cost = (estimate_tokens(framed) - estimate_tokens(history)
-                      if previous.strip() else FIRST_SUMMARY_RESERVE_TOKENS)
+        # `history` doesn't know that frame exists — so reserve that same
+        # cost here (the current frame is a proxy for the new one, since both
+        # are bounded by the same summarization prompt). With no previous
+        # frame to measure, fall back to a fixed reserve for the summary
+        # about to be written instead.
+        frame_cost = max(
+            estimate_tokens(framed) - estimate_tokens(history) if previous.strip() else 0,
+            FIRST_SUMMARY_RESERVE_TOKENS)
         target = max((self.budget_tokens * 2) // 3 - frame_cost, MIN_CUT_TARGET_TOKENS)
         cut = _cut_index(history, target)
         if cut == 0:
             return framed, history  # nothing can be dropped without splitting a tool call
 
-        # `cut` is a local index into `history`, which by the docstring's
-        # invariant is exactly the transcript from `since` forward — so
-        # `turn_ids` (fetched fresh from that same `since`) must be the same
-        # length as `history`. That invariant can break for two different
-        # reasons: a caller failed to adopt the trimmed history from a
-        # previous call (a bug), or the store has legitimately fallen behind
-        # because writes are failing (AgentSession._append degrades to an
-        # in-memory session on a persistence failure rather than ending the
-        # conversation — see its docstring). Both look identical from here:
-        # `history` keeps growing while the store doesn't. We can't reliably
-        # tell them apart, and a live chat dying mid-turn is a far worse
-        # outcome than silently not-yet-summarizing a turn, so either way the
-        # answer is the same as an LLM failure — degrade to the
-        # oversized-but-correct context and advance nothing. This check runs
-        # before any side-effecting work (the flush hook, the summarizing LLM
-        # call) so that a misalignment is caught before either fires, not
-        # after both have already run for nothing. It's a plain branch, not
-        # an assert, so it still holds under `python -O`.
-        turn_ids = [tid for tid, _ in
-                    self.store.history_with_ids(conversation_id, after_turn_id=since)]
+        # `turn_ids` (fetched fresh from `since`) must be the same length as
+        # `history`, or `cut` no longer indexes what the store thinks is
+        # unsummarized (a caller that didn't adopt a trimmed `history`, or the
+        # store legitimately falling behind under a persistence failure — see
+        # AgentSession._append). We can't tell those apart, so treat either
+        # as the same case as an LLM failure. Checked before the flush hook
+        # or the summarizing LLM call so a misalignment doesn't waste both.
+        try:
+            turn_ids = [tid for tid, _ in
+                        self.store.history_with_ids(conversation_id, after_turn_id=since)]
+        except Exception as exc:  # noqa: BLE001 — see _warn_store_failure
+            self._warn_store_failure(exc)
+            return framed, history
         if len(turn_ids) != len(history):
+            self._warn_alignment_mismatch()
             return framed, history
 
         older, newer = history[:cut], history[cut:]
@@ -145,7 +154,11 @@ class Compactor:
             return framed, history  # LLM failure: oversized-but-correct context
 
         through = turn_ids[cut - 1]
-        self.store.set_summary(conversation_id, summary, through)
+        try:
+            self.store.set_summary(conversation_id, summary, through)
+        except Exception as exc:  # noqa: BLE001 — see _warn_store_failure
+            self._warn_store_failure(exc)
+            return framed, history
         return self._frame(summary, newer), newer
 
     def _frame(self, summary: str, messages: list[dict]) -> list[dict]:

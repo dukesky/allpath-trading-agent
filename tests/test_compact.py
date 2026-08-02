@@ -1,3 +1,5 @@
+import sqlite3
+
 from allpath_trade.agent.compact import Compactor, estimate_tokens
 from allpath_trade.llm.base import LLMError, LLMResponse
 from allpath_trade.store.conversations import ConversationStore
@@ -6,8 +8,83 @@ from tests.test_agent_loop import ScriptedLLM
 
 
 class FailingLLM:
+    def __init__(self):
+        self.calls = 0
+
     def complete(self, messages, tools=None):
+        self.calls += 1
         raise LLMError("boom")
+
+
+class SetSummaryFailingStore:
+    """Wraps a real store so reads and appends behave normally and stay
+    aligned — only the final set_summary commit fails, mirroring an incident
+    where the disk fills or a write lock times out mid-summarization."""
+
+    def __init__(self, inner: ConversationStore):
+        self._inner = inner
+        self.summary_calls = 0
+
+    def append(self, conversation_id, message):
+        self._inner.append(conversation_id, message)
+
+    def history(self, conversation_id, after_turn_id=0):
+        return self._inner.history(conversation_id, after_turn_id)
+
+    def history_with_ids(self, conversation_id, after_turn_id=0):
+        return self._inner.history_with_ids(conversation_id, after_turn_id)
+
+    def summary(self, conversation_id):
+        return self._inner.summary(conversation_id)
+
+    def set_summary(self, conversation_id, text, through_turn_id):
+        self.summary_calls += 1
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+
+class SummaryReadFailingStore:
+    """summary() raises — the earliest guarded read in maybe_compact, before
+    `previous`/`since` are even known."""
+
+    def summary(self, conversation_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    def history_with_ids(self, conversation_id, after_turn_id=0):
+        raise AssertionError("must not be reached: summary() should fail first")
+
+    def set_summary(self, conversation_id, text, through_turn_id):
+        raise AssertionError("must not be reached: summary() should fail first")
+
+
+class MisalignedStore:
+    """summary() and history_with_ids() both succeed (no exception), but
+    history_with_ids() returns fewer turns than `history` — the store has
+    fallen behind while `history` keeps growing (see AgentSession._append),
+    a different condition from a store call raising outright."""
+
+    def summary(self, conversation_id):
+        return "", 0
+
+    def history_with_ids(self, conversation_id, after_turn_id=0):
+        return []
+
+    def set_summary(self, conversation_id, text, through_turn_id):
+        raise AssertionError("must not be reached: alignment check should catch this first")
+
+
+class HistoryIdsReadFailingStore:
+    """summary() succeeds (nothing previously summarized); history_with_ids()
+    raises — the second guarded read, used to fetch turn_ids for the
+    alignment check."""
+
+    def summary(self, conversation_id):
+        return "", 0
+
+    def history_with_ids(self, conversation_id, after_turn_id=0):
+        raise sqlite3.OperationalError("database is locked")
+
+    def set_summary(self, conversation_id, text, through_turn_id):
+        raise AssertionError("must not be reached: history_with_ids() should fail first")
 
 
 def store(tmp_path) -> ConversationStore:
@@ -103,6 +180,30 @@ def test_compaction_keeps_a_tool_pair_intact_when_it_survives_the_cut(tmp_path):
         {call["id"] for m in call_msgs for call in m["tool_calls"]}
 
 
+def test_cut_index_role_guard_prevents_orphaning_a_tool_result(tmp_path):
+    """Sized so the smallest suffix that fits under target starts right at
+    the `tool` message (index 2): a large tool-result payload followed by a
+    small user turn. A guard-less "first suffix that fits" implementation
+    would cut there, orphaning the result from the assistant message that
+    carries its `tool_calls`. The role guard must push the cut to the next
+    user boundary (index 3) instead, keeping the pair together in `older`."""
+    s = store(tmp_path)
+    cid = s.start()
+    s.append(cid, big("user", 8000))
+    s.append(cid, {"role": "assistant", "content": "",
+                   "tool_calls": [{"id": "c1", "name": "quote", "arguments": {}}]})
+    s.append(cid, {"role": "tool", "tool_call_id": "c1", "content": "y" * 2000})
+    s.append(cid, big("user", 50))
+    llm = ScriptedLLM([LLMResponse(text="summary")])
+    c = Compactor(llm, s, budget_tokens=1720)
+
+    _context, kept = c.maybe_compact(cid, s.history(cid))
+
+    assert not any(m["role"] == "tool" for m in kept), \
+        "guard-less cut would land inside the pair, orphaning the tool result"
+    assert kept == [big("user", 50)]
+
+
 def test_flush_hook_runs_before_summarizing(tmp_path):
     s = store(tmp_path)
     cid = s.start()
@@ -111,12 +212,9 @@ def test_flush_hook_runs_before_summarizing(tmp_path):
         s.append(cid, big("assistant", 100))
     order: list[str] = []
     llm = ScriptedLLM([LLMResponse(text="summary")])
-    # budget_tokens=2500: with these message sizes a smaller budget leaves no
-    # user-boundary suffix under target (see deviation note in the report),
-    # so maybe_compact would bail out at cut==0 before ever calling the hook —
-    # this value is the smallest that forces a genuine cut. Raised from 1500
-    # once a first-ever compaction started reserving FIRST_SUMMARY_RESERVE_TOKENS
-    # off `target` (see compact.py); 1500 no longer clears that reserve.
+    # budget_tokens=2500: must be large enough that _cut_index finds a real
+    # user-boundary suffix under target, or maybe_compact bails at cut==0
+    # before ever calling the hook.
     c = Compactor(llm, s, budget_tokens=2500,
                   on_before_compact=lambda msgs: order.append("flush"))
     c.maybe_compact(cid, s.history(cid))
@@ -129,15 +227,100 @@ def test_llm_failure_leaves_history_untouched(tmp_path):
     for _ in range(6):
         s.append(cid, big("user", 3000))
     history = s.history(cid)
-    # budget_tokens=2200, same reasoning as above (raised from 1500 for the
-    # same FIRST_SUMMARY_RESERVE_TOKENS reason): must force a real cut so
-    # the compactor actually calls the (failing) LLM, otherwise this test
-    # would pass vacuously without exercising the failure path at all.
-    c = Compactor(FailingLLM(), s, budget_tokens=2200)
+    # budget_tokens=2200: must force a real cut so the compactor actually
+    # calls the (failing) LLM — otherwise this would pass vacuously. The
+    # call counter below is the self-guard: if a future change to the
+    # reserve/floor ever pushes this back into the cut==0 early return,
+    # llm.calls == 0 fails loudly instead of the assertions below passing
+    # for the wrong reason.
+    llm = FailingLLM()
+    c = Compactor(llm, s, budget_tokens=2200)
     context, kept = c.maybe_compact(cid, history)
+    assert llm.calls == 1
     assert context == history
     assert kept == history
     assert s.summary(cid) == ("", 0)
+
+
+def test_summary_read_failure_degrades_without_crashing(capsys):
+    """store.summary() is the first store call maybe_compact makes, before
+    it even knows whether a previous summary exists. It must degrade the
+    same way an LLM failure does rather than propagate."""
+    llm = ScriptedLLM([])  # must never be called: fails before any cut is computed
+    c = Compactor(llm, SummaryReadFailingStore(), budget_tokens=100)
+    history = [big("user", 500)]
+
+    context, kept = c.maybe_compact(1, history)
+
+    assert context == history
+    assert kept == history
+    assert "compaction skipped" in capsys.readouterr().err
+
+
+def test_history_with_ids_read_failure_degrades_without_crashing(capsys):
+    """The second guarded read (fetching turn_ids for the alignment check)
+    must degrade the same way — before the summarizing LLM call, not after."""
+    history = [big("user", 3000) for _ in range(6)]
+    llm = ScriptedLLM([])  # must never be called: the read fails before summarizing
+    c = Compactor(llm, HistoryIdsReadFailingStore(), budget_tokens=2200)
+
+    context, kept = c.maybe_compact(1, history)
+
+    assert context == history
+    assert kept == history
+    assert "compaction skipped" in capsys.readouterr().err
+
+
+def test_alignment_mismatch_degrades_without_crashing(capsys):
+    """Distinct from a store call raising: both reads succeed, but the turn
+    count no longer matches `history`. Must degrade the same way, with a
+    warning that says something different from the store-failure one."""
+    history = [big("user", 3000) for _ in range(6)]
+    llm = ScriptedLLM([])  # must never be called: mismatch caught before summarizing
+    c = Compactor(llm, MisalignedStore(), budget_tokens=2200)
+
+    context, kept = c.maybe_compact(1, history)
+
+    assert context == history
+    assert kept == history
+    err = capsys.readouterr().err
+    assert "compaction skipped" in err
+    assert "drifted" in err  # different wording from the store-failure warning
+
+
+def test_set_summary_failure_leaves_marker_untouched_and_session_survives(tmp_path, capsys):
+    """Reproduces the incident the review traced: turns persist normally,
+    compaction triggers, both reads succeed and stay aligned — only the
+    final set_summary commit fails (disk fills, or another writer holds the
+    lock past the busy timeout). Before the fix this propagated straight out
+    of maybe_compact, out of run_turn, and ended a live chat; it must instead
+    degrade the same way an LLM failure does: marker untouched, and the
+    session stays usable for the next turn."""
+    real = store(tmp_path)
+    cid = real.start()
+    for _ in range(6):
+        real.append(cid, big("user", 3000))
+    broken = SetSummaryFailingStore(real)
+    llm = ScriptedLLM([LLMResponse(text="summary"), LLMResponse(text="summary again")])
+    c = Compactor(llm, broken, budget_tokens=2200)
+    history = real.history(cid)
+
+    context, kept = c.maybe_compact(cid, history)
+
+    assert context == history
+    assert kept == history                      # marker didn't move: history is unchanged
+    assert broken.summary_calls == 1
+    assert real.summary(cid) == ("", 0)          # marker never advanced
+
+    # the next turn must still work: calling again with the (unchanged)
+    # history behaves the same way rather than raising or corrupting state.
+    context2, kept2 = c.maybe_compact(cid, kept)
+    assert context2 == history
+    assert kept2 == history
+    assert broken.summary_calls == 2
+
+    err = capsys.readouterr().err
+    assert err.count("compaction skipped") == 1  # warned once per instance, not per attempt
 
 
 def test_cut_zero_returns_the_oversized_context_unchanged(tmp_path):

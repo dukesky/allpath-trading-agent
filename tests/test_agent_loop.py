@@ -161,6 +161,66 @@ def test_persistence_failure_degrades_to_in_memory(capsys):
     assert err.count("not being saved") == 1          # warned exactly once, not per message
 
 
+class SetSummaryFailsStore:
+    """Reads and appends work normally against a real store (turns persist,
+    reads stay aligned) — only the final set_summary commit fails, e.g. disk
+    fills or a write lock times out mid-summarization. Unlike BrokenStore,
+    this exercises the path where the alignment check passes and the
+    failure is set_summary's own, not a symptom of the store falling
+    behind."""
+
+    def __init__(self, inner: ConversationStore):
+        self._inner = inner
+        self.summary_calls = 0
+
+    def append(self, conversation_id, message):
+        self._inner.append(conversation_id, message)
+
+    def history(self, conversation_id, after_turn_id=0):
+        return self._inner.history(conversation_id, after_turn_id)
+
+    def history_with_ids(self, conversation_id, after_turn_id=0):
+        return self._inner.history_with_ids(conversation_id, after_turn_id)
+
+    def summary(self, conversation_id):
+        return self._inner.summary(conversation_id)
+
+    def set_summary(self, conversation_id, text, through_turn_id):
+        self.summary_calls += 1
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+
+def test_set_summary_failure_degrades_instead_of_crashing(tmp_path, capsys):
+    """Reproduces the incident the review traced: turns persist normally,
+    compaction triggers, both reads succeed and stay aligned — only the
+    final set_summary commit fails. Before the fix this propagated straight
+    out of maybe_compact and out of run_turn, ending a live chat mid-turn.
+    It must instead degrade like an LLM failure: the marker never moves and
+    the session keeps working turn after turn."""
+    real = ConversationStore(connect(tmp_path / "compact.db"))
+    cid = real.start()
+    for _ in range(10):
+        real.append(cid, {"role": "user", "content": "x" * 300})
+        real.append(cid, {"role": "assistant", "content": "x" * 300})
+    broken = SetSummaryFailsStore(real)
+
+    compactor_llm = ScriptedLLM([LLMResponse(text=f"summary {i}") for i in range(30)])
+    compactor = Compactor(compactor_llm, broken, budget_tokens=1200)
+    session_llm = ScriptedLLM([LLMResponse(text=f"reply {i}") for i in range(30)])
+    session = AgentSession(session_llm, make_registry(), "SYS", store=broken,
+                           conversation_id=cid, compactor=compactor)
+
+    for i in range(10):
+        reply = session.run_turn(f"question {i} " + "x" * 300)
+        assert reply == f"reply {i}"              # every turn completes despite the failure
+
+    assert broken.summary_calls > 0                # set_summary was attempted and raised
+    assert real.summary(cid) == ("", 0)             # marker never moved
+    err = capsys.readouterr().err
+    assert "compaction skipped" in err
+    assert err.count("compaction skipped") == 1     # warned once, not per attempt
+
+
 def test_compaction_degrades_instead_of_crashing_when_store_is_unwritable(capsys):
     """A persistence failure must never end a conversation in progress
     (AgentSession._append's docstring). But when a Compactor is attached,
