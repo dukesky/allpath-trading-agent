@@ -29,12 +29,18 @@ class ConversationStore:
                 "INSERT INTO conversation_turns (conversation_id, ts, message)"
                 " VALUES (?, ?, ?)",
                 (conversation_id, datetime.now(UTC).isoformat(), json.dumps(message)))
-            content = message.get("content")
-            if isinstance(content, str) and content.strip():
+            # `display`, when present, is the human-readable text (e.g. a
+            # system_note's unfenced summary -- see ChatService.note_
+            # resolution); `content` for that same message is the
+            # fence_external-wrapped version sent to the model. Indexing
+            # `content` would surface the FENCE_NOTICE wrapper boilerplate
+            # in session search instead of "You resolved #12. Result: ...".
+            indexed = message.get("display", message.get("content"))
+            if isinstance(indexed, str) and indexed.strip():
                 conn.execute(
                     "INSERT INTO search_index (kind, ref_id, subject, content)"
                     " VALUES ('turn', ?, ?, ?)",
-                    (str(conversation_id), message.get("role", ""), content))
+                    (str(conversation_id), message.get("role", ""), indexed))
 
     def history(self, conversation_id: int, after_turn_id: int = 0) -> list[dict]:
         rows = self._conn.execute(

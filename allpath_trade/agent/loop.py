@@ -13,6 +13,22 @@ if TYPE_CHECKING:
 
 LIMIT_NOTICE = "(stopped: tool-call limit reached — ask me to continue if needed)"
 
+# The only fields any LLMClient's chat-completions message schema accepts.
+# History entries can carry extra bookkeeping fields that must never reach a
+# provider -- e.g. ChatService.note_resolution's `kind`/`display`, where
+# `display` is deliberately the *unfenced* text (see chat_service.py) kept
+# only for template rendering. Forwarding it verbatim would ship the exact
+# string fence_external exists to neutralize, and a strict endpoint may
+# reject an unknown field outright. Projecting once here, at the one place
+# `messages` is assembled for `llm.complete`, keeps every LLMClient
+# implementation protocol-clean without each one having to know which
+# fields on a history dict are presentation-only.
+_PROTOCOL_KEYS = ("role", "content", "tool_call_id", "tool_calls")
+
+
+def _protocol_only(message: dict) -> dict:
+    return {k: message[k] for k in _PROTOCOL_KEYS if k in message}
+
 
 class AgentSession:
     """One conversation with the agent. System prompt is frozen at
@@ -68,6 +84,7 @@ class AgentSession:
                 context, self.history = self.compactor.maybe_compact(
                     self.conversation_id, self.history)
             messages = [{"role": "system", "content": self.system_prompt}, *context]
+            messages = [_protocol_only(m) for m in messages]
             try:
                 resp = self.llm.complete(messages, tools=self.registry.specs())
             except LLMError as exc:

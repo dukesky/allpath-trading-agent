@@ -1,3 +1,5 @@
+from allpath_trade.agent.tools import fence_external
+from allpath_trade.memory.search import SessionSearch
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 
@@ -37,3 +39,25 @@ def test_summary_columns_migrated(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(conversations)")}
     assert {"summary", "summarized_through"} <= cols
     connect(tmp_path / "db.sqlite")  # idempotent second run
+
+
+def test_a_system_note_is_indexed_by_its_readable_display_text(tmp_path):
+    # ChatService.note_resolution stores `content` as the fence_external-
+    # wrapped text (what the model sees) and `display` as the plain,
+    # human-readable summary (what the template shows). Indexing `content`
+    # would surface the FENCE_NOTICE wrapper boilerplate in session search
+    # instead of the actual sentence -- this locks in that the search index
+    # follows `display` when a message carries one.
+    conn = connect(tmp_path / "db.sqlite")
+    store = ConversationStore(conn)
+    cid = store.start()
+    line = "You resolved #12. Result: order submitted"
+    store.append(cid, {"role": "user", "content": fence_external(line),
+                       "kind": "system_note", "display": line})
+
+    results = SessionSearch(conn).query("order submitted")
+    assert any(r["kind"] == "turn" for r in results)
+    row = conn.execute(
+        "SELECT content FROM search_index WHERE kind = 'turn'").fetchone()
+    assert row["content"] == line
+    assert "external-content" not in row["content"]

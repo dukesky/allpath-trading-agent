@@ -16,11 +16,12 @@
 {% endfor %}
 {# Activity (tool names) appears only after a turn completes, not as it
    streams. The brief's Interfaces block lists `GET /chat/events` (SSE) for
-   live activity, but nothing implements it -- deliberately deferred (see
-   Phase 5 leftovers in the plan doc / TODO). This full-refresh-after-turn
-   approach is what's actually wired: routes/chat.py only shows `activity`
-   on the response to the POST /chat/send that just ran, never on a plain
-   GET, so a page reload never renders a past turn's tools as if live. #}
+   live activity, but nothing implements it -- deliberately deferred; not
+   yet tracked in docs/TODO.md (a later task adds that entry). This
+   full-refresh-after-turn approach is what's actually wired: routes/chat.py
+   only shows `activity` on the response to the POST /chat/send that just
+   ran, never on a plain GET, so a page reload never renders a past turn's
+   tools as if live. #}
 {% if activity %}<div class="activity">{{ activity | join(' · ') }}</div>{% endif %}
 {% for id, item in pending.items() %}
   {% if item['source'] == 'chat' %}
