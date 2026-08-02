@@ -17,7 +17,8 @@ class AgentSession:
     def __init__(self, llm: LLMClient, registry: ToolRegistry, system_prompt: str,
                  store: ConversationStore | None = None,
                  conversation_id: int | None = None, max_iters: int = 15,
-                 on_tool: Callable[[ToolCall], None] | None = None) -> None:
+                 on_tool: Callable[[ToolCall], None] | None = None,
+                 compactor: object | None = None) -> None:
         self.llm = llm
         self.registry = registry
         self.system_prompt = system_prompt
@@ -25,10 +26,12 @@ class AgentSession:
         self.conversation_id = conversation_id
         self.max_iters = max_iters
         self.on_tool = on_tool
+        self.compactor = compactor
         self.persistence_failed = False
         self.history: list[dict] = []
         if store is not None and conversation_id is not None:
-            self.history = store.history(conversation_id)
+            _, through = store.summary(conversation_id)
+            self.history = store.history(conversation_id, after_turn_id=through)
 
     def _append(self, message: dict) -> None:
         """Record a message. History lives in memory first: a persistence
@@ -48,8 +51,11 @@ class AgentSession:
     def run_turn(self, user_text: str) -> str:
         self._append({"role": "user", "content": user_text})
         for _ in range(self.max_iters):
-            messages = [{"role": "system", "content": self.system_prompt},
-                        *self.history]
+            context = self.history
+            if self.compactor is not None and self.conversation_id is not None:
+                context = self.compactor.maybe_compact(
+                    self.conversation_id, self.history)
+            messages = [{"role": "system", "content": self.system_prompt}, *context]
             try:
                 resp = self.llm.complete(messages, tools=self.registry.specs())
             except LLMError as exc:

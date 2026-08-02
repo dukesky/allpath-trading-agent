@@ -123,8 +123,11 @@ class BrokenStore:
     def __init__(self):
         self.calls = 0
 
-    def history(self, conversation_id):
+    def history(self, conversation_id, after_turn_id=0):
         return []
+
+    def summary(self, conversation_id):
+        return "", 0
 
     def append(self, conversation_id, message):
         self.calls += 1

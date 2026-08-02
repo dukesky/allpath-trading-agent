@@ -93,6 +93,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
 
 _MIGRATIONS = [
     "ALTER TABLE pending_reviews ADD COLUMN agent_analysis TEXT",
+    "ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE conversations ADD COLUMN summarized_through INTEGER NOT NULL DEFAULT 0",
 ]
 
 

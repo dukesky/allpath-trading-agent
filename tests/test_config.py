@@ -7,6 +7,7 @@ def test_settings_defaults(tmp_path: Path):
     s = Settings(_env_file=tmp_path / "nope.env")
     assert s.alpaca_paper is True
     assert s.alpaca_api_key == ""
+    assert s.context_budget_tokens == 60000
 
 
 def test_store_set_creates_and_updates_env_file(tmp_path: Path):

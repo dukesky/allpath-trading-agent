@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # pollutes every later conversation, so it gets the strongest tier.
     memory_model: str = "anthropic/claude-opus-5"
     memory_dir: Path = Path("memory")
+    context_budget_tokens: int = 60000
 
 
 class SettingsStore:

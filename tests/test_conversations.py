@@ -30,3 +30,10 @@ def test_agent_analysis_column_migrated(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(pending_reviews)")}
     assert "agent_analysis" in cols
     connect(tmp_path / "db.sqlite")  # idempotent second run
+
+
+def test_summary_columns_migrated(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(conversations)")}
+    assert {"summary", "summarized_through"} <= cols
+    connect(tmp_path / "db.sqlite")  # idempotent second run

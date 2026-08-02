@@ -36,8 +36,32 @@ class ConversationStore:
                     " VALUES ('turn', ?, ?, ?)",
                     (str(conversation_id), message.get("role", ""), content))
 
-    def history(self, conversation_id: int) -> list[dict]:
+    def history(self, conversation_id: int, after_turn_id: int = 0) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT message FROM conversation_turns WHERE conversation_id = ?"
-            " ORDER BY id", (conversation_id,))
+            "SELECT message FROM conversation_turns"
+            " WHERE conversation_id = ? AND id > ? ORDER BY id",
+            (conversation_id, after_turn_id))
         return [json.loads(r["message"]) for r in rows]
+
+    def history_with_ids(self, conversation_id: int,
+                         after_turn_id: int = 0) -> list[tuple[int, dict]]:
+        rows = self._conn.execute(
+            "SELECT id, message FROM conversation_turns"
+            " WHERE conversation_id = ? AND id > ? ORDER BY id",
+            (conversation_id, after_turn_id))
+        return [(r["id"], json.loads(r["message"])) for r in rows]
+
+    def summary(self, conversation_id: int) -> tuple[str, int]:
+        row = self._conn.execute(
+            "SELECT summary, summarized_through FROM conversations WHERE id = ?",
+            (conversation_id,)).fetchone()
+        if row is None:
+            return "", 0
+        return row["summary"], row["summarized_through"]
+
+    def set_summary(self, conversation_id: int, text: str,
+                    through_turn_id: int) -> None:
+        self._conn.execute(
+            "UPDATE conversations SET summary = ?, summarized_through = ?"
+            " WHERE id = ?", (text, through_turn_id, conversation_id))
+        self._conn.commit()
