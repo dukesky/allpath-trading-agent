@@ -183,6 +183,31 @@ review:
 - `tradewind check`：单次手动哨兵；`tradewind strategies`：列策略与规则状态；`tradewind rearm`：重新武装；`tradewind reviews list/approve/reject`：过渡期队列处置。
 - 通知层：SMTP 邮件（未配置时降级为日志），Phase 2 一并搭好。
 
+## 5.2 Phase 3 详细设计：Agent 核心（2026-07-31 讨论定稿）
+
+### LLM 层（tradewind/llm/）
+- 统一接口 `LLMClient.complete(messages, tools) -> text | tool_calls`；两个实现：**OpenAICompatClient**（openai SDK + base_url，覆盖 OpenRouter 与 OpenAI 直连）、**AnthropicClient**（anthropic SDK 原生）。
+- 配置：`LLM_PROVIDER=openrouter|openai|anthropic` + key + 双档模型 `CHAT_MODEL`（对话/策略共创，强模型）/ `REVIEW_MODEL`（哨兵复核，可用中档）。测试默认 OpenRouter。
+
+### Agent 工具循环（tradewind/agent/）
+- 自研 tool loop（不引重框架）：LLM 工具调用 → 执行 → 回填 → 循环，轮次上限（默认 15）防失控。
+- 工具箱 v1：`get_quote` / `get_bars` / `web_search`（ddgs 免费默认，接口可插拔，升级项见 docs/TODO.md）/ `get_portfolio` / `list_strategies` / `read_strategy` / `draft_strategy` / `propose_order` / `list_pending_reviews`。
+- **确认边界**：`draft_strategy` 生成 YAML → 终端展示 diff → 用户 yes → 写文件 + 版本快照；`propose_order` 在对话场景同样先经用户确认，再进 Executor → 风控守门。agent 无绕过路径。
+
+### 对话入口：tradewind chat
+- 终端 REPL，多轮对话，历史存 SQLite（按 session；`--new` 开新会话，默认续上次）。
+- 上下文组装：系统提示自动注入持仓摘要、活跃策略列表、近 5 笔交易、待确认项数量。
+- agent service 为纯后端函数，Phase 5 Web UI 复用同一套。
+
+### 哨兵接入：ReviewAgent
+- 软规则触发（已入队）后新增复核：agent 拿触发快照 → 自主调工具（查价、搜新闻）→ 产出结构化分析（recommend: execute/skip + 理由 + 来源）。
+- **confirm 策略**：分析写入 pending review 的 `agent_analysis` 字段，邮件附带，用户参考后决策；
+- **auto 策略**：agent 决定执行（→ Executor → 风控守门）或放弃（记录理由）；
+- **降级安全**：LLM 失败/超时 → 待确认项照常存在（无分析），绝不因 agent 故障丢触发；复核设 token/轮次上限；分析入库留痕（Phase 6 复盘用）。
+
+### 测试
+- Mock LLM client（脚本化工具调用序列）测：链路正确、确认门禁不可绕过、违规订单被拦、降级路径。真实 OpenRouter 调用为 `-m integration` 可选测试。CI 零 LLM 成本。
+
 ## 6. 风控守门层
 
 所有订单意图的必经之路，纯确定性代码，LLM 不可绕过。检查项（用户可配）：单笔金额上限、单股仓位上限、当日交易次数上限、账户现金下限、授权级别匹配、live/paper 开关。任何检查不过 → 拒单 + 记录 + 通知。

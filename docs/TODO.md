@@ -15,6 +15,7 @@
 
 - [ ] 美股节假日历法（当前仅按 ET 工作日 9:30–16:00 判断，节假日空跑无害但不精确）
 - [ ] 数据源冗余：Tiingo（EOD）、Finnhub（新闻/情绪）、Alpaca data，yfinance 故障时自动切换
+- [ ] **搜索升级**：web_search 从 DuckDuckGo（免费默认）扩展到更高质量的付费信息源——Tavily / Brave Search API（通用搜索，需 key）、Finnhub / Polygon news（金融专用新闻流）；接口已设计为可插拔，用户配了 key 即自动启用
 - [ ] SettingsStore `quote_mode="never"` 对含空格/#/= 值的破坏问题 —— **Phase 5 前必修**（Web UI 会写任意值）
 
 ## 券商
