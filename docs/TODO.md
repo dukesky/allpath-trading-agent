@@ -35,3 +35,9 @@
 - [ ] 组合级风控（多策略同时触发时的总敞口控制）
 - [ ] 策略间资金分配冲突检测（多个策略的 target 合计超过 100%）
 - [ ] 回测能力（用同一套规则求值器跑历史数据验证策略）
+
+## Phase 3 终审遗留（小项）
+- [ ] sentinel `_agent_review`：post-claim 阶段出现非 ExecutionError 异常时（如 journal 写失败）行留在 approved 且无通知——与 execution.py 的日志时序 seam 一并处理
+- [ ] store/db `_migrate` 的 except OperationalError 会吞掉 "database is locked"——改为先查 PRAGMA table_info 或匹配错误消息
+- [ ] draft_strategy 保存的 YAML 含 `id:` 字段（loader 会用文件名覆盖，无害但与手写文件风格不一致）
+- [ ] chat REPL：assistant 空文本时打印空行 `agent> `
