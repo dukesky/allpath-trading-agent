@@ -1,6 +1,6 @@
 import pytest
 
-from tradewind.memory.guard import MemoryGuardError, scan_entry
+from allpath_trade.memory.guard import MemoryGuardError, scan_entry
 
 
 @pytest.mark.parametrize("bad", [

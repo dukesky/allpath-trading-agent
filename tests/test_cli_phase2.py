@@ -1,7 +1,7 @@
 from pathlib import Path
 
+from allpath_trade.cli import main
 from tests.test_sentinel import FakeBroker  # reuse fixture broker
-from tradewind.cli import main
 
 STRAT = """
 name: "T"

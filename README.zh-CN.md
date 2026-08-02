@@ -23,13 +23,14 @@
 
 ---
 
-> **项目状态：** Phase 1-4 已完成——券商连接、行情数据、风控和交易日志已可对接 Alpaca 模拟盘账户；策略引擎 + 哨兵循环（YAML 策略、规则求值、版本管理、定时监控、硬规则自动执行）现已运行；LLM agent 核心（多 provider 聊天客户端、工具调用循环、`tradewind chat` REPL，以及对已入队软规则触发进行联网研究的 ReviewAgent）已就位；记忆系统（四层精选 markdown 层 + 沉淀 + 会话检索）使 agent 能在跨会话中学习和回忆耐久模式。下一步是 Web UI，详见[路线图](#路线图)。**默认仅模拟盘（paper trading）。**
+> **项目状态：** Phase 1-4 已完成——券商连接、行情数据、风控和交易日志已可对接 Alpaca 模拟盘账户；策略引擎 + 哨兵循环（YAML 策略、规则求值、版本管理、定时监控、硬规则自动执行）现已运行；LLM agent 核心（多 provider 聊天客户端、工具调用循环、`allpath-trade chat` REPL，以及对已入队软规则触发进行联网研究的 ReviewAgent）已就位；记忆系统（四层精选 markdown 层 + 沉淀 + 会话检索）使 agent 能在跨会话中学习和回忆耐久模式。下一步是 Web UI，详见[路线图](#路线图)。**默认仅模拟盘（paper trading）。**
 
 ## 目录
 
 - [概述](#概述)
 - [核心特性](#核心特性)
 - [架构](#架构)
+- [工作原理](#工作原理)
 - [安全模型](#安全模型)
 - [快速上手](#快速上手)
 - [项目结构](#项目结构)
@@ -52,7 +53,7 @@
 | **分级执行** | 通过*你自己的*券商账户交易，授权级别由你选择：仅通知 → 确认后执行 → 额度内自动执行 |
 | **持续学习** | 交易后复盘、随时间累积的个股档案、以及影响未来决策的经验教训 |
 
-框架以 Python 包 **`tradewind`** 的形式发布，完全运行在你自己的机器上：你的密钥、你的数据、你的决策。
+框架以 Python 包 **`allpath-trade`** 的形式发布，完全运行在你自己的机器上：你的密钥、你的数据、你的决策。
 
 ## 核心特性
 
@@ -101,6 +102,16 @@
 
 设计文档位于 [`docs/superpowers/specs/`](docs/superpowers/specs/)，实现计划位于 [`docs/superpowers/plans/`](docs/superpowers/plans/)。
 
+## 工作原理
+
+**对话循环**——你提问，agent 用实时工具研究；凡是碰钱或改策略文件的动作都会停下来向你确认。退出时它把这次对话炼进精选记忆，为下一次会话打底（虚线）。
+
+![对话循环](docs/images/conversation-loop.svg)
+
+**哨兵循环**——你不在时它自己跑。确定性规则检查零成本；硬规则（止损）执行全程无 LLM，软规则则唤醒 agent 先研究再入队等你批准。每个结果都记入日志，收盘后被炼进同一份记忆，让下一次复核更准。
+
+![哨兵循环](docs/images/sentinel-loop.svg)
+
 ## 安全模型
 
 整个框架建立在一条不变量之上：**LLM 永远无法绕过你的限制。**
@@ -148,8 +159,8 @@ cp .env.example .env
 ### 验证
 
 ```bash
-uv run tradewind status
-uv run tradewind chat   # 与 agent 对话（需要在 .env 中配置 LLM 与 Alpaca 密钥）
+uv run allpath-trade status
+uv run allpath-trade chat   # 与 agent 对话（需要在 .env 中配置 LLM 与 Alpaca 密钥）
 ```
 
 预期输出：模拟盘账户净值、现金、购买力、持仓与最近的交易日志。
@@ -157,7 +168,7 @@ uv run tradewind chat   # 与 agent 对话（需要在 .env 中配置 LLM 与 Al
 ## 项目结构
 
 ```
-tradewind/
+allpath_trade/          # import 包名（PyPI / CLI 名为 allpath-trade）
 ├── broker/       # 券商抽象 + Alpaca 适配器
 ├── data/         # 行情数据源（yfinance）
 ├── risk/         # 确定性风控守门
@@ -173,7 +184,7 @@ tradewind/
 |:---:|---|:---:|
 | 1 | **执行地基**——券商抽象、Alpaca（模拟盘）适配器、行情数据、风控守门、交易日志、执行器、CLI | ✅ 已完成 |
 | 2 | **策略引擎 + 哨兵循环**——YAML 策略文档、受限表达式规则求值器、版本管理、定时监控、硬规则自动执行 | ✅ 已完成 |
-| 3 | **Agent 核心**——多 provider LLM 层（Claude / OpenAI / OpenRouter）、工具循环、上下文组装、`tradewind chat` REPL、为哨兵触发附加分析的 ReviewAgent | ✅ 已完成 |
+| 3 | **Agent 核心**——多 provider LLM 层（Claude / OpenAI / OpenRouter）、工具循环、上下文组装、`allpath-trade chat` REPL、为哨兵触发附加分析的 ReviewAgent | ✅ 已完成 |
 | 4 | **记忆系统**——四层记忆 + 每个循环后的交叉沉淀 | ✅ 已完成 |
 | 5 | **Web UI + 通知**——聊天、仪表盘、待确认队列、设置页、邮件 | 🔜 下一步 |
 | 6 | **反思循环**——每日深度 review、交易后复盘 | 计划中 |
@@ -184,8 +195,8 @@ tradewind/
 uv run pytest                  # 单元测试（不联网）
 uv run pytest -m integration   # 集成测试——需要 Alpaca 模拟盘密钥
 uv run ruff check .            # lint
-uv run tradewind chat          # 与 agent 对话（需要在 .env 中配置 LLM 与 Alpaca 密钥）
-uv run tradewind memory show   # 查看 agent 记忆文件
+uv run allpath-trade chat          # 与 agent 对话（需要在 .env 中配置 LLM 与 Alpaca 密钥）
+uv run allpath-trade memory show   # 查看 agent 记忆文件
 ```
 
 **工程约定**

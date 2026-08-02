@@ -1,0 +1,64 @@
+<svg viewBox="0 0 680 400" width="680" height="400" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="t d">
+<title id="t">Sentinel loop and daily consolidation</title>
+<desc id="d">Hourly deterministic rule checks send hard rules straight to the risk gate and broker, and soft rules to the agent for research before queuing or executing; every outcome is journaled and distilled into memory after market close.</desc>
+<style>
+  .bx { stroke-width: 1.2 }
+  .t  { font: 500 14px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #1f2328 }
+  .ts { font: 400 12px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #4a5058 }
+  .ln { stroke: #8b949e; stroke-width: 1.5; fill: none }
+</style>
+<defs>
+<marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8b949e"/></marker>
+</defs>
+
+<rect class="bx" x="20" y="24" width="150" height="52" rx="4" fill="#e9edf2" stroke="#b9c2cc"/>
+<text class="t" x="95" y="42" text-anchor="middle" dominant-baseline="central">every hour</text>
+<text class="ts" x="95" y="60" text-anchor="middle" dominant-baseline="central">market hours only</text>
+
+<rect class="bx" x="265" y="24" width="150" height="52" rx="4" fill="#dbeafe" stroke="#93b4e8"/>
+<text class="t" x="340" y="42" text-anchor="middle" dominant-baseline="central">evaluate rules</text>
+<text class="ts" x="340" y="60" text-anchor="middle" dominant-baseline="central">no LLM · zero cost</text>
+<line class="ln" x1="170" y1="50" x2="257" y2="50" marker-end="url(#b)"/>
+
+<rect class="bx" x="510" y="24" width="150" height="52" rx="4" fill="#ede9fe" stroke="#bdb2ea"/>
+<text class="t" x="585" y="42" text-anchor="middle" dominant-baseline="central">hard rule fires</text>
+<text class="ts" x="585" y="60" text-anchor="middle" dominant-baseline="central">risk gate · broker</text>
+<line class="ln" x1="415" y1="50" x2="502" y2="50" marker-end="url(#b)"/>
+
+<rect class="bx" x="265" y="130" width="150" height="52" rx="4" fill="#ccfbf1" stroke="#8fd8ca"/>
+<text class="t" x="340" y="148" text-anchor="middle" dominant-baseline="central">soft rule fires</text>
+<text class="ts" x="340" y="166" text-anchor="middle" dominant-baseline="central">agent researches</text>
+<line class="ln" x1="340" y1="76" x2="340" y2="122" marker-end="url(#b)"/>
+
+<rect class="bx" x="510" y="130" width="150" height="52" rx="4" fill="#fef3c7" stroke="#e5c987"/>
+<text class="t" x="585" y="148" text-anchor="middle" dominant-baseline="central">review queue</text>
+<text class="ts" x="585" y="166" text-anchor="middle" dominant-baseline="central">analysis · email</text>
+<line class="ln" x1="415" y1="156" x2="502" y2="156" marker-end="url(#b)"/>
+
+<rect class="bx" x="510" y="222" width="150" height="52" rx="4" fill="#dbeafe" stroke="#93b4e8"/>
+<text class="t" x="585" y="240" text-anchor="middle" dominant-baseline="central">you approve</text>
+<text class="ts" x="585" y="258" text-anchor="middle" dominant-baseline="central">or agent decides</text>
+<line class="ln" x1="585" y1="182" x2="585" y2="214" marker-end="url(#b)"/>
+
+<rect class="bx" x="265" y="222" width="150" height="52" rx="4" fill="#e9edf2" stroke="#b9c2cc"/>
+<text class="t" x="340" y="240" text-anchor="middle" dominant-baseline="central">observations</text>
+<text class="ts" x="340" y="258" text-anchor="middle" dominant-baseline="central">every outcome logged</text>
+<line class="ln" x1="502" y1="248" x2="423" y2="248" marker-end="url(#b)"/>
+<path class="ln" d="M660 50 L672 50 L672 236 L423 236" marker-end="url(#b)"/>
+
+<rect class="bx" x="20" y="222" width="150" height="52" rx="4" fill="#ccfbf1" stroke="#8fd8ca"/>
+<text class="t" x="95" y="240" text-anchor="middle" dominant-baseline="central">after close</text>
+<text class="ts" x="95" y="258" text-anchor="middle" dominant-baseline="central">daily distillation</text>
+<line class="ln" x1="265" y1="248" x2="178" y2="248" marker-end="url(#b)"/>
+
+<rect class="bx" x="20" y="320" width="150" height="52" rx="4" fill="#dcfce7" stroke="#9ad3ac"/>
+<text class="t" x="95" y="338" text-anchor="middle" dominant-baseline="central">memory/*.md</text>
+<text class="ts" x="95" y="356" text-anchor="middle" dominant-baseline="central">dossiers · lessons</text>
+<line class="ln" x1="95" y1="274" x2="95" y2="312" marker-end="url(#b)"/>
+
+<rect class="bx" x="265" y="320" width="150" height="52" rx="4" fill="#dcfce7" stroke="#9ad3ac"/>
+<text class="t" x="340" y="338" text-anchor="middle" dominant-baseline="central">next review</text>
+<text class="ts" x="340" y="356" text-anchor="middle" dominant-baseline="central">dossier in prompt</text>
+<line class="ln" x1="170" y1="346" x2="257" y2="346" stroke-dasharray="4 3" marker-end="url(#b)"/>
+<path class="ln" d="M415 346 L440 346 L440 190 L390 190 L390 182" stroke-dasharray="4 3" marker-end="url(#b)"/>
+</svg>

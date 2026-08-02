@@ -1,0 +1,65 @@
+<svg viewBox="0 0 680 430" width="680" height="430" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="t d">
+<title id="t">Conversation loop with memory</title>
+<desc id="d">You chat with the agent; the agent researches with tools, asks for confirmation before orders and strategy writes, and on exit distills the conversation into curated memory files that seed the next session.</desc>
+<style>
+  .bx { stroke-width: 1.2 }
+  .t  { font: 500 14px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #1f2328 }
+  .ts { font: 400 12px system-ui, -apple-system, "Segoe UI", sans-serif; fill: #4a5058 }
+  .ln { stroke: #8b949e; stroke-width: 1.5; fill: none }
+</style>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8b949e"/></marker>
+</defs>
+
+<rect class="bx" x="20" y="24" width="150" height="52" rx="4" fill="#dbeafe" stroke="#93b4e8"/>
+<text class="t" x="95" y="42" text-anchor="middle" dominant-baseline="central">you ▸ question</text>
+<text class="ts" x="95" y="60" text-anchor="middle" dominant-baseline="central">allpath-trade chat</text>
+
+<rect class="bx" x="265" y="24" width="150" height="52" rx="4" fill="#ccfbf1" stroke="#8fd8ca"/>
+<text class="t" x="340" y="42" text-anchor="middle" dominant-baseline="central">agent turn</text>
+<text class="ts" x="340" y="60" text-anchor="middle" dominant-baseline="central">LLM + tool loop</text>
+
+<rect class="bx" x="510" y="24" width="150" height="52" rx="4" fill="#fef3c7" stroke="#e5c987"/>
+<text class="t" x="585" y="42" text-anchor="middle" dominant-baseline="central">tools</text>
+<text class="ts" x="585" y="60" text-anchor="middle" dominant-baseline="central">quote · search · memory</text>
+
+<line class="ln" x1="170" y1="50" x2="257" y2="50" marker-end="url(#a)"/>
+<line class="ln" x1="415" y1="42" x2="502" y2="42" marker-end="url(#a)"/>
+<line class="ln" x1="502" y1="60" x2="423" y2="60" marker-end="url(#a)"/>
+
+<rect class="bx" x="265" y="130" width="150" height="52" rx="4" fill="#ffe4e6" stroke="#eaacb4"/>
+<text class="t" x="340" y="148" text-anchor="middle" dominant-baseline="central">confirm? [y/N]</text>
+<text class="ts" x="340" y="166" text-anchor="middle" dominant-baseline="central">order or strategy</text>
+<line class="ln" x1="340" y1="76" x2="340" y2="122" marker-end="url(#a)"/>
+
+<rect class="bx" x="510" y="130" width="150" height="52" rx="4" fill="#ede9fe" stroke="#bdb2ea"/>
+<text class="t" x="585" y="148" text-anchor="middle" dominant-baseline="central">risk gate</text>
+<text class="ts" x="585" y="166" text-anchor="middle" dominant-baseline="central">then broker</text>
+<line class="ln" x1="415" y1="156" x2="502" y2="156" marker-end="url(#a)"/>
+
+<rect class="bx" x="20" y="130" width="150" height="52" rx="4" fill="#dbeafe" stroke="#93b4e8"/>
+<text class="t" x="95" y="148" text-anchor="middle" dominant-baseline="central">◆ reply</text>
+<text class="ts" x="95" y="166" text-anchor="middle" dominant-baseline="central">next turn</text>
+<line class="ln" x1="265" y1="156" x2="178" y2="156" marker-end="url(#a)"/>
+<path class="ln" d="M95 130 L95 76" marker-end="url(#a)"/>
+
+<rect class="bx" x="20" y="248" width="150" height="52" rx="4" fill="#e9edf2" stroke="#b9c2cc"/>
+<text class="t" x="95" y="266" text-anchor="middle" dominant-baseline="central">/exit</text>
+<text class="ts" x="95" y="284" text-anchor="middle" dominant-baseline="central">or ctrl+c twice</text>
+
+<rect class="bx" x="265" y="248" width="150" height="52" rx="4" fill="#ccfbf1" stroke="#8fd8ca"/>
+<text class="t" x="340" y="266" text-anchor="middle" dominant-baseline="central">light consolidation</text>
+<text class="ts" x="340" y="284" text-anchor="middle" dominant-baseline="central">cheap model</text>
+<line class="ln" x1="170" y1="274" x2="257" y2="274" marker-end="url(#a)"/>
+
+<rect class="bx" x="510" y="248" width="150" height="52" rx="4" fill="#dcfce7" stroke="#9ad3ac"/>
+<text class="t" x="585" y="266" text-anchor="middle" dominant-baseline="central">memory/*.md</text>
+<text class="ts" x="585" y="284" text-anchor="middle" dominant-baseline="central">guard screens writes</text>
+<line class="ln" x1="415" y1="274" x2="502" y2="274" marker-end="url(#a)"/>
+
+<rect class="bx" x="265" y="352" width="150" height="52" rx="4" fill="#dcfce7" stroke="#9ad3ac"/>
+<text class="t" x="340" y="370" text-anchor="middle" dominant-baseline="central">next session</text>
+<text class="ts" x="340" y="388" text-anchor="middle" dominant-baseline="central">memory in prompt</text>
+<path class="ln" d="M585 300 L585 378 L423 378" marker-end="url(#a)"/>
+<path class="ln" d="M265 378 L95 378 L95 308" stroke-dasharray="4 3" marker-end="url(#a)"/>
+</svg>

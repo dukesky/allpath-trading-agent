@@ -1,5 +1,5 @@
-from tradewind.memory.observations import ObservationLog
-from tradewind.store.db import connect
+from allpath_trade.memory.observations import ObservationLog
+from allpath_trade.store.db import connect
 
 
 def test_add_and_recent(tmp_path):

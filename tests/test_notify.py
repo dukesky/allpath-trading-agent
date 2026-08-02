@@ -1,8 +1,8 @@
 from typing import ClassVar
 
-from tradewind.config import Settings
-from tradewind.notify.base import ConsoleNotifier
-from tradewind.notify.email import EmailNotifier, build_notifier
+from allpath_trade.config import Settings
+from allpath_trade.notify.base import ConsoleNotifier
+from allpath_trade.notify.email import EmailNotifier, build_notifier
 
 
 class StubSMTP:

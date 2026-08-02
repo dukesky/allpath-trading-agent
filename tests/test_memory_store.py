@@ -1,8 +1,8 @@
 import pytest
 
-from tradewind.memory.guard import MemoryGuardError
-from tradewind.memory.store import LAYER_BUDGETS, MemoryError, MemoryStore  # noqa: F401
-from tradewind.store.db import connect
+from allpath_trade.memory.guard import MemoryGuardError
+from allpath_trade.memory.store import LAYER_BUDGETS, MemoryError, MemoryStore  # noqa: F401
+from allpath_trade.store.db import connect
 
 
 @pytest.fixture()

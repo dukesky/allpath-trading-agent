@@ -43,7 +43,7 @@
 - [ ] chat REPL：assistant 空文本时打印空行 `agent> `
 
 ## Phase 4 终审遗留（小项）
-- [ ] `tradewind/memory/store.py` 的 `MemoryError` 与内置异常同名——Phase 5 前重命名为 `MemoryStoreError`（保留别名）
+- [ ] `allpath-trade/memory/store.py` 的 `MemoryError` 与内置异常同名——Phase 5 前重命名为 `MemoryStoreError`（保留别名）
 - [ ] consolidator 每日日期跟踪为进程内状态，重启后当日重跑（与 marker 过滤配合后已是无害 no-op，仍值得持久化）
 - [ ] 一字母 ticker 的 lessons 匹配已用词边界修复；更长期可给 lessons 加 frontmatter tickers 字段做精确匹配
 - [ ] observations.recent() 大积压时取最旧 200 条——积压场景应改为取最新

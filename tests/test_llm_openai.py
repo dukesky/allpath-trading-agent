@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tradewind.llm.base import LLMError, ToolSpec
-from tradewind.llm.openai_compat import OpenAICompatClient
+from allpath_trade.llm.base import LLMError, ToolSpec
+from allpath_trade.llm.openai_compat import OpenAICompatClient
 
 TOOL = ToolSpec(name="get_quote", description="quote",
                 parameters={"type": "object", "properties": {"ticker": {"type": "string"}},

@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from tradewind.broker.base import Account, Broker, Position
-from tradewind.cli import main
+from allpath_trade.broker.base import Account, Broker, Position
+from allpath_trade.cli import main
 
 
 class FakeBroker(Broker):
@@ -32,7 +32,7 @@ class FakeBroker(Broker):
 
 
 def test_status_prints_account_and_positions(tmp_path, capsys, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # so tradewind.db lands in tmp
+    monkeypatch.chdir(tmp_path)  # so allpath_trade.db lands in tmp
     code = main(["status"], broker_factory=lambda settings: FakeBroker())
     out = capsys.readouterr().out
     assert code == 0

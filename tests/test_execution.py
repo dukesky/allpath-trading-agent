@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.broker.base import (
+from allpath_trade.broker.base import (
     Account,
     Broker,
     Order,
@@ -12,11 +12,11 @@ from tradewind.broker.base import (
     OrderStatus,
     Position,
 )
-from tradewind.data.base import DataSource, Quote
-from tradewind.execution import ExecutionError, Executor
-from tradewind.risk.gate import RiskDecision, RiskGate, RiskLimits
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.data.base import DataSource, Quote
+from allpath_trade.execution import ExecutionError, Executor
+from allpath_trade.risk.gate import RiskDecision, RiskGate, RiskLimits
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 
 class FakeData(DataSource):

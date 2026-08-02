@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from tradewind.llm.anthropic_client import AnthropicClient
-from tradewind.llm.base import ToolSpec
+from allpath_trade.llm.anthropic_client import AnthropicClient
+from allpath_trade.llm.base import ToolSpec
 
 TOOL = ToolSpec(name="get_quote", description="quote",
                 parameters={"type": "object", "properties": {}})

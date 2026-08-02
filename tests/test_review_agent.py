@@ -2,10 +2,10 @@ import json
 
 import pytest
 
+from allpath_trade.agent.review import ReviewAgent
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.llm.base import LLMError, LLMResponse
 from tests.test_agent_loop import ScriptedLLM, tool_response
-from tradewind.agent.review import ReviewAgent
-from tradewind.agent.tools import ToolRegistry
-from tradewind.llm.base import LLMError, LLMResponse
 
 REVIEW = {"id": 1, "strategy_id": "s", "rule_id": "r1", "ticker": "AAPL",
           "rule_type": "soft", "condition": "price < 205", "action": "buy $3000",
@@ -47,8 +47,8 @@ def test_llm_error_propagates():
 
 
 def test_matching_lessons_uses_word_boundary_not_bare_substring(tmp_path):
-    from tradewind.memory.store import MemoryStore
-    from tradewind.store.db import connect
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.db import connect
 
     memory = MemoryStore(tmp_path / "memory", connect(tmp_path / "db.sqlite"))
     # "AI" must not match merely because it's a substring of "SAIL".
@@ -62,8 +62,8 @@ def test_matching_lessons_uses_word_boundary_not_bare_substring(tmp_path):
 
 
 def test_analyze_prompt_includes_dossier_and_lessons(tmp_path):
-    from tradewind.memory.store import MemoryStore
-    from tradewind.store.db import connect
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.db import connect
 
     memory = MemoryStore(tmp_path / "memory", connect(tmp_path / "db.sqlite"))
     memory.apply("stock", "AAPL", "add", text="Earnings vol ±8%")

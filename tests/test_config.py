@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tradewind.config import Settings, SettingsStore
+from allpath_trade.config import Settings, SettingsStore
 
 
 def test_settings_defaults(tmp_path: Path):

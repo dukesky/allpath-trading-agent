@@ -1,12 +1,12 @@
 from decimal import Decimal
 
-from tradewind.agent.action_tools import register_action_tools
-from tradewind.agent.tools import ToolRegistry
-from tradewind.execution import ExecutionResult
-from tradewind.llm.base import ToolCall
-from tradewind.risk.gate import RiskDecision
-from tradewind.store.db import connect
-from tradewind.strategy.store import StrategyStore
+from allpath_trade.agent.action_tools import register_action_tools
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.execution import ExecutionResult
+from allpath_trade.llm.base import ToolCall
+from allpath_trade.risk.gate import RiskDecision
+from allpath_trade.store.db import connect
+from allpath_trade.strategy.store import StrategyStore
 
 GOOD = """\
 name: "New"

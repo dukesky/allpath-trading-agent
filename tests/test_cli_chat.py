@@ -1,7 +1,7 @@
+from allpath_trade.cli import main
+from allpath_trade.llm.base import LLMResponse
 from tests.test_agent_loop import ScriptedLLM
 from tests.test_sentinel import FakeBroker
-from tradewind.cli import main
-from tradewind.llm.base import LLMResponse
 
 STRAT = """
 name: "T"
@@ -73,7 +73,7 @@ def test_chat_banner_model_and_tool_activity(tmp_path, capsys, monkeypatch):
                      LLMResponse(text="around 200")])
     out = capsys.readouterr().out
     assert code == 0
-    assert "t r a d e w i n d" in out          # banner
+    assert "a l l p a t h" in out          # banner
     assert "scripted" in out                    # model name (ScriptedLLM.model)
     assert "get_quote" in out                   # tool activity line
     assert "around 200" in out                  # rendered reply
@@ -107,7 +107,7 @@ def test_chat_eof_runs_same_post_chat_consolidation_as_exit(tmp_path, capsys, mo
     def fake_build_llm(settings, tier):
         return review_llm if tier == "review" else chat_llm
 
-    monkeypatch.setattr("tradewind.llm.factory.build_llm", fake_build_llm)
+    monkeypatch.setattr("allpath_trade.llm.factory.build_llm", fake_build_llm)
 
     lines = iter(["remember I prefer dividends"])
 

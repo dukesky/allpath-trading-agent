@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from tradewind.broker.alpaca import AlpacaBroker
+from allpath_trade.broker.alpaca import AlpacaBroker
 
 pytestmark = pytest.mark.integration
 

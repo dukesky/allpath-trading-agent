@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 from alpaca.trading.enums import QueryOrderStatus
 
-from tradewind.broker.alpaca import AlpacaBroker
-from tradewind.broker.base import OrderIntent, OrderSide, OrderStatus
+from allpath_trade.broker.alpaca import AlpacaBroker
+from allpath_trade.broker.base import OrderIntent, OrderSide, OrderStatus
 
 
 def _raw_order(**over):

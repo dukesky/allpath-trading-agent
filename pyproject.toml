@@ -1,5 +1,5 @@
 [project]
-name = "tradewind"
+name = "allpath-trade"
 version = "0.1.0"
 description = "All Path Trading Agent - an LLM-powered mid/long-term trading agent framework"
 readme = "README.md"
@@ -23,7 +23,7 @@ dependencies = [
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
-tradewind = "tradewind.cli:main"
+allpath-trade = "allpath_trade.cli:main"
 
 [project.urls]
 Repository = "https://github.com/dukesky/allpath-trading-agent"

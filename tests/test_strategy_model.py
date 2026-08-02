@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tradewind.strategy.loader import StrategyValidationError, load_strategy
-from tradewind.strategy.model import (
+from allpath_trade.strategy.loader import StrategyValidationError, load_strategy
+from allpath_trade.strategy.model import (
     Authorization,
     PositionPlan,
     Rule,
@@ -111,7 +111,7 @@ def test_load_action_typo_collects_error_not_crash(tmp_path):
 
 
 def test_parse_strategy_text_matches_load(tmp_path):
-    from tradewind.strategy.loader import parse_strategy_text
+    from allpath_trade.strategy.loader import parse_strategy_text
 
     doc = parse_strategy_text("aapl-long", GOOD_YAML)
     assert doc.id == "aapl-long" and doc.position.ticker == "AAPL"

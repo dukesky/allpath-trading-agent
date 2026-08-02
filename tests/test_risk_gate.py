@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from tradewind.broker.base import Account, OrderIntent, OrderSide, Position
-from tradewind.risk.gate import RiskGate, RiskLimits
+from allpath_trade.broker.base import Account, OrderIntent, OrderSide, Position
+from allpath_trade.risk.gate import RiskGate, RiskLimits
 
 ACCT = Account(equity=Decimal(10000), cash=Decimal(5000), buying_power=Decimal(10000))
 AAPL_POS = Position(ticker="AAPL", qty=Decimal(10), avg_entry_price=Decimal(190),

@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-from tradewind.config import Settings
-from tradewind.llm.factory import build_llm
+from allpath_trade.config import Settings
+from allpath_trade.llm.factory import build_llm
 
 pytestmark = pytest.mark.integration
 

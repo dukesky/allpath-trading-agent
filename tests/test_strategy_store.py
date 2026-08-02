@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from tradewind.store.db import connect
-from tradewind.strategy.loader import StrategyValidationError
-from tradewind.strategy.model import RuleState
-from tradewind.strategy.store import StrategyStore
+from allpath_trade.store.db import connect
+from allpath_trade.strategy.loader import StrategyValidationError
+from allpath_trade.strategy.model import RuleState
+from allpath_trade.strategy.store import StrategyStore
 
 ACTIVE = """
 name: "A"

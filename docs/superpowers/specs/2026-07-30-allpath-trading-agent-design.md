@@ -22,7 +22,7 @@
 | 技术栈 | Python 全栈（FastAPI + SQLite + APScheduler），前端轻量（服务端渲染/htmx） |
 | MVP 范围 | Alpaca **paper trading** 跑通全闭环，验证后再开 live 开关 |
 | 技术路线 | 自研轻量核心（方案 A）：薄 Broker 抽象 + 混合策略引擎；不依赖 Lumibot，但接口设计对齐它以便未来复用/迁移 |
-| 包名 | `tradewind`（项目名仍为 All Path Trading Agent） |
+| 包名 | `allpath_trade`（项目名仍为 All Path Trading Agent） |
 
 安全性说明：真正安全关键的部分（认证、传输、下单）由券商官方 SDK（`alpaca-py`）承担；我们的适配层只有几百行、易审计。Credentials 只存本地环境变量/配置，永不上传。
 
@@ -179,22 +179,22 @@ review:
 - `ReviewQueue` service API（list/approve/reject），approve 经 Executor 执行；CLI、未来的 Web UI、Phase 3 的 agent 都调这套 API。
 
 ### 运行形态
-- `tradewind run`：常驻进程（APScheduler），盘中每 1 小时哨兵（`sentinel_interval_minutes` 参数可调，默认 60），ET 9:30–16:00 工作日判断（节假日历法在 TODO）；每日反思任务位留待 Phase 6；
-- `tradewind check`：单次手动哨兵；`tradewind strategies`：列策略与规则状态；`tradewind rearm`：重新武装；`tradewind reviews list/approve/reject`：过渡期队列处置。
+- `allpath-trade run`：常驻进程（APScheduler），盘中每 1 小时哨兵（`sentinel_interval_minutes` 参数可调，默认 60），ET 9:30–16:00 工作日判断（节假日历法在 TODO）；每日反思任务位留待 Phase 6；
+- `allpath-trade check`：单次手动哨兵；`allpath-trade strategies`：列策略与规则状态；`allpath-trade rearm`：重新武装；`allpath-trade reviews list/approve/reject`：过渡期队列处置。
 - 通知层：SMTP 邮件（未配置时降级为日志），Phase 2 一并搭好。
 
 ## 5.2 Phase 3 详细设计：Agent 核心（2026-07-31 讨论定稿）
 
-### LLM 层（tradewind/llm/）
+### LLM 层（allpath_trade/llm/）
 - 统一接口 `LLMClient.complete(messages, tools) -> text | tool_calls`；两个实现：**OpenAICompatClient**（openai SDK + base_url，覆盖 OpenRouter 与 OpenAI 直连）、**AnthropicClient**（anthropic SDK 原生）。
 - 配置：`LLM_PROVIDER=openrouter|openai|anthropic` + key + 双档模型 `CHAT_MODEL`（对话/策略共创，强模型）/ `REVIEW_MODEL`（哨兵复核，可用中档）。测试默认 OpenRouter。
 
-### Agent 工具循环（tradewind/agent/）
+### Agent 工具循环（allpath_trade/agent/）
 - 自研 tool loop（不引重框架）：LLM 工具调用 → 执行 → 回填 → 循环，轮次上限（默认 15）防失控。
 - 工具箱 v1：`get_quote` / `get_bars` / `web_search`（ddgs 免费默认，接口可插拔，升级项见 docs/TODO.md）/ `get_portfolio` / `list_strategies` / `read_strategy` / `draft_strategy` / `propose_order` / `list_pending_reviews`。
 - **确认边界**：`draft_strategy` 生成 YAML → 终端展示 diff → 用户 yes → 写文件 + 版本快照；`propose_order` 在对话场景同样先经用户确认，再进 Executor → 风控守门。agent 无绕过路径。
 
-### 对话入口：tradewind chat
+### 对话入口：allpath-trade chat
 - 终端 REPL，多轮对话，历史存 SQLite（按 session；`--new` 开新会话，默认续上次）。
 - 上下文组装：系统提示自动注入持仓摘要、活跃策略列表、近 5 笔交易、待确认项数量。
 - agent service 为纯后端函数，Phase 5 Web UI 复用同一套。
@@ -245,7 +245,7 @@ memory/
 ### 提炼（consolidation）
 - **每日完整提炼**（收盘后，挂 Phase 2 预留的调度位，强模型）：读当日 trades/触发/复核分析/observations + 当前记忆文件 → 经 memory_update 提出条目级变更（每条仍过扫描）。
 - **对话后轻提炼**（chat 退出时，REVIEW_MODEL 便宜模型）：只读本次对话，只沉淀用户明确表达的偏好/决定。
-- 提炼失败静默降级（观察still在库，下次再炼）；`tradewind memory consolidate` 可手动触发。
+- 提炼失败静默降级（观察still在库，下次再炼）；`allpath-trade memory consolidate` 可手动触发。
 
 ### 记忆进上下文
 - chat 系统提示（冻结快照）注入：用户画像全文 + 持仓/活跃策略相关的个股档案 + 相关 lessons（按 ticker/tags 匹配），各按预算截断。
@@ -255,7 +255,7 @@ memory/
 - `conversation_turns` + `observations` 建 SQLite FTS5 索引；新工具 `session_search(query)` 返回命中消息及上下文窗口——历史按需搜索，不塞上下文；兼作审计。
 
 ### CLI
-- `tradewind memory show [layer] [key]`（查看）、`tradewind memory consolidate`（手动提炼）。
+- `allpath-trade memory show [layer] [key]`（查看）、`allpath-trade memory consolidate`（手动提炼）。
 
 ## 6. 风控守门层
 
@@ -273,7 +273,7 @@ memory/
 
 ```
 allpath-trading-agent/
-├── tradewind/
+├── allpath_trade/
 │   ├── agent/          # LLM 核心：对话、工具、上下文组装、provider 抽象
 │   ├── strategy/       # 策略文档模型、规则解析/求值、版本管理
 │   ├── memory/         # 四层记忆读写与检索

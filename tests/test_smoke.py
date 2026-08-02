@@ -1,5 +1,5 @@
-import tradewind
+import allpath_trade
 
 
 def test_package_imports():
-    assert tradewind.__version__
+    assert allpath_trade.__version__

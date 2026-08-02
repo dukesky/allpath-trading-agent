@@ -4,7 +4,7 @@
 
 **Goal:** Give the agent durable, auditable, injection-resistant memory: four curated markdown layers (user profile / strategy memory / stock dossiers / lessons) with per-file budgets, a single narrow `memory_update` write tool guarded by injection scanning, an observations journal + two-tier consolidation (daily full after close, light after each chat), FTS5 session search, and memory-aware context for chat + ReviewAgent.
 
-**Architecture:** `tradewind/memory/` owns the four layers as human-readable markdown under `memory/` (git-friendly). All writes flow through `MemoryStore` entry-level ops (add/replace/remove on `- ` paragraph entries), logged as diffs to SQLite `memory_log`, and pre-screened by `guard.scan_entry`. Raw events land in SQLite `observations`; the `Consolidator` (LLM) proposes curated updates via the same guarded tool. Nothing ever writes IDENTITY.md.
+**Architecture:** `allpath_trade/memory/` owns the four layers as human-readable markdown under `memory/` (git-friendly). All writes flow through `MemoryStore` entry-level ops (add/replace/remove on `- ` paragraph entries), logged as diffs to SQLite `memory_log`, and pre-screened by `guard.scan_entry`. Raw events land in SQLite `observations`; the `Consolidator` (LLM) proposes curated updates via the same guarded tool. Nothing ever writes IDENTITY.md.
 
 **Tech Stack:** stdlib + existing deps (pydantic, PyYAML, rich); SQLite FTS5 (stdlib sqlite3); existing LLM layer with ScriptedLLM-style mocks in tests. No new dependencies.
 
@@ -25,8 +25,8 @@
 ### Task 1: MemoryStore — four layers, entry ops, budgets, rendering
 
 **Files:**
-- Create: `tradewind/memory/__init__.py`, `tradewind/memory/store.py`
-- Modify: `tradewind/store/db.py` (SCHEMA: `memory_log`), `tradewind/config.py` (`memory_dir: Path = Path("memory")`)
+- Create: `allpath_trade/memory/__init__.py`, `allpath_trade/memory/store.py`
+- Modify: `allpath_trade/store/db.py` (SCHEMA: `memory_log`), `allpath_trade/config.py` (`memory_dir: Path = Path("memory")`)
 - Test: `tests/test_memory_store.py`
 
 **Interfaces (produced):**
@@ -46,8 +46,8 @@
 ```python
 import pytest
 
-from tradewind.memory.store import LAYER_BUDGETS, MemoryError, MemoryStore
-from tradewind.store.db import connect
+from allpath_trade.memory.store import LAYER_BUDGETS, MemoryError, MemoryStore
+from allpath_trade.store.db import connect
 
 
 @pytest.fixture()
@@ -135,7 +135,7 @@ def test_memory_log_records_diffs(store, tmp_path):
 
 - [ ] **Step 3: Implement**
 
-Append to SCHEMA in `tradewind/store/db.py`:
+Append to SCHEMA in `allpath_trade/store/db.py`:
 ```sql
 CREATE TABLE IF NOT EXISTS memory_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,16 +148,16 @@ CREATE TABLE IF NOT EXISTS memory_log (
 );
 ```
 
-`tradewind/config.py` — add field: `memory_dir: Path = Path("memory")`.
+`allpath_trade/config.py` — add field: `memory_dir: Path = Path("memory")`.
 
-`tradewind/memory/__init__.py`:
+`allpath_trade/memory/__init__.py`:
 ```python
-from tradewind.memory.store import LAYER_BUDGETS, MemoryError, MemoryStore
+from allpath_trade.memory.store import LAYER_BUDGETS, MemoryError, MemoryStore
 
 __all__ = ["LAYER_BUDGETS", "MemoryError", "MemoryStore"]
 ```
 
-`tradewind/memory/store.py`:
+`allpath_trade/memory/store.py`:
 ```python
 from __future__ import annotations
 
@@ -271,7 +271,7 @@ class MemoryStore:
 ### Task 2: Injection guard
 
 **Files:**
-- Create: `tradewind/memory/guard.py`
+- Create: `allpath_trade/memory/guard.py`
 - Test: `tests/test_memory_guard.py`
 
 **Interfaces:**
@@ -285,7 +285,7 @@ class MemoryStore:
 ```python
 import pytest
 
-from tradewind.memory.guard import MemoryGuardError, scan_entry
+from allpath_trade.memory.guard import MemoryGuardError, scan_entry
 
 
 @pytest.mark.parametrize("bad", [
@@ -321,7 +321,7 @@ def test_accepts_normal_memories(good):
 
 - [ ] **Step 3: Implement**
 
-`tradewind/memory/guard.py`:
+`allpath_trade/memory/guard.py`:
 ```python
 from __future__ import annotations
 
@@ -364,8 +364,8 @@ def scan_entry(text: str) -> None:
 ### Task 3: memory_update tool + memory tools in chat
 
 **Files:**
-- Create: `tradewind/agent/memory_tools.py`
-- Modify: `tradewind/cli.py` (cmd_chat registers memory tools)
+- Create: `allpath_trade/agent/memory_tools.py`
+- Modify: `allpath_trade/cli.py` (cmd_chat registers memory tools)
 - Test: `tests/test_memory_tools.py`, extend `tests/test_cli_chat.py`
 
 **Interfaces:**
@@ -378,11 +378,11 @@ def scan_entry(text: str) -> None:
 
 `tests/test_memory_tools.py`:
 ```python
-from tradewind.agent.memory_tools import register_memory_tools
-from tradewind.agent.tools import ToolRegistry
-from tradewind.llm.base import ToolCall
-from tradewind.memory.store import MemoryStore
-from tradewind.store.db import connect
+from allpath_trade.agent.memory_tools import register_memory_tools
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.llm.base import ToolCall
+from allpath_trade.memory.store import MemoryStore
+from allpath_trade.store.db import connect
 
 
 def make(tmp_path):
@@ -441,13 +441,13 @@ def test_chat_registers_memory_tools(tmp_path, capsys, monkeypatch):
 
 - [ ] **Step 3: Implement**
 
-`tradewind/agent/memory_tools.py`:
+`allpath_trade/agent/memory_tools.py`:
 ```python
 from __future__ import annotations
 
-from tradewind.agent.tools import ToolRegistry
-from tradewind.memory.guard import MemoryGuardError, scan_entry
-from tradewind.memory.store import MemoryError, MemoryStore
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.memory.guard import MemoryGuardError, scan_entry
+from allpath_trade.memory.store import MemoryError, MemoryStore
 
 _LAYERS = ("profile", "strategy", "stock", "lesson")
 
@@ -491,10 +491,10 @@ def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore) -> Non
         memory_read)
 ```
 
-`tradewind/cli.py` cmd_chat — after `register_action_tools(...)` add:
+`allpath_trade/cli.py` cmd_chat — after `register_action_tools(...)` add:
 ```python
-    from tradewind.agent.memory_tools import register_memory_tools
-    from tradewind.memory.store import MemoryStore
+    from allpath_trade.agent.memory_tools import register_memory_tools
+    from allpath_trade.memory.store import MemoryStore
 
     memory = MemoryStore(components.settings.memory_dir, components.conn)
     register_memory_tools(registry, memory=memory)
@@ -509,8 +509,8 @@ def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore) -> Non
 ### Task 4: Observations journal + sentinel/chat writers
 
 **Files:**
-- Modify: `tradewind/store/db.py` (SCHEMA: `observations`), `tradewind/sentinel.py` (record outcomes), `tradewind/store/reviews.py` (no change — analyses already stored)
-- Create: `tradewind/memory/observations.py`
+- Modify: `allpath_trade/store/db.py` (SCHEMA: `observations`), `allpath_trade/sentinel.py` (record outcomes), `allpath_trade/store/reviews.py` (no change — analyses already stored)
+- Create: `allpath_trade/memory/observations.py`
 - Test: `tests/test_observations.py`, extend `tests/test_sentinel.py`
 
 **Interfaces:**
@@ -523,8 +523,8 @@ def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore) -> Non
 
 `tests/test_observations.py`:
 ```python
-from tradewind.memory.observations import ObservationLog
-from tradewind.store.db import connect
+from allpath_trade.memory.observations import ObservationLog
+from allpath_trade.store.db import connect
 
 
 def test_add_and_recent(tmp_path):
@@ -546,7 +546,7 @@ def test_recent_since_filter(tmp_path):
 Extend `tests/test_sentinel.py`:
 ```python
 def test_sentinel_records_observations(tmp_path):
-    from tradewind.memory.observations import ObservationLog
+    from allpath_trade.memory.observations import ObservationLog
 
     s, store, ex, q, n = make(tmp_path, strategy_yaml())
     s.observations = ObservationLog(q._conn)
@@ -570,7 +570,7 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 ```
 
-`tradewind/memory/observations.py`:
+`allpath_trade/memory/observations.py`:
 ```python
 from __future__ import annotations
 
@@ -602,7 +602,7 @@ class ObservationLog:
             "SELECT * FROM observations ORDER BY id LIMIT ?", (limit,)))
 ```
 
-`tradewind/sentinel.py`: add `observations=None` param + attribute (after review_agent); in `_check_strategy` after `report.outcomes.append(outcome)`:
+`allpath_trade/sentinel.py`: add `observations=None` param + attribute (after review_agent); in `_check_strategy` after `report.outcomes.append(outcome)`:
 ```python
             if self.observations is not None:
                 self.observations.add(
@@ -617,7 +617,7 @@ and in `run_once` per-strategy except block, after appending to errors:
                     self.observations.add("sentinel", f"error: {doc.id}: {exc}")
 ```
 
-`tradewind/app.py`: Components gains `observations: ObservationLog`; build_components constructs it and passes `sentinel.observations = observations` (or via constructor param — add to Sentinel constructor call).
+`allpath_trade/app.py`: Components gains `observations: ObservationLog`; build_components constructs it and passes `sentinel.observations = observations` (or via constructor param — add to Sentinel constructor call).
 
 - [ ] **Step 4: Run** — all pass (existing sentinel tests unaffected: observations default None); suite green; ruff clean.
 - [ ] **Step 5: Commit** — `feat: observations journal; sentinel records trigger outcomes`
@@ -627,16 +627,16 @@ and in `run_once` per-strategy except block, after appending to errors:
 ### Task 5: FTS5 session search + agent tool
 
 **Files:**
-- Modify: `tradewind/store/db.py` (FTS table), `tradewind/store/conversations.py` (index on append), `tradewind/memory/observations.py` (index on add)
-- Create: `tradewind/memory/search.py`
-- Modify: `tradewind/agent/readonly_tools.py` (register `session_search` when search provided) — simpler: new registrar in `tradewind/agent/memory_tools.py`
+- Modify: `allpath_trade/store/db.py` (FTS table), `allpath_trade/store/conversations.py` (index on append), `allpath_trade/memory/observations.py` (index on add)
+- Create: `allpath_trade/memory/search.py`
+- Modify: `allpath_trade/agent/readonly_tools.py` (register `session_search` when search provided) — simpler: new registrar in `allpath_trade/agent/memory_tools.py`
 - Test: `tests/test_session_search.py`
 
 **Interfaces:**
 - SCHEMA gains: `CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(kind, ref_id, subject, content)` (kind: turn | observation).
 - `ConversationStore.append` also inserts `(kind='turn', ref_id=str(conversation_id), subject=role, content=<text content only>)` — for assistant/tool messages index the text content; skip messages with no textual content.
 - `ObservationLog.add` also inserts `(kind='observation', ref_id=str(rowid), subject=source, content=text)`.
-- `tradewind/memory/search.py`: `SessionSearch(conn)`: `query(text: str, limit: int = 8) -> list[dict]` — FTS5 MATCH (escape double quotes; wrap terms), returns dicts {kind, ref_id, subject, snippet} using `snippet(search_index, 3, '[', ']', '…', 12)`. Malformed queries → empty list (never raises).
+- `allpath_trade/memory/search.py`: `SessionSearch(conn)`: `query(text: str, limit: int = 8) -> list[dict]` — FTS5 MATCH (escape double quotes; wrap terms), returns dicts {kind, ref_id, subject, snippet} using `snippet(search_index, 3, '[', ']', '…', 12)`. Malformed queries → empty list (never raises).
 - `register_memory_tools` gains optional `search: SessionSearch | None = None` → registers `session_search(query)` tool returning formatted lines or "no matches".
 - cmd_chat passes SessionSearch.
 
@@ -644,14 +644,14 @@ and in `run_once` per-strategy except block, after appending to errors:
 
 `tests/test_session_search.py`:
 ```python
-from tradewind.agent.memory_tools import register_memory_tools
-from tradewind.agent.tools import ToolRegistry
-from tradewind.llm.base import ToolCall
-from tradewind.memory.observations import ObservationLog
-from tradewind.memory.search import SessionSearch
-from tradewind.memory.store import MemoryStore
-from tradewind.store.conversations import ConversationStore
-from tradewind.store.db import connect
+from allpath_trade.agent.memory_tools import register_memory_tools
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.llm.base import ToolCall
+from allpath_trade.memory.observations import ObservationLog
+from allpath_trade.memory.search import SessionSearch
+from allpath_trade.memory.store import MemoryStore
+from allpath_trade.store.conversations import ConversationStore
+from allpath_trade.store.db import connect
 
 
 def test_turns_and_observations_are_searchable(tmp_path):
@@ -723,7 +723,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
             (str(cur.lastrowid), source, text))
 ```
 
-`tradewind/memory/search.py`:
+`allpath_trade/memory/search.py`:
 ```python
 from __future__ import annotations
 
@@ -785,7 +785,7 @@ cmd_chat: pass `search=SessionSearch(components.conn)` to register_memory_tools.
 ### Task 6: Memory-aware context (chat + ReviewAgent)
 
 **Files:**
-- Modify: `tradewind/agent/context.py` (memory sections), `tradewind/agent/review.py` (dossier+lessons in prompt), `tradewind/app.py` (memory store into Components + ReviewAgent), `tradewind/cli.py` (pass memory into build_system_prompt)
+- Modify: `allpath_trade/agent/context.py` (memory sections), `allpath_trade/agent/review.py` (dossier+lessons in prompt), `allpath_trade/app.py` (memory store into Components + ReviewAgent), `allpath_trade/cli.py` (pass memory into build_system_prompt)
 - Test: extend `tests/test_context.py`, `tests/test_review_agent.py`
 
 **Interfaces:**
@@ -798,7 +798,7 @@ cmd_chat: pass `search=SessionSearch(components.conn)` to register_memory_tools.
 Extend `tests/test_context.py`:
 ```python
 def test_system_prompt_includes_memory_sections(tmp_path):
-    from tradewind.memory.store import MemoryStore
+    from allpath_trade.memory.store import MemoryStore
 
     (tmp_path / "strategies").mkdir()
     (tmp_path / "strategies" / "t.yaml").write_text(STRAT)
@@ -820,8 +820,8 @@ def test_system_prompt_includes_memory_sections(tmp_path):
 Extend `tests/test_review_agent.py`:
 ```python
 def test_analyze_prompt_includes_dossier_and_lessons(tmp_path):
-    from tradewind.memory.store import MemoryStore
-    from tradewind.store.db import connect
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.db import connect
 
     memory = MemoryStore(tmp_path / "memory", connect(tmp_path / "db.sqlite"))
     memory.apply("stock", "AAPL", "add", text="Earnings vol ±8%")
@@ -898,8 +898,8 @@ appended to the prompt content (`PROMPT.format(...) + extras`). Helper:
 ### Task 7: Consolidator (daily full + post-chat light)
 
 **Files:**
-- Create: `tradewind/memory/consolidate.py`
-- Modify: `tradewind/scheduler.py` (daily job slot), `tradewind/cli.py` (chat-exit hook + `memory consolidate` command in Task 8), `tradewind/app.py` (wire consolidator)
+- Create: `allpath_trade/memory/consolidate.py`
+- Modify: `allpath_trade/scheduler.py` (daily job slot), `allpath_trade/cli.py` (chat-exit hook + `memory consolidate` command in Task 8), `allpath_trade/app.py` (wire consolidator)
 - Test: `tests/test_consolidate.py`
 
 **Interfaces:**
@@ -916,12 +916,12 @@ appended to the prompt content (`PROMPT.format(...) + extras`). Helper:
 `tests/test_consolidate.py`:
 ```python
 from tests.test_agent_loop import ScriptedLLM, tool_response
-from tradewind.llm.base import LLMResponse
-from tradewind.memory.consolidate import Consolidator
-from tradewind.memory.observations import ObservationLog
-from tradewind.memory.store import MemoryStore
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.llm.base import LLMResponse
+from allpath_trade.memory.consolidate import Consolidator
+from allpath_trade.memory.observations import ObservationLog
+from allpath_trade.memory.store import MemoryStore
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 
 def make(tmp_path, llm):
@@ -960,7 +960,7 @@ def test_injection_via_consolidator_is_blocked(tmp_path):
 
 
 def test_consolidation_failure_degrades(tmp_path):
-    from tradewind.llm.base import LLMError
+    from allpath_trade.llm.base import LLMError
 
     c, memory, obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
     out = c.run_daily()
@@ -987,7 +987,7 @@ def test_post_chat_light_consolidation(tmp_path):
 Scheduler daily-job test (append to `tests/test_scheduler.py`):
 ```python
 def test_run_daemon_fires_daily_job_after_close(monkeypatch):
-    import tradewind.scheduler as sched
+    import allpath_trade.scheduler as sched
 
     calls = []
 
@@ -1009,19 +1009,19 @@ def test_run_daemon_fires_daily_job_after_close(monkeypatch):
 
 - [ ] **Step 3: Implement**
 
-`tradewind/memory/consolidate.py`:
+`allpath_trade/memory/consolidate.py`:
 ```python
 from __future__ import annotations
 
 import sqlite3
 
-from tradewind.agent.loop import AgentSession
-from tradewind.agent.memory_tools import register_memory_tools
-from tradewind.agent.tools import ToolRegistry
-from tradewind.llm.base import LLMClient
-from tradewind.memory.observations import ObservationLog
-from tradewind.memory.store import MemoryStore
-from tradewind.store.journal import TradeJournal
+from allpath_trade.agent.loop import AgentSession
+from allpath_trade.agent.memory_tools import register_memory_tools
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.llm.base import LLMClient
+from allpath_trade.memory.observations import ObservationLog
+from allpath_trade.memory.store import MemoryStore
+from allpath_trade.store.journal import TradeJournal
 
 CONSOLIDATE_PROMPT = """\
 You are the memory consolidator for a trading agent. Below are recent raw
@@ -1111,7 +1111,7 @@ class Consolidator:
 
 Note: `run_daily` failure path — `AgentSession.run_turn` already converts `LLMError` into a returned notice string, so the except mainly guards infrastructure errors; the LLMError test passes because the returned text contains "llm error". Keep both accepted in the test as written.
 
-`tradewind/scheduler.py`: add module-level `_is_after_close(now=None)`:
+`allpath_trade/scheduler.py`: add module-level `_is_after_close(now=None)`:
 ```python
 def _is_after_close(now: datetime | None = None) -> bool:
     now = now or datetime.now(timezone.utc)
@@ -1172,19 +1172,19 @@ Add a cmd_chat test: exiting after a turn with a consolidator stub records… ke
 ### Task 8: memory CLI + docs rollup
 
 **Files:**
-- Modify: `tradewind/cli.py` (memory subcommand), `README.md`, `README.zh-CN.md`, `.gitignore` (memory/ is user data — do NOT ignore; add `memory/` to gitignore? NO: keep it versionable by the user; ignore nothing)
+- Modify: `allpath_trade/cli.py` (memory subcommand), `README.md`, `README.zh-CN.md`, `.gitignore` (memory/ is user data — do NOT ignore; add `memory/` to gitignore? NO: keep it versionable by the user; ignore nothing)
 - Test: `tests/test_cli_memory.py`
 
 **Interfaces:**
-- CLI: `tradewind memory show [--layer L] [--key K]` — no args: list all memory files with sizes; with layer(+key): print file content. `tradewind memory consolidate` — runs `components.consolidator.run_daily()` (requires LLM; exit 2 with friendly message when consolidator is None). `memory` commands don't need broker credentials EXCEPT consolidate (needs LLM only — but components construction needs broker… route: memory show goes through the broker-less path like `strategies`; consolidate requires broker creds like chat since build_components needs a broker for the executor chain — acceptable, document in help text).
-- README both languages: roadmap Phase 4 → ✅, Phase 5 → 🔜; status blurb mentions memory; Development section gains `tradewind memory show`.
+- CLI: `allpath-trade memory show [--layer L] [--key K]` — no args: list all memory files with sizes; with layer(+key): print file content. `allpath-trade memory consolidate` — runs `components.consolidator.run_daily()` (requires LLM; exit 2 with friendly message when consolidator is None). `memory` commands don't need broker credentials EXCEPT consolidate (needs LLM only — but components construction needs broker… route: memory show goes through the broker-less path like `strategies`; consolidate requires broker creds like chat since build_components needs a broker for the executor chain — acceptable, document in help text).
+- README both languages: roadmap Phase 4 → ✅, Phase 5 → 🔜; status blurb mentions memory; Development section gains `allpath-trade memory show`.
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/test_cli_memory.py`:
 ```python
 from tests.test_sentinel import FakeBroker
-from tradewind.cli import main
+from allpath_trade.cli import main
 
 
 def setup_env(tmp_path, monkeypatch):
@@ -1203,10 +1203,10 @@ def test_memory_show_empty(tmp_path, capsys, monkeypatch):
 
 def test_memory_show_lists_and_prints(tmp_path, capsys, monkeypatch):
     setup_env(tmp_path, monkeypatch)
-    from tradewind.memory.store import MemoryStore
-    from tradewind.store.db import connect
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.db import connect
 
-    MemoryStore(tmp_path / "memory", connect(tmp_path / "tradewind.db")).apply(
+    MemoryStore(tmp_path / "memory", connect(tmp_path / "allpath_trade.db")).apply(
         "stock", "AAPL", "add", text="earnings vol ±8%")
     assert main(["memory", "show"]) == 0
     out = capsys.readouterr().out
@@ -1247,10 +1247,10 @@ def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
     return 0
 ```
 - `memory consolidate` (broker path): if `components.consolidator is None` → stderr `"LLM not configured: set OPENROUTER_API_KEY (or provider key) in .env"`, return 2; else print `components.consolidator.run_daily()`, return 0.
-- README updates both languages (roadmap ✅/🔜, status blurb, dev section `uv run tradewind memory show`).
+- README updates both languages (roadmap ✅/🔜, status blurb, dev section `uv run allpath-trade memory show`).
 
 - [ ] **Step 4: Run** — all pass; full suite green; ruff clean.
-- [ ] **Step 5: Commit** — `feat: tradewind memory CLI; README Phase 4 rollup`
+- [ ] **Step 5: Commit** — `feat: allpath-trade memory CLI; README Phase 4 rollup`
 
 ---
 
@@ -1259,7 +1259,7 @@ def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
 - Full suite green; ruff clean; no new deps beyond stdlib.
 - Chat: agent can record/read memories via guarded tools; injection attempts return errors and write nothing; `memory/` files are human-readable markdown the user can edit.
 - Sentinel outcomes land in observations; `session_search` finds past turns and events.
-- With LLM configured: `tradewind memory consolidate` distills events into curated layers; `tradewind run` triggers the daily pass after close; chat `/exit` runs the light pass. All consolidation failures degrade silently.
+- With LLM configured: `allpath-trade memory consolidate` distills events into curated layers; `allpath-trade run` triggers the daily pass after close; chat `/exit` runs the light pass. All consolidation failures degrade silently.
 - ReviewAgent prompts include the ticker's dossier and matching lessons.
 - IDENTITY.md remains unwritable by any tool.
 

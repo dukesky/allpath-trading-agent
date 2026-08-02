@@ -1,9 +1,9 @@
+from allpath_trade.agent.context import DEFAULT_IDENTITY, build_system_prompt, load_identity
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
+from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.strategy.store import StrategyStore
 from tests.test_sentinel import FakeBroker
-from tradewind.agent.context import DEFAULT_IDENTITY, build_system_prompt, load_identity
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
-from tradewind.store.reviews import ReviewQueue
-from tradewind.strategy.store import StrategyStore
 
 STRAT = """
 name: "T"
@@ -43,7 +43,7 @@ def test_default_identity_mentions_boundaries():
 
 
 def test_system_prompt_includes_memory_sections(tmp_path):
-    from tradewind.memory.store import MemoryStore
+    from allpath_trade.memory.store import MemoryStore
 
     (tmp_path / "strategies").mkdir()
     (tmp_path / "strategies" / "t.yaml").write_text(STRAT)

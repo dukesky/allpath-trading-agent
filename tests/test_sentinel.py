@@ -2,19 +2,19 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from tradewind.broker.base import (
+from allpath_trade.broker.base import (
     Account,
     Broker,
     Position,
 )
-from tradewind.data.base import DataSource, Quote
-from tradewind.execution import ExecutionError
-from tradewind.risk.gate import RiskDecision
-from tradewind.sentinel import Sentinel
-from tradewind.store.db import connect
-from tradewind.store.reviews import ReviewQueue
-from tradewind.strategy.model import RuleState
-from tradewind.strategy.store import StrategyStore
+from allpath_trade.data.base import DataSource, Quote
+from allpath_trade.execution import ExecutionError
+from allpath_trade.risk.gate import RiskDecision
+from allpath_trade.sentinel import Sentinel
+from allpath_trade.store.db import connect
+from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.strategy.model import RuleState
+from allpath_trade.strategy.store import StrategyStore
 
 
 def strategy_yaml(auth="auto", rule_type="hard", condition="price < 250",
@@ -86,7 +86,7 @@ class SpyExecutor:
         if self.raise_exc is not None:
             raise self.raise_exc
         self.calls.append(intent)
-        from tradewind.execution import ExecutionResult
+        from allpath_trade.execution import ExecutionResult
         if self.reject_reasons is not None:
             return ExecutionResult(
                 submitted=False, order=None,
@@ -231,7 +231,7 @@ class StubReviewAgent:
         self.fail = fail
 
     def analyze(self, review):
-        from tradewind.agent.review import ReviewAnalysis
+        from allpath_trade.agent.review import ReviewAnalysis
         if self.fail:
             raise RuntimeError("llm down")
         return ReviewAnalysis(recommendation=self.recommendation, reasoning="because")
@@ -289,7 +289,7 @@ def test_auto_soft_agent_execute_but_executor_fails_reports_error(tmp_path):
 
 
 def test_auto_soft_with_unparseable_analysis_stays_pending(tmp_path):
-    from tradewind.agent.review import ReviewAnalysis
+    from allpath_trade.agent.review import ReviewAnalysis
 
     class UnparseableStub:
         def analyze(self, review):
@@ -329,7 +329,7 @@ def test_confirm_detail_includes_recommendation_and_reasoning(tmp_path):
 
 
 def test_sentinel_records_observations(tmp_path):
-    from tradewind.memory.observations import ObservationLog
+    from allpath_trade.memory.observations import ObservationLog
 
     s, _store, _ex, q, _n = make(tmp_path, strategy_yaml())
     s.observations = ObservationLog(q._conn)

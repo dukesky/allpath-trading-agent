@@ -23,13 +23,14 @@
 
 ---
 
-> **Project status:** Phases 1-4 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `tradewind chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; and the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions. The Web UI is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
+> **Project status:** Phases 1-4 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; and the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions. The Web UI is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
+- [How It Works](#how-it-works)
 - [Safety Model](#safety-model)
 - [Getting Started](#getting-started)
 - [Project Structure](#project-structure)
@@ -52,7 +53,7 @@ Most LLM trading projects stop at *"here's my analysis."* Most algorithmic tradi
 | **Tiered execution** | Trades through *your own* brokerage account, at the authorization level you choose: notify-only → confirm-first → auto-execute within limits |
 | **Continuous learning** | Post-trade retrospectives, per-stock dossiers that compound over time, and distilled lessons that inform future decisions |
 
-The framework is distributed as the Python package **`tradewind`** and is designed to run entirely on your own machine: your keys, your data, your decisions.
+The framework is distributed as the Python package **`allpath-trade`** and is designed to run entirely on your own machine: your keys, your data, your decisions.
 
 ## Key Features
 
@@ -101,6 +102,16 @@ The framework is distributed as the Python package **`tradewind`** and is design
 
 Design documents are maintained in [`docs/superpowers/specs/`](docs/superpowers/specs/) and implementation plans in [`docs/superpowers/plans/`](docs/superpowers/plans/).
 
+## How It Works
+
+**Conversation loop** — you talk, the agent researches with live tools, and anything that touches money or your strategy files stops for an explicit confirmation. On exit it distills what it learned into curated memory, which seeds the next session (dashed line).
+
+![Conversation loop](docs/images/conversation-loop.svg)
+
+**Sentinel loop** — runs on its own while you're away. Deterministic rule checks cost nothing; hard rules (stop-losses) execute without any LLM in the path, soft rules wake the agent to research before queuing for your approval. Every outcome is journaled, and after the close it's distilled into the same memory that makes the next review sharper.
+
+![Sentinel loop](docs/images/sentinel-loop.svg)
+
 ## Safety Model
 
 The framework is built on one invariant: **the LLM can never bypass your limits.**
@@ -148,8 +159,8 @@ All credentials stay in this local file. `ALPACA_PAPER=true` is the default; liv
 ### Verify
 
 ```bash
-uv run tradewind status
-uv run tradewind chat   # talk to the agent (needs LLM + Alpaca keys in .env)
+uv run allpath-trade status
+uv run allpath-trade chat   # talk to the agent (needs LLM + Alpaca keys in .env)
 ```
 
 Expected output: your paper account equity, cash, buying power, open positions, and recent trade journal entries.
@@ -157,7 +168,7 @@ Expected output: your paper account equity, cash, buying power, open positions, 
 ## Project Structure
 
 ```
-tradewind/
+allpath_trade/          # import package (PyPI/CLI name: allpath-trade)
 ├── broker/       # Broker abstraction + Alpaca adapter
 ├── data/         # Market data sources (yfinance)
 ├── risk/         # Deterministic risk gate
@@ -173,7 +184,7 @@ tradewind/
 |:---:|---|:---:|
 | 1 | **Execution foundation** — broker abstraction, Alpaca (paper) adapter, market data, risk gate, trade journal, executor, CLI | ✅ Complete |
 | 2 | **Strategy engine + sentinel loop** — YAML strategy documents, restricted-expression rule evaluator, versioning, scheduled monitoring, hard-rule auto-execution | ✅ Complete |
-| 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly, `tradewind chat` REPL, ReviewAgent-annotated sentinel triggers | ✅ Complete |
+| 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly, `allpath-trade chat` REPL, ReviewAgent-annotated sentinel triggers | ✅ Complete |
 | 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | ✅ Complete |
 | 5 | **Web UI + notifications** — chat, dashboard, pending-confirmation queue, settings, email | 🔜 Next |
 | 6 | **Reflection loops** — daily deep review, post-trade retrospectives | Planned |
@@ -184,8 +195,8 @@ tradewind/
 uv run pytest                  # unit tests (network-free)
 uv run pytest -m integration   # integration tests — requires Alpaca paper keys
 uv run ruff check .            # lint
-uv run tradewind chat          # talk to the agent (needs LLM + Alpaca keys in .env)
-uv run tradewind memory show   # view agent memory files
+uv run allpath-trade chat          # talk to the agent (needs LLM + Alpaca keys in .env)
+uv run allpath-trade memory show   # view agent memory files
 ```
 
 **Engineering conventions**

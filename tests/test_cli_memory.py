@@ -1,5 +1,5 @@
+from allpath_trade.cli import main
 from tests.test_sentinel import FakeBroker
-from tradewind.cli import main
 
 
 def setup_env(tmp_path, monkeypatch):
@@ -18,10 +18,10 @@ def test_memory_show_empty(tmp_path, capsys, monkeypatch):
 
 def test_memory_show_lists_and_prints(tmp_path, capsys, monkeypatch):
     setup_env(tmp_path, monkeypatch)
-    from tradewind.memory.store import MemoryStore
-    from tradewind.store.db import connect
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.db import connect
 
-    MemoryStore(tmp_path / "memory", connect(tmp_path / "tradewind.db")).apply(
+    MemoryStore(tmp_path / "memory", connect(tmp_path / "allpath_trade.db")).apply(
         "stock", "AAPL", "add", text="earnings vol ±8%")
     assert main(["memory", "show"]) == 0
     out = capsys.readouterr().out

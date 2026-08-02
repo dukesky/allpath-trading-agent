@@ -2,14 +2,14 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.broker.base import OrderSide, Position
-from tradewind.strategy.actions import (
+from allpath_trade.broker.base import OrderSide, Position
+from allpath_trade.strategy.actions import (
     ActionError,
     ActionKind,
     parse_action,
     to_order_intent,
 )
-from tradewind.strategy.model import PositionPlan, StrategyDoc
+from allpath_trade.strategy.model import PositionPlan, StrategyDoc
 
 STRAT = StrategyDoc(id="s", name="s",
                     position=PositionPlan(ticker="AAPL", target_weight="15%"))

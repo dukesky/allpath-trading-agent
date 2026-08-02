@@ -1,8 +1,8 @@
 import threading
 from datetime import UTC, datetime
 
+from allpath_trade.scheduler import is_market_hours, run_daemon
 from tests.test_sentinel import make, strategy_yaml
-from tradewind.scheduler import is_market_hours, run_daemon
 
 # 2026-07-29 is a Wednesday. 15:00 UTC = 11:00 ET (EDT, UTC-4).
 
@@ -50,7 +50,7 @@ class ImmediateScheduler:
 
 def test_run_daemon_runs_job_on_worker_thread_against_real_store(
         tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr("tradewind.scheduler.is_market_hours", lambda: True)
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
     s, _store, _ex, _q, _n = make(tmp_path, strategy_yaml(condition="price < 100"))
     calls = []
 
@@ -67,7 +67,7 @@ def test_run_daemon_runs_job_on_worker_thread_against_real_store(
 
 
 def test_run_daemon_skips_sentinel_when_market_closed(monkeypatch):
-    monkeypatch.setattr("tradewind.scheduler.is_market_hours", lambda: False)
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
     calls = []
 
     def sentinel_factory():
@@ -80,7 +80,7 @@ def test_run_daemon_skips_sentinel_when_market_closed(monkeypatch):
 
 
 def test_run_daemon_fires_daily_job_after_close(monkeypatch):
-    import tradewind.scheduler as sched
+    import allpath_trade.scheduler as sched
 
     calls = []
 

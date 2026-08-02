@@ -1,8 +1,8 @@
-from tradewind.agent.loop import AgentSession
-from tradewind.agent.tools import ToolRegistry
-from tradewind.llm.base import LLMClient, LLMError, LLMResponse, ToolCall
-from tradewind.store.conversations import ConversationStore
-from tradewind.store.db import connect
+from allpath_trade.agent.loop import AgentSession
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.llm.base import LLMClient, LLMError, LLMResponse, ToolCall
+from allpath_trade.store.conversations import ConversationStore
+from allpath_trade.store.db import connect
 
 
 class ScriptedLLM(LLMClient):

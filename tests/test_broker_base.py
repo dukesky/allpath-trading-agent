@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from tradewind.broker.base import Broker, OrderIntent, OrderSide
+from allpath_trade.broker.base import Broker, OrderIntent, OrderSide
 
 
 def test_intent_requires_exactly_one_of_qty_or_notional():
@@ -35,7 +35,7 @@ def test_broker_is_abstract():
 def test_decimal_fields_coerce_floats_precision_safely():
     """Regression test: pydantic v2 coerces floats to Decimal via str() for precision safety.
     E.g., 1.1 becomes Decimal("1.1"), not Decimal(1.1) with binary float artifact."""
-    from tradewind.broker.base import Account
+    from allpath_trade.broker.base import Account
     acct = Account(equity=1.1, cash=2.2, buying_power=3.3)
     assert acct.equity == Decimal("1.1")  # str-based coercion, no binary float artifact
     assert acct.cash == Decimal("2.2")

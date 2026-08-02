@@ -3,9 +3,9 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.broker.base import OrderIntent, OrderSide
-from tradewind.store.db import connect
-from tradewind.store.reviews import ReviewError, ReviewQueue
+from allpath_trade.broker.base import OrderIntent, OrderSide
+from allpath_trade.store.db import connect
+from allpath_trade.store.reviews import ReviewError, ReviewQueue
 
 
 class StubExecutor:
@@ -14,8 +14,8 @@ class StubExecutor:
 
     def execute(self, intent):
         self.calls.append(intent)
-        from tradewind.execution import ExecutionResult
-        from tradewind.risk.gate import RiskDecision
+        from allpath_trade.execution import ExecutionResult
+        from allpath_trade.risk.gate import RiskDecision
         return ExecutionResult(submitted=True, order=None,
                                decision=RiskDecision(approved=True))
 

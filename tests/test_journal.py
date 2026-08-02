@@ -1,10 +1,10 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from tradewind.broker.base import Order, OrderIntent, OrderSide, OrderStatus
-from tradewind.risk.gate import RiskDecision
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+from allpath_trade.risk.gate import RiskDecision
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 
 def make_journal(tmp_path):

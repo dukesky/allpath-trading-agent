@@ -5,7 +5,7 @@ from typing import ClassVar
 import pandas as pd
 import pytest
 
-from tradewind.data.yf import YFinanceSource
+from allpath_trade.data.yf import YFinanceSource
 
 
 class StubTicker:

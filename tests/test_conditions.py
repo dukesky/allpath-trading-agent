@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.strategy.conditions import (
+from allpath_trade.strategy.conditions import (
     ConditionError,
     evaluate_condition,
     parse_condition,

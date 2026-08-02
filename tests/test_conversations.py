@@ -1,5 +1,5 @@
-from tradewind.store.conversations import ConversationStore
-from tradewind.store.db import connect
+from allpath_trade.store.conversations import ConversationStore
+from allpath_trade.store.db import connect
 
 
 def make(tmp_path):

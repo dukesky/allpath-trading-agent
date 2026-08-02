@@ -14,13 +14,13 @@
 - Condition evaluation uses `ast.parse` + node whitelist — never `eval()`. Unknown nodes/variables are rejected at load time.
 - Condition vocabulary v1 (exactly): `price`, `position_weight`, `position_qty`, `avg_entry_price`, `pnl_pct`, `target_weight`. Operators: `< > <= >= ==`, `and/or/not`, parentheses, numeric literals (incl. negative).
 - Action grammar v1 (exactly): `sell all` | `sell N%` | `sell $N` | `buy $N` | `buy to target_weight`.
-- Trigger semantics: one-shot. A fired rule's state goes `armed → triggered` and is persisted BEFORE any execution attempt (never double-execute). Re-arm is explicit (`tradewind rearm`).
+- Trigger semantics: one-shot. A fired rule's state goes `armed → triggered` and is persisted BEFORE any execution attempt (never double-execute). Re-arm is explicit (`allpath-trade rearm`).
 - Dispatch matrix: auth `auto` → hard executes via `Executor.execute`, soft enqueues; `confirm` → both enqueue; `notify` → notify only. Every trigger notifies.
 - Rule runtime state lives in SQLite (`rule_states`), never written back into the user's YAML.
 - The sentinel never crashes on one bad strategy: per-strategy errors are collected and reported, the loop continues.
 - Email is notification-only (no action links). When SMTP is not configured, notifications degrade to console/log — never an error.
 - Sentinel interval is a parameter: `Settings.sentinel_interval_minutes: int = 60`.
-- All new schema goes through `tradewind/store/db.py` `SCHEMA` (idempotent `CREATE TABLE IF NOT EXISTS`).
+- All new schema goes through `allpath_trade/store/db.py` `SCHEMA` (idempotent `CREATE TABLE IF NOT EXISTS`).
 - Run everything with `uv run`; commit after every task; commit messages end with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 ---
@@ -28,7 +28,7 @@
 ### Task 1: Harden OrderIntent ticker validation (Phase 3 prerequisite from final review)
 
 **Files:**
-- Modify: `tradewind/broker/base.py` (the `_upper` validator)
+- Modify: `allpath_trade/broker/base.py` (the `_upper` validator)
 - Test: `tests/test_broker_base.py`
 
 **Interfaces:**
@@ -49,7 +49,7 @@ def test_intent_rejects_empty_or_whitespace_ticker():
 Run: `uv run pytest tests/test_broker_base.py::test_intent_rejects_empty_or_whitespace_ticker -v`
 Expected: FAIL (no exception raised)
 
-- [ ] **Step 3: Implement** — in `tradewind/broker/base.py`, change the `_upper` validator to:
+- [ ] **Step 3: Implement** — in `allpath_trade/broker/base.py`, change the `_upper` validator to:
 
 ```python
     @field_validator("ticker")
@@ -69,7 +69,7 @@ Expected: FAIL (no exception raised)
 ### Task 2: Strategy domain models + YAML loading
 
 **Files:**
-- Create: `tradewind/strategy/__init__.py`, `tradewind/strategy/model.py`, `tradewind/strategy/loader.py`
+- Create: `allpath_trade/strategy/__init__.py`, `allpath_trade/strategy/model.py`, `allpath_trade/strategy/loader.py`
 - Test: `tests/test_strategy_model.py`
 
 **Interfaces (produced, used by every later task):**
@@ -91,8 +91,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tradewind.strategy.loader import StrategyValidationError, load_strategy
-from tradewind.strategy.model import (
+from allpath_trade.strategy.loader import StrategyValidationError, load_strategy
+from allpath_trade.strategy.model import (
     Authorization, PositionPlan, Rule, RuleState, RuleType, StrategyDoc, StrategyStatus,
 )
 
@@ -179,9 +179,9 @@ def test_load_missing_position_reports_error(tmp_path):
 
 - [ ] **Step 3: Implement**
 
-`tradewind/strategy/__init__.py`:
+`allpath_trade/strategy/__init__.py`:
 ```python
-from tradewind.strategy.model import (
+from allpath_trade.strategy.model import (
     Authorization, PositionPlan, ReviewPolicy, Rule, RuleState, RuleType,
     StrategyDoc, StrategyStatus,
 )
@@ -192,7 +192,7 @@ __all__ = [
 ]
 ```
 
-`tradewind/strategy/model.py`:
+`allpath_trade/strategy/model.py`:
 ```python
 from __future__ import annotations
 
@@ -305,7 +305,7 @@ class StrategyDoc(BaseModel):
         return self
 ```
 
-`tradewind/strategy/loader.py`:
+`allpath_trade/strategy/loader.py`:
 ```python
 from __future__ import annotations
 
@@ -314,7 +314,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from tradewind.strategy.model import StrategyDoc
+from allpath_trade.strategy.model import StrategyDoc
 
 
 class StrategyValidationError(Exception):
@@ -352,7 +352,7 @@ def load_strategy(path: Path) -> StrategyDoc:
 ### Task 3: Condition evaluator (whitelist AST)
 
 **Files:**
-- Create: `tradewind/strategy/conditions.py`
+- Create: `allpath_trade/strategy/conditions.py`
 - Test: `tests/test_conditions.py`
 
 **Interfaces:**
@@ -369,7 +369,7 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.strategy.conditions import (
+from allpath_trade.strategy.conditions import (
     ConditionError, evaluate_condition, parse_condition,
 )
 
@@ -425,7 +425,7 @@ def test_decimal_precision():
 
 - [ ] **Step 3: Implement**
 
-`tradewind/strategy/conditions.py`:
+`allpath_trade/strategy/conditions.py`:
 ```python
 from __future__ import annotations
 
@@ -535,8 +535,8 @@ Note: dict lookup in `_eval`'s Compare branch evaluates all entries eagerly — 
 ### Task 4: Action parser + OrderIntent conversion + loader integration
 
 **Files:**
-- Create: `tradewind/strategy/actions.py`
-- Modify: `tradewind/strategy/loader.py` (validate conditions/actions at load)
+- Create: `allpath_trade/strategy/actions.py`
+- Modify: `allpath_trade/strategy/loader.py` (validate conditions/actions at load)
 - Test: `tests/test_actions.py`, extend `tests/test_strategy_model.py`
 
 **Interfaces:**
@@ -555,11 +555,11 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.broker.base import OrderSide, Position
-from tradewind.strategy.actions import (
+from allpath_trade.broker.base import OrderSide, Position
+from allpath_trade.strategy.actions import (
     ActionError, ActionKind, parse_action, to_order_intent,
 )
-from tradewind.strategy.model import PositionPlan, StrategyDoc
+from allpath_trade.strategy.model import PositionPlan, StrategyDoc
 
 STRAT = StrategyDoc(id="s", name="s",
                     position=PositionPlan(ticker="AAPL", target_weight="15%"))
@@ -648,7 +648,7 @@ def test_load_rejects_bad_condition_and_action(tmp_path):
 
 - [ ] **Step 3: Implement**
 
-`tradewind/strategy/actions.py`:
+`allpath_trade/strategy/actions.py`:
 ```python
 from __future__ import annotations
 
@@ -658,8 +658,8 @@ from enum import Enum
 
 from pydantic import BaseModel
 
-from tradewind.broker.base import OrderIntent, OrderSide, Position
-from tradewind.strategy.model import StrategyDoc
+from allpath_trade.broker.base import OrderIntent, OrderSide, Position
+from allpath_trade.strategy.model import StrategyDoc
 
 
 class ActionKind(str, Enum):
@@ -742,11 +742,11 @@ def to_order_intent(spec: ActionSpec, *, strategy: StrategyDoc, rule_id: str,
                        reason=reason, strategy_id=strategy.id)
 ```
 
-Modify `tradewind/strategy/loader.py` — after successful `StrategyDoc.model_validate`, add rule validation before `return doc`:
+Modify `allpath_trade/strategy/loader.py` — after successful `StrategyDoc.model_validate`, add rule validation before `return doc`:
 
 ```python
-    from tradewind.strategy.actions import ActionError, parse_action
-    from tradewind.strategy.conditions import ConditionError, parse_condition
+    from allpath_trade.strategy.actions import ActionError, parse_action
+    from allpath_trade.strategy.conditions import ConditionError, parse_condition
 
     for rule in doc.rules:
         try:
@@ -772,8 +772,8 @@ Modify `tradewind/strategy/loader.py` — after successful `StrategyDoc.model_va
 ### Task 5: Strategy store (files + version snapshots + rule states)
 
 **Files:**
-- Modify: `tradewind/store/db.py` (extend SCHEMA)
-- Create: `tradewind/strategy/store.py`
+- Modify: `allpath_trade/store/db.py` (extend SCHEMA)
+- Create: `allpath_trade/strategy/store.py`
 - Test: `tests/test_strategy_store.py`
 
 **Interfaces:**
@@ -796,10 +796,10 @@ from pathlib import Path
 
 import pytest
 
-from tradewind.store.db import connect
-from tradewind.strategy.loader import StrategyValidationError
-from tradewind.strategy.model import RuleState, StrategyStatus
-from tradewind.strategy.store import StrategyStore
+from allpath_trade.store.db import connect
+from allpath_trade.strategy.loader import StrategyValidationError
+from allpath_trade.strategy.model import RuleState, StrategyStatus
+from allpath_trade.strategy.store import StrategyStore
 
 ACTIVE = """
 name: "A"
@@ -857,7 +857,7 @@ def test_invalid_file_raises(tmp_path):
 
 - [ ] **Step 3: Implement**
 
-Append to `SCHEMA` in `tradewind/store/db.py`:
+Append to `SCHEMA` in `allpath_trade/store/db.py`:
 ```sql
 CREATE TABLE IF NOT EXISTS strategy_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -877,7 +877,7 @@ CREATE TABLE IF NOT EXISTS rule_states (
 );
 ```
 
-`tradewind/strategy/store.py`:
+`allpath_trade/strategy/store.py`:
 ```python
 from __future__ import annotations
 
@@ -887,8 +887,8 @@ from pathlib import Path
 
 import yaml
 
-from tradewind.strategy.loader import load_strategy
-from tradewind.strategy.model import RuleState, StrategyDoc, StrategyStatus
+from allpath_trade.strategy.loader import load_strategy
+from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
 
 
 class StrategyStore:
@@ -959,8 +959,8 @@ class StrategyStore:
 ### Task 6: Pending review queue (service API)
 
 **Files:**
-- Modify: `tradewind/store/db.py` (extend SCHEMA)
-- Create: `tradewind/store/reviews.py`
+- Modify: `allpath_trade/store/db.py` (extend SCHEMA)
+- Create: `allpath_trade/store/reviews.py`
 - Test: `tests/test_reviews.py`
 
 **Interfaces:**
@@ -983,9 +983,9 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.broker.base import OrderIntent, OrderSide
-from tradewind.store.db import connect
-from tradewind.store.reviews import ReviewError, ReviewQueue
+from allpath_trade.broker.base import OrderIntent, OrderSide
+from allpath_trade.store.db import connect
+from allpath_trade.store.reviews import ReviewError, ReviewQueue
 
 
 class StubExecutor:
@@ -994,8 +994,8 @@ class StubExecutor:
 
     def execute(self, intent):
         self.calls.append(intent)
-        from tradewind.risk.gate import RiskDecision
-        from tradewind.execution import ExecutionResult
+        from allpath_trade.risk.gate import RiskDecision
+        from allpath_trade.execution import ExecutionResult
         return ExecutionResult(submitted=True, order=None,
                                decision=RiskDecision(approved=True))
 
@@ -1061,7 +1061,7 @@ def test_get_missing_raises(queue):
 
 - [ ] **Step 3: Implement**
 
-Append to `SCHEMA` in `tradewind/store/db.py`:
+Append to `SCHEMA` in `allpath_trade/store/db.py`:
 ```sql
 CREATE TABLE IF NOT EXISTS pending_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1081,7 +1081,7 @@ CREATE TABLE IF NOT EXISTS pending_reviews (
 );
 ```
 
-`tradewind/store/reviews.py`:
+`allpath_trade/store/reviews.py`:
 ```python
 from __future__ import annotations
 
@@ -1090,8 +1090,8 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from tradewind.broker.base import OrderIntent
-from tradewind.execution import ExecutionError, ExecutionResult, Executor
+from allpath_trade.broker.base import OrderIntent
+from allpath_trade.execution import ExecutionError, ExecutionResult, Executor
 
 
 class ReviewError(Exception):
@@ -1182,8 +1182,8 @@ class ReviewQueue:
 ### Task 7: Notification layer
 
 **Files:**
-- Create: `tradewind/notify/__init__.py`, `tradewind/notify/base.py`, `tradewind/notify/email.py`
-- Modify: `tradewind/config.py` (SMTP + sentinel settings), `.env.example`
+- Create: `allpath_trade/notify/__init__.py`, `allpath_trade/notify/base.py`, `allpath_trade/notify/email.py`
+- Modify: `allpath_trade/config.py` (SMTP + sentinel settings), `.env.example`
 - Test: `tests/test_notify.py`
 
 **Interfaces:**
@@ -1197,9 +1197,9 @@ class ReviewQueue:
 
 `tests/test_notify.py`:
 ```python
-from tradewind.config import Settings
-from tradewind.notify.base import ConsoleNotifier
-from tradewind.notify.email import EmailNotifier, build_notifier
+from allpath_trade.config import Settings
+from allpath_trade.notify.base import ConsoleNotifier
+from allpath_trade.notify.email import EmailNotifier, build_notifier
 
 
 class StubSMTP:
@@ -1263,7 +1263,7 @@ def test_build_notifier_selects(tmp_path):
 
 - [ ] **Step 3: Implement**
 
-`tradewind/config.py` — add fields to `Settings`:
+`allpath_trade/config.py` — add fields to `Settings`:
 ```python
     smtp_host: str = ""
     smtp_port: int = 587
@@ -1275,15 +1275,15 @@ def test_build_notifier_selects(tmp_path):
     strategies_dir: Path = Path("strategies")
 ```
 
-`tradewind/notify/__init__.py`:
+`allpath_trade/notify/__init__.py`:
 ```python
-from tradewind.notify.base import ConsoleNotifier, Notifier
-from tradewind.notify.email import EmailNotifier, build_notifier
+from allpath_trade.notify.base import ConsoleNotifier, Notifier
+from allpath_trade.notify.email import EmailNotifier, build_notifier
 
 __all__ = ["ConsoleNotifier", "EmailNotifier", "Notifier", "build_notifier"]
 ```
 
-`tradewind/notify/base.py`:
+`allpath_trade/notify/base.py`:
 ```python
 from __future__ import annotations
 
@@ -1300,7 +1300,7 @@ class ConsoleNotifier(Notifier):
         print(f"[notify] {subject}\n{body}")
 ```
 
-`tradewind/notify/email.py`:
+`allpath_trade/notify/email.py`:
 ```python
 from __future__ import annotations
 
@@ -1309,8 +1309,8 @@ import sys
 from email.message import EmailMessage
 from typing import Callable
 
-from tradewind.config import Settings
-from tradewind.notify.base import ConsoleNotifier, Notifier
+from allpath_trade.config import Settings
+from allpath_trade.notify.base import ConsoleNotifier, Notifier
 
 
 class EmailNotifier(Notifier):
@@ -1372,7 +1372,7 @@ STRATEGIES_DIR=strategies
 ### Task 8: Sentinel engine
 
 **Files:**
-- Create: `tradewind/sentinel.py`
+- Create: `allpath_trade/sentinel.py`
 - Test: `tests/test_sentinel.py`
 
 **Interfaces:**
@@ -1383,7 +1383,7 @@ STRATEGIES_DIR=strategies
     1. `strategies.set_rule_state(..., TRIGGERED)` FIRST (crash-safe: never double-execute),
     2. build intent via `to_order_intent` (reason = `"strategy {id} rule {rule_id}: {condition} -> {action}"`),
     3. dispatch per matrix: `notify` auth → disposition `notified`; `confirm` auth → `queue.add` + `queued`; `auto` auth: hard → `executor.execute` (`executed`; `ExecutionError` → disposition `error` with detail, sentinel continues), soft → `queue.add` + `queued`. Intent None → disposition `skipped` (still notified, e.g. "sell all triggered but no position").
-    4. `notifier.send` for every trigger (subject `[tradewind] {strategy_id}/{rule_id} triggered`, body includes condition, action, price, disposition).
+    4. `notifier.send` for every trigger (subject `[allpath_trade] {strategy_id}/{rule_id} triggered`, body includes condition, action, price, disposition).
   - Account/positions fetched once per run. Per-strategy exceptions (quote failure, bad strategy file) append to `errors` and continue. No triggers → no notifications.
 
 - [ ] **Step 1: Write the failing test**
@@ -1396,17 +1396,17 @@ from pathlib import Path
 
 import pytest
 
-from tradewind.broker.base import (
+from allpath_trade.broker.base import (
     Account, Broker, Order, OrderStatus, Position,
 )
-from tradewind.data.base import Bar, DataSource, Quote
-from tradewind.execution import ExecutionError
-from tradewind.risk.gate import RiskDecision
-from tradewind.sentinel import Sentinel
-from tradewind.store.db import connect
-from tradewind.store.reviews import ReviewQueue
-from tradewind.strategy.model import RuleState
-from tradewind.strategy.store import StrategyStore
+from allpath_trade.data.base import Bar, DataSource, Quote
+from allpath_trade.execution import ExecutionError
+from allpath_trade.risk.gate import RiskDecision
+from allpath_trade.sentinel import Sentinel
+from allpath_trade.store.db import connect
+from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.strategy.model import RuleState
+from allpath_trade.strategy.store import StrategyStore
 
 
 def strategy_yaml(auth="auto", rule_type="hard", condition="price < 250",
@@ -1474,7 +1474,7 @@ class SpyExecutor:
         if self.fail:
             raise ExecutionError("boom")
         self.calls.append(intent)
-        from tradewind.execution import ExecutionResult
+        from allpath_trade.execution import ExecutionResult
         return ExecutionResult(submitted=True, order=None,
                                decision=RiskDecision(approved=True))
 
@@ -1573,7 +1573,7 @@ def test_draft_strategy_ignored(tmp_path):
 
 - [ ] **Step 3: Implement**
 
-`tradewind/sentinel.py`:
+`allpath_trade/sentinel.py`:
 ```python
 from __future__ import annotations
 
@@ -1581,17 +1581,17 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from tradewind.broker.base import Broker, OrderIntent, Position
-from tradewind.data.base import DataSource
-from tradewind.execution import ExecutionError, Executor
-from tradewind.notify.base import Notifier
-from tradewind.store.reviews import ReviewQueue
-from tradewind.strategy.actions import parse_action, to_order_intent
-from tradewind.strategy.conditions import evaluate_condition
-from tradewind.strategy.model import (
+from allpath_trade.broker.base import Broker, OrderIntent, Position
+from allpath_trade.data.base import DataSource
+from allpath_trade.execution import ExecutionError, Executor
+from allpath_trade.notify.base import Notifier
+from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.strategy.actions import parse_action, to_order_intent
+from allpath_trade.strategy.conditions import evaluate_condition
+from allpath_trade.strategy.model import (
     Authorization, RuleState, RuleType, StrategyDoc,
 )
-from tradewind.strategy.store import StrategyStore
+from allpath_trade.strategy.store import StrategyStore
 
 
 class TriggerOutcome(BaseModel):
@@ -1659,7 +1659,7 @@ class Sentinel:
                                      ctx)
             report.outcomes.append(outcome)
             self.notifier.send(
-                f"[tradewind] {doc.id}/{rule.id} triggered",
+                f"[allpath_trade] {doc.id}/{rule.id} triggered",
                 f"strategy: {doc.name}\nrule: {rule.id} ({rule.type.value})\n"
                 f"condition: {rule.condition}\naction: {rule.action}\n"
                 f"price: {quote.price}\ndisposition: {outcome.disposition}"
@@ -1724,8 +1724,8 @@ class Sentinel:
 ### Task 9: Scheduler, app wiring, CLI commands, example strategy
 
 **Files:**
-- Create: `tradewind/scheduler.py`, `tradewind/app.py`, `strategies/example.yaml`
-- Modify: `tradewind/cli.py`, `pyproject.toml` (add `apscheduler>=3.10`)
+- Create: `allpath_trade/scheduler.py`, `allpath_trade/app.py`, `strategies/example.yaml`
+- Modify: `allpath_trade/cli.py`, `pyproject.toml` (add `apscheduler>=3.10`)
 - Test: `tests/test_scheduler.py`, `tests/test_cli_phase2.py`
 
 **Interfaces:**
@@ -1747,7 +1747,7 @@ class Sentinel:
 ```python
 from datetime import datetime, timezone
 
-from tradewind.scheduler import is_market_hours
+from allpath_trade.scheduler import is_market_hours
 
 # 2026-07-29 is a Wednesday. 15:00 UTC = 11:00 ET (EDT, UTC-4).
 
@@ -1783,7 +1783,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from tests.test_sentinel import FakeBroker  # reuse fixture broker
-from tradewind.cli import main
+from allpath_trade.cli import main
 
 STRAT = """
 name: "T"
@@ -1847,7 +1847,7 @@ Note: `check`/`strategies`/`rearm`/`reviews` require broker credentials or an in
 
 Add `"apscheduler>=3.10",` to `pyproject.toml` dependencies; run `uv sync`.
 
-`tradewind/scheduler.py`:
+`allpath_trade/scheduler.py`:
 ```python
 from __future__ import annotations
 
@@ -1857,7 +1857,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from tradewind.sentinel import Sentinel
+from allpath_trade.sentinel import Sentinel
 
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
@@ -1890,30 +1890,30 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
     scheduler = scheduler_cls()
     scheduler.add_job(job, "interval", minutes=interval_minutes,
                       next_run_time=datetime.now(timezone.utc))
-    print(f"[tradewind] sentinel daemon: every {interval_minutes}min "
+    print(f"[allpath_trade] sentinel daemon: every {interval_minutes}min "
           "during US market hours (Ctrl-C to stop)")
     scheduler.start()
 ```
 
-`tradewind/app.py`:
+`allpath_trade/app.py`:
 ```python
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tradewind.broker.base import Broker
-from tradewind.config import Settings
-from tradewind.data.base import DataSource
-from tradewind.data.yf import YFinanceSource
-from tradewind.execution import Executor
-from tradewind.notify.base import Notifier
-from tradewind.notify.email import build_notifier
-from tradewind.risk.gate import RiskGate, RiskLimits
-from tradewind.sentinel import Sentinel
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
-from tradewind.store.reviews import ReviewQueue
-from tradewind.strategy.store import StrategyStore
+from allpath_trade.broker.base import Broker
+from allpath_trade.config import Settings
+from allpath_trade.data.base import DataSource
+from allpath_trade.data.yf import YFinanceSource
+from allpath_trade.execution import Executor
+from allpath_trade.notify.base import Notifier
+from allpath_trade.notify.email import build_notifier
+from allpath_trade.risk.gate import RiskGate, RiskLimits
+from allpath_trade.sentinel import Sentinel
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
+from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.strategy.store import StrategyStore
 
 
 @dataclass
@@ -1932,7 +1932,7 @@ class Components:
 
 def build_components(settings: Settings, broker: Broker | None = None) -> Components:
     if broker is None:
-        from tradewind.broker.alpaca import AlpacaBroker
+        from allpath_trade.broker.alpaca import AlpacaBroker
 
         broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
                               paper=settings.alpaca_paper)
@@ -1951,7 +1951,7 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
                       strategies=strategies, notifier=notifier, sentinel=sentinel)
 ```
 
-`tradewind/cli.py` — restructure `main` to build subcommands `status | check | run | strategies | rearm | reviews`. Keep `cmd_status` as-is. New handlers (complete `main` shown):
+`allpath_trade/cli.py` — restructure `main` to build subcommands `status | check | run | strategies | rearm | reviews`. Keep `cmd_status` as-is. New handlers (complete `main` shown):
 
 ```python
 from __future__ import annotations
@@ -1960,14 +1960,14 @@ import argparse
 import sys
 from typing import Callable
 
-from tradewind.broker.base import Broker
-from tradewind.config import Settings, SettingsStore
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.broker.base import Broker
+from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 
 def _default_broker(settings: Settings) -> Broker:
-    from tradewind.broker.alpaca import AlpacaBroker
+    from allpath_trade.broker.alpaca import AlpacaBroker
 
     return AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
                         paper=settings.alpaca_paper)
@@ -2012,7 +2012,7 @@ def cmd_rearm(components, strategy_id: str, rule_id: str) -> int:
 
 
 def cmd_reviews(components, args) -> int:
-    from tradewind.store.reviews import ReviewError
+    from allpath_trade.store.reviews import ReviewError
 
     q = components.queue
     try:
@@ -2038,7 +2038,7 @@ def cmd_reviews(components, args) -> int:
 
 def main(argv: list[str] | None = None,
          broker_factory: Callable[[Settings], Broker] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="tradewind")
+    parser = argparse.ArgumentParser(prog="allpath_trade")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show account, positions, recent trades")
     sub.add_parser("check", help="run one sentinel pass now")
@@ -2068,13 +2068,13 @@ def main(argv: list[str] | None = None,
     if args.command == "status":
         return cmd_status(settings, broker)
 
-    from tradewind.app import build_components
+    from allpath_trade.app import build_components
 
     components = build_components(settings, broker=broker)
     if args.command == "check":
         return cmd_check(components)
     if args.command == "run":
-        from tradewind.scheduler import run_daemon
+        from allpath_trade.scheduler import run_daemon
 
         run_daemon(lambda: components.sentinel,
                    settings.sentinel_interval_minutes)
@@ -2137,8 +2137,8 @@ review:
 ## Phase 2 Definition of Done
 
 - `uv run pytest` green; `uv run ruff check .` clean.
-- With a strategies dir and paper keys: `uv run tradewind check` evaluates rules and reports; `uv run tradewind strategies` lists states; triggered confirm-auth rules appear in `tradewind reviews list` and can be approved (executes via risk gate) or rejected.
-- `uv run tradewind run` starts the hourly (configurable) daemon and skips outside US market hours.
+- With a strategies dir and paper keys: `uv run allpath-trade check` evaluates rules and reports; `uv run allpath-trade strategies` lists states; triggered confirm-auth rules appear in `allpath-trade reviews list` and can be approved (executes via risk gate) or rejected.
+- `uv run allpath-trade run` starts the hourly (configurable) daemon and skips outside US market hours.
 - A triggered rule never fires twice without explicit `rearm`.
 - README roadmap Phase 2 checked off (do in final review fix wave if reviewer agrees).
 

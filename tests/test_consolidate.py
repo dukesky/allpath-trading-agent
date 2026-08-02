@@ -1,15 +1,15 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+from allpath_trade.llm.base import LLMResponse
+from allpath_trade.memory.consolidate import Consolidator
+from allpath_trade.memory.observations import ObservationLog
+from allpath_trade.memory.store import MemoryStore
+from allpath_trade.risk.gate import RiskDecision
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 from tests.test_agent_loop import ScriptedLLM, tool_response
-from tradewind.broker.base import Order, OrderIntent, OrderSide, OrderStatus
-from tradewind.llm.base import LLMResponse
-from tradewind.memory.consolidate import Consolidator
-from tradewind.memory.observations import ObservationLog
-from tradewind.memory.store import MemoryStore
-from tradewind.risk.gate import RiskDecision
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
 
 
 def make(tmp_path, llm):
@@ -50,7 +50,7 @@ def test_injection_via_consolidator_is_blocked(tmp_path):
 
 
 def test_consolidation_failure_degrades(tmp_path):
-    from tradewind.llm.base import LLMError
+    from allpath_trade.llm.base import LLMError
 
     c, memory, obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
     obs.add("sentinel", "t/r1 triggered: queued", subject="AAPL")
@@ -68,7 +68,7 @@ def test_daily_with_no_events_short_circuits(tmp_path):
 
 
 def test_failed_run_leaves_events_for_next_run(tmp_path):
-    from tradewind.llm.base import LLMError
+    from allpath_trade.llm.base import LLMError
 
     c, _memory, obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
     obs.add("sentinel", "unique-marker-event", subject="AAPL")
@@ -126,7 +126,7 @@ def test_journal_events_are_marker_scoped(tmp_path):
 
 
 def test_events_and_transcript_are_fenced_against_injection(tmp_path):
-    from tradewind.agent.tools import FENCE_NOTICE
+    from allpath_trade.agent.tools import FENCE_NOTICE
 
     llm = ScriptedLLM([LLMResponse(text="ok")])
     c, _memory, obs = make(tmp_path, llm)

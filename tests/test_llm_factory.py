@@ -1,9 +1,9 @@
 import pytest
 
-from tradewind.config import Settings
-from tradewind.llm.anthropic_client import AnthropicClient
-from tradewind.llm.factory import LLMConfigError, build_llm
-from tradewind.llm.openai_compat import OpenAICompatClient
+from allpath_trade.config import Settings
+from allpath_trade.llm.anthropic_client import AnthropicClient
+from allpath_trade.llm.factory import LLMConfigError, build_llm
+from allpath_trade.llm.openai_compat import OpenAICompatClient
 
 
 def settings(**over):

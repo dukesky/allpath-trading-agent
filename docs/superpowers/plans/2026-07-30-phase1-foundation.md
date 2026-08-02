@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the safe-execution foundation of the tradewind package: config store, broker abstraction with Alpaca (paper) adapter, market data layer, deterministic risk gate, trade journal, order executor, and a `tradewind status` CLI to verify against a real Alpaca paper account.
+**Goal:** Build the safe-execution foundation of the allpath_trade package: config store, broker abstraction with Alpaca (paper) adapter, market data layer, deterministic risk gate, trade journal, order executor, and a `allpath-trade status` CLI to verify against a real Alpaca paper account.
 
 **Architecture:** Sync Python core (mid/long-term trading needs no async). Every order flows OrderIntent → RiskGate (deterministic, cannot be bypassed) → Broker adapter (thin wrapper over official `alpaca-py`) → TradeJournal (SQLite). LLM never touches the broker directly — later phases only ever produce `OrderIntent`s and call `Executor.execute`.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Package name is `tradewind` (repo stays `allpath-trading-agent`).
+- Package name is `allpath_trade` (repo stays `allpath-trading-agent`).
 - Python `>=3.11`; all core code is synchronous.
 - Money is `Decimal`, never float (floats OK for OHLCV bars/weights).
 - Paper-first: `RiskLimits.allow_live` defaults to `False`; AlpacaBroker defaults to `paper=True`.
@@ -26,17 +26,17 @@
 ### Task 1: Project scaffold
 
 **Files:**
-- Create: `pyproject.toml`, `.gitignore`, `.env.example`, `tradewind/__init__.py`, `tests/__init__.py`, `tests/test_smoke.py`
+- Create: `pyproject.toml`, `.gitignore`, `.env.example`, `allpath_trade/__init__.py`, `tests/__init__.py`, `tests/test_smoke.py`
 
 **Interfaces:**
-- Produces: installable `tradewind` package, `uv run pytest` green, `tradewind` console script stub target (wired in Task 9).
+- Produces: installable `allpath_trade` package, `uv run pytest` green, `allpath_trade` console script stub target (wired in Task 9).
 
 - [ ] **Step 1: Write files**
 
 `pyproject.toml`:
 ```toml
 [project]
-name = "tradewind"
+name = "allpath_trade"
 version = "0.1.0"
 description = "All Path Trading Agent - an LLM-powered mid/long-term trading agent framework"
 requires-python = ">=3.11"
@@ -52,7 +52,7 @@ dependencies = [
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
-tradewind = "tradewind.cli:main"
+allpath_trade = "allpath_trade.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -91,7 +91,7 @@ ANTHROPIC_API_KEY=
 OPENAI_API_KEY=
 ```
 
-`tradewind/__init__.py`:
+`allpath_trade/__init__.py`:
 ```python
 __version__ = "0.1.0"
 ```
@@ -100,11 +100,11 @@ __version__ = "0.1.0"
 
 `tests/test_smoke.py`:
 ```python
-import tradewind
+import allpath_trade
 
 
 def test_package_imports():
-    assert tradewind.__version__
+    assert allpath_trade.__version__
 ```
 
 - [ ] **Step 2: Create env and run tests**
@@ -125,12 +125,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 2: Settings + SettingsStore (runtime-writable .env)
 
 **Files:**
-- Create: `tradewind/config.py`
+- Create: `allpath_trade/config.py`
 - Test: `tests/test_config.py`
 
 **Interfaces:**
 - Produces:
-  - `Settings(BaseSettings)` with fields `alpaca_api_key: str = ""`, `alpaca_secret_key: str = ""`, `alpaca_paper: bool = True`, `db_path: Path = Path("tradewind.db")`, `env_file: Path = Path(".env")` — loads from `.env` + env vars (env vars win).
+  - `Settings(BaseSettings)` with fields `alpaca_api_key: str = ""`, `alpaca_secret_key: str = ""`, `alpaca_paper: bool = True`, `db_path: Path = Path("allpath_trade.db")`, `env_file: Path = Path(".env")` — loads from `.env` + env vars (env vars win).
   - `SettingsStore(env_file: Path)` with `.get(key: str) -> str | None`, `.set(key: str, value: str) -> None`, `.load() -> Settings`. `.set` persists to the `.env` file (create if missing), preserving other lines. This is the single write-path later used by both the Web UI settings page and the agent's `update_settings` tool (spec: LLM key must be set via Web UI first; broker creds may be set via UI or agent).
 
 - [ ] **Step 1: Write the failing test**
@@ -139,7 +139,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```python
 from pathlib import Path
 
-from tradewind.config import Settings, SettingsStore
+from allpath_trade.config import Settings, SettingsStore
 
 
 def test_settings_defaults(tmp_path: Path):
@@ -179,7 +179,7 @@ Expected: FAIL (`ModuleNotFoundError` / `ImportError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/config.py`:
+`allpath_trade/config.py`:
 ```python
 from __future__ import annotations
 
@@ -195,7 +195,7 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
-    db_path: Path = Path("tradewind.db")
+    db_path: Path = Path("allpath_trade.db")
 
 
 class SettingsStore:
@@ -228,7 +228,7 @@ Expected: 3 PASSED
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tradewind/config.py tests/test_config.py
+git add allpath_trade/config.py tests/test_config.py
 git commit -m "feat: Settings + runtime-writable SettingsStore (.env-backed)
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -239,7 +239,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 3: Broker domain models + abstract interface
 
 **Files:**
-- Create: `tradewind/broker/__init__.py`, `tradewind/broker/base.py`
+- Create: `allpath_trade/broker/__init__.py`, `allpath_trade/broker/base.py`
 - Test: `tests/test_broker_base.py`
 
 **Interfaces:**
@@ -257,7 +257,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from tradewind.broker.base import Broker, OrderIntent, OrderSide
+from allpath_trade.broker.base import Broker, OrderIntent, OrderSide
 
 
 def test_intent_requires_exactly_one_of_qty_or_notional():
@@ -293,9 +293,9 @@ Expected: FAIL (`ModuleNotFoundError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/broker/__init__.py`:
+`allpath_trade/broker/__init__.py`:
 ```python
-from tradewind.broker.base import (
+from allpath_trade.broker.base import (
     Account,
     Broker,
     Order,
@@ -310,7 +310,7 @@ __all__ = [
 ]
 ```
 
-`tradewind/broker/base.py`:
+`allpath_trade/broker/base.py`:
 ```python
 from __future__ import annotations
 
@@ -418,7 +418,7 @@ Expected: 3 PASSED
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tradewind/broker tests/test_broker_base.py
+git add allpath_trade/broker tests/test_broker_base.py
 git commit -m "feat: broker domain models and abstract Broker interface
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -429,11 +429,11 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 4: Alpaca adapter
 
 **Files:**
-- Create: `tradewind/broker/alpaca.py`
+- Create: `allpath_trade/broker/alpaca.py`
 - Test: `tests/test_broker_alpaca.py`, `tests/test_broker_alpaca_integration.py`
 
 **Interfaces:**
-- Consumes: everything from `tradewind.broker.base` (Task 3), `Settings` (Task 2).
+- Consumes: everything from `allpath_trade.broker.base` (Task 3), `Settings` (Task 2).
 - Produces: `AlpacaBroker(api_key: str, secret_key: str, paper: bool = True, client: object | None = None)` implementing `Broker`. `client` param allows injecting a stub in tests. Market orders, `TimeInForce.DAY`.
 
 - [ ] **Step 1: Write the failing unit test (stub client)**
@@ -444,8 +444,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
-from tradewind.broker.alpaca import AlpacaBroker
-from tradewind.broker.base import OrderIntent, OrderSide, OrderStatus
+from allpath_trade.broker.alpaca import AlpacaBroker
+from allpath_trade.broker.base import OrderIntent, OrderSide, OrderStatus
 
 
 def _raw_order(**over):
@@ -528,7 +528,7 @@ Expected: FAIL (`ModuleNotFoundError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/broker/alpaca.py`:
+`allpath_trade/broker/alpaca.py`:
 ```python
 from __future__ import annotations
 
@@ -539,7 +539,7 @@ from alpaca.trading.enums import OrderSide as _Side
 from alpaca.trading.enums import QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
 
-from tradewind.broker.base import (
+from allpath_trade.broker.base import (
     Account,
     Broker,
     Order,
@@ -634,7 +634,7 @@ import os
 
 import pytest
 
-from tradewind.broker.alpaca import AlpacaBroker
+from allpath_trade.broker.alpaca import AlpacaBroker
 
 pytestmark = pytest.mark.integration
 
@@ -658,7 +658,7 @@ Run: `uv run pytest tests/test_broker_alpaca_integration.py -v` → expected: `n
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tradewind/broker/alpaca.py tests/test_broker_alpaca.py tests/test_broker_alpaca_integration.py
+git add allpath_trade/broker/alpaca.py tests/test_broker_alpaca.py tests/test_broker_alpaca_integration.py
 git commit -m "feat: Alpaca broker adapter (paper-first, market orders)
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -669,7 +669,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 5: Data layer (models + yfinance source)
 
 **Files:**
-- Create: `tradewind/data/__init__.py`, `tradewind/data/base.py`, `tradewind/data/yf.py`
+- Create: `allpath_trade/data/__init__.py`, `allpath_trade/data/base.py`, `allpath_trade/data/yf.py`
 - Test: `tests/test_data.py`
 
 **Interfaces:**
@@ -687,7 +687,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from tradewind.data.yf import YFinanceSource
+from allpath_trade.data.yf import YFinanceSource
 
 
 class StubTicker:
@@ -727,15 +727,15 @@ Expected: FAIL (`ModuleNotFoundError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/data/__init__.py`:
+`allpath_trade/data/__init__.py`:
 ```python
-from tradewind.data.base import Bar, DataSource, Quote
-from tradewind.data.yf import YFinanceSource
+from allpath_trade.data.base import Bar, DataSource, Quote
+from allpath_trade.data.yf import YFinanceSource
 
 __all__ = ["Bar", "DataSource", "Quote", "YFinanceSource"]
 ```
 
-`tradewind/data/base.py`:
+`allpath_trade/data/base.py`:
 ```python
 from __future__ import annotations
 
@@ -769,7 +769,7 @@ class DataSource(ABC):
     def get_bars(self, ticker: str, days: int = 365) -> list[Bar]: ...
 ```
 
-`tradewind/data/yf.py`:
+`allpath_trade/data/yf.py`:
 ```python
 from __future__ import annotations
 
@@ -779,7 +779,7 @@ from typing import Callable
 
 import yfinance
 
-from tradewind.data.base import Bar, DataSource, Quote
+from allpath_trade.data.base import Bar, DataSource, Quote
 
 
 class YFinanceSource(DataSource):
@@ -810,7 +810,7 @@ Expected: 2 PASSED
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tradewind/data tests/test_data.py
+git add allpath_trade/data tests/test_data.py
 git commit -m "feat: data layer with yfinance source
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -821,7 +821,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 6: Risk gate
 
 **Files:**
-- Create: `tradewind/risk/__init__.py`, `tradewind/risk/gate.py`
+- Create: `allpath_trade/risk/__init__.py`, `allpath_trade/risk/gate.py`
 - Test: `tests/test_risk_gate.py`
 
 **Interfaces:**
@@ -839,8 +839,8 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.broker.base import Account, OrderIntent, OrderSide, Position
-from tradewind.risk.gate import RiskGate, RiskLimits
+from allpath_trade.broker.base import Account, OrderIntent, OrderSide, Position
+from allpath_trade.risk.gate import RiskGate, RiskLimits
 
 ACCT = Account(equity=Decimal("10000"), cash=Decimal("5000"), buying_power=Decimal("10000"))
 AAPL_POS = Position(ticker="AAPL", qty=Decimal("10"), avg_entry_price=Decimal("190"),
@@ -941,14 +941,14 @@ Expected: FAIL (`ModuleNotFoundError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/risk/__init__.py`:
+`allpath_trade/risk/__init__.py`:
 ```python
-from tradewind.risk.gate import RiskDecision, RiskGate, RiskLimits
+from allpath_trade.risk.gate import RiskDecision, RiskGate, RiskLimits
 
 __all__ = ["RiskDecision", "RiskGate", "RiskLimits"]
 ```
 
-`tradewind/risk/gate.py`:
+`allpath_trade/risk/gate.py`:
 ```python
 from __future__ import annotations
 
@@ -956,7 +956,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from tradewind.broker.base import Account, OrderIntent, OrderSide, Position
+from allpath_trade.broker.base import Account, OrderIntent, OrderSide, Position
 
 
 class RiskLimits(BaseModel):
@@ -1030,7 +1030,7 @@ Expected: all PASSED (12 tests)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tradewind/risk tests/test_risk_gate.py
+git add allpath_trade/risk tests/test_risk_gate.py
 git commit -m "feat: deterministic risk gate (paper-first, position/order/cash/trade caps)
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1041,7 +1041,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 7: SQLite store + trade journal
 
 **Files:**
-- Create: `tradewind/store/__init__.py`, `tradewind/store/db.py`, `tradewind/store/journal.py`
+- Create: `allpath_trade/store/__init__.py`, `allpath_trade/store/db.py`, `allpath_trade/store/journal.py`
 - Test: `tests/test_journal.py`
 
 **Interfaces:**
@@ -1057,10 +1057,10 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from tradewind.broker.base import Order, OrderIntent, OrderSide, OrderStatus
-from tradewind.risk.gate import RiskDecision
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+from allpath_trade.risk.gate import RiskDecision
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 
 def make_journal(tmp_path):
@@ -1114,15 +1114,15 @@ Expected: FAIL (`ModuleNotFoundError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/store/__init__.py`:
+`allpath_trade/store/__init__.py`:
 ```python
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 __all__ = ["TradeJournal", "connect"]
 ```
 
-`tradewind/store/db.py`:
+`allpath_trade/store/db.py`:
 ```python
 from __future__ import annotations
 
@@ -1153,7 +1153,7 @@ def connect(path: Path | str) -> sqlite3.Connection:
     return conn
 ```
 
-`tradewind/store/journal.py`:
+`allpath_trade/store/journal.py`:
 ```python
 from __future__ import annotations
 
@@ -1161,8 +1161,8 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from tradewind.broker.base import Order, OrderIntent
-from tradewind.risk.gate import RiskDecision
+from allpath_trade.broker.base import Order, OrderIntent
+from allpath_trade.risk.gate import RiskDecision
 
 
 class TradeJournal:
@@ -1214,7 +1214,7 @@ Expected: 4 PASSED
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tradewind/store tests/test_journal.py
+git add allpath_trade/store tests/test_journal.py
 git commit -m "feat: SQLite store and trade journal
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1225,7 +1225,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 8: Order executor (wire gate + broker + journal)
 
 **Files:**
-- Create: `tradewind/execution.py`
+- Create: `allpath_trade/execution.py`
 - Test: `tests/test_execution.py`
 
 **Interfaces:**
@@ -1245,14 +1245,14 @@ from decimal import Decimal
 
 import pytest
 
-from tradewind.broker.base import (
+from allpath_trade.broker.base import (
     Account, Broker, Order, OrderIntent, OrderSide, OrderStatus, Position,
 )
-from tradewind.data.base import Bar, DataSource, Quote
-from tradewind.execution import ExecutionError, Executor
-from tradewind.risk.gate import RiskGate, RiskLimits
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.data.base import Bar, DataSource, Quote
+from allpath_trade.execution import ExecutionError, Executor
+from allpath_trade.risk.gate import RiskGate, RiskLimits
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 
 class FakeData(DataSource):
@@ -1348,16 +1348,16 @@ Expected: FAIL (`ModuleNotFoundError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/execution.py`:
+`allpath_trade/execution.py`:
 ```python
 from __future__ import annotations
 
 from pydantic import BaseModel
 
-from tradewind.broker.base import Broker, Order, OrderIntent
-from tradewind.data.base import DataSource
-from tradewind.risk.gate import RiskDecision, RiskGate
-from tradewind.store.journal import TradeJournal
+from allpath_trade.broker.base import Broker, Order, OrderIntent
+from allpath_trade.data.base import DataSource
+from allpath_trade.risk.gate import RiskDecision, RiskGate
+from allpath_trade.store.journal import TradeJournal
 
 
 class ExecutionError(Exception):
@@ -1420,7 +1420,7 @@ Expected: all tests pass, 0 failures
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tradewind/execution.py tests/test_execution.py
+git add allpath_trade/execution.py tests/test_execution.py
 git commit -m "feat: order executor wiring risk gate, broker, journal
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -1428,15 +1428,15 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 9: CLI (`tradewind status`) + README quickstart
+### Task 9: CLI (`allpath-trade status`) + README quickstart
 
 **Files:**
-- Create: `tradewind/cli.py`, `README.md`
+- Create: `allpath_trade/cli.py`, `README.md`
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
 - Consumes: `SettingsStore` (Task 2), `AlpacaBroker` (Task 4), `TradeJournal`/`connect` (Task 7).
-- Produces: console script `tradewind` with subcommand `status` — prints account equity/cash, positions table, and last 5 journal entries. `main(argv: list[str] | None = None, broker_factory=None) -> int` (factory injectable for tests; returns exit code, 2 when credentials missing).
+- Produces: console script `allpath_trade` with subcommand `status` — prints account equity/cash, positions table, and last 5 journal entries. `main(argv: list[str] | None = None, broker_factory=None) -> int` (factory injectable for tests; returns exit code, 2 when credentials missing).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1445,8 +1445,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from tradewind.broker.base import Account, Broker, Position
-from tradewind.cli import main
+from allpath_trade.broker.base import Account, Broker, Position
+from allpath_trade.cli import main
 
 
 class FakeBroker(Broker):
@@ -1477,7 +1477,7 @@ class FakeBroker(Broker):
 
 
 def test_status_prints_account_and_positions(tmp_path, capsys, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # so tradewind.db lands in tmp
+    monkeypatch.chdir(tmp_path)  # so allpath_trade.db lands in tmp
     code = main(["status"], broker_factory=lambda settings: FakeBroker())
     out = capsys.readouterr().out
     assert code == 0
@@ -1500,7 +1500,7 @@ Expected: FAIL (`ModuleNotFoundError`)
 
 - [ ] **Step 3: Write implementation**
 
-`tradewind/cli.py`:
+`allpath_trade/cli.py`:
 ```python
 from __future__ import annotations
 
@@ -1508,14 +1508,14 @@ import argparse
 import sys
 from typing import Callable
 
-from tradewind.broker.base import Broker
-from tradewind.config import Settings, SettingsStore
-from tradewind.store.db import connect
-from tradewind.store.journal import TradeJournal
+from allpath_trade.broker.base import Broker
+from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.store.db import connect
+from allpath_trade.store.journal import TradeJournal
 
 
 def _default_broker(settings: Settings) -> Broker:
-    from tradewind.broker.alpaca import AlpacaBroker
+    from allpath_trade.broker.alpaca import AlpacaBroker
 
     return AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
                         paper=settings.alpaca_paper)
@@ -1547,7 +1547,7 @@ def cmd_status(settings: Settings, broker: Broker) -> int:
 
 def main(argv: list[str] | None = None,
          broker_factory: Callable[[Settings], Broker] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="tradewind")
+    parser = argparse.ArgumentParser(prog="allpath_trade")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show account, positions, recent trades")
     args = parser.parse_args(argv)
@@ -1576,7 +1576,7 @@ An open-source, self-hosted, LLM-powered **mid/long-term** trading agent
 framework. It discusses your goals with you, co-creates strategies with
 explicit take-profit/stop-loss rules, monitors daily, executes through your
 own brokerage account under tiered authorization, and learns with you over
-time. Package name: `tradewind`.
+time. Package name: `allpath_trade`.
 
 > Status: Phase 1 (execution foundation). Paper trading only by default.
 
@@ -1594,7 +1594,7 @@ time. Package name: `tradewind`.
 3. Verify the connection:
 
    ```bash
-   uv run tradewind status
+   uv run allpath-trade status
    ```
 
 ## Safety model
@@ -1627,8 +1627,8 @@ Expected: all pass, no lint errors
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tradewind/cli.py README.md tests/test_cli.py
-git commit -m "feat: tradewind status CLI and README quickstart
+git add allpath_trade/cli.py README.md tests/test_cli.py
+git commit -m "feat: allpath-trade status CLI and README quickstart
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
@@ -1638,7 +1638,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ## Phase 1 Definition of Done
 
 - `uv run pytest` green; `uv run ruff check .` clean.
-- With real Alpaca paper keys in `.env`: `uv run tradewind status` prints the
+- With real Alpaca paper keys in `.env`: `uv run allpath-trade status` prints the
   paper account, and `uv run pytest -m integration` passes.
 - No code path submits an order without passing `RiskGate.check` (only
   `Executor.execute` calls `broker.submit_order` outside tests).

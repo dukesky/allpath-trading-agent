@@ -1,8 +1,8 @@
-from tradewind.agent.memory_tools import register_memory_tools
-from tradewind.agent.tools import ToolRegistry
-from tradewind.llm.base import ToolCall
-from tradewind.memory.store import MemoryStore
-from tradewind.store.db import connect
+from allpath_trade.agent.memory_tools import register_memory_tools
+from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.llm.base import ToolCall
+from allpath_trade.memory.store import MemoryStore
+from allpath_trade.store.db import connect
 
 
 def make(tmp_path):
