@@ -273,3 +273,24 @@ def test_agent_failure_leaves_trigger_queued(tmp_path):
     assert report.outcomes[0].disposition == "queued"
     assert "review failed" in report.outcomes[0].detail
     assert q.get(1)["status"] == "pending"
+
+
+def test_auto_soft_agent_execute_but_executor_fails_reports_error(tmp_path):
+    s, _store, _ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"), fail=True)
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "error"
+    assert "execution failed" in o.detail
+    row = q.get(1)
+    assert row["status"] == "approved"       # truthfully claimed
+    assert "error" in (row["execution_result"] or "")
+    assert len(n.sent) == 1                  # user still notified
+
+
+def test_confirm_detail_includes_recommendation_and_reasoning(tmp_path):
+    s, _store, _ex, _q, _n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert "execute" in o.detail and "because" in o.detail

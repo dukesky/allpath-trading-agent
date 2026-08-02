@@ -6,9 +6,9 @@ from pydantic import BaseModel
 
 from tradewind.broker.base import Broker, Position
 from tradewind.data.base import DataSource
-from tradewind.execution import Executor
+from tradewind.execution import ExecutionError, Executor
 from tradewind.notify.base import Notifier
-from tradewind.store.reviews import ReviewQueue
+from tradewind.store.reviews import ReviewError, ReviewQueue
 from tradewind.strategy.actions import parse_action, to_order_intent
 from tradewind.strategy.conditions import evaluate_condition
 from tradewind.strategy.model import (
@@ -154,24 +154,47 @@ class Sentinel:
     def _agent_review(self, rid: int, doc: StrategyDoc, rule_id: str,
                       rule_type: RuleType) -> TriggerOutcome:
         base = {"strategy_id": doc.id, "rule_id": rule_id}
+        # Analysis phase: the review row is still pending here, so any
+        # failure genuinely leaves it "queued" — the invariant holds.
         try:
             analysis = self.review_agent.analyze(dict(self.queue.get(rid)))
             self.queue.attach_analysis(rid, analysis.model_dump_json())
-            autonomous = (doc.authorization == Authorization.AUTO
-                          and rule_type == RuleType.SOFT)
-            if not autonomous:
-                return TriggerOutcome(**base, disposition="queued",
-                                      detail="analysis attached: "
-                                             f"{analysis.recommendation}")
-            if analysis.recommendation == "execute":
-                result = self.queue.approve(rid)
-                detail = ("agent-approved; submitted" if result.submitted else
-                          "agent-approved; risk gate rejected: "
-                          + "; ".join(result.decision.reasons))
-                return TriggerOutcome(**base, disposition="executed", detail=detail)
-            self.queue.reject(rid, note=analysis.reasoning[:500])
-            return TriggerOutcome(**base, disposition="skipped",
-                                  detail=f"agent: {analysis.reasoning[:120]}")
         except Exception as exc:  # noqa: BLE001 — a failed review must never lose the trigger
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
+
+        autonomous = (doc.authorization == Authorization.AUTO
+                      and rule_type == RuleType.SOFT)
+        if not autonomous:
+            return TriggerOutcome(**base, disposition="queued",
+                                  detail="analysis attached: "
+                                         f"{analysis.recommendation} — "
+                                         f"{analysis.reasoning[:300]}")
+
+        # Decision phase: once approve()/reject() claims the row, its status
+        # is authoritative in the DB — dispositions here must match it, not
+        # be papered over by a broad except.
+        if analysis.recommendation == "execute":
+            try:
+                result = self.queue.approve(rid)
+            except ExecutionError as exc:
+                return TriggerOutcome(
+                    **base, disposition="error",
+                    detail=f"agent-approved but execution failed: {exc}")
+            except ReviewError as exc:
+                return TriggerOutcome(
+                    **base, disposition="error",
+                    detail=f"review already resolved elsewhere: {exc}")
+            detail = ("agent-approved; submitted" if result.submitted else
+                      "agent-approved; risk gate rejected: "
+                      + "; ".join(result.decision.reasons))
+            return TriggerOutcome(**base, disposition="executed", detail=detail)
+
+        try:
+            self.queue.reject(rid, note=analysis.reasoning[:500])
+        except ReviewError as exc:
+            return TriggerOutcome(
+                **base, disposition="error",
+                detail=f"review already resolved elsewhere: {exc}")
+        return TriggerOutcome(**base, disposition="skipped",
+                              detail=f"agent skip: {analysis.reasoning[:300]}")
