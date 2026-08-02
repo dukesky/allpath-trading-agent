@@ -45,10 +45,30 @@ def test_injection_via_consolidator_is_blocked(tmp_path):
 def test_consolidation_failure_degrades(tmp_path):
     from tradewind.llm.base import LLMError
 
-    c, memory, _obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
+    c, memory, obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
+    obs.add("sentinel", "t/r1 triggered: queued", subject="AAPL")
     out = c.run_daily()
     assert "failed" in out or "llm error" in out
     assert memory.read("profile") == ""
+    # marker NOT advanced: the same event is re-offered on the next run
+    assert not any(r["source"] == "consolidator" for r in obs.recent())
+
+
+def test_daily_with_no_events_short_circuits(tmp_path):
+    llm = ScriptedLLM([])  # any LLM call would blow up: script exhausted
+    c, _memory, _obs = make(tmp_path, llm)
+    assert c.run_daily() == "nothing to consolidate"
+
+
+def test_failed_run_leaves_events_for_next_run(tmp_path):
+    from tradewind.llm.base import LLMError
+
+    c, _memory, obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
+    obs.add("sentinel", "unique-marker-event", subject="AAPL")
+    c.run_daily()
+    c.llm = ScriptedLLM([LLMResponse(text="recovered")])
+    out = c.run_daily()
+    assert out == "recovered"  # events were still there to consolidate
 
 
 def test_post_chat_light_consolidation(tmp_path):

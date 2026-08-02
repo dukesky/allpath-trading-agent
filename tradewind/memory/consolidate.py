@@ -69,15 +69,16 @@ class Consolidator:
             for r in self.journal.recent(limit=20):
                 events.append(f"[trade] {r['ts'][:19]} {r['side']} {r['ticker']}"
                               f" [{r['status']}] {r['reason']}")
-            # No short-circuit on empty events: the daily run always talks to
-            # the LLM (even to say "nothing happened"), so infra/LLM failures
-            # surface every day rather than only on days with new events.
+            if not events:
+                return "nothing to consolidate"
             prompt = CONSOLIDATE_PROMPT.format(
                 events="\n".join(events[-100:]),
                 profile=self.memory.render_for_context("profile") or "(empty)")
             session = AgentSession(self.llm, self._registry(), prompt,
                                    max_iters=self.max_updates)
             summary = session.run_turn("Consolidate now.")
+            if summary.startswith("(llm error:"):
+                return f"consolidation failed: {summary}"
             self.observations.add("consolidator", f"{MARKER}: {summary[:200]}")
             return summary
         except Exception as exc:  # noqa: BLE001 — consolidation must degrade silently
