@@ -108,3 +108,10 @@ def test_load_action_typo_collects_error_not_crash(tmp_path):
     with pytest.raises(StrategyValidationError) as ei:
         load_strategy(write(tmp_path, bad, name="typo.yaml"))
     assert any("add-on-dip" in e for e in ei.value.errors)
+
+
+def test_parse_strategy_text_matches_load(tmp_path):
+    from tradewind.strategy.loader import parse_strategy_text
+
+    doc = parse_strategy_text("aapl-long", GOOD_YAML)
+    assert doc.id == "aapl-long" and doc.position.ticker == "AAPL"
