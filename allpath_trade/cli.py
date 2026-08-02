@@ -180,12 +180,13 @@ CHAT_BANNER = r"""
 """
 
 
-def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
+def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> int:
     from rich.console import Console
     from rich.markdown import Markdown
     from rich.panel import Panel
 
     from allpath_trade.agent.action_tools import register_action_tools
+    from allpath_trade.agent.compact import Compactor
     from allpath_trade.agent.context import build_system_prompt, load_identity
     from allpath_trade.agent.loop import AgentSession
     from allpath_trade.agent.memory_tools import register_memory_tools
@@ -227,8 +228,22 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
                                  strategies=components.strategies,
                                  queue=components.queue,
                                  memory=components.memory)
+    # The terminal chat resumes the same unbounded conversation the web chat
+    # does (allpath_trade/web/chat_service.py ChatService._build) -- without
+    # a Compactor here too, a long-lived interactive session grows its
+    # context forever in exactly the same way. `memory_llm` is normally
+    # supplied by main() (built through the same injectable factory as the
+    # chat-tier `llm`, so tests can script it); build it directly here only
+    # for callers that construct cmd_chat's dependencies themselves.
+    if memory_llm is None:
+        from allpath_trade.llm.factory import build_llm
+
+        memory_llm = build_llm(components.settings, tier="memory")
+    compactor = Compactor(memory_llm, store,
+                          budget_tokens=components.settings.context_budget_tokens)
     session = AgentSession(llm, registry, system, store=store,
-                           conversation_id=cid, on_tool=on_tool)
+                           conversation_id=cid, on_tool=on_tool,
+                           compactor=compactor)
     initial_len = len(session.history)
 
     mode = "paper" if components.broker.is_paper else "LIVE"
@@ -458,12 +473,18 @@ def main(argv: list[str] | None = None,
     if args.command == "chat":
         from allpath_trade.llm.factory import LLMConfigError, build_llm
 
+        factory = llm_factory or build_llm
         try:
-            llm = (llm_factory or build_llm)(settings, "chat")
+            llm = factory(settings, "chat")
+            # Same factory (real or injected) as the chat-tier client, so a
+            # test that scripts one scripts the other: the Compactor's LLM
+            # calls stay fully deterministic instead of quietly reaching a
+            # real provider the moment compaction triggers.
+            memory_llm = factory(settings, "memory")
         except LLMConfigError as exc:
             print(f"LLM not configured: {exc}", file=sys.stderr)
             return 2
-        return cmd_chat(components, llm, new=args.new)
+        return cmd_chat(components, llm, new=args.new, memory_llm=memory_llm)
     if args.command == "memory":
         if args.memory_command == "show":
             from allpath_trade.memory.store import MemoryStore

@@ -5,7 +5,11 @@
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
   <p class="muted" style="font-size:13px;margin:6px 0">
+    {% if item['source'] == 'chat' %}
+    From chat — triggered on <code>{{ item['condition'] }}</code>
+    {% else %}
     {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
+    {% endif %}
   </p>
   {% if item['intent'] %}
   <p style="font-family:var(--mono);font-size:14px;margin:6px 0">

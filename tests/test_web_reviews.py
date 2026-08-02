@@ -163,3 +163,14 @@ def test_http_source_is_rendered_as_a_safe_link(client):
     body = client.get("/reviews").text
     assert 'href="https://example.com/pr"' in body
     assert 'rel="noopener noreferrer"' in body
+
+
+def test_chat_sourced_review_does_not_render_a_bare_strategy_slash_rule(client):
+    # Chat-originated proposals (allpath_trade/web/order_sink.py) have empty
+    # strategy_id/rule_id -- the card must say something sensible for them
+    # instead of the sentinel-card's "{strategy_id}/{rule_id}" fragment.
+    queue_one(client, source="chat", strategy_id="", rule_id="",
+             condition="proposed in conversation")
+    body = client.get("/reviews").text
+    assert "/ — triggered" not in body
+    assert "from chat" in body.lower()

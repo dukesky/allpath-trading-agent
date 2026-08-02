@@ -55,6 +55,10 @@ input, select, textarea { background:var(--bg); color:var(--text);
 .msg.user { display:flex; justify-content:flex-end; }
 .msg.user span { background:var(--surface); border-radius:12px 12px 2px 12px;
   padding:9px 13px; max-width:78%; }
+/* Assistant text is escaped, not rendered as markup (see chat_service.py /
+   _chat_messages.html) -- pre-wrap keeps the model's own line breaks and
+   paragraphing readable without turning its output into live HTML. */
+.msg.assistant { white-space:pre-wrap; word-wrap:break-word; }
 .activity { color:var(--muted); font-size:12px; font-family:var(--mono); }
 pre { font-family:var(--mono); font-size:13px; overflow-x:auto;
   background:var(--surface); border:1px solid var(--line);

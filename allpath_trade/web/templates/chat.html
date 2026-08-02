@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Chat · AllPath Trade{% endblock %}
+{% block content %}
+{% include "_chat_messages.html" %}
+<form hx-post="/chat/send" hx-target="#messages" hx-swap="outerHTML"
+      hx-on::after-request="this.reset()" class="row" style="margin-top:18px">
+  <input name="message" placeholder="Ask your agent anything" autocomplete="off" autofocus>
+  <button class="primary" type="submit">Send</button>
+</form>
+<p class="hint">Orders and strategy changes always wait for your approval.</p>
+{% endblock %}

@@ -1,7 +1,9 @@
 from decimal import Decimal
+from typing import ClassVar
 
 from allpath_trade.broker.base import Account, Broker, Position
-from allpath_trade.cli import main
+from allpath_trade.cli import cmd_chat, main
+from allpath_trade.config import Settings
 
 
 class FakeBroker(Broker):
@@ -181,3 +183,53 @@ def test_serve_ensures_token_before_constructing_the_app(tmp_path, monkeypatch):
 
     assert code == 0
     assert seen["web_token"] != ""
+
+
+class SpyCompactor:
+    """Stands in for allpath_trade.agent.compact.Compactor so a test can
+    inspect what cmd_chat constructed it with, without needing a real LLM
+    call or a conversation big enough to trigger compaction."""
+
+    instances: ClassVar[list["SpyCompactor"]] = []
+
+    def __init__(self, llm, store, budget_tokens=60_000, on_before_compact=None):
+        self.llm = llm
+        self.store = store
+        self.budget_tokens = budget_tokens
+        self.on_before_compact = on_before_compact
+        SpyCompactor.instances.append(self)
+
+    def maybe_compact(self, conversation_id, history):
+        return list(history), history
+
+
+def test_chat_wires_a_compactor_from_the_configured_context_budget(tmp_path, monkeypatch):
+    # cmd_chat resumes the same unbounded conversation the web chat does
+    # (allpath_trade/cli.py), so it needs the same Compactor the web wires
+    # in ChatService._build -- otherwise a long-lived terminal session grows
+    # its context forever.
+    from allpath_trade.app import build_components
+    from allpath_trade.llm.base import LLMResponse
+    from tests.test_agent_loop import ScriptedLLM
+
+    monkeypatch.chdir(tmp_path)
+    SpyCompactor.instances = []
+    monkeypatch.setattr("allpath_trade.agent.compact.Compactor", SpyCompactor)
+
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory",
+                        openrouter_api_key="k", context_budget_tokens=12345)
+    settings.strategies_dir.mkdir()
+    llm = ScriptedLLM([LLMResponse(text="hi there")])
+    monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
+                        lambda settings, tier="chat": llm)
+    components = build_components(settings, broker=FakeBroker())
+
+    inputs = iter(["hello", "/exit"])
+    code = cmd_chat(components, llm, new=False,
+                    input_fn=lambda prompt="": next(inputs))
+
+    assert code == 0
+    assert len(SpyCompactor.instances) == 1
+    assert SpyCompactor.instances[0].budget_tokens == 12345

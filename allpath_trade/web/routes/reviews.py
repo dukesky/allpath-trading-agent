@@ -54,10 +54,19 @@ def _back_to_reviews(error: str | None = None) -> RedirectResponse:
     return RedirectResponse(target, status_code=303)
 
 
+def _echo_resolution(request: Request, review_id: int, row_source: str, summary: str) -> None:
+    # Only chat-sourced reviews have a live conversation to report back
+    # into; a sentinel-triggered row has no ChatService turn waiting on it.
+    service = getattr(request.app.state, "chat", None)
+    if service is not None and row_source == "chat":
+        service.note_resolution(f"You resolved #{review_id}. Result: {summary}")
+
+
 @router.post("/reviews/{review_id}/approve")
 def approve(request: Request, review_id: int) -> Response:
     c = request.app.state.holder.get()
     try:
+        row_source = c.queue.get(review_id)["source"]
         result = c.queue.approve(review_id)
     except ReviewError as exc:
         # Nothing was claimed: the atomic UPDATE never matched a pending
@@ -68,10 +77,14 @@ def approve(request: Request, review_id: int) -> Response:
         # The review WAS claimed (status is already "approved" in the
         # store) before the broker call failed. The user has to reason
         # about a claimed-but-unknown-outcome order, not a no-op.
+        _echo_resolution(request, review_id, row_source, f"execution failed: {exc}")
         return _back_to_reviews(f"Review claimed, but execution failed: {exc}")
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
+        _echo_resolution(request, review_id, row_source,
+                         f"blocked by the risk gate ({reasons})")
         return _back_to_reviews(f"Rejected by the risk gate: {reasons}")
+    _echo_resolution(request, review_id, row_source, "order submitted")
     return _back_to_reviews()
 
 
@@ -79,7 +92,10 @@ def approve(request: Request, review_id: int) -> Response:
 def reject(request: Request, review_id: int, note: str = Form("")) -> Response:
     c = request.app.state.holder.get()
     try:
+        row_source = c.queue.get(review_id)["source"]
         c.queue.reject(review_id, note)
     except ReviewError as exc:
         return _back_to_reviews(f"Not processed: {exc}")
+    summary = f"rejected ({note})" if note else "rejected"
+    _echo_resolution(request, review_id, row_source, summary)
     return _back_to_reviews()

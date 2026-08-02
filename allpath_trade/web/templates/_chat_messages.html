@@ -1,0 +1,26 @@
+<div id="messages">
+{% for m in messages %}
+  {% if m['role'] == 'user' %}
+    <div class="msg user"><span>{{ m['content'] }}</span></div>
+  {% elif m['role'] == 'assistant' and m['content'] %}
+    <div class="msg assistant">{{ m['content'] }}</div>
+  {% endif %}
+{% endfor %}
+{% if activity %}<div class="activity">{{ activity | join(' · ') }}</div>{% endif %}
+{% for id, item in pending.items() %}
+  {% if item['source'] == 'chat' %}
+  <div class="card" style="margin:12px 0">
+    <div class="row">
+      <strong>Waiting for your approval</strong>
+      <span style="margin-left:auto" class="muted">#{{ id }}</span>
+    </div>
+    <p style="font-family:var(--mono);margin:8px 0">{{ item['action'] }} · {{ item['ticker'] }}</p>
+    <p class="muted" style="font-size:13px;margin:0">Risk pre-check: {{ item['risk_preview'] or 'not checked' }}</p>
+    <div class="row" style="margin-top:12px">
+      <form method="post" action="/reviews/{{ id }}/approve"><button class="primary" type="submit">Approve</button></form>
+      <form method="post" action="/reviews/{{ id }}/reject"><button class="danger" type="submit">Reject</button></form>
+    </div>
+  </div>
+  {% endif %}
+{% endfor %}
+</div>
