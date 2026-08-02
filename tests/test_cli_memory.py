@@ -54,3 +54,10 @@ def test_memory_show_layer_without_key_friendly_error(tmp_path, capsys, monkeypa
     code = main(["memory", "show", "--layer", "strategy"])
     assert code == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_no_args_prints_overview(capsys):
+    code = main([])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "typical workflow" in out and "chat" in out and "memory" in out

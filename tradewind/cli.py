@@ -219,6 +219,7 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
 
     # Colored input prompt only on a real terminal (tests/pipes get plain text).
     prompt = "\x1b[1;36myou ▸ \x1b[0m" if sys.stdout.isatty() else "you ▸ "
+    interrupted_once = False
     while True:
         try:
             user = input_fn(prompt)
@@ -226,49 +227,137 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
             console.print()
             _finish()
             return 0
+        except KeyboardInterrupt:
+            if interrupted_once:
+                console.print()
+                _finish()
+                console.print("[dim]bye — the sentinel keeps watching your rules.[/dim]")
+                return 0
+            interrupted_once = True
+            console.print("\n[dim](ctrl+c again to exit, or keep typing)[/dim]")
+            continue
+        interrupted_once = False
         if user.strip() in ("/exit", "/quit"):
             _finish()
             console.print("[dim]bye — the sentinel keeps watching your rules.[/dim]")
             return 0
         if not user.strip():
             continue
-        reply = session.run_turn(user)
+        try:
+            reply = session.run_turn(user)
+        except KeyboardInterrupt:
+            console.print("\n[dim](interrupted — the reply was discarded)[/dim]")
+            continue
         console.print("\n[bold magenta]◆ tradewind[/bold magenta]")
         console.print(Markdown(reply or "(no reply)"))
         console.print()
 
 
+CLI_DESCRIPTION = """\
+tradewind — a self-hosted, LLM-powered mid/long-term trading agent.
+
+typical workflow:
+  1. tradewind status              check your (paper) brokerage connection
+  2. tradewind chat                talk to the agent, co-create strategies
+  3. tradewind strategies          see what the sentinel is watching
+  4. tradewind run                 start the hourly monitoring daemon
+  5. tradewind reviews list        act on triggers awaiting your approval
+"""
+
+CLI_EPILOG = """\
+examples:
+  tradewind chat --new                       start a fresh conversation
+  tradewind rearm aapl-long stop-loss        re-arm a triggered rule
+  tradewind reviews approve 3                execute pending review #3
+  tradewind memory show --layer stock --key AAPL
+                                             read the agent's AAPL dossier
+
+keys live in .env (see .env.example). Read-only commands (strategies, rearm,
+reviews list/reject, memory show) work without any keys.
+"""
+
+
 def main(argv: list[str] | None = None,
          broker_factory: Callable[[Settings], Broker] | None = None,
          llm_factory: Callable[[Settings, str], LLMClient] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="tradewind")
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status", help="show account, positions, recent trades")
-    sub.add_parser("check", help="run one sentinel pass now")
-    sub.add_parser("run", help="run the sentinel daemon")
-    sub.add_parser("strategies", help="list strategies and rule states")
-    p_rearm = sub.add_parser("rearm", help="re-arm a triggered rule")
-    p_rearm.add_argument("strategy_id")
-    p_rearm.add_argument("rule_id")
-    p_reviews = sub.add_parser("reviews", help="pending trigger reviews")
-    rsub = p_reviews.add_subparsers(dest="reviews_command", required=True)
-    rsub.add_parser("list")
-    p_app = rsub.add_parser("approve")
-    p_app.add_argument("review_id", type=int)
-    p_rej = rsub.add_parser("reject")
-    p_rej.add_argument("review_id", type=int)
-    p_rej.add_argument("--note", default="")
-    p_chat = sub.add_parser("chat", help="talk to the agent")
+    parser = argparse.ArgumentParser(
+        prog="tradewind", description=CLI_DESCRIPTION, epilog=CLI_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                metavar="<command>")
+    sub.add_parser(
+        "status", help="show account, positions, recent trades",
+        description="Show brokerage account (equity/cash/buying power), open "
+                    "positions, and the last 5 journaled trades. "
+                    "Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in .env.")
+    sub.add_parser(
+        "check", help="run one sentinel pass now",
+        description="Evaluate every armed rule of every active strategy once, "
+                    "right now — useful for testing a strategy you just wrote. "
+                    "Hard rules on auto-strategies may EXECUTE (paper) trades.")
+    sub.add_parser(
+        "run", help="run the monitoring daemon",
+        description="Long-running daemon: sentinel pass every "
+                    "SENTINEL_INTERVAL_MINUTES (default 60) during US market "
+                    "hours, plus the daily memory consolidation after close.")
+    sub.add_parser(
+        "strategies", help="list strategies and rule states",
+        description="List every strategy YAML in strategies/ with its status, "
+                    "authorization level, and each rule's armed/triggered state. "
+                    "Works without any keys.")
+    p_rearm = sub.add_parser(
+        "rearm", help="re-arm a triggered rule",
+        description="Rules fire once, then stay 'triggered' until re-armed. "
+                    "Example: tradewind rearm aapl-long stop-loss")
+    p_rearm.add_argument("strategy_id", help="strategy file name without .yaml")
+    p_rearm.add_argument("rule_id", help="rule id inside the strategy")
+    p_reviews = sub.add_parser(
+        "reviews", help="approve/reject triggers awaiting review",
+        description="Soft-rule triggers (and everything on confirm-level "
+                    "strategies) queue here with the agent's analysis attached. "
+                    "Approving executes through the risk gate.")
+    rsub = p_reviews.add_subparsers(dest="reviews_command", required=True,
+                                    metavar="<action>")
+    rsub.add_parser("list", help="list pending reviews")
+    p_app = rsub.add_parser("approve", help="execute a pending review (needs keys)")
+    p_app.add_argument("review_id", type=int, help="id from 'reviews list'")
+    p_rej = rsub.add_parser("reject", help="dismiss a pending review")
+    p_rej.add_argument("review_id", type=int, help="id from 'reviews list'")
+    p_rej.add_argument("--note", default="", help="reason, stored for the record")
+    p_chat = sub.add_parser(
+        "chat", help="talk to the agent",
+        description="Interactive chat with the trading agent: discuss stocks, "
+                    "research with live data + web search, draft strategies, "
+                    "propose orders. Every order and strategy change asks for "
+                    "your y/N confirmation. Requires Alpaca + LLM keys in .env. "
+                    "Exit with /exit, ctrl+d, or ctrl+c twice.")
     p_chat.add_argument("--new", action="store_true",
-                        help="start a new conversation instead of resuming")
-    p_mem = sub.add_parser("memory", help="curated agent memory")
-    msub = p_mem.add_subparsers(dest="memory_command", required=True)
-    m_show = msub.add_parser("show")
+                        help="start a new conversation instead of resuming the last")
+    p_mem = sub.add_parser(
+        "memory", help="inspect or consolidate the agent's memory",
+        description="The agent's curated memory lives in memory/ as plain "
+                    "markdown you can read and edit. Layers: profile, strategy, "
+                    "stock, lesson.")
+    msub = p_mem.add_subparsers(dest="memory_command", required=True,
+                                metavar="<action>")
+    m_show = msub.add_parser(
+        "show", help="list memory files, or print one layer",
+        description="Without arguments: list all memory files with sizes. "
+                    "With --layer (and --key for strategy/stock/lesson): print "
+                    "that file. Works without any keys.")
     m_show.add_argument("--layer", default=None,
-                        help="memory layer (profile, strategy, stock, lesson)")
+                        help="profile | strategy | stock | lesson")
     m_show.add_argument("--key", default=None,
-                        help="memory key (strategy/stock name)")
-    msub.add_parser("consolidate")
+                        help="strategy id / ticker / lesson slug")
+    msub.add_parser(
+        "consolidate", help="distill recent events into memory now (needs LLM key)",
+        description="Manually run the daily consolidation pass: recent trades, "
+                    "triggers, and observations are distilled into the curated "
+                    "memory layers. Normally runs automatically after close.")
+
+    if argv is not None and len(argv) == 0:
+        parser.print_help()
+        return 0
     args = parser.parse_args(argv)
 
     settings = SettingsStore().load()

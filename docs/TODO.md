@@ -48,3 +48,4 @@
 - [ ] 一字母 ticker 的 lessons 匹配已用词边界修复；更长期可给 lessons 加 frontmatter tickers 字段做精确匹配
 - [ ] observations.recent() 大积压时取最旧 200 条——积压场景应改为取最新
 - [ ] 上下文个股档案包含非 active 策略的 ticker（轻微膨胀，预算兜底）
+- [ ] 提炼频率/开关做成配置项（`DAILY_CONSOLIDATION=true`、`CONSOLIDATE_AFTER_CHAT=true`、收盘后时间点可调）——归入 Phase 5 设置页一起做

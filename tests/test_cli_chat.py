@@ -124,3 +124,36 @@ def test_chat_eof_runs_same_post_chat_consolidation_as_exit(tmp_path, capsys, mo
     memory_file = tmp_path / "memory" / "user_profile.md"
     assert memory_file.exists()
     assert "dividends" in memory_file.read_text()
+
+
+def test_chat_double_ctrl_c_exits_gracefully(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    presses = iter([KeyboardInterrupt, KeyboardInterrupt])
+
+    def raising_input(*a):
+        raise next(presses)
+
+    monkeypatch.setattr("builtins.input", raising_input)
+    code = main(["chat"], broker_factory=lambda s: FakeBroker(),
+                llm_factory=lambda s, tier: ScriptedLLM([]))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "again to exit" in out and "bye" in out
+
+
+def test_chat_single_ctrl_c_continues(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    events = iter([KeyboardInterrupt, "hello", "/exit"])
+
+    def input_or_raise(*a):
+        e = next(events)
+        if e is KeyboardInterrupt:
+            raise e
+        return e
+
+    monkeypatch.setattr("builtins.input", input_or_raise)
+    code = main(["chat"], broker_factory=lambda s: FakeBroker(),
+                llm_factory=lambda s, tier: ScriptedLLM([LLMResponse(text="hi")]))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "again to exit" in out and "hi" in out
