@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,3 +71,94 @@ def test_rebuild_closes_the_old_connection_when_db_path_changes(tmp_path):
     assert original_conn.closed is True
     # The builder was asked to open a fresh connection (no conn handed in).
     assert calls[-1]["conn"] is None
+
+
+def test_overlapping_rebuilds_never_install_a_closed_connection(tmp_path):
+    """Regression test for the race the previous fix wave introduced: two
+    `rebuild()` calls overlapping in time must not let the second one
+    commit a `Components` whose `.conn` the first one already closed (nor
+    abandon a freshly opened connection that nothing ends up closing).
+
+    This drives the exact interleaving from the finding -- "call B
+    snapshots `current` before call A commits, then commits *after* A has
+    committed and closed" -- using one real background thread for the
+    second call, synchronized with `threading.Event`s rather than sleeps
+    so nothing here is timing-dependent. A background thread is required
+    (rather than a nested same-thread call) because proving the fix's lock
+    actually blocks a second caller needs two independent callers
+    contending for the same `Lock` object; a same-thread nested call would
+    just self-deadlock on a non-reentrant lock instead of demonstrating
+    anything.
+
+    Against the pre-fix code (separate, fine-grained lock sections) B is
+    never blocked and reliably finishes inside A's window, reproducing the
+    corrupted-Components outcome deterministically every run. Against the
+    fixed code, B blocks on `_rebuild_lock` until A's commit-and-close has
+    completed, so it always rebuilds from the post-A state instead.
+    """
+    a_path = tmp_path / "a.db"
+    new_path = tmp_path / "new.db"
+    initial = FakeSettings(db_path=a_path)
+
+    created: list[FakeConn] = []
+
+    def make_conn(settings, conn):
+        if conn is not None:
+            return conn
+        fresh = FakeConn(f"conn:{settings.db_path}")
+        created.append(fresh)
+        return fresh
+
+    holder = ComponentHolder(
+        initial,
+        builder=lambda settings, broker, conn: FakeComponents(settings, make_conn(settings, conn)),
+        env_file=tmp_path / ".env",
+    )
+    created.clear()  # don't count the connection opened by __init__
+
+    b_reached_builder = threading.Event()
+    a_finished = threading.Event()
+    thread_b_box: dict[str, threading.Thread] = {}
+
+    def b_builder(settings, broker, conn):
+        # B has already read `current` and decided its branch (that
+        # happened in the `rebuild()` frame calling this). Signal that,
+        # then wait for A to fully finish (commit + close) before
+        # returning -- the very next thing B's `rebuild()` does with this
+        # return value is commit it, so this forces B's commit to land
+        # strictly after A's close.
+        b_reached_builder.set()
+        a_finished.wait(timeout=2)
+        return FakeComponents(settings, make_conn(settings, conn))
+
+    def a_builder(settings, broker, conn):
+        # Swap the builder before starting B's thread so B's call is
+        # guaranteed to see `b_builder` (not recurse into `a_builder`).
+        holder._builder = b_builder
+        thread_b = threading.Thread(
+            target=holder.rebuild, args=(FakeSettings(db_path=a_path),)
+        )
+        thread_b.start()
+        thread_b_box["thread"] = thread_b
+        # Bounded wait, not a correctness assumption: on the fixed code B
+        # is blocked on `_rebuild_lock` (still held by this call) and this
+        # reliably times out -- that's the fix working, not a failure. On
+        # the pre-fix code B is never blocked and reliably signals well
+        # within this window.
+        b_reached_builder.wait(timeout=1)
+        return FakeComponents(settings, make_conn(settings, conn))
+
+    holder._builder = a_builder
+    holder.rebuild(FakeSettings(db_path=new_path))  # this is "A"
+    a_finished.set()  # release B (if it was waiting) now that A has committed+closed
+
+    thread_b = thread_b_box["thread"]
+    thread_b.join(timeout=2)
+    assert not thread_b.is_alive(), "B's rebuild() never completed"
+
+    live = holder.get().conn
+    assert live.closed is False, "the live connection must never be a closed one"
+    for conn in created:
+        assert conn is live or conn.closed, (
+            f"connection {conn.tag} is neither the live connection nor closed -- leaked"
+        )
