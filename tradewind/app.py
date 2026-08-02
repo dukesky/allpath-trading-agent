@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 from tradewind.broker.base import Broker
@@ -29,6 +30,7 @@ class Components:
     strategies: StrategyStore
     notifier: Notifier
     sentinel: Sentinel
+    conn: sqlite3.Connection
 
 
 def build_components(settings: Settings, broker: Broker | None = None) -> Components:
@@ -47,6 +49,21 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
     strategies = StrategyStore(settings.strategies_dir, conn)
     notifier = build_notifier(settings)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier)
+    try:
+        from tradewind.agent.readonly_tools import register_readonly_tools
+        from tradewind.agent.review import ReviewAgent
+        from tradewind.agent.tools import ToolRegistry
+        from tradewind.llm.factory import LLMConfigError, build_llm
+
+        review_llm = build_llm(settings, tier="review")
+        review_registry = ToolRegistry()
+        register_readonly_tools(review_registry, data=data, broker=broker,
+                                journal=journal, strategies=strategies,
+                                queue=queue)
+        sentinel.review_agent = ReviewAgent(review_llm, review_registry)
+    except LLMConfigError:
+        pass  # no LLM configured: Phase 2 behavior
     return Components(settings=settings, broker=broker, data=data, journal=journal,
                       gate=gate, executor=executor, queue=queue,
-                      strategies=strategies, notifier=notifier, sentinel=sentinel)
+                      strategies=strategies, notifier=notifier, sentinel=sentinel,
+                      conn=conn)

@@ -105,6 +105,12 @@ class ReviewQueue:
         self._conn.commit()
         return result
 
+    def attach_analysis(self, review_id: int, analysis_json: str) -> None:
+        self._conn.execute(
+            "UPDATE pending_reviews SET agent_analysis = ? WHERE id = ?",
+            (analysis_json, review_id))
+        self._conn.commit()
+
     def reject(self, review_id: int, note: str = "") -> None:
         # Fetch row first to check existence
         row = self.get(review_id)

@@ -6,9 +6,9 @@ from pydantic import BaseModel
 
 from tradewind.broker.base import Broker, Position
 from tradewind.data.base import DataSource
-from tradewind.execution import Executor
+from tradewind.execution import ExecutionError, Executor
 from tradewind.notify.base import Notifier
-from tradewind.store.reviews import ReviewQueue
+from tradewind.store.reviews import ReviewError, ReviewQueue
 from tradewind.strategy.actions import parse_action, to_order_intent
 from tradewind.strategy.conditions import evaluate_condition
 from tradewind.strategy.model import (
@@ -39,13 +39,14 @@ class Sentinel:
 
     def __init__(self, strategies: StrategyStore, data: DataSource,
                  broker: Broker, executor: Executor, queue: ReviewQueue,
-                 notifier: Notifier) -> None:
+                 notifier: Notifier, review_agent=None) -> None:
         self.strategies = strategies
         self.data = data
         self.broker = broker
         self.executor = executor
         self.queue = queue
         self.notifier = notifier
+        self.review_agent = review_agent
 
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
@@ -141,8 +142,68 @@ class Sentinel:
                                   disposition="rejected",
                                   detail="; ".join(result.decision.reasons))
         # confirm auth (both types), or auto+soft
-        self.queue.add(strategy_id=doc.id, rule_id=rule_id, ticker=doc.position.ticker,
-                       rule_type=rule_type.value, condition=condition, action=action,
-                       snapshot=snapshot, intent=intent)
-        return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                              disposition="queued")
+        rid = self.queue.add(strategy_id=doc.id, rule_id=rule_id,
+                             ticker=doc.position.ticker, rule_type=rule_type.value,
+                             condition=condition, action=action,
+                             snapshot=snapshot, intent=intent)
+        if self.review_agent is None:
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="queued")
+        return self._agent_review(rid, doc, rule_id, rule_type)
+
+    def _agent_review(self, rid: int, doc: StrategyDoc, rule_id: str,
+                      rule_type: RuleType) -> TriggerOutcome:
+        base = {"strategy_id": doc.id, "rule_id": rule_id}
+        # Analysis phase: the review row is still pending here, so any
+        # failure genuinely leaves it "queued" — the invariant holds.
+        try:
+            analysis = self.review_agent.analyze(dict(self.queue.get(rid)))
+            self.queue.attach_analysis(rid, analysis.model_dump_json())
+        except Exception as exc:  # noqa: BLE001 — a failed review must never lose the trigger
+            return TriggerOutcome(**base, disposition="queued",
+                                  detail=f"agent review failed: {exc}")
+
+        if analysis.reasoning.startswith("unparseable analysis:"):
+            # The LLM's output couldn't be parsed as a recommendation at all —
+            # this is not a genuine "skip" decision, so don't act on it.
+            # Leave the trigger pending for human review.
+            return TriggerOutcome(
+                **base, disposition="queued",
+                detail="analysis unparseable — left for human review")
+
+        autonomous = (doc.authorization == Authorization.AUTO
+                      and rule_type == RuleType.SOFT)
+        if not autonomous:
+            return TriggerOutcome(**base, disposition="queued",
+                                  detail="analysis attached: "
+                                         f"{analysis.recommendation} — "
+                                         f"{analysis.reasoning[:300]}")
+
+        # Decision phase: once approve()/reject() claims the row, its status
+        # is authoritative in the DB — dispositions here must match it, not
+        # be papered over by a broad except.
+        if analysis.recommendation == "execute":
+            try:
+                result = self.queue.approve(rid)
+            except ExecutionError as exc:
+                return TriggerOutcome(
+                    **base, disposition="error",
+                    detail=f"agent-approved but execution failed: {exc}")
+            except ReviewError as exc:
+                return TriggerOutcome(
+                    **base, disposition="error",
+                    detail=f"review already resolved elsewhere: {exc}")
+            detail = ("agent-approved; submitted" if result.submitted else
+                      "agent-approved; risk gate rejected: "
+                      + "; ".join(result.decision.reasons))
+            disposition = "executed" if result.submitted else "rejected"
+            return TriggerOutcome(**base, disposition=disposition, detail=detail)
+
+        try:
+            self.queue.reject(rid, note=analysis.reasoning[:500])
+        except ReviewError as exc:
+            return TriggerOutcome(
+                **base, disposition="error",
+                detail=f"review already resolved elsewhere: {exc}")
+        return TriggerOutcome(**base, disposition="skipped",
+                              detail=f"agent skip: {analysis.reasoning[:300]}")

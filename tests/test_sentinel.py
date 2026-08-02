@@ -223,3 +223,106 @@ def test_one_bad_yaml_does_not_halt_other_strategies(tmp_path):
     report = s.run_once()
     assert report.strategies_checked == 1
     assert report.errors and any("bad.yaml" in e for e in report.errors)
+
+
+class StubReviewAgent:
+    def __init__(self, recommendation="execute", fail=False):
+        self.recommendation = recommendation
+        self.fail = fail
+
+    def analyze(self, review):
+        from tradewind.agent.review import ReviewAnalysis
+        if self.fail:
+            raise RuntimeError("llm down")
+        return ReviewAnalysis(recommendation=self.recommendation, reasoning="because")
+
+
+def test_auto_soft_with_agent_execute_recommendation(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "executed"
+    assert len(ex.calls) == 1
+    row = q.get(1)
+    assert row["status"] == "approved" and "because" in row["agent_analysis"]
+
+
+def test_auto_soft_with_agent_skip_recommendation(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent("skip")
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "skipped"
+    assert ex.calls == []
+    assert q.get(1)["status"] == "rejected"
+
+
+def test_confirm_with_agent_attaches_analysis_stays_queued(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "queued"
+    row = q.get(1)
+    assert row["status"] == "pending" and row["agent_analysis"]
+    assert ex.calls == []
+
+
+def test_agent_failure_leaves_trigger_queued(tmp_path):
+    s, _store, _ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent(fail=True)
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "queued"
+    assert "review failed" in report.outcomes[0].detail
+    assert q.get(1)["status"] == "pending"
+
+
+def test_auto_soft_agent_execute_but_executor_fails_reports_error(tmp_path):
+    s, _store, _ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"), fail=True)
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "error"
+    assert "execution failed" in o.detail
+    row = q.get(1)
+    assert row["status"] == "approved"       # truthfully claimed
+    assert "error" in (row["execution_result"] or "")
+    assert len(n.sent) == 1                  # user still notified
+
+
+def test_auto_soft_with_unparseable_analysis_stays_pending(tmp_path):
+    from tradewind.agent.review import ReviewAnalysis
+
+    class UnparseableStub:
+        def analyze(self, review):
+            return ReviewAnalysis(recommendation="skip",
+                                  reasoning="unparseable analysis: garbage")
+
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = UnparseableStub()
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "queued"
+    assert "unparseable" in o.detail
+    row = q.get(1)
+    assert row["status"] == "pending"
+    assert ex.calls == []
+
+
+def test_auto_soft_agent_execute_but_gate_rejects_reports_rejected(tmp_path):
+    s, _store, ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    ex.reject_reasons = ["exceeds max position size"]
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "rejected"
+    assert "risk gate" in o.detail and "exceeds max position size" in o.detail
+    row = q.get(1)
+    assert row["status"] == "approved"       # agent's decision truthfully recorded
+    assert len(n.sent) == 1
+
+
+def test_confirm_detail_includes_recommendation_and_reasoning(tmp_path):
+    s, _store, _ex, _q, _n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert "execute" in o.detail and "because" in o.detail

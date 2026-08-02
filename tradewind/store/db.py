@@ -51,7 +51,33 @@ CREATE TABLE IF NOT EXISTS pending_reviews (
     resolution_note TEXT,
     execution_result TEXT
 );
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_ts TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    message TEXT NOT NULL
+);
 """
+
+
+_MIGRATIONS = [
+    "ALTER TABLE pending_reviews ADD COLUMN agent_analysis TEXT",
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -62,4 +88,5 @@ def connect(path: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn

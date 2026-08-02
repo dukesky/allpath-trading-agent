@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -9,6 +10,12 @@ from tradewind.strategy.actions import ActionError, parse_action
 from tradewind.strategy.conditions import ConditionError, parse_condition
 from tradewind.strategy.model import StrategyDoc
 
+_VALID_STRATEGY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def is_valid_strategy_id(strategy_id: str) -> bool:
+    return bool(_VALID_STRATEGY_ID.match(strategy_id))
+
 
 class StrategyValidationError(Exception):
     def __init__(self, strategy_id: str, errors: list[str]) -> None:
@@ -17,11 +24,22 @@ class StrategyValidationError(Exception):
         super().__init__(f"invalid strategy '{strategy_id}': " + "; ".join(errors))
 
 
-def load_strategy(path: Path) -> StrategyDoc:
-    strategy_id = path.stem
+def parse_strategy_text(strategy_id: str, text: str) -> StrategyDoc:
+    """Parse and validate strategy YAML text.
+
+    Args:
+        strategy_id: The strategy identifier
+        text: The YAML text to parse
+
+    Returns:
+        Parsed and validated StrategyDoc
+
+    Raises:
+        StrategyValidationError: If parsing or validation fails
+    """
     errors: list[str] = []
     try:
-        raw = yaml.safe_load(path.read_text())
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise StrategyValidationError(strategy_id, [f"YAML parse error: {exc}"]) from exc
     if not isinstance(raw, dict):
@@ -47,3 +65,19 @@ def load_strategy(path: Path) -> StrategyDoc:
     if errors:
         raise StrategyValidationError(strategy_id, errors)
     return doc
+
+
+def load_strategy(path: Path) -> StrategyDoc:
+    """Load a strategy from a YAML file.
+
+    Args:
+        path: Path to the YAML file
+
+    Returns:
+        Parsed and validated StrategyDoc
+
+    Raises:
+        StrategyValidationError: If parsing or validation fails
+        FileNotFoundError: If the file doesn't exist
+    """
+    return parse_strategy_text(path.stem, path.read_text())
