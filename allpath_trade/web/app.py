@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings
+from allpath_trade.web.auth import install_auth
 from allpath_trade.web.deps import ComponentHolder
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -55,6 +56,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app.state.holder = ComponentHolder(settings, broker)
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    install_auth(app)
 
     @app.get("/healthz")
     def healthz() -> dict:

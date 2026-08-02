@@ -58,6 +58,11 @@ def cmd_serve(settings: Settings, host: str | None, port: int | None) -> int:
     app = create_app(settings, start_scheduler=True)
     shown = "localhost" if host in {"127.0.0.1", "localhost"} else host
     print(f"[allpath-trade] http://{shown}:{port}")
+
+    from allpath_trade.web.auth import ensure_token
+
+    token = ensure_token(SettingsStore(), settings)
+    print(f"[allpath-trade] access token: {token}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · AllPath Trade</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="centered">
+  <form class="card login" method="post" action="/login">
+    <h1>allpath trade</h1>
+    <p class="muted">Enter your access token to continue</p>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <input type="password" name="token" autofocus autocomplete="current-password">
+    <label class="check"><input type="checkbox" name="remember" value="1"> Remember me on this device</label>
+    <button type="submit" class="primary">Sign in</button>
+    <p class="hint">The token is printed by <code>allpath-trade serve</code> and stored as <code>WEB_TOKEN</code> in <code>.env</code>.</p>
+  </form>
+</body>
+</html>
