@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
-    chat_model: str = "anthropic/claude-sonnet-4.5"
+    chat_model: str = "anthropic/claude-sonnet-5"
     review_model: str = "anthropic/claude-haiku-4.5"
     memory_dir: Path = Path("memory")
 
