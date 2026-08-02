@@ -77,8 +77,8 @@ class Consolidator:
             session = AgentSession(self.llm, self._registry(), prompt,
                                    max_iters=self.max_updates)
             summary = session.run_turn("Consolidate now.")
-            if summary.startswith("(llm error:"):
-                return f"consolidation failed: {summary}"
+            if summary.startswith(("(llm error:", "(stopped:")):
+                return f"consolidation incomplete: {summary}"
             self.observations.add("consolidator", f"{MARKER}: {summary[:200]}")
             return summary
         except Exception as exc:  # noqa: BLE001 — consolidation must degrade silently
