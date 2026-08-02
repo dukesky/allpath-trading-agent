@@ -41,3 +41,10 @@
 - [ ] store/db `_migrate` 的 except OperationalError 会吞掉 "database is locked"——改为先查 PRAGMA table_info 或匹配错误消息
 - [ ] draft_strategy 保存的 YAML 含 `id:` 字段（loader 会用文件名覆盖，无害但与手写文件风格不一致）
 - [ ] chat REPL：assistant 空文本时打印空行 `agent> `
+
+## Phase 4 终审遗留（小项）
+- [ ] `tradewind/memory/store.py` 的 `MemoryError` 与内置异常同名——Phase 5 前重命名为 `MemoryStoreError`（保留别名）
+- [ ] consolidator 每日日期跟踪为进程内状态，重启后当日重跑（与 marker 过滤配合后已是无害 no-op，仍值得持久化）
+- [ ] 一字母 ticker 的 lessons 匹配已用词边界修复；更长期可给 lessons 加 frontmatter tickers 字段做精确匹配
+- [ ] observations.recent() 大积压时取最旧 200 条——积压场景应改为取最新
+- [ ] 上下文个股档案包含非 active 策略的 ticker（轻微膨胀，预算兜底）
