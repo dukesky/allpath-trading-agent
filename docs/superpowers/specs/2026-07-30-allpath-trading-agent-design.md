@@ -187,7 +187,7 @@ review:
 
 ### LLM 层（allpath_trade/llm/）
 - 统一接口 `LLMClient.complete(messages, tools) -> text | tool_calls`；两个实现：**OpenAICompatClient**（openai SDK + base_url，覆盖 OpenRouter 与 OpenAI 直连）、**AnthropicClient**（anthropic SDK 原生）。
-- 配置：`LLM_PROVIDER=openrouter|openai|anthropic` + key + 双档模型 `CHAT_MODEL`（对话/策略共创，强模型）/ `REVIEW_MODEL`（哨兵复核，可用中档）。测试默认 OpenRouter。
+- 配置：`LLM_PROVIDER=openrouter|openai|anthropic` + key + 三档模型 `CHAT_MODEL`（对话/策略共创，强模型）/ `REVIEW_MODEL`（哨兵复核，可用中档）/ `MEMORY_MODEL`（记忆提炼，最强档——写错会长期污染上下文）。测试默认 OpenRouter。
 
 ### Agent 工具循环（allpath_trade/agent/）
 - 自研 tool loop（不引重框架）：LLM 工具调用 → 执行 → 回填 → 循环，轮次上限（默认 15）防失控。
@@ -244,7 +244,7 @@ memory/
 
 ### 提炼（consolidation）
 - **每日完整提炼**（收盘后，挂 Phase 2 预留的调度位，强模型）：读当日 trades/触发/复核分析/observations + 当前记忆文件 → 经 memory_update 提出条目级变更（每条仍过扫描）。
-- **对话后轻提炼**（chat 退出时，REVIEW_MODEL 便宜模型）：只读本次对话，只沉淀用户明确表达的偏好/决定。
+- **对话后轻提炼**（chat 退出时，同样走 MEMORY_MODEL）：只读本次对话，只沉淀用户明确表达的偏好/决定。
 - 提炼失败静默降级（观察still在库，下次再炼）；`allpath-trade memory consolidate` 可手动触发。
 
 ### 记忆进上下文

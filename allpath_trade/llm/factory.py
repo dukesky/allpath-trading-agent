@@ -13,7 +13,11 @@ class LLMConfigError(Exception):
 
 
 def build_llm(settings: Settings, tier: str = "chat") -> LLMClient:
-    model = settings.chat_model if tier == "chat" else settings.review_model
+    models = {"chat": settings.chat_model, "review": settings.review_model,
+              "memory": settings.memory_model}
+    if tier not in models:
+        raise LLMConfigError(f"unknown LLM tier: {tier!r}")
+    model = models[tier]
     provider = settings.llm_provider.lower()
     if provider == "openrouter":
         if not settings.openrouter_api_key:

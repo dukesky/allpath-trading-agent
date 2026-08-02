@@ -1,1 +1,5 @@
 - 投资风格：中长线为主，但对中短线波段交易感兴趣。偏好风险控制，采用分批建仓策略。看好科技/AI领域长期增长。
+
+- $100,000 trading account
+
+- NVDA $8,000 existing position; also considering AAPL

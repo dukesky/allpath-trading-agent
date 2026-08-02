@@ -97,7 +97,7 @@ def test_chat_eof_runs_same_post_chat_consolidation_as_exit(tmp_path, capsys, mo
     setup_env(tmp_path, monkeypatch)
 
     chat_llm = ScriptedLLM([LLMResponse(text="hi there")])
-    review_llm = ScriptedLLM([
+    memory_llm = ScriptedLLM([
         tool_response("memory_update",
                       {"layer": "profile", "action": "add",
                        "text": "prefers dividends"}),
@@ -105,7 +105,8 @@ def test_chat_eof_runs_same_post_chat_consolidation_as_exit(tmp_path, capsys, mo
     ])
 
     def fake_build_llm(settings, tier):
-        return review_llm if tier == "review" else chat_llm
+        # consolidation runs on the memory tier, not the sentinel review tier
+        return memory_llm if tier == "memory" else chat_llm
 
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm", fake_build_llm)
 

@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     chat_model: str = "anthropic/claude-sonnet-5"
     review_model: str = "anthropic/claude-haiku-4.5"
+    # Consolidation decides what enters long-term memory; a bad call there
+    # pollutes every later conversation, so it gets the strongest tier.
+    memory_model: str = "anthropic/claude-opus-5"
     memory_dir: Path = Path("memory")
 
 

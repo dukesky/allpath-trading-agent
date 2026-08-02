@@ -71,7 +71,8 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
                                 journal=journal, strategies=strategies,
                                 queue=queue)
         sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
-        consolidator = Consolidator(review_llm, memory, observations, journal, conn)
+        consolidator = Consolidator(build_llm(settings, tier="memory"), memory,
+                                    observations, journal, conn)
     except LLMConfigError:
         pass  # no LLM configured: Phase 2 behavior
     return Components(settings=settings, broker=broker, data=data, journal=journal,
