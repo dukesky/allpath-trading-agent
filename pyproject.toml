@@ -16,6 +16,7 @@ dependencies = [
     "openai>=1.40",
     "anthropic>=0.34",
     "ddgs>=9.0",
+    "rich>=15.0.0",
 ]
 
 [dependency-groups]

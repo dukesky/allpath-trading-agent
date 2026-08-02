@@ -118,8 +118,21 @@ def cmd_reviews(q, args) -> int:
         return 1
 
 
-def cmd_chat(components, llm, *, new: bool,
-             input_fn=None, print_fn=print) -> int:
+CHAT_BANNER = r"""
+          |\
+          | \        t r a d e w i n d
+          |  \       your mid/long-term investing copilot
+       ___|___\__
+       \_________/
+    ~ ~ ~ ~ ~ ~ ~ ~
+"""
+
+
+def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
+    from rich.console import Console
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
     from tradewind.agent.action_tools import register_action_tools
     from tradewind.agent.context import build_system_prompt, load_identity
     from tradewind.agent.loop import AgentSession
@@ -132,11 +145,18 @@ def cmd_chat(components, llm, *, new: bool,
     if input_fn is None:
         input_fn = input
 
+    console = Console(highlight=False)
     store = ConversationStore(components.conn)
     cid = store.start() if new or store.latest() is None else store.latest()
 
     def confirm(prompt: str) -> bool:
-        return input_fn(f"{prompt}\nConfirm? [y/N] ").strip().lower() in ("y", "yes")
+        console.print(Panel(prompt, title="confirmation required",
+                            border_style="yellow"))
+        return input_fn("Confirm? [y/N] ").strip().lower() in ("y", "yes")
+
+    def on_tool(call) -> None:
+        args = ", ".join(f"{k}={v!r}" for k, v in call.arguments.items())
+        console.print(f"  [dim]⚙ {call.name}({args})[/dim]")
 
     registry = ToolRegistry()
     register_readonly_tools(registry, data=components.data,
@@ -150,18 +170,33 @@ def cmd_chat(components, llm, *, new: bool,
                                  journal=components.journal,
                                  strategies=components.strategies,
                                  queue=components.queue)
-    session = AgentSession(llm, registry, system, store=store, conversation_id=cid)
-    print_fn(f"[tradewind chat] conversation #{cid} — /exit to quit")
+    session = AgentSession(llm, registry, system, store=store,
+                           conversation_id=cid, on_tool=on_tool)
+
+    mode = "paper" if components.broker.is_paper else "LIVE"
+    console.print(f"[bold cyan]{CHAT_BANNER}[/bold cyan]")
+    console.print(f"  [dim]model[/dim]  [bold]{llm.model}[/bold] "
+                  f"[dim]via {components.settings.llm_provider} · {mode} account[/dim]")
+    console.print(f"  [dim]chat[/dim]   conversation #{cid} · /exit to quit · "
+                  "orders & strategy changes always ask first\n")
+
+    # Colored input prompt only on a real terminal (tests/pipes get plain text).
+    prompt = "\x1b[1;36myou ▸ \x1b[0m" if sys.stdout.isatty() else "you ▸ "
     while True:
         try:
-            user = input_fn("you> ")
+            user = input_fn(prompt)
         except EOFError:
+            console.print()
             return 0
         if user.strip() in ("/exit", "/quit"):
+            console.print("[dim]bye — the sentinel keeps watching your rules.[/dim]")
             return 0
         if not user.strip():
             continue
-        print_fn(f"agent> {session.run_turn(user)}")
+        reply = session.run_turn(user)
+        console.print("\n[bold magenta]◆ tradewind[/bold magenta]")
+        console.print(Markdown(reply or "(no reply)"))
+        console.print()
 
 
 def main(argv: list[str] | None = None,

@@ -64,3 +64,16 @@ def test_chat_resumes_latest_conversation(tmp_path, capsys, monkeypatch):
     main(["chat"], broker_factory=lambda s: FakeBroker(),
          llm_factory=lambda s, tier: llm)
     assert any(m.get("content") == "hello" for m in llm.seen[0])
+
+
+def test_chat_banner_model_and_tool_activity(tmp_path, capsys, monkeypatch):
+    from tests.test_agent_loop import tool_response
+    code = run_chat(monkeypatch, tmp_path, ["price?", "/exit"],
+                    [tool_response("get_quote", {"ticker": "AAPL"}),
+                     LLMResponse(text="around 200")])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "t r a d e w i n d" in out          # banner
+    assert "scripted" in out                    # model name (ScriptedLLM.model)
+    assert "get_quote" in out                   # tool activity line
+    assert "around 200" in out                  # rendered reply

@@ -105,3 +105,11 @@ def test_persistence_roundtrip(tmp_path):
     s2 = AgentSession(ScriptedLLM([LLMResponse(text="again")]), make_registry(),
                       "SYS", store=store, conversation_id=cid)
     assert s2.history == saved
+
+
+def test_on_tool_callback_invoked():
+    seen = []
+    llm = ScriptedLLM([tool_response("echo", {"a": 1}), LLMResponse(text="done")])
+    s = AgentSession(llm, make_registry(), "SYS", on_tool=seen.append)
+    s.run_turn("go")
+    assert [c.name for c in seen] == ["echo"]

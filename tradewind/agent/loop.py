@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tradewind.agent.tools import ToolRegistry
-from tradewind.llm.base import LLMClient, LLMError
+from tradewind.llm.base import LLMClient, LLMError, ToolCall
 from tradewind.store.conversations import ConversationStore
 
 LIMIT_NOTICE = "(stopped: tool-call limit reached — ask me to continue if needed)"
@@ -13,13 +15,15 @@ class AgentSession:
 
     def __init__(self, llm: LLMClient, registry: ToolRegistry, system_prompt: str,
                  store: ConversationStore | None = None,
-                 conversation_id: int | None = None, max_iters: int = 15) -> None:
+                 conversation_id: int | None = None, max_iters: int = 15,
+                 on_tool: Callable[[ToolCall], None] | None = None) -> None:
         self.llm = llm
         self.registry = registry
         self.system_prompt = system_prompt
         self.store = store
         self.conversation_id = conversation_id
         self.max_iters = max_iters
+        self.on_tool = on_tool
         self.history: list[dict] = []
         if store is not None and conversation_id is not None:
             self.history = store.history(conversation_id)
@@ -45,6 +49,8 @@ class AgentSession:
                     "role": "assistant", "content": resp.text,
                     "tool_calls": [c.model_dump() for c in resp.tool_calls]})
                 for call in resp.tool_calls:
+                    if self.on_tool is not None:
+                        self.on_tool(call)
                     result = self.registry.execute(call)
                     self._append({"role": "tool", "tool_call_id": call.id,
                                   "content": result})
