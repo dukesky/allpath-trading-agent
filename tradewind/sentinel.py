@@ -39,7 +39,7 @@ class Sentinel:
 
     def __init__(self, strategies: StrategyStore, data: DataSource,
                  broker: Broker, executor: Executor, queue: ReviewQueue,
-                 notifier: Notifier, review_agent=None) -> None:
+                 notifier: Notifier, review_agent=None, observations=None) -> None:
         self.strategies = strategies
         self.data = data
         self.broker = broker
@@ -47,6 +47,7 @@ class Sentinel:
         self.queue = queue
         self.notifier = notifier
         self.review_agent = review_agent
+        self.observations = observations
 
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
@@ -67,6 +68,8 @@ class Sentinel:
                 report.strategies_checked += 1
             except Exception as exc:  # noqa: BLE001 — isolate per-strategy failures
                 report.errors.append(f"{doc.id}: {exc}")
+                if self.observations is not None:
+                    self.observations.add("sentinel", f"error: {doc.id}: {exc}")
         return report
 
     def _check_strategy(self, doc: StrategyDoc, equity: Decimal,
@@ -88,6 +91,12 @@ class Sentinel:
                                      rule.action, quote.price, position, equity,
                                      ctx)
             report.outcomes.append(outcome)
+            if self.observations is not None:
+                self.observations.add(
+                    "sentinel",
+                    f"{doc.id}/{rule.id} {rule.condition} -> {rule.action}: "
+                    f"{outcome.disposition} {outcome.detail}".strip(),
+                    subject=doc.position.ticker)
             self.notifier.send(
                 f"[tradewind] {doc.id}/{rule.id} triggered",
                 f"strategy: {doc.name}\nrule: {rule.id} ({rule.type.value})\n"

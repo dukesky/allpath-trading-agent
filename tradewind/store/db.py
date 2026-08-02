@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS memory_log (
     before TEXT,
     after TEXT
 );
+
+CREATE TABLE IF NOT EXISTS observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    source TEXT NOT NULL,
+    subject TEXT,
+    text TEXT NOT NULL
+);
 """
 
 

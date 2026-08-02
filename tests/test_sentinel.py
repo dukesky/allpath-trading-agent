@@ -326,3 +326,13 @@ def test_confirm_detail_includes_recommendation_and_reasoning(tmp_path):
     report = s.run_once()
     [o] = report.outcomes
     assert "execute" in o.detail and "because" in o.detail
+
+
+def test_sentinel_records_observations(tmp_path):
+    from tradewind.memory.observations import ObservationLog
+
+    s, _store, _ex, q, _n = make(tmp_path, strategy_yaml())
+    s.observations = ObservationLog(q._conn)
+    s.run_once()
+    rows = s.observations.recent()
+    assert rows and "t/r1" in rows[0]["text"] and rows[0]["subject"] == "AAPL"
