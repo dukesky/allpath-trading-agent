@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from allpath_trade.sentinel import Sentinel
+from allpath_trade.sentinel import Sentinel, SentinelReport
 
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
@@ -31,7 +31,7 @@ def _is_after_close(now: datetime | None = None) -> bool:
 
 
 def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
-                       on_report: Callable[[object], None] | None = None) -> None:
+                       on_report: Callable[[SentinelReport | None], None] | None = None) -> None:
     """Run one sentinel pass, but only during market hours.
 
     `on_report` (if given) is called with the resulting `SentinelReport`, or
@@ -68,7 +68,7 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
                daily_job: Callable[[], None] | None = None) -> None:
     state = {"last_daily": None}
 
-    def report_progress(report) -> None:  # report: SentinelReport | None
+    def report_progress(report: SentinelReport | None) -> None:
         if report is None:
             print("[sentinel] market closed, skipping")
             return
