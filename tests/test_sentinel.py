@@ -223,3 +223,53 @@ def test_one_bad_yaml_does_not_halt_other_strategies(tmp_path):
     report = s.run_once()
     assert report.strategies_checked == 1
     assert report.errors and any("bad.yaml" in e for e in report.errors)
+
+
+class StubReviewAgent:
+    def __init__(self, recommendation="execute", fail=False):
+        self.recommendation = recommendation
+        self.fail = fail
+
+    def analyze(self, review):
+        from tradewind.agent.review import ReviewAnalysis
+        if self.fail:
+            raise RuntimeError("llm down")
+        return ReviewAnalysis(recommendation=self.recommendation, reasoning="because")
+
+
+def test_auto_soft_with_agent_execute_recommendation(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "executed"
+    assert len(ex.calls) == 1
+    row = q.get(1)
+    assert row["status"] == "approved" and "because" in row["agent_analysis"]
+
+
+def test_auto_soft_with_agent_skip_recommendation(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent("skip")
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "skipped"
+    assert ex.calls == []
+    assert q.get(1)["status"] == "rejected"
+
+
+def test_confirm_with_agent_attaches_analysis_stays_queued(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "queued"
+    row = q.get(1)
+    assert row["status"] == "pending" and row["agent_analysis"]
+    assert ex.calls == []
+
+
+def test_agent_failure_leaves_trigger_queued(tmp_path):
+    s, _store, _ex, q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent(fail=True)
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "queued"
+    assert "review failed" in report.outcomes[0].detail
+    assert q.get(1)["status"] == "pending"

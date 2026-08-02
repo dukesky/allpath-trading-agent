@@ -39,13 +39,14 @@ class Sentinel:
 
     def __init__(self, strategies: StrategyStore, data: DataSource,
                  broker: Broker, executor: Executor, queue: ReviewQueue,
-                 notifier: Notifier) -> None:
+                 notifier: Notifier, review_agent=None) -> None:
         self.strategies = strategies
         self.data = data
         self.broker = broker
         self.executor = executor
         self.queue = queue
         self.notifier = notifier
+        self.review_agent = review_agent
 
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
@@ -141,8 +142,36 @@ class Sentinel:
                                   disposition="rejected",
                                   detail="; ".join(result.decision.reasons))
         # confirm auth (both types), or auto+soft
-        self.queue.add(strategy_id=doc.id, rule_id=rule_id, ticker=doc.position.ticker,
-                       rule_type=rule_type.value, condition=condition, action=action,
-                       snapshot=snapshot, intent=intent)
-        return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                              disposition="queued")
+        rid = self.queue.add(strategy_id=doc.id, rule_id=rule_id,
+                             ticker=doc.position.ticker, rule_type=rule_type.value,
+                             condition=condition, action=action,
+                             snapshot=snapshot, intent=intent)
+        if self.review_agent is None:
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="queued")
+        return self._agent_review(rid, doc, rule_id, rule_type)
+
+    def _agent_review(self, rid: int, doc: StrategyDoc, rule_id: str,
+                      rule_type: RuleType) -> TriggerOutcome:
+        base = {"strategy_id": doc.id, "rule_id": rule_id}
+        try:
+            analysis = self.review_agent.analyze(dict(self.queue.get(rid)))
+            self.queue.attach_analysis(rid, analysis.model_dump_json())
+            autonomous = (doc.authorization == Authorization.AUTO
+                          and rule_type == RuleType.SOFT)
+            if not autonomous:
+                return TriggerOutcome(**base, disposition="queued",
+                                      detail="analysis attached: "
+                                             f"{analysis.recommendation}")
+            if analysis.recommendation == "execute":
+                result = self.queue.approve(rid)
+                detail = ("agent-approved; submitted" if result.submitted else
+                          "agent-approved; risk gate rejected: "
+                          + "; ".join(result.decision.reasons))
+                return TriggerOutcome(**base, disposition="executed", detail=detail)
+            self.queue.reject(rid, note=analysis.reasoning[:500])
+            return TriggerOutcome(**base, disposition="skipped",
+                                  detail=f"agent: {analysis.reasoning[:120]}")
+        except Exception as exc:  # noqa: BLE001 — a failed review must never lose the trigger
+            return TriggerOutcome(**base, disposition="queued",
+                                  detail=f"agent review failed: {exc}")
