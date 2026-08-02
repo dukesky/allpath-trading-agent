@@ -67,9 +67,12 @@ def test_approving_twice_reports_an_error_rather_than_executing_again(client):
     r = client.post(f"/reviews/{rid}/approve")
     assert r.status_code == 200
     assert "not pending" in r.text.lower()
+    # Nothing was claimed by this second click (it's a no-op, not a broker
+    # call that may or may not have gone through) -- the message says so.
+    assert "not processed" in r.text.lower()
 
 
-def test_approval_goes_through_the_queue_not_the_executor(client, monkeypatch):
+def test_approval_goes_through_the_queue_not_the_executor(client):
     # Only ReviewQueue.approve writes execution_result and flips the status.
     # If the route ever reached the executor directly, the row would stay
     # pending with an empty execution_result while an order went out.
@@ -89,3 +92,74 @@ def test_a_failing_queue_approve_means_nothing_is_executed(client, monkeypatch):
     r = client.post(f"/reviews/{rid}/approve")
     assert "not pending" in r.text.lower()
     assert executed == []
+
+
+def test_gate_rejection_is_visible_now_and_on_a_later_visit(client):
+    # notional far above RiskLimits.max_order_value(5000) and above the
+    # FakeBroker AAPL position value (qty=10 * $200 = $2000): the gate
+    # rejects deterministically, with no dependency on live quote data
+    # (notional intents skip the price fetch).
+    rid = queue_one(client, intent=OrderIntent(
+        ticker="AAPL", side=OrderSide.SELL, notional="10000", reason="rule r1"))
+    r = client.post(f"/reviews/{rid}/approve")
+    assert r.status_code == 200
+    assert "rejected by the risk gate" in r.text.lower()
+
+    row = client.app.state.holder.get().queue.get(rid)
+    # The review WAS claimed -- approve() flips status before executing --
+    # even though the order never went out.
+    assert row["status"] == "approved"
+    assert row["execution_result"]
+
+    # This is Finding 1: reloading the page later must still be able to
+    # tell "blocked by the gate" apart from "the order was filled", even
+    # though both persist as status == "approved".
+    body = client.get("/reviews").text
+    assert "blocked by the risk gate" in body.lower()
+    assert "order submitted" not in body.lower()
+
+
+def test_execution_failure_is_visible_now_and_on_a_later_visit(client, monkeypatch):
+    def _boom(intent):
+        raise ConnectionError("connection reset")
+
+    monkeypatch.setattr(client.app.state.holder.get().broker, "submit_order", _boom)
+    # notional intent: passes the gate (small, within the AAPL position
+    # value) and skips the price fetch, so the only way to reach the broker
+    # call -- and thus the patched failure -- is deterministic.
+    rid = queue_one(client, intent=OrderIntent(
+        ticker="AAPL", side=OrderSide.SELL, notional="100", reason="rule r1"))
+    r = client.post(f"/reviews/{rid}/approve")
+    assert r.status_code == 200
+    assert "review claimed, but execution failed" in r.text.lower()
+    assert "connection reset" in r.text.lower()
+
+    row = client.app.state.holder.get().queue.get(rid)
+    # Claimed, unlike a ReviewError -- this is the state Finding 3 is about:
+    # the user must be told the review is claimed, not free to retry.
+    assert row["status"] == "approved"
+
+    body = client.get("/reviews").text
+    assert "execution failed" in body.lower()
+    assert "connection reset" in body.lower()
+    assert "order submitted" not in body.lower()
+
+
+def test_malicious_source_scheme_is_rendered_as_text_not_a_link(client):
+    rid = queue_one(client)
+    client.app.state.holder.get().queue.attach_analysis(
+        rid, json.dumps({"recommend": "execute", "reasoning": "x",
+                         "sources": ["javascript:alert(1)"]}))
+    body = client.get("/reviews").text
+    assert "javascript:alert(1)" in body
+    assert '<a href="javascript:alert(1)"' not in body
+
+
+def test_http_source_is_rendered_as_a_safe_link(client):
+    rid = queue_one(client)
+    client.app.state.holder.get().queue.attach_analysis(
+        rid, json.dumps({"recommend": "execute", "reasoning": "x",
+                         "sources": ["https://example.com/pr"]}))
+    body = client.get("/reviews").text
+    assert 'href="https://example.com/pr"' in body
+    assert 'rel="noopener noreferrer"' in body

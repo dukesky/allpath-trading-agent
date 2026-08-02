@@ -25,11 +25,16 @@ def _decorate(row) -> dict:  # row: sqlite3.Row
 @router.get("/reviews", response_class=HTMLResponse)
 def reviews(request: Request) -> HTMLResponse:
     c = request.app.state.holder.get()
-    items = [_decorate(r) for r in c.queue.list("pending")]
-    recent = [_decorate(r) for r in c.queue.list(None)][:20]
+    # One query, then filter, then slice: `list(None)` already carries the
+    # pending rows, so a second `list("pending")` query is redundant. And the
+    # slice-then-filter order matters — with >=20 pending rows, slicing
+    # first would take only pending rows off the top and filtering would
+    # then empty the "Resolved" section even when resolved rows exist.
+    all_items = [_decorate(r) for r in c.queue.list(None)]
+    items = [r for r in all_items if r["status"] == "pending"]
+    recent = [r for r in all_items if r["status"] != "pending"][:20]
     return templates.TemplateResponse(request, "reviews.html", {
-        "page": "reviews", "items": items,
-        "recent": [r for r in recent if r["status"] != "pending"],
+        "page": "reviews", "items": items, "recent": recent,
         "error": request.query_params.get("error"),
         **nav_context(c)})
 
@@ -54,8 +59,16 @@ def approve(request: Request, review_id: int) -> Response:
     c = request.app.state.holder.get()
     try:
         result = c.queue.approve(review_id)
-    except (ReviewError, ExecutionError) as exc:
-        return _back_to_reviews(str(exc))
+    except ReviewError as exc:
+        # Nothing was claimed: the atomic UPDATE never matched a pending
+        # row (already resolved, missing, corrupt intent). The review's
+        # state is unchanged from before the click.
+        return _back_to_reviews(f"Not processed: {exc}")
+    except ExecutionError as exc:
+        # The review WAS claimed (status is already "approved" in the
+        # store) before the broker call failed. The user has to reason
+        # about a claimed-but-unknown-outcome order, not a no-op.
+        return _back_to_reviews(f"Review claimed, but execution failed: {exc}")
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
         return _back_to_reviews(f"Rejected by the risk gate: {reasons}")
@@ -68,5 +81,5 @@ def reject(request: Request, review_id: int, note: str = Form("")) -> Response:
     try:
         c.queue.reject(review_id, note)
     except ReviewError as exc:
-        return _back_to_reviews(str(exc))
+        return _back_to_reviews(f"Not processed: {exc}")
     return _back_to_reviews()
