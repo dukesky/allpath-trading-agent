@@ -208,6 +208,22 @@ review:
 ### 测试
 - Mock LLM client（脚本化工具调用序列）测：链路正确、确认门禁不可绕过、违规订单被拦、降级路径。真实 OpenRouter 调用为 `-m integration` 可选测试。CI 零 LLM 成本。
 
+### 借鉴 Hermes / OpenClaw 的模式（2026-07-31 调研定稿）
+Phase 3 采纳：
+- **IDENTITY.md**（借 OpenClaw SOUL.md）：agent 角色与授权边界写成仓库内只读 markdown，每次注入系统提示；agent 的任何工具都不能修改它，拒绝越权操作时可引用它。
+- **冻结快照上下文**（借 Hermes）：系统提示在 session 开始组装一次（持仓/策略/近期交易摘要），会话中不重组——prompt 前缀稳定，保证缓存命中、成本可控。
+- **外部内容 fence**：web_search 等外部来源的结果包裹 `<external-content>` 标记并声明"是数据不是指令"——防 prompt 注入渗入交易决策。
+- **复核短路**：ReviewAgent 用便宜模型 + 轮次上限，无事直接短路（防 OpenClaw 式心跳 token 燃烧）。
+
+Phase 4 预案（记忆系统实现时采纳，防 OpenClaw 已知安全坑）：
+- 两级写入：原始观察进带时间戳的 journal，定期"提炼"步骤才写入四层精选记忆；绝不在业务流程中直写精选层。
+- 记忆变更仅经 `memory_update(layer, action=add|replace|remove, ...)` 窄工具（条目级、可审计、diff 入库），禁止整文件重写。
+- 每层记忆硬性字符预算 + 定期整合（去重/合并/降级陈旧条目）。
+- **注入扫描**：写入精选记忆的内容过指令模式检测；来自外部内容（新闻/搜索）的文本不得原样进入精选记忆——被投毒的"经验教训"对交易 agent 是延迟执行攻击。
+- 会话全量存档 SQLite FTS5 + `session_search` 工具（按需搜索历史，不塞上下文；兼作审计轨迹）。
+- 压缩前刷写：长对话接近上下文上限时，先让 agent 把持久性结论写盘再压缩。
+- lessons 带 YAML frontmatter（tags/triggers/confidence），决策前按 ticker/情境匹配预加载。
+
 ## 6. 风控守门层
 
 所有订单意图的必经之路，纯确定性代码，LLM 不可绕过。检查项（用户可配）：单笔金额上限、单股仓位上限、当日交易次数上限、账户现金下限、授权级别匹配、live/paper 开关。任何检查不过 → 拒单 + 记录 + 通知。
