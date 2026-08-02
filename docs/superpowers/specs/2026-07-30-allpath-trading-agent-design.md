@@ -257,6 +257,76 @@ memory/
 ### CLI
 - `allpath-trade memory show [layer] [key]`（查看）、`allpath-trade memory consolidate`（手动提炼）。
 
+## 5.4 Phase 5 详细设计：Web UI + 通知（2026-08-02 讨论定稿）
+
+**语言规则**：所有界面文案、CLI 输出、邮件正文、错误信息一律英文；用户输入语言不限，agent 用用户的语言回复。不做语言切换功能。
+
+### 进程与技术栈
+- 新命令 `allpath-trade serve [--host] [--port]`：uvicorn + FastAPI，lifespan 内用 **BackgroundScheduler**（非 BlockingScheduler）挂哨兵与收盘提炼——Web 与哨兵同进程。`allpath-trade run` 保留为无 UI 的 headless 模式。
+- 模板 Jinja2 + htmx（JS 文件 vendored 入仓库），手写单份 CSS，无 npm、无构建步骤。移动端优先单栏布局，暗色优先且支持浅色。
+- 不用 React/Vue：多一套 node 工具链，而页面本质是列表、卡片、表单，htmx 局部替换已足够；保持 Python 全栈。
+- 默认端口 **8791**（避开 3000/5000/7000/8000/8080 等常见占用；5000/7000 在 macOS 被 AirPlay 占用），`WEB_PORT` 可配。
+
+### 数据库并发（前置改造）
+现全局单连接 + `check_same_thread=False`，是 Phase 2 为单线程守护进程所做的妥协。Web 请求线程与调度线程并发写会互踩事务。改为 **WAL 模式 + 每线程连接**（请求依赖注入 / `threading.local`）。
+
+### 鉴权
+- `WEB_TOKEN` 存 `.env`；首次 `serve` 时若为空则自动生成并打印在终端。
+- 无 cookie 请求跳 `/login`；校验通过设 HttpOnly + SameSite=Strict cookie（勾选 "Remember me" 有效期 30 天，不勾选则浏览器会话结束即失效）。
+- 所有写操作校验 Origin 头（防局域网内跨站伪造请求）。
+- 设置页可重置令牌，重置后所有已登录设备失效。
+
+### 页面（英文文案）
+| 路由 | 标题 | 内容 |
+|---|---|---|
+| `/` | Dashboard | 权益/现金/当日涨跌三张指标卡、持仓表（等宽字体，盈亏仅绿红二色）、活跃策略及规则状态、近期成交 |
+| `/chat` | Chat | 复用 `AgentSession`；SSE 推送工具活动行（复用 `on_tool` 回调）与最终回复；确认卡片内联 |
+| `/reviews` | Pending | 卡片列表：`agent_analysis`（建议+理由+来源）、触发快照、订单意图、Approve / Reject |
+| `/strategies` | Strategies | 列表 + 详情：YAML 只读、规则状态、版本历史 diff、Re-arm 按钮 |
+| `/memory` | Memory | 四层 markdown 渲染 + `memory_log` 改动审计 |
+| `/settings` | Settings | 模型、券商、邮件、哨兵与记忆、访问五组 |
+
+- 导航为横排文字，待确认数量作徽标常驻——它是唯一需要用户主动处理的东西。
+- **策略与记忆只读**：修改策略走聊天让 agent 起草（本就是"共创策略"的设计初衷，也避免浏览器里手写 YAML）；手改记忆会绕过注入扫描守卫，不提供。
+
+### 聊天内确认（入队式）
+- `pending_reviews` 增列 `source`（`sentinel` / `chat`）与 `conversation_id`。
+- Web 模式下注入 `action_tools` 的 `confirm` 换为**入队实现**：`propose_order` 不调 `executor.execute`，改为 `queue.add(...)`，返回模型 "queued for your approval (#12)"。回合立即结束，不占线程。
+- 入队时跑一次风控预演，把结论渲染在卡片上，用户点之前即知会否被拦。
+- 用户点 Approve → `ReviewQueue.approve()` → `Executor` → 风控守门。**不变量：Web 层永不直接调用 `Executor`。**
+- 结果以带 `[system]` 前缀的消息追加进对话，agent 下一回合可见。
+- 聊天卡片与 `/reviews` 是同一条记录，任一处处置后另一处即时反映。
+
+### 上下文管理（用户无需管理会话）
+用户不选会话、不切会话、不新建会话——打开 `/chat` 即接续。责任因此转到系统：
+- 当前 `ConversationStore.history()` 全量加载且无上限，长会话必然撞上下文窗口。改为**注入模型的上下文 = 滚动摘要 + 最近窗口**。
+- 估算 token 超 `CONTEXT_BUDGET_TOKENS`（默认 60,000）时触发压缩：从最老的消息起交 `MEMORY_MODEL` 摘要，直到估算降至预算的三分之二以下；摘要存 `conversations.summary`，并记录已摘要到的 turn id。token 用字符数 /4 粗估，不引 tokenizer 依赖。预算远低于模型的百万上下文，是成本考量而非能力上限。
+- **压缩前先刷写**：压缩前让 agent 把持久性结论写入记忆层（Phase 4 预案中列出、当时未实现的一条）。不刷写就压缩等于静默丢失用户偏好。
+- 完整历史一条不删，FTS5 与 `session_search` 照常工作。区别只在"什么进 prompt"。
+- 系统提示的冻结持仓快照在长驻进程中会过期：超过 30 分钟即在下一回合前重建，接受一次 prompt 缓存未命中。
+- CLI 的 `--new` 保留作调试用，UI 不暴露。
+
+### 邮件通知
+- 接入事件：规则触发、订单成交或被风控拒绝、新增待确认项、每日收盘小结。
+- **正文只报信，不含任何链接**——带令牌的链接一旦进邮箱，邮箱泄露即等同账户泄露。正文提示用户自行打开面板。
+- 配置走 Gmail 应用专用密码（需先开两步验证）：发件 `tzjmeage@gmail.com`，收件 `dukesky17@gmail.com`。密钥由用户自行填写，实现方不经手。
+- 设置页提供 "Send test email"：SMTP 配错的唯一表现是通知永远不来，属沉默故障，必须能主动验证。
+
+### 设置页
+- 分五组：Model（provider、API key、三档模型）、Brokerage、Email notifications、Sentinel & memory（检查间隔、`DAILY_CONSOLIDATION`、`CONSOLIDATE_AFTER_CHAT`）、Access（监听地址、令牌）。
+- **密钥只写**：保存后服务端永不将明文回传浏览器，页面只显示掩码与 "Replace"。局域网下任何能打开页面的设备都不应能读出券商密钥。
+- **UI 不提供切换实盘**：`ALPACA_PAPER` 在页面上只读展示，改为实盘须手工编辑 `.env`——把真钱接入这套系统应当有一次清醒的摩擦。
+- 保存后重建组件图，新会话立即生效；进行中的对话沿用原有客户端。
+- 引导路径：全新安装无任何 key 时，登录令牌自动生成并打印，进入后设置页可用，填入 LLM key 即可开始对话，全程不必手动编辑 `.env`。
+
+### 前置修复（实施前完成）
+1. `SettingsStore` 的 `quote_mode="never"` 会破坏含空格/`#`/`=` 的值——设置页写任意值，必修。
+2. `memory/store.py` 的 `MemoryError` 与内置异常同名，重命名为 `MemoryStoreError`（保留别名）。
+3. 上述 WAL + 每线程连接改造。
+
+### 测试
+FastAPI `TestClient` + `FakeBroker` + `ScriptedLLM`：未登录跳转、令牌登录、Approve 走风控、**Web 层无法绕过风控守门**、跨站请求被拒、SSE 活动流、设置写盘往返（专测含空格与 `#` 的值）、上下文压缩触发与压缩前刷写。不做浏览器端 E2E。
+
 ## 6. 风控守门层
 
 所有订单意图的必经之路，纯确定性代码，LLM 不可绕过。检查项（用户可配）：单笔金额上限、单股仓位上限、当日交易次数上限、账户现金下限、授权级别匹配、live/paper 开关。任何检查不过 → 拒单 + 记录 + 通知。
@@ -282,7 +352,7 @@ allpath-trading-agent/
 │   ├── risk/           # 风控守门层
 │   ├── scheduler/      # 三循环调度
 │   ├── notify/         # 邮件 + 站内通知
-│   ├── server/         # FastAPI 路由 + WebSocket
+│   ├── server/         # FastAPI 路由 + SSE（Phase 5）
 │   └── web/            # 轻量前端
 ├── tests/
 └── docs/
