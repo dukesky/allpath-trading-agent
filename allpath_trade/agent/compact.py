@@ -56,16 +56,37 @@ class Compactor:
         self.budget_tokens = budget_tokens
         self.on_before_compact = on_before_compact
 
-    def maybe_compact(self, conversation_id: int, history: list[dict]) -> list[dict]:
+    def maybe_compact(self, conversation_id: int,
+                      history: list[dict]) -> tuple[list[dict], list[dict]]:
+        """Returns `(context_to_send, history_still_in_memory)`.
+
+        The caller MUST adopt the second value (assign it back over its own
+        history) before calling again. `history` is only a valid index space
+        for `cut` while it is exactly the transcript from the current marker
+        (`since`) forward — every branch below that does *not* advance the
+        marker returns `history` unchanged, and the one branch that does
+        advance it returns the trimmed tail instead. That makes "the
+        caller's copy stays aligned with the store" true by construction
+        rather than something each call site has to remember to uphold.
+        """
         previous, since = self.store.summary(conversation_id)
         framed = self._frame(previous, history)
         if estimate_tokens(framed) <= self.budget_tokens:
-            return framed
+            return framed, history
 
-        target = (self.budget_tokens * 2) // 3
+        # The overflow check above counts the leading summary frame's tokens
+        # toward the budget (it's part of `framed`), but a plain cut over
+        # `history` doesn't know that frame exists — so without this, the
+        # post-compaction context (new frame + newer) could land back over
+        # `target` by however big the summary frame is. Reserving that same
+        # cost here (using the current frame as a proxy for the new one, since
+        # both are bounded by the same summarization prompt) keeps the two
+        # checks measuring the same thing.
+        frame_cost = estimate_tokens(framed) - estimate_tokens(history)
+        target = max((self.budget_tokens * 2) // 3 - frame_cost, 0)
         cut = _cut_index(history, target)
         if cut == 0:
-            return framed  # nothing can be dropped without splitting a tool call
+            return framed, history  # nothing can be dropped without splitting a tool call
 
         older, newer = history[:cut], history[cut:]
         if self.on_before_compact is not None:
@@ -76,22 +97,28 @@ class Compactor:
 
         summary = self._summarize(previous, older)
         if summary is None:
-            return framed  # LLM failure degrades to an oversized-but-correct context
+            return framed, history  # LLM failure: oversized-but-correct context
 
-        # `history` starts right after the *current* marker (`since`) — the
-        # caller (AgentSession) fetches it that way, and callers that don't
-        # pass a marker-aligned `history` get a `cut` that's meaningless
-        # against the full transcript anyway. Re-fetching ids from `since`
-        # rather than from turn 0 keeps this offset consistent with `cut`,
-        # which is a local index into `history`, not into the whole table —
-        # using the whole table's ids here previously set `through` to the
-        # id of the `cut`-th turn *overall*, silently wrong on every
-        # compaction after the first.
+        # `cut` is a local index into `history`, which by the docstring's
+        # invariant is exactly the transcript from `since` forward — so
+        # `turn_ids` (fetched fresh from that same `since`) must be the same
+        # length as `history`. If a caller ever fails to adopt the trimmed
+        # history from a previous call, `history` drifts long while
+        # `turn_ids` stays short (or vice versa after a fresh load), and
+        # `cut` would index into the wrong list — silently marking turns as
+        # summarized that were never in `older`, and permanently dropping
+        # them from every future context. That must be impossible, not just
+        # unlikely, so it's asserted rather than allowed to compute a wrong
+        # `through` quietly.
         turn_ids = [tid for tid, _ in
-                    self.store.history_with_ids(conversation_id, after_turn_id=since)][:cut]
-        through = turn_ids[-1] if turn_ids else since
+                    self.store.history_with_ids(conversation_id, after_turn_id=since)]
+        assert len(turn_ids) == len(history), (
+            "maybe_compact: history is out of sync with the stored summary "
+            "marker (expected caller to have adopted the previously "
+            "returned trimmed history) — refusing to advance the marker")
+        through = turn_ids[cut - 1]
         self.store.set_summary(conversation_id, summary, through)
-        return self._frame(summary, newer)
+        return self._frame(summary, newer), newer
 
     def _frame(self, summary: str, messages: list[dict]) -> list[dict]:
         if not summary.strip():

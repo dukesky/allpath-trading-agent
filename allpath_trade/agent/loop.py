@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.llm.base import LLMClient, LLMError, ToolCall
 from allpath_trade.store.conversations import ConversationStore
+
+if TYPE_CHECKING:
+    from allpath_trade.agent.compact import Compactor
 
 LIMIT_NOTICE = "(stopped: tool-call limit reached — ask me to continue if needed)"
 
@@ -18,7 +22,7 @@ class AgentSession:
                  store: ConversationStore | None = None,
                  conversation_id: int | None = None, max_iters: int = 15,
                  on_tool: Callable[[ToolCall], None] | None = None,
-                 compactor: object | None = None) -> None:
+                 compactor: Compactor | None = None) -> None:
         self.llm = llm
         self.registry = registry
         self.system_prompt = system_prompt
@@ -53,7 +57,15 @@ class AgentSession:
         for _ in range(self.max_iters):
             context = self.history
             if self.compactor is not None and self.conversation_id is not None:
-                context = self.compactor.maybe_compact(
+                # `self.history` must stay exactly aligned with the stored
+                # summary marker across iterations and across turns — adopt
+                # the trimmed history maybe_compact returns rather than
+                # keeping the old (possibly now-summarized) messages around.
+                # See Compactor.maybe_compact's docstring: without this, the
+                # *next* compaction's cut index stops matching what
+                # history_with_ids fetches from the marker forward, and
+                # turns get silently and permanently dropped.
+                context, self.history = self.compactor.maybe_compact(
                     self.conversation_id, self.history)
             messages = [{"role": "system", "content": self.system_prompt}, *context]
             try:
