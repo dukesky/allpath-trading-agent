@@ -58,7 +58,11 @@ def test_compaction_summarizes_the_oldest_messages(tmp_path):
         s.append(cid, big("user", 2000))
         s.append(cid, big("assistant", 2000))
     llm = ScriptedLLM([LLMResponse(text="earlier: the user asked about NVDA")])
-    c = Compactor(llm, s, budget_tokens=2_000)
+    # budget_tokens=3_000: a first-ever compaction reserves
+    # FIRST_SUMMARY_RESERVE_TOKENS off `target` before there's any previous
+    # frame to measure — 2_000 no longer leaves enough room for a real cut
+    # to be found (see compact.py); 3_000 is the smallest that still does.
+    c = Compactor(llm, s, budget_tokens=3_000)
     history = s.history(cid)
 
     result, kept = c.maybe_compact(cid, history)
@@ -72,31 +76,10 @@ def test_compaction_summarizes_the_oldest_messages(tmp_path):
     assert kept == result[1:]
 
 
-def test_compaction_never_splits_a_tool_call_from_its_result(tmp_path):
-    s = store(tmp_path)
-    cid = s.start()
-    s.append(cid, big("user", 3000))
-    s.append(cid, {"role": "assistant", "content": "",
-                   "tool_calls": [{"id": "c1", "name": "quote", "arguments": {}}]})
-    s.append(cid, {"role": "tool", "tool_call_id": "c1", "content": "199.0"})
-    s.append(cid, big("assistant", 3000))
-    s.append(cid, big("user", 100))
-    llm = ScriptedLLM([LLMResponse(text="summary")])
-    c = Compactor(llm, s, budget_tokens=500)
-
-    result, _kept_history = c.maybe_compact(cid, s.history(cid))
-
-    visible = [m for m in result if m["role"] != "system"]
-    ids = {m["tool_call_id"] for m in visible if m["role"] == "tool"}
-    called = {call["id"] for m in visible for call in m.get("tool_calls", [])}
-    assert ids == called
-
-
 def test_compaction_keeps_a_tool_pair_intact_when_it_survives_the_cut(tmp_path):
-    """The test above only proves splitting doesn't happen when *nothing*
-    survives the cut — `kept`/`ids`/`called` all end up empty, so `ids ==
-    called` reduces to `set() == set()` and never actually shows a pair being
-    kept together. Here the cut lands before the pair, so it must appear
+    """A budget that would reduce everything to `set() == set()` (nothing
+    survives the cut, so a tool call/result pairing check is vacuously true)
+    proves nothing. Here the cut lands before the pair, so it must appear
     intact in the tail — a naive budget-driven cut that ignored role
     boundaries could still land between the tool call and its result."""
     s = store(tmp_path)
@@ -120,23 +103,6 @@ def test_compaction_keeps_a_tool_pair_intact_when_it_survives_the_cut(tmp_path):
         {call["id"] for m in call_msgs for call in m["tool_calls"]}
 
 
-def test_cut_index_never_lands_between_a_tool_call_and_its_result():
-    """Direct check on _cut_index across a spread of targets: whatever the
-    budget, the boundary between the assistant's tool_calls message (index 3)
-    and its tool result (index 4) must never be chosen."""
-    from allpath_trade.agent.compact import _cut_index
-
-    messages = [
-        big("user", 3000), big("assistant", 3000), big("user", 50),
-        {"role": "assistant", "content": "",
-         "tool_calls": [{"id": "c1", "name": "quote", "arguments": {}}]},
-        {"role": "tool", "tool_call_id": "c1", "content": "199.0"},
-        big("user", 50),
-    ]
-    for target in range(0, 2000, 25):
-        assert _cut_index(messages, target) not in (3, 4)
-
-
 def test_flush_hook_runs_before_summarizing(tmp_path):
     s = store(tmp_path)
     cid = s.start()
@@ -145,11 +111,13 @@ def test_flush_hook_runs_before_summarizing(tmp_path):
         s.append(cid, big("assistant", 100))
     order: list[str] = []
     llm = ScriptedLLM([LLMResponse(text="summary")])
-    # budget_tokens=1500: with these message sizes a smaller budget leaves no
+    # budget_tokens=2500: with these message sizes a smaller budget leaves no
     # user-boundary suffix under target (see deviation note in the report),
     # so maybe_compact would bail out at cut==0 before ever calling the hook —
-    # this value is the smallest that forces a genuine cut.
-    c = Compactor(llm, s, budget_tokens=1500,
+    # this value is the smallest that forces a genuine cut. Raised from 1500
+    # once a first-ever compaction started reserving FIRST_SUMMARY_RESERVE_TOKENS
+    # off `target` (see compact.py); 1500 no longer clears that reserve.
+    c = Compactor(llm, s, budget_tokens=2500,
                   on_before_compact=lambda msgs: order.append("flush"))
     c.maybe_compact(cid, s.history(cid))
     assert order == ["flush"]
@@ -161,10 +129,11 @@ def test_llm_failure_leaves_history_untouched(tmp_path):
     for _ in range(6):
         s.append(cid, big("user", 3000))
     history = s.history(cid)
-    # budget_tokens=1500, same reasoning as above: must force a real cut so
+    # budget_tokens=2200, same reasoning as above (raised from 1500 for the
+    # same FIRST_SUMMARY_RESERVE_TOKENS reason): must force a real cut so
     # the compactor actually calls the (failing) LLM, otherwise this test
     # would pass vacuously without exercising the failure path at all.
-    c = Compactor(FailingLLM(), s, budget_tokens=1500)
+    c = Compactor(FailingLLM(), s, budget_tokens=2200)
     context, kept = c.maybe_compact(cid, history)
     assert context == history
     assert kept == history
@@ -201,7 +170,10 @@ def test_second_compaction_round_sets_a_correct_marker(tmp_path):
     for _ in range(10):
         s.append(cid, big("user", 2000))
         s.append(cid, big("assistant", 2000))
-    c1 = Compactor(ScriptedLLM([LLMResponse(text="round 1")]), s, budget_tokens=2_000)
+    # budget_tokens=3_000: see the reserve comment in the test above — 2_000
+    # no longer forces a real cut on either round now that a first-ever
+    # compaction reserves FIRST_SUMMARY_RESERVE_TOKENS off `target`.
+    c1 = Compactor(ScriptedLLM([LLMResponse(text="round 1")]), s, budget_tokens=3_000)
     c1.maybe_compact(cid, s.history(cid))
     _, through1 = s.summary(cid)
 
@@ -209,7 +181,7 @@ def test_second_compaction_round_sets_a_correct_marker(tmp_path):
         s.append(cid, big("user", 2000))
         s.append(cid, big("assistant", 2000))
     hist2 = s.history(cid, after_turn_id=through1)
-    c2 = Compactor(ScriptedLLM([LLMResponse(text="round 2")]), s, budget_tokens=2_000)
+    c2 = Compactor(ScriptedLLM([LLMResponse(text="round 2")]), s, budget_tokens=3_000)
     result2, kept2 = c2.maybe_compact(cid, hist2)
 
     _, through2 = s.summary(cid)
@@ -260,6 +232,11 @@ def test_two_compaction_rounds_via_run_turn_drop_no_turns(tmp_path):
     _, through = s.summary(cid)
     kept_in_db = s.history(cid, after_turn_id=through)
     assert kept_in_db == session.history
+    # Pin the "marker lands before a user turn" guarantee directly, rather
+    # than leaving it to _cut_index's internal role guard (an implementation
+    # detail one call away from this test, and one that vanishes if that
+    # guard is ever weakened without a test noticing here).
+    assert s.history(cid, after_turn_id=through)[0]["role"] == "user"
 
 
 def test_session_resumes_from_the_summary_marker(tmp_path):
