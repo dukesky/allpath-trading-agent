@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from allpath_trade.agent.action_tools import register_action_tools
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.execution import ExecutionResult
@@ -123,3 +125,23 @@ def test_propose_order_invalid_never_prompts(tmp_path):
     reg, _, executor, prompts = make(tmp_path, answers=[True])
     out = call(reg, "propose_order", ticker="AAPL", side="buy", reason="x")
     assert out.startswith("error:") and prompts == [] and executor.calls == []
+
+
+def test_order_sink_takes_precedence_over_confirm(tmp_path):
+    from allpath_trade.agent.tools import ToolRegistry
+
+    calls: list = []
+
+    class Sink:
+        def propose(self, intent):
+            calls.append(intent)
+            return "queued for the user's approval (#3)"
+
+    registry = ToolRegistry()
+    register_action_tools(registry, strategies=None, executor=None,
+                          confirm=lambda _: pytest.fail("must not prompt"),
+                          order_sink=Sink())
+    out = registry.execute(ToolCall(id="1", name="propose_order", arguments={
+        "ticker": "AAPL", "side": "buy", "notional": "500", "reason": "test"}))
+    assert "#3" in out
+    assert calls[0].ticker == "AAPL"

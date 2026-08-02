@@ -16,11 +16,13 @@ from allpath_trade.strategy.loader import (
     parse_strategy_text,
 )
 from allpath_trade.strategy.store import StrategyStore
+from allpath_trade.web.order_sink import QueueingOrderSink
 
 
 def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                           executor: Executor,
-                          confirm: Callable[[str], bool]) -> None:
+                          confirm: Callable[[str], bool],
+                          order_sink: QueueingOrderSink | None = None) -> None:
 
     def draft_strategy(strategy_id: str, yaml_text: str, reason: str) -> str:
         if not is_valid_strategy_id(strategy_id):
@@ -61,6 +63,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                 reason=reason)
         except (ValidationError, ValueError, InvalidOperation) as exc:
             return f"error: invalid order: {exc}"
+        if order_sink is not None:
+            # Web chat: no blocking confirm() here — queue it and return, the
+            # user resolves it with a button. The terminal path below is
+            # untouched and still used when order_sink is not injected.
+            return order_sink.propose(intent)
         size = f"qty {intent.qty}" if intent.qty else f"${intent.notional}"
         if not confirm(f"Submit order: {intent.side.value} {size} "
                        f"{intent.ticker}? Reason: {reason}"):

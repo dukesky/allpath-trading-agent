@@ -95,6 +95,9 @@ _MIGRATIONS = [
     "ALTER TABLE pending_reviews ADD COLUMN agent_analysis TEXT",
     "ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE conversations ADD COLUMN summarized_through INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE pending_reviews ADD COLUMN source TEXT NOT NULL DEFAULT 'sentinel'",
+    "ALTER TABLE pending_reviews ADD COLUMN conversation_id INTEGER",
+    "ALTER TABLE pending_reviews ADD COLUMN risk_preview TEXT",
 ]
 
 
