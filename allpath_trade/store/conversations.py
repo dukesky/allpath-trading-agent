@@ -22,17 +22,21 @@ class ConversationStore:
         return row["id"] if row else None
 
     def append(self, conversation_id: int, message: dict) -> None:
-        self._conn.execute(
-            "INSERT INTO conversation_turns (conversation_id, ts, message)"
-            " VALUES (?, ?, ?)",
-            (conversation_id, datetime.now(UTC).isoformat(), json.dumps(message)))
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            self._conn.execute(
-                "INSERT INTO search_index (kind, ref_id, subject, content)"
-                " VALUES ('turn', ?, ?, ?)",
-                (str(conversation_id), message.get("role", ""), content))
-        self._conn.commit()
+        # Two INSERTs (turn + FTS index entry) must land as a unit — with
+        # separately-locked execute() calls another thread's commit could
+        # land between them and leave the FTS index permanently missing this
+        # row. transaction() holds the lock across both.
+        with self._conn.transaction() as conn:
+            conn.execute(
+                "INSERT INTO conversation_turns (conversation_id, ts, message)"
+                " VALUES (?, ?, ?)",
+                (conversation_id, datetime.now(UTC).isoformat(), json.dumps(message)))
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                conn.execute(
+                    "INSERT INTO search_index (kind, ref_id, subject, content)"
+                    " VALUES ('turn', ?, ?, ?)",
+                    (str(conversation_id), message.get("role", ""), content))
 
     def history(self, conversation_id: int) -> list[dict]:
         rows = self._conn.execute(

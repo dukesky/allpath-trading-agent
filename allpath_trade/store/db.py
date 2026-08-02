@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Self
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
@@ -100,11 +100,13 @@ class LockedConnection:
     """Serializes access to one sqlite connection.
 
     `serve` runs the web app and the sentinel scheduler in a single process,
-    so two threads write to this database. Every store in the codebase takes
-    a connection object and writes with a single statement followed by a
-    commit, so one lock around the connection is both sufficient and cheaper
-    than threading a connection pool through every constructor. A single-user
-    app has nothing to gain from write concurrency."""
+    so two threads write to this database. Most writes in this codebase are a
+    single statement followed by a commit, which per-statement locking
+    (`execute`/`commit` each take the lock separately) already covers. A few
+    writes span more than one statement — a record plus its FTS index entry —
+    and those go through `transaction()` instead, which holds the lock across
+    the whole scope so another thread's commit can't land in between. A
+    single-user app has nothing to gain from write concurrency beyond that."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -141,24 +143,21 @@ class LockedConnection:
         with self._lock:
             self._conn.close()
 
-    def __enter__(self) -> Self:
-        # Mirrors sqlite3.Connection's context manager (commit on clean exit,
-        # rollback on exception) rather than raw lock acquisition, so this
-        # stays a true drop-in if a future caller writes `with conn:`. The
-        # lock is held for the whole block so a multi-statement transaction,
-        # should one ever appear, is not interleaved with another thread's.
-        self._lock.acquire()
-        return self
+    @contextmanager
+    def transaction(self):
+        """Hold the lock across several statements and commit them together.
 
-    def __exit__(self, exc_type: type[BaseException] | None,
-                 exc_val: BaseException | None, exc_tb: object) -> None:
-        try:
-            if exc_type is None:
-                self._conn.commit()
-            else:
+        Most writes here are one statement plus a commit, which `execute` and
+        `commit` already serialize. A few write two rows that must land as a
+        unit — a record plus its FTS index entry — and those must not have
+        another thread's commit interleaved between them."""
+        with self._lock:
+            try:
+                yield self
+            except BaseException:
                 self._conn.rollback()
-        finally:
-            self._lock.release()
+                raise
+            self._conn.commit()
 
 
 class _Rows:
@@ -169,25 +168,24 @@ class _Rows:
     Eager `fetchall()` is safe for every statement this codebase issues
     through `execute`/`executemany`/`executescript`: INSERT, UPDATE, and DDL
     cursors have no result set, and `sqlite3` returns `[]` from `fetchall()`
-    on those rather than raising — it does not raise `ProgrammingError` just
-    because there is nothing to fetch (verified empirically against this
-    project's sqlite3/Python version; the `except` below guards the one case
-    the docs leave undefined, not an observed failure). `lastrowid` and
-    `rowcount` are read off the cursor before `fetchall()` runs, and neither
-    value changes as a result of fetching, so capture order is not
-    load-bearing here — it is kept first-then-fetch anyway as the more
-    obviously correct order."""
+    on those rather than raising (verified empirically against this
+    project's sqlite3/Python version). `lastrowid` and `rowcount` are read
+    off the cursor before `fetchall()` runs, and neither value changes as a
+    result of fetching, so capture order is not load-bearing here — it is
+    kept first-then-fetch anyway as the more obviously correct order."""
 
     def __init__(self, cursor: sqlite3.Cursor) -> None:
         self.lastrowid = cursor.lastrowid
         self.rowcount = cursor.rowcount
-        try:
-            self._rows = cursor.fetchall()
-        except sqlite3.ProgrammingError:
-            self._rows = []  # statement returned no result set
+        self._rows = cursor.fetchall()
+        self._pos = 0
 
     def fetchone(self):
-        return self._rows[0] if self._rows else None
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
 
     def fetchall(self) -> list:
         return list(self._rows)

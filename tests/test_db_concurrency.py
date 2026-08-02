@@ -115,22 +115,27 @@ def test_select_fetchone_and_fetchall_and_iteration(tmp_path):
     assert iterated == ["0", "1", "2"]
 
 
-def test_context_manager_commits_on_success_and_rolls_back_on_exception(tmp_path):
+def test_transaction_commits_on_success(tmp_path):
     conn = connect(tmp_path / "t.db")
 
-    with conn:
-        conn.execute(
+    with conn.transaction() as txn:
+        txn.execute(
             "INSERT INTO observations (ts, source, subject, text)"
             " VALUES ('t', 's', NULL, 'committed')")
+
     assert conn.execute(
         "SELECT COUNT(*) AS c FROM observations").fetchone()["c"] == 1
+
+
+def test_transaction_rolls_back_on_exception(tmp_path):
+    conn = connect(tmp_path / "t.db")
 
     class Boom(Exception):
         pass
 
     try:
-        with conn:
-            conn.execute(
+        with conn.transaction() as txn:
+            txn.execute(
                 "INSERT INTO observations (ts, source, subject, text)"
                 " VALUES ('t', 's', NULL, 'rolled-back')")
             raise Boom
@@ -138,4 +143,41 @@ def test_context_manager_commits_on_success_and_rolls_back_on_exception(tmp_path
         pass
 
     assert conn.execute(
+        "SELECT COUNT(*) AS c FROM observations").fetchone()["c"] == 0
+
+
+def test_transaction_allows_nested_execute_via_relock(tmp_path):
+    # The lock is an RLock: execute()'s own "with self._lock" must re-enter
+    # cleanly from inside transaction()'s "with self._lock", or a
+    # multi-statement write would deadlock the writing thread against itself.
+    conn = connect(tmp_path / "t.db")
+
+    with conn.transaction() as txn:
+        first = txn.execute(
+            "INSERT INTO observations (ts, source, subject, text)"
+            " VALUES ('t', 's', NULL, 'a')")
+        second = txn.execute(
+            "INSERT INTO search_index (kind, ref_id, subject, content)"
+            " VALUES ('observation', ?, 's', 'a')", (str(first.lastrowid),))
+        assert second.rowcount == 1
+
+    assert conn.execute(
         "SELECT COUNT(*) AS c FROM observations").fetchone()["c"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM search_index").fetchone()["c"] == 1
+
+
+def test_rows_fetchone_advances_and_returns_none_past_end(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO observations (ts, source, subject, text)"
+            " VALUES ('t', 's', NULL, ?)", (str(i),))
+        conn.commit()
+
+    cur = conn.execute("SELECT text FROM observations ORDER BY id")
+    assert cur.fetchone()["text"] == "0"
+    assert cur.fetchone()["text"] == "1"
+    assert cur.fetchone()["text"] == "2"
+    assert cur.fetchone() is None
+    assert cur.fetchone() is None
