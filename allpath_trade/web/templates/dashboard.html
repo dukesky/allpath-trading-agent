@@ -22,13 +22,13 @@
     <td class="num">{{ p.qty }}</td>
     <td class="num">{{ p.avg_entry_price | money }}</td>
     <td class="num">{{ p.market_value | money }}</td>
-    <td class="num {{ 'up' if p.unrealized_pl and p.unrealized_pl > 0 else 'down' }}">{{ p.unrealized_pl | money }}</td>
+    <td class="num {% if p.unrealized_pl and p.unrealized_pl > 0 %}up{% elif p.unrealized_pl and p.unrealized_pl < 0 %}down{% endif %}">{{ p.unrealized_pl | money }}</td>
   </tr>
   {% endfor %}
 </table>
 {% else %}<p class="muted">No open positions.</p>{% endif %}
 
-<h2>Active strategies</h2>
+<h2>Strategies</h2>
 {% for s in strategies %}
 <div class="card" style="margin-bottom:10px">
   <div class="row">
