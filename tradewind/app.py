@@ -8,6 +8,9 @@ from tradewind.config import Settings
 from tradewind.data.base import DataSource
 from tradewind.data.yf import YFinanceSource
 from tradewind.execution import Executor
+from tradewind.memory.consolidate import Consolidator
+from tradewind.memory.observations import ObservationLog
+from tradewind.memory.store import MemoryStore
 from tradewind.notify.base import Notifier
 from tradewind.notify.email import build_notifier
 from tradewind.risk.gate import RiskGate, RiskLimits
@@ -31,6 +34,9 @@ class Components:
     notifier: Notifier
     sentinel: Sentinel
     conn: sqlite3.Connection
+    observations: ObservationLog
+    memory: MemoryStore
+    consolidator: Consolidator | None = None
 
 
 def build_components(settings: Settings, broker: Broker | None = None) -> Components:
@@ -48,7 +54,11 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
     settings.strategies_dir.mkdir(parents=True, exist_ok=True)
     strategies = StrategyStore(settings.strategies_dir, conn)
     notifier = build_notifier(settings)
-    sentinel = Sentinel(strategies, data, broker, executor, queue, notifier)
+    observations = ObservationLog(conn)
+    memory = MemoryStore(settings.memory_dir, conn)
+    sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
+                       observations=observations)
+    consolidator: Consolidator | None = None
     try:
         from tradewind.agent.readonly_tools import register_readonly_tools
         from tradewind.agent.review import ReviewAgent
@@ -60,10 +70,12 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
         register_readonly_tools(review_registry, data=data, broker=broker,
                                 journal=journal, strategies=strategies,
                                 queue=queue)
-        sentinel.review_agent = ReviewAgent(review_llm, review_registry)
+        sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
+        consolidator = Consolidator(review_llm, memory, observations, journal, conn)
     except LLMConfigError:
         pass  # no LLM configured: Phase 2 behavior
     return Components(settings=settings, broker=broker, data=data, journal=journal,
                       gate=gate, executor=executor, queue=queue,
                       strategies=strategies, notifier=notifier, sentinel=sentinel,
-                      conn=conn)
+                      conn=conn, observations=observations, memory=memory,
+                      consolidator=consolidator)

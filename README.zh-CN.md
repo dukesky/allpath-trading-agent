@@ -23,7 +23,7 @@
 
 ---
 
-> **项目状态：** Phase 1-3 已完成——券商连接、行情数据、风控和交易日志已可对接 Alpaca 模拟盘账户；策略引擎 + 哨兵循环（YAML 策略、规则求值、版本管理、定时监控、硬规则自动执行）现已运行；LLM agent 核心（多 provider 聊天客户端、工具调用循环、`tradewind chat` REPL，以及对已入队软规则触发进行联网研究的 ReviewAgent（confirm 策略附上分析供你决策；auto 策略由其决定执行/放弃，仍经风控守门））也已就位。下一步是 Web UI + 记忆系统，详见[路线图](#路线图)。**默认仅模拟盘（paper trading）。**
+> **项目状态：** Phase 1-4 已完成——券商连接、行情数据、风控和交易日志已可对接 Alpaca 模拟盘账户；策略引擎 + 哨兵循环（YAML 策略、规则求值、版本管理、定时监控、硬规则自动执行）现已运行；LLM agent 核心（多 provider 聊天客户端、工具调用循环、`tradewind chat` REPL，以及对已入队软规则触发进行联网研究的 ReviewAgent）已就位；记忆系统（四层精选 markdown 层 + 沉淀 + 会话检索）使 agent 能在跨会话中学习和回忆耐久模式。下一步是 Web UI，详见[路线图](#路线图)。**默认仅模拟盘（paper trading）。**
 
 ## 目录
 
@@ -126,6 +126,7 @@ LLM / 策略规则  →  订单意图  →  风控守门（确定性）  →  �
 
 - Python ≥ 3.11 与 [uv](https://docs.astral.sh/uv/)
 - 一个免费的 [Alpaca 模拟盘账户](https://app.alpaca.markets/paper/dashboard/overview)
+- 编译时启用 FTS5 的 SQLite（Python ≥ 3.11 官方构建默认包含）——记忆搜索功能需要
 
 ### 安装
 
@@ -173,8 +174,8 @@ tradewind/
 | 1 | **执行地基**——券商抽象、Alpaca（模拟盘）适配器、行情数据、风控守门、交易日志、执行器、CLI | ✅ 已完成 |
 | 2 | **策略引擎 + 哨兵循环**——YAML 策略文档、受限表达式规则求值器、版本管理、定时监控、硬规则自动执行 | ✅ 已完成 |
 | 3 | **Agent 核心**——多 provider LLM 层（Claude / OpenAI / OpenRouter）、工具循环、上下文组装、`tradewind chat` REPL、为哨兵触发附加分析的 ReviewAgent | ✅ 已完成 |
-| 4 | **记忆系统**——四层记忆 + 每个循环后的交叉沉淀 | 🔜 下一步 |
-| 5 | **Web UI + 通知**——聊天、仪表盘、待确认队列、设置页、邮件 | 计划中 |
+| 4 | **记忆系统**——四层记忆 + 每个循环后的交叉沉淀 | ✅ 已完成 |
+| 5 | **Web UI + 通知**——聊天、仪表盘、待确认队列、设置页、邮件 | 🔜 下一步 |
 | 6 | **反思循环**——每日深度 review、交易后复盘 | 计划中 |
 
 ## 开发
@@ -184,6 +185,7 @@ uv run pytest                  # 单元测试（不联网）
 uv run pytest -m integration   # 集成测试——需要 Alpaca 模拟盘密钥
 uv run ruff check .            # lint
 uv run tradewind chat          # 与 agent 对话（需要在 .env 中配置 LLM 与 Alpaca 密钥）
+uv run tradewind memory show   # 查看 agent 记忆文件
 ```
 
 **工程约定**

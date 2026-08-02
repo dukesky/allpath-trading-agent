@@ -64,6 +64,28 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     ts TEXT NOT NULL,
     message TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS memory_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    layer TEXT NOT NULL,
+    key TEXT,
+    action TEXT NOT NULL,
+    before TEXT,
+    after TEXT
+);
+
+CREATE TABLE IF NOT EXISTS observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    source TEXT NOT NULL,
+    subject TEXT,
+    text TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+    kind UNINDEXED, ref_id UNINDEXED, subject, content
+);
 """
 
 

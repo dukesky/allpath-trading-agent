@@ -22,19 +22,39 @@ def is_market_hours(now: datetime | None = None) -> bool:
     return et.weekday() < 5 and OPEN <= et.time() < CLOSE
 
 
+def _is_after_close(now: datetime | None = None) -> bool:
+    now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    et = now.astimezone(ET)
+    return et.weekday() < 5 and et.time() >= time(16, 5)
+
+
 def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
-               scheduler_cls: type = BlockingScheduler) -> None:
+               scheduler_cls: type = BlockingScheduler,
+               daily_job: Callable[[], None] | None = None) -> None:
+    state = {"last_daily": None}
+
     def job() -> None:
         if not is_market_hours():
             print("[sentinel] market closed, skipping")
-            return
-        report = sentinel_factory().run_once()
-        print(f"[sentinel] checked={report.strategies_checked} "
-              f"triggers={len(report.outcomes)} errors={len(report.errors)}")
-        for o in report.outcomes:
-            print(f"  {o.strategy_id}/{o.rule_id}: {o.disposition} {o.detail}")
-        for e in report.errors:
-            print(f"  error: {e}")
+        else:
+            report = sentinel_factory().run_once()
+            print(f"[sentinel] checked={report.strategies_checked} "
+                  f"triggers={len(report.outcomes)} errors={len(report.errors)}")
+            for o in report.outcomes:
+                print(f"  {o.strategy_id}/{o.rule_id}: {o.disposition} {o.detail}")
+            for e in report.errors:
+                print(f"  error: {e}")
+
+        if daily_job is not None and _is_after_close():
+            today = datetime.now(UTC).astimezone(ET).date().isoformat()
+            if state["last_daily"] != today:
+                state["last_daily"] = today
+                try:
+                    daily_job()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[daily] failed: {exc}")
 
     scheduler = scheduler_cls()
     scheduler.add_job(job, "interval", minutes=interval_minutes,

@@ -77,3 +77,50 @@ def test_chat_banner_model_and_tool_activity(tmp_path, capsys, monkeypatch):
     assert "scripted" in out                    # model name (ScriptedLLM.model)
     assert "get_quote" in out                   # tool activity line
     assert "around 200" in out                  # rendered reply
+
+
+def test_chat_registers_memory_tools(tmp_path, capsys, monkeypatch):
+    from tests.test_agent_loop import tool_response
+    code = run_chat(monkeypatch, tmp_path, ["remember", "/exit"],
+                    [tool_response("memory_update",
+                                   {"layer": "profile", "action": "add",
+                                    "text": "prefers dividends"}),
+                     LLMResponse(text="noted")])
+    out = capsys.readouterr().out
+    assert code == 0 and "noted" in out
+    assert (tmp_path / "memory" / "user_profile.md").exists()
+
+
+def test_chat_eof_runs_same_post_chat_consolidation_as_exit(tmp_path, capsys, monkeypatch):
+    from tests.test_agent_loop import tool_response
+
+    setup_env(tmp_path, monkeypatch)
+
+    chat_llm = ScriptedLLM([LLMResponse(text="hi there")])
+    review_llm = ScriptedLLM([
+        tool_response("memory_update",
+                      {"layer": "profile", "action": "add",
+                       "text": "prefers dividends"}),
+        LLMResponse(text="noted 1 preference"),
+    ])
+
+    def fake_build_llm(settings, tier):
+        return review_llm if tier == "review" else chat_llm
+
+    monkeypatch.setattr("tradewind.llm.factory.build_llm", fake_build_llm)
+
+    lines = iter(["remember I prefer dividends"])
+
+    def input_then_eof(*a):
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError
+
+    monkeypatch.setattr("builtins.input", input_then_eof)
+    code = main(["chat"], broker_factory=lambda s: FakeBroker(),
+                llm_factory=lambda s, tier: chat_llm)
+    assert code == 0
+    memory_file = tmp_path / "memory" / "user_profile.md"
+    assert memory_file.exists()
+    assert "dividends" in memory_file.read_text()

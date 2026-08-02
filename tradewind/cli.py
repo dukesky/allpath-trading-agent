@@ -118,6 +118,27 @@ def cmd_reviews(q, args) -> int:
         return 1
 
 
+def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
+    if layer:
+        from tradewind.memory.store import MemoryError as MemoryStoreError
+
+        try:
+            text = memory.read(layer, key)
+        except MemoryStoreError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(text if text.strip() else "(empty)")
+        return 0
+    root = memory.root
+    files = sorted(root.rglob("*.md")) if root.exists() else []
+    if not files:
+        print("no memory files yet — the agent writes them as you work together")
+        return 0
+    for f in files:
+        print(f"{f.relative_to(root)}  ({f.stat().st_size} bytes)")
+    return 0
+
+
 CHAT_BANNER = r"""
           |\
           | \        t r a d e w i n d
@@ -136,8 +157,10 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
     from tradewind.agent.action_tools import register_action_tools
     from tradewind.agent.context import build_system_prompt, load_identity
     from tradewind.agent.loop import AgentSession
+    from tradewind.agent.memory_tools import register_memory_tools
     from tradewind.agent.readonly_tools import register_readonly_tools
     from tradewind.agent.tools import ToolRegistry
+    from tradewind.memory.search import SessionSearch
     from tradewind.store.conversations import ConversationStore
 
     # Resolved at call time (not as a default-arg value) so tests can
@@ -165,13 +188,17 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
                             queue=components.queue)
     register_action_tools(registry, strategies=components.strategies,
                           executor=components.executor, confirm=confirm)
+    register_memory_tools(registry, memory=components.memory,
+                          search=SessionSearch(components.conn))
     system = build_system_prompt(identity=load_identity(),
                                  broker=components.broker,
                                  journal=components.journal,
                                  strategies=components.strategies,
-                                 queue=components.queue)
+                                 queue=components.queue,
+                                 memory=components.memory)
     session = AgentSession(llm, registry, system, store=store,
                            conversation_id=cid, on_tool=on_tool)
+    initial_len = len(session.history)
 
     mode = "paper" if components.broker.is_paper else "LIVE"
     console.print(f"[bold cyan]{CHAT_BANNER}[/bold cyan]")
@@ -180,6 +207,16 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
     console.print(f"  [dim]chat[/dim]   conversation #{cid} · /exit to quit · "
                   "orders & strategy changes always ask first\n")
 
+    def _finish() -> None:
+        if components.consolidator is not None:
+            new_msgs = session.history[initial_len:]
+            if new_msgs:
+                try:
+                    note = components.consolidator.run_post_chat(new_msgs)
+                    console.print(f"[dim]memory: {note}[/dim]")
+                except Exception:  # noqa: BLE001, S110 — exit must never fail
+                    pass
+
     # Colored input prompt only on a real terminal (tests/pipes get plain text).
     prompt = "\x1b[1;36myou ▸ \x1b[0m" if sys.stdout.isatty() else "you ▸ "
     while True:
@@ -187,8 +224,10 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
             user = input_fn(prompt)
         except EOFError:
             console.print()
+            _finish()
             return 0
         if user.strip() in ("/exit", "/quit"):
+            _finish()
             console.print("[dim]bye — the sentinel keeps watching your rules.[/dim]")
             return 0
         if not user.strip():
@@ -222,6 +261,14 @@ def main(argv: list[str] | None = None,
     p_chat = sub.add_parser("chat", help="talk to the agent")
     p_chat.add_argument("--new", action="store_true",
                         help="start a new conversation instead of resuming")
+    p_mem = sub.add_parser("memory", help="curated agent memory")
+    msub = p_mem.add_subparsers(dest="memory_command", required=True)
+    m_show = msub.add_parser("show")
+    m_show.add_argument("--layer", default=None,
+                        help="memory layer (profile, strategy, stock, lesson)")
+    m_show.add_argument("--key", default=None,
+                        help="memory key (strategy/stock name)")
+    msub.add_parser("consolidate")
     args = parser.parse_args(argv)
 
     settings = SettingsStore().load()
@@ -229,7 +276,8 @@ def main(argv: list[str] | None = None,
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work without.
     needs_broker = args.command in {"status", "check", "run", "chat"} or (
-        args.command == "reviews" and args.reviews_command == "approve")
+        args.command == "reviews" and getattr(args, "reviews_command", None) == "approve") or (
+        args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
     broker: Broker | None = None
     if broker_factory is not None:
@@ -266,7 +314,11 @@ def main(argv: list[str] | None = None,
     if args.command == "run":
         from tradewind.scheduler import run_daemon
 
-        run_daemon(lambda: sentinel, settings.sentinel_interval_minutes)
+        daily = None
+        if components.consolidator is not None:
+            daily = lambda: print("[memory] " + components.consolidator.run_daily())
+        run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
+                   daily_job=daily)
         return 0
     if args.command == "strategies":
         return cmd_strategies(settings, store)
@@ -283,6 +335,19 @@ def main(argv: list[str] | None = None,
             print(f"LLM not configured: {exc}", file=sys.stderr)
             return 2
         return cmd_chat(components, llm, new=args.new)
+    if args.command == "memory":
+        if args.memory_command == "show":
+            from tradewind.memory.store import MemoryStore
+
+            memory = MemoryStore(settings.memory_dir, connect(settings.db_path))
+            return cmd_memory_show(memory, args.layer, args.key)
+        if args.memory_command == "consolidate":
+            if components.consolidator is None:
+                print("LLM not configured: set OPENROUTER_API_KEY "
+                      "(or provider key) in .env", file=sys.stderr)
+                return 2
+            print(components.consolidator.run_daily())
+            return 0
     return 1
 
 
