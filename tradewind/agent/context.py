@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tradewind.broker.base import Broker
+from tradewind.memory.store import MemoryStore
 from tradewind.store.journal import TradeJournal
 from tradewind.store.reviews import ReviewQueue
 from tradewind.strategy.store import StrategyStore
@@ -23,7 +24,8 @@ def load_identity(path: Path = Path("IDENTITY.md")) -> str:
 
 
 def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
-                        strategies: StrategyStore, queue: ReviewQueue) -> str:
+                        strategies: StrategyStore, queue: ReviewQueue,
+                        memory: MemoryStore | None = None) -> str:
     """Frozen snapshot, assembled once per session (stable prompt prefix)."""
     parts = [identity, "\n## Current snapshot (as of session start)\n"]
     try:
@@ -50,4 +52,21 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
         parts.append(f"trade: {r['ts'][:19]} {r['side']} {r['ticker']} "
                      f"[{r['status']}] {r['reason']}")
     parts.append(f"pending reviews: {len(queue.list())}")
+
+    if memory is not None:
+        profile = memory.render_for_context("profile")
+        if profile.strip():
+            parts.append("\n## Memory — user profile\n" + profile)
+        tickers: set[str] = set()
+        try:
+            tickers.update(p.ticker for p in broker.get_positions())
+        except Exception:  # noqa: BLE001, S110 — degraded broker already noted above
+            pass
+        tickers.update(d.position.ticker
+                       for d in strategies.load_all(status=None, errors=[]))
+        for ticker in sorted(tickers):
+            dossier = memory.render_for_context("stock", ticker)
+            if dossier.strip():
+                parts.append(f"\n## Memory — {ticker}\n" + dossier)
+
     return "\n".join(parts)

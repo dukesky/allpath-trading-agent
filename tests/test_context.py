@@ -40,3 +40,23 @@ def test_system_prompt_snapshot(tmp_path):
 def test_default_identity_mentions_boundaries():
     text = DEFAULT_IDENTITY.lower()
     assert "risk gate" in text and "confirm" in text
+
+
+def test_system_prompt_includes_memory_sections(tmp_path):
+    from tradewind.memory.store import MemoryStore
+
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / "t.yaml").write_text(STRAT)
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn)
+    memory.apply("profile", None, "add", text="Prefers dividend stocks")
+    memory.apply("stock", "AAPL", "add", text="Earnings vol ±8%")
+    memory.apply("stock", "ZZZZ", "add", text="unrelated ticker")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None), memory=memory)
+    assert "Prefers dividend stocks" in prompt
+    assert "Earnings vol" in prompt          # AAPL is held + in strategy
+    assert "unrelated ticker" not in prompt  # ZZZZ not relevant

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError
 
 from tradewind.agent.tools import ToolRegistry
 from tradewind.llm.base import LLMClient
+from tradewind.memory.store import MemoryStore
 
 PROMPT = """\
 A trading strategy rule has triggered and needs review before acting.
@@ -32,17 +33,27 @@ class ReviewAnalysis(BaseModel):
 
 class ReviewAgent:
     def __init__(self, llm: LLMClient, registry: ToolRegistry,
-                 max_iters: int = 8) -> None:
+                 max_iters: int = 8, memory: MemoryStore | None = None) -> None:
         self.llm = llm
         self.registry = registry
         self.max_iters = max_iters
+        self.memory = memory
 
     def analyze(self, review: dict) -> ReviewAnalysis:
-        history: list[dict] = [{"role": "user", "content": PROMPT.format(
+        extras = ""
+        if self.memory is not None:
+            dossier = self.memory.render_for_context("stock", review["ticker"])
+            if dossier.strip():
+                extras += f"\nstock dossier (curated memory):\n{dossier}\n"
+            lessons = self._matching_lessons(review["ticker"])
+            if lessons:
+                extras += f"\nrelevant lessons:\n{lessons}\n"
+        prompt_content = PROMPT.format(
             strategy_id=review["strategy_id"], rule_id=review["rule_id"],
             rule_type=review["rule_type"], ticker=review["ticker"],
             condition=review["condition"], action=review["action"],
-            snapshot=review["snapshot"])}]
+            snapshot=review["snapshot"]) + extras
+        history: list[dict] = [{"role": "user", "content": prompt_content}]
         text = ""
         for _ in range(self.max_iters):
             resp = self.llm.complete(history, tools=self.registry.specs())
@@ -56,6 +67,24 @@ class ReviewAgent:
             text = resp.text or ""
             break
         return self._parse(text)
+
+    def _matching_lessons(self, ticker: str, budget: int = 1000) -> str:
+        if self.memory is None:
+            return ""
+        lessons_dir = self.memory.root / "lessons"
+        if not lessons_dir.exists():
+            return ""
+        chunks: list[str] = []
+        total = 0
+        for path in sorted(lessons_dir.glob("*.md")):
+            text = path.read_text()
+            if ticker.upper() in text.upper():
+                take = text[: max(0, budget - total)]
+                chunks.append(take)
+                total += len(take)
+                if total >= budget:
+                    break
+        return "\n".join(chunks)
 
     @staticmethod
     def _parse(text: str) -> ReviewAnalysis:

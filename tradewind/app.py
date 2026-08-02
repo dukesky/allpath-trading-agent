@@ -9,6 +9,7 @@ from tradewind.data.base import DataSource
 from tradewind.data.yf import YFinanceSource
 from tradewind.execution import Executor
 from tradewind.memory.observations import ObservationLog
+from tradewind.memory.store import MemoryStore
 from tradewind.notify.base import Notifier
 from tradewind.notify.email import build_notifier
 from tradewind.risk.gate import RiskGate, RiskLimits
@@ -33,6 +34,7 @@ class Components:
     sentinel: Sentinel
     conn: sqlite3.Connection
     observations: ObservationLog
+    memory: MemoryStore
 
 
 def build_components(settings: Settings, broker: Broker | None = None) -> Components:
@@ -51,6 +53,7 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
     strategies = StrategyStore(settings.strategies_dir, conn)
     notifier = build_notifier(settings)
     observations = ObservationLog(conn)
+    memory = MemoryStore(settings.memory_dir, conn)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
                        observations=observations)
     try:
@@ -64,10 +67,10 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
         register_readonly_tools(review_registry, data=data, broker=broker,
                                 journal=journal, strategies=strategies,
                                 queue=queue)
-        sentinel.review_agent = ReviewAgent(review_llm, review_registry)
+        sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
     except LLMConfigError:
         pass  # no LLM configured: Phase 2 behavior
     return Components(settings=settings, broker=broker, data=data, journal=journal,
                       gate=gate, executor=executor, queue=queue,
                       strategies=strategies, notifier=notifier, sentinel=sentinel,
-                      conn=conn, observations=observations)
+                      conn=conn, observations=observations, memory=memory)

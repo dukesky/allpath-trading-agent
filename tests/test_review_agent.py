@@ -44,3 +44,19 @@ def test_unparseable_answer_defaults_to_skip():
 def test_llm_error_propagates():
     with pytest.raises(LLMError):
         ReviewAgent(ScriptedLLM([LLMError("down")]), registry()).analyze(REVIEW)
+
+
+def test_analyze_prompt_includes_dossier_and_lessons(tmp_path):
+    from tradewind.memory.store import MemoryStore
+    from tradewind.store.db import connect
+
+    memory = MemoryStore(tmp_path / "memory", connect(tmp_path / "db.sqlite"))
+    memory.apply("stock", "AAPL", "add", text="Earnings vol ±8%")
+    memory.apply("lesson", "earnings-week", "add",
+                 text="AAPL: no new positions in earnings week")
+    llm = ScriptedLLM([LLMResponse(
+        text='{"recommendation": "skip", "reasoning": "earnings week"}')])
+    agent = ReviewAgent(llm, registry(), memory=memory)
+    agent.analyze(REVIEW)
+    prompt = llm.seen[0][0]["content"]
+    assert "Earnings vol" in prompt and "earnings week" in prompt.lower()
