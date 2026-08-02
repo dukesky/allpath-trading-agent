@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}AllPath Trade{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <nav>
+    <span class="brand">allpath trade</span>
+    <a href="/" class="{{ 'on' if page == 'dashboard' }}">Dashboard</a>
+    <a href="/chat" class="{{ 'on' if page == 'chat' }}">Chat</a>
+    <a href="/reviews" class="{{ 'on' if page == 'reviews' }}">Pending{% if pending_count %}<span class="badge">{{ pending_count }}</span>{% endif %}</a>
+    <a href="/strategies" class="{{ 'on' if page == 'strategies' }}">Strategies</a>
+    <a href="/memory" class="{{ 'on' if page == 'memory' }}">Memory</a>
+    <a href="/settings" class="{{ 'on' if page == 'settings' }}">Settings</a>
+  </nav>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

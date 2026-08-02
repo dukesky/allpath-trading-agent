@@ -58,6 +58,10 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     install_auth(app)
 
+    from allpath_trade.web.routes import dashboard
+
+    app.include_router(dashboard.router)
+
     @app.get("/healthz")
     def healthz() -> dict:
         return {"status": "ok"}

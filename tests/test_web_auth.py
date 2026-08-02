@@ -32,14 +32,10 @@ def test_login_with_the_wrong_token_is_rejected(client):
 def test_login_then_browse(client):
     r = client.post("/login", data={"token": "secret"}, follow_redirects=False)
     assert r.status_code == 303
-    # Task 5 owns only /login and /logout -- "/" itself isn't a route yet
-    # (Task 6 adds the dashboard), so a 200 there isn't available to assert
-    # on. What this test can and must prove is that the auth gate itself
-    # passed: an authenticated GET to a protected path no longer gets
-    # redirected to /login (a 404 here means routing, not auth, rejected
-    # it).
+    # Task 6 added the dashboard at "/", so an authenticated GET there can
+    # now be held to the real bar: 200, not just "didn't redirect".
     r2 = client.get("/", follow_redirects=False)
-    assert r2.status_code != 303
+    assert r2.status_code == 200
 
 
 def test_cross_origin_post_is_rejected(client):

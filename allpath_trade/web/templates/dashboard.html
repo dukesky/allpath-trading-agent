@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · AllPath Trade{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if broker_error %}<p class="error">{{ broker_error }}</p>{% endif %}
+{% if account %}
+<div class="metrics">
+  <div class="card metric"><div class="label">Equity</div><div class="value">{{ account.equity | money }}</div></div>
+  <div class="card metric"><div class="label">Cash</div><div class="value">{{ account.cash | money }}</div></div>
+  <div class="card metric"><div class="label">Buying power</div><div class="value">{{ account.buying_power | money }}</div></div>
+</div>
+{% endif %}
+
+<h2>Positions</h2>
+{% if positions %}
+<table>
+  <tr><th>Ticker</th><th class="num">Qty</th><th class="num">Avg cost</th><th class="num">Value</th><th class="num">P/L</th></tr>
+  {% for p in positions %}
+  <tr>
+    <td>{{ p.ticker }}</td>
+    <td class="num">{{ p.qty }}</td>
+    <td class="num">{{ p.avg_entry_price | money }}</td>
+    <td class="num">{{ p.market_value | money }}</td>
+    <td class="num {{ 'up' if p.unrealized_pl and p.unrealized_pl > 0 else 'down' }}">{{ p.unrealized_pl | money }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}<p class="muted">No open positions.</p>{% endif %}
+
+<h2>Active strategies</h2>
+{% for s in strategies %}
+<div class="card" style="margin-bottom:10px">
+  <div class="row">
+    <a href="/strategies/{{ s.id }}"><strong>{{ s.name }}</strong></a>
+    <span class="muted">· {{ s.position.ticker }}</span>
+    <span style="margin-left:auto" class="muted">{{ s.status.value }} / {{ s.authorization.value }}</span>
+  </div>
+  <div class="muted" style="font-size:13px">
+    {% for r in s.rules %}{{ r.id }}: {{ r.state.value }}{% if not loop.last %} · {% endif %}{% endfor %}
+  </div>
+</div>
+{% else %}<p class="muted">No strategies yet. Ask the agent to draft one in Chat.</p>{% endfor %}
+{% for e in strategy_errors %}<p class="error">{{ e }}</p>{% endfor %}
+
+<h2>Recent trades</h2>
+{% if trades %}
+<table>
+  <tr><th>When</th><th>Side</th><th>Ticker</th><th>Status</th><th>Reason</th></tr>
+  {% for t in trades %}
+  <tr><td class="muted">{{ t['ts'] | ago }}</td><td>{{ t['side'] }}</td><td>{{ t['ticker'] }}</td><td>{{ t['status'] }}</td><td class="muted">{{ t['reason'] }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<p class="muted">No trades recorded yet.</p>{% endif %}
+{% endblock %}
