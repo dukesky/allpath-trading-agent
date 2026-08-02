@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Pending · AllPath Trade{% endblock %}
+{% block content %}
+<h1>Pending</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% for item in items %}{% include "_review_card.html" %}{% else %}
+<p class="muted">Nothing waiting on you.</p>
+{% endfor %}
+
+{% if recent %}
+<h2>Resolved</h2>
+{% for item in recent %}{% include "_review_card.html" %}{% endfor %}
+{% endif %}
+{% endblock %}

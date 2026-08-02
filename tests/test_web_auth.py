@@ -39,11 +39,8 @@ def test_login_then_browse(client):
 
 
 def test_cross_origin_post_is_rejected(client):
-    # Brief targets /reviews/1/reject, which doesn't exist until Task 7.
-    # /logout is the only state-changing route available now; Task 7
-    # re-points this at a real reviews route once it lands.
     client.post("/login", data={"token": "secret"})
-    r = client.post("/logout", headers={"origin": "http://evil.example"})
+    r = client.post("/reviews/1/reject", headers={"origin": "http://evil.example"})
     assert r.status_code == 403
 
 

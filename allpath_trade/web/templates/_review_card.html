@@ -1,0 +1,34 @@
+<div class="card" id="review-{{ item['id'] }}" style="margin-bottom:12px">
+  <div class="row">
+    <strong>{{ item['action'] }} · {{ item['ticker'] }}</strong>
+    <span class="muted">#{{ item['id'] }}</span>
+    <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
+  </div>
+  <p class="muted" style="font-size:13px;margin:6px 0">
+    {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
+  </p>
+  {% if item['intent'] %}
+  <p style="font-family:var(--mono);font-size:14px;margin:6px 0">
+    {{ item['intent']['side'] }}
+    {% if item['intent']['qty'] %}{{ item['intent']['qty'] }} shares{% else %}{{ item['intent']['notional'] | money }}{% endif %}
+    {{ item['intent']['ticker'] }}
+  </p>
+  {% endif %}
+  {% if item['agent_analysis'] %}
+  <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+    <p style="font-size:13px;margin:0 0 4px"><strong>Agent recommends:</strong> {{ item['agent_analysis'].get('recommend', 'no recommendation') }}</p>
+    <p class="muted" style="font-size:13px;margin:0">{{ item['agent_analysis'].get('reasoning', '') }}</p>
+    {% for src in item['agent_analysis'].get('sources', []) %}
+    <p class="muted" style="font-size:12px;margin:2px 0"><a href="{{ src }}">{{ src }}</a></p>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if item['status'] == 'pending' %}
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="/reviews/{{ item['id'] }}/approve"><button class="primary" type="submit">Approve</button></form>
+    <form method="post" action="/reviews/{{ item['id'] }}/reject"><button class="danger" type="submit">Reject</button></form>
+  </div>
+  {% else %}
+  <p class="muted" style="font-size:13px;margin:10px 0 0">{{ item['status'] }} {{ item['resolved_ts'] | ago }}</p>
+  {% endif %}
+</div>
