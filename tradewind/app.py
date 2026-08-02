@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 from tradewind.broker.base import Broker
@@ -29,6 +30,7 @@ class Components:
     strategies: StrategyStore
     notifier: Notifier
     sentinel: Sentinel
+    conn: sqlite3.Connection
 
 
 def build_components(settings: Settings, broker: Broker | None = None) -> Components:
@@ -63,4 +65,5 @@ def build_components(settings: Settings, broker: Broker | None = None) -> Compon
         pass  # no LLM configured: Phase 2 behavior
     return Components(settings=settings, broker=broker, data=data, journal=journal,
                       gate=gate, executor=executor, queue=queue,
-                      strategies=strategies, notifier=notifier, sentinel=sentinel)
+                      strategies=strategies, notifier=notifier, sentinel=sentinel,
+                      conn=conn)

@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from tradewind.broker.base import Broker
 from tradewind.config import Settings, SettingsStore
+from tradewind.llm.base import LLMClient
 from tradewind.store.db import connect
 from tradewind.store.journal import TradeJournal
 
@@ -117,8 +118,55 @@ def cmd_reviews(q, args) -> int:
         return 1
 
 
+def cmd_chat(components, llm, *, new: bool,
+             input_fn=None, print_fn=print) -> int:
+    from tradewind.agent.action_tools import register_action_tools
+    from tradewind.agent.context import build_system_prompt, load_identity
+    from tradewind.agent.loop import AgentSession
+    from tradewind.agent.readonly_tools import register_readonly_tools
+    from tradewind.agent.tools import ToolRegistry
+    from tradewind.store.conversations import ConversationStore
+
+    # Resolved at call time (not as a default-arg value) so tests can
+    # monkeypatch builtins.input and have it take effect here.
+    if input_fn is None:
+        input_fn = input
+
+    store = ConversationStore(components.conn)
+    cid = store.start() if new or store.latest() is None else store.latest()
+
+    def confirm(prompt: str) -> bool:
+        return input_fn(f"{prompt}\nConfirm? [y/N] ").strip().lower() in ("y", "yes")
+
+    registry = ToolRegistry()
+    register_readonly_tools(registry, data=components.data,
+                            broker=components.broker, journal=components.journal,
+                            strategies=components.strategies,
+                            queue=components.queue)
+    register_action_tools(registry, strategies=components.strategies,
+                          executor=components.executor, confirm=confirm)
+    system = build_system_prompt(identity=load_identity(),
+                                 broker=components.broker,
+                                 journal=components.journal,
+                                 strategies=components.strategies,
+                                 queue=components.queue)
+    session = AgentSession(llm, registry, system, store=store, conversation_id=cid)
+    print_fn(f"[tradewind chat] conversation #{cid} — /exit to quit")
+    while True:
+        try:
+            user = input_fn("you> ")
+        except EOFError:
+            return 0
+        if user.strip() in ("/exit", "/quit"):
+            return 0
+        if not user.strip():
+            continue
+        print_fn(f"agent> {session.run_turn(user)}")
+
+
 def main(argv: list[str] | None = None,
-         broker_factory: Callable[[Settings], Broker] | None = None) -> int:
+         broker_factory: Callable[[Settings], Broker] | None = None,
+         llm_factory: Callable[[Settings, str], LLMClient] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tradewind")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show account, positions, recent trades")
@@ -136,13 +184,16 @@ def main(argv: list[str] | None = None,
     p_rej = rsub.add_parser("reject")
     p_rej.add_argument("review_id", type=int)
     p_rej.add_argument("--note", default="")
+    p_chat = sub.add_parser("chat", help="talk to the agent")
+    p_chat.add_argument("--new", action="store_true",
+                        help="start a new conversation instead of resuming")
     args = parser.parse_args(argv)
 
     settings = SettingsStore().load()
 
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work without.
-    needs_broker = args.command in {"status", "check", "run"} or (
+    needs_broker = args.command in {"status", "check", "run", "chat"} or (
         args.command == "reviews" and args.reviews_command == "approve")
 
     broker: Broker | None = None
@@ -188,6 +239,15 @@ def main(argv: list[str] | None = None,
         return cmd_rearm(store, args.strategy_id, args.rule_id)
     if args.command == "reviews":
         return cmd_reviews(queue, args)
+    if args.command == "chat":
+        from tradewind.llm.factory import LLMConfigError, build_llm
+
+        try:
+            llm = (llm_factory or build_llm)(settings, "chat")
+        except LLMConfigError as exc:
+            print(f"LLM not configured: {exc}", file=sys.stderr)
+            return 2
+        return cmd_chat(components, llm, new=args.new)
     return 1
 
 
