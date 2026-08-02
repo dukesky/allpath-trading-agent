@@ -48,8 +48,10 @@ class SettingsStore:
         return dotenv_values(self.env_file).get(key)
 
     def set(self, key: str, value: str) -> None:
+        # quote_mode="always": values reach here from the settings page and may
+        # contain spaces, '#', or '=' — unquoted, dotenv truncates or mangles them.
         self.env_file.touch(exist_ok=True)
-        set_key(str(self.env_file), key, value, quote_mode="never")
+        set_key(str(self.env_file), key, value, quote_mode="always")
 
     def load(self) -> Settings:
         return Settings(_env_file=self.env_file)

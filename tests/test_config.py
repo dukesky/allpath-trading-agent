@@ -16,10 +16,10 @@ def test_store_set_creates_and_updates_env_file(tmp_path: Path):
     store.set("ALPACA_SECRET_KEY", "s1")
     store.set("ALPACA_API_KEY", "k2")  # update in place
     text = env.read_text()
-    assert "ALPACA_API_KEY=k2" in text
-    assert "ALPACA_SECRET_KEY=s1" in text
-    assert text.count("ALPACA_API_KEY") == 1
+    # Values are quoted for safety, so we check the retrieved value instead
     assert store.get("ALPACA_API_KEY") == "k2"
+    assert store.get("ALPACA_SECRET_KEY") == "s1"
+    assert text.count("ALPACA_API_KEY") == 1
 
 
 def test_store_load_returns_settings(tmp_path: Path, monkeypatch):
@@ -31,3 +31,12 @@ def test_store_load_returns_settings(tmp_path: Path, monkeypatch):
     s = store.load()
     assert s.alpaca_api_key == "abc"
     assert s.alpaca_paper is True
+
+
+def test_set_preserves_values_with_spaces_hashes_and_equals(tmp_path: Path):
+    store = SettingsStore(tmp_path / ".env")
+    store.set("SMTP_FROM", "AllPath Trade <bot@example.com>")
+    store.set("WEB_TOKEN", "abc#def=ghi jkl")
+    reloaded = SettingsStore(tmp_path / ".env")
+    assert reloaded.get("SMTP_FROM") == "AllPath Trade <bot@example.com>"
+    assert reloaded.get("WEB_TOKEN") == "abc#def=ghi jkl"

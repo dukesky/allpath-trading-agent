@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.memory.guard import MemoryGuardError, scan_entry
-from allpath_trade.memory.store import MemoryError, MemoryStore
+from allpath_trade.memory.store import MemoryStore, MemoryStoreError
 
 if TYPE_CHECKING:
     from allpath_trade.memory.search import SessionSearch
@@ -23,13 +23,13 @@ def register_memory_tools(registry: ToolRegistry, *, memory: MemoryStore,
             if text is not None:
                 scan_entry(text)
             return memory.apply(layer, key, action, text=text, match=match)
-        except (MemoryError, MemoryGuardError) as exc:
+        except (MemoryStoreError, MemoryGuardError) as exc:
             return f"error: {exc}"
 
     def memory_read(layer: str, key: str | None = None) -> str:
         try:
             return memory.read(layer, key) or "(empty)"
-        except MemoryError as exc:
+        except MemoryStoreError as exc:
             return f"error: {exc}"
 
     t = "string"

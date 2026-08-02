@@ -120,7 +120,7 @@ def cmd_reviews(q, args) -> int:
 
 def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
     if layer:
-        from allpath_trade.memory.store import MemoryError as MemoryStoreError
+        from allpath_trade.memory.store import MemoryStoreError
 
         try:
             text = memory.read(layer, key)

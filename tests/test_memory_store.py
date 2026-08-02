@@ -1,7 +1,7 @@
 import pytest
 
 from allpath_trade.memory.guard import MemoryGuardError
-from allpath_trade.memory.store import LAYER_BUDGETS, MemoryError, MemoryStore  # noqa: F401
+from allpath_trade.memory.store import LAYER_BUDGETS, MemoryStore, MemoryStoreError  # noqa: F401
 from allpath_trade.store.db import connect
 
 
@@ -23,7 +23,7 @@ def test_paths(store, tmp_path):
     ("stock", None), ("strategy", "a b"),
 ])
 def test_invalid_layer_or_key_rejected(store, layer, key):
-    with pytest.raises(MemoryError):
+    with pytest.raises(MemoryStoreError):
         store.path_for(layer, key)
 
 
@@ -50,13 +50,13 @@ def test_replace_and_remove_by_unique_substring(store):
 def test_ambiguous_match_errors(store):
     store.apply("profile", None, "add", text="alpha one")
     store.apply("profile", None, "add", text="alpha two")
-    with pytest.raises(MemoryError) as ei:
+    with pytest.raises(MemoryStoreError) as ei:
         store.apply("profile", None, "remove", match="alpha")
     assert "2" in str(ei.value)
 
 
 def test_missing_match_errors(store):
-    with pytest.raises(MemoryError):
+    with pytest.raises(MemoryStoreError):
         store.apply("profile", None, "remove", match="nothing here")
 
 
@@ -64,7 +64,7 @@ def test_budget_blocks_add_when_full(store):
     big = "x" * 480
     for i in range(5):
         store.apply("profile", None, "add", text=f"{i} {big}")
-    with pytest.raises(MemoryError) as ei:
+    with pytest.raises(MemoryStoreError) as ei:
         store.apply("profile", None, "add", text="one more")
     assert "budget" in str(ei.value)
 
@@ -95,3 +95,8 @@ def test_apply_enforces_guard_even_without_the_tool_layer(store, tmp_path):
     assert not (tmp_path / "memory" / "user_profile.md").exists()
     conn = store._conn
     assert conn.execute("SELECT COUNT(*) AS n FROM memory_log").fetchone()["n"] == 0
+
+
+def test_memory_store_error_is_raised_for_an_unknown_layer(store):
+    with pytest.raises(MemoryStoreError):
+        store.read("not-a-layer")

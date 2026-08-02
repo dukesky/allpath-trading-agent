@@ -321,7 +321,7 @@ memory/
 
 ### 前置修复（实施前完成）
 1. `SettingsStore` 的 `quote_mode="never"` 会破坏含空格/`#`/`=` 的值——设置页写任意值，必修。
-2. `memory/store.py` 的 `MemoryError` 与内置异常同名，重命名为 `MemoryStoreError`（保留别名）。
+2. `memory/store.py` 的 `MemoryError` 与内置异常同名，重命名为 `MemoryStoreError`（不保留别名，调用点全部更新）。
 3. 上述 WAL + 每线程连接改造。
 
 ### 测试
