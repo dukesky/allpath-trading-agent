@@ -5,6 +5,8 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tradewind.memory.guard import scan_entry
+
 LAYER_BUDGETS: dict[str, int] = {
     "profile": 2000, "strategy": 2000, "stock": 3000, "lesson": 2000,
 }
@@ -48,6 +50,8 @@ class MemoryStore:
 
     def apply(self, layer: str, key: str | None, action: str,
               text: str | None = None, match: str | None = None) -> str:
+        if action in ("add", "replace") and text is not None:
+            scan_entry(text)
         path = self.path_for(layer, key)
         before = self.read(layer, key)
         budget = LAYER_BUDGETS[layer]

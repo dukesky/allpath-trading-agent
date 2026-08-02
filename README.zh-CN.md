@@ -126,6 +126,7 @@ LLM / 策略规则  →  订单意图  →  风控守门（确定性）  →  �
 
 - Python ≥ 3.11 与 [uv](https://docs.astral.sh/uv/)
 - 一个免费的 [Alpaca 模拟盘账户](https://app.alpaca.markets/paper/dashboard/overview)
+- 编译时启用 FTS5 的 SQLite（Python ≥ 3.11 官方构建默认包含）——记忆搜索功能需要
 
 ### 安装
 

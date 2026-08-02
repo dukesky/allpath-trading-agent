@@ -207,6 +207,16 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
     console.print(f"  [dim]chat[/dim]   conversation #{cid} · /exit to quit · "
                   "orders & strategy changes always ask first\n")
 
+    def _finish() -> None:
+        if components.consolidator is not None:
+            new_msgs = session.history[initial_len:]
+            if new_msgs:
+                try:
+                    note = components.consolidator.run_post_chat(new_msgs)
+                    console.print(f"[dim]memory: {note}[/dim]")
+                except Exception:  # noqa: BLE001, S110 — exit must never fail
+                    pass
+
     # Colored input prompt only on a real terminal (tests/pipes get plain text).
     prompt = "\x1b[1;36myou ▸ \x1b[0m" if sys.stdout.isatty() else "you ▸ "
     while True:
@@ -214,16 +224,10 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
             user = input_fn(prompt)
         except EOFError:
             console.print()
+            _finish()
             return 0
         if user.strip() in ("/exit", "/quit"):
-            if components.consolidator is not None:
-                new_msgs = session.history[initial_len:]
-                if new_msgs:
-                    try:
-                        note = components.consolidator.run_post_chat(new_msgs)
-                        console.print(f"[dim]memory: {note}[/dim]")
-                    except Exception:  # noqa: BLE001, S110 — exit must never fail
-                        pass
+            _finish()
             console.print("[dim]bye — the sentinel keeps watching your rules.[/dim]")
             return 0
         if not user.strip():

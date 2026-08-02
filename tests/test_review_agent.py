@@ -46,6 +46,21 @@ def test_llm_error_propagates():
         ReviewAgent(ScriptedLLM([LLMError("down")]), registry()).analyze(REVIEW)
 
 
+def test_matching_lessons_uses_word_boundary_not_bare_substring(tmp_path):
+    from tradewind.memory.store import MemoryStore
+    from tradewind.store.db import connect
+
+    memory = MemoryStore(tmp_path / "memory", connect(tmp_path / "db.sqlite"))
+    # "AI" must not match merely because it's a substring of "SAIL".
+    memory.apply("lesson", "sailing-note", "add",
+                 text="Learned to stay calm and sail steady during volatility")
+    memory.apply("lesson", "ai-note", "add", text="AI stocks: don't chase the hype")
+    agent = ReviewAgent(ScriptedLLM([]), registry(), memory=memory)
+    lessons = agent._matching_lessons("AI")
+    assert "hype" in lessons
+    assert "sail steady" not in lessons
+
+
 def test_analyze_prompt_includes_dossier_and_lessons(tmp_path):
     from tradewind.memory.store import MemoryStore
     from tradewind.store.db import connect

@@ -126,6 +126,7 @@ LLM / strategy rules  →  OrderIntent  →  RiskGate (deterministic)  →  Brok
 
 - Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/)
 - A free [Alpaca paper trading account](https://app.alpaca.markets/paper/dashboard/overview)
+- SQLite built with FTS5 (standard in official Python ≥ 3.11 builds) — needed for memory search
 
 ### Installation
 

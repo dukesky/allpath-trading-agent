@@ -76,9 +76,10 @@ class ReviewAgent:
             return ""
         chunks: list[str] = []
         total = 0
+        pattern = re.compile(rf"\b{re.escape(ticker)}\b", re.IGNORECASE)
         for path in sorted(lessons_dir.glob("*.md")):
             text = path.read_text()
-            if ticker.upper() in text.upper():
+            if pattern.search(text):
                 take = text[: max(0, budget - total)]
                 chunks.append(take)
                 total += len(take)

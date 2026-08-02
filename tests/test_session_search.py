@@ -38,6 +38,13 @@ def test_session_search_tool(tmp_path):
     assert "AAPL" in out
 
 
+def test_ticker_subject_is_indexed_even_when_absent_from_text(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    ObservationLog(conn).add("sentinel", "stop rule executed", subject="NVDA")
+    results = SessionSearch(conn).query("NVDA")
+    assert any(r["kind"] == "observation" for r in results)
+
+
 def test_tool_no_matches(tmp_path):
     conn = connect(tmp_path / "db.sqlite")
     reg = ToolRegistry()
