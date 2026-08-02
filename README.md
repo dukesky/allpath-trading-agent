@@ -23,7 +23,7 @@
 
 ---
 
-> **Project status:** Phases 1-3 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; and the LLM agent core (multi-provider chat client, tool-calling loop, `tradewind chat` REPL, and a ReviewAgent that researches queued soft-rule triggers, attaching its analysis for your review (and deciding execute/skip for auto-authorized strategies, still through the risk gate)) is now in place. The Web UI + memory system is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
+> **Project status:** Phases 1-4 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `tradewind chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; and the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions. The Web UI is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
 
 ## Table of Contents
 
@@ -173,8 +173,8 @@ tradewind/
 | 1 | **Execution foundation** — broker abstraction, Alpaca (paper) adapter, market data, risk gate, trade journal, executor, CLI | ✅ Complete |
 | 2 | **Strategy engine + sentinel loop** — YAML strategy documents, restricted-expression rule evaluator, versioning, scheduled monitoring, hard-rule auto-execution | ✅ Complete |
 | 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly, `tradewind chat` REPL, ReviewAgent-annotated sentinel triggers | ✅ Complete |
-| 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | 🔜 Next |
-| 5 | **Web UI + notifications** — chat, dashboard, pending-confirmation queue, settings, email | Planned |
+| 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | ✅ Complete |
+| 5 | **Web UI + notifications** — chat, dashboard, pending-confirmation queue, settings, email | 🔜 Next |
 | 6 | **Reflection loops** — daily deep review, post-trade retrospectives | Planned |
 
 ## Development
@@ -184,6 +184,7 @@ uv run pytest                  # unit tests (network-free)
 uv run pytest -m integration   # integration tests — requires Alpaca paper keys
 uv run ruff check .            # lint
 uv run tradewind chat          # talk to the agent (needs LLM + Alpaca keys in .env)
+uv run tradewind memory show   # view agent memory files
 ```
 
 **Engineering conventions**

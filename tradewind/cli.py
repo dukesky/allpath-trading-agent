@@ -118,6 +118,21 @@ def cmd_reviews(q, args) -> int:
         return 1
 
 
+def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
+    if layer:
+        text = memory.read(layer, key)
+        print(text if text.strip() else "(empty)")
+        return 0
+    root = memory.root
+    files = sorted(root.rglob("*.md")) if root.exists() else []
+    if not files:
+        print("no memory files yet — the agent writes them as you work together")
+        return 0
+    for f in files:
+        print(f"{f.relative_to(root)}  ({f.stat().st_size} bytes)")
+    return 0
+
+
 CHAT_BANNER = r"""
           |\
           | \        t r a d e w i n d
@@ -236,6 +251,14 @@ def main(argv: list[str] | None = None,
     p_chat = sub.add_parser("chat", help="talk to the agent")
     p_chat.add_argument("--new", action="store_true",
                         help="start a new conversation instead of resuming")
+    p_mem = sub.add_parser("memory", help="curated agent memory")
+    msub = p_mem.add_subparsers(dest="memory_command", required=True)
+    m_show = msub.add_parser("show")
+    m_show.add_argument("--layer", default=None,
+                        help="memory layer (profile, strategy, stock, lesson)")
+    m_show.add_argument("--key", default=None,
+                        help="memory key (strategy/stock name)")
+    msub.add_parser("consolidate")
     args = parser.parse_args(argv)
 
     settings = SettingsStore().load()
@@ -243,7 +266,8 @@ def main(argv: list[str] | None = None,
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work without.
     needs_broker = args.command in {"status", "check", "run", "chat"} or (
-        args.command == "reviews" and args.reviews_command == "approve")
+        args.command == "reviews" and getattr(args, "reviews_command", None) == "approve") or (
+        args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
     broker: Broker | None = None
     if broker_factory is not None:
@@ -301,6 +325,19 @@ def main(argv: list[str] | None = None,
             print(f"LLM not configured: {exc}", file=sys.stderr)
             return 2
         return cmd_chat(components, llm, new=args.new)
+    if args.command == "memory":
+        if args.memory_command == "show":
+            from tradewind.memory.store import MemoryStore
+
+            memory = MemoryStore(settings.memory_dir, connect(settings.db_path))
+            return cmd_memory_show(memory, args.layer, args.key)
+        if args.memory_command == "consolidate":
+            if components.consolidator is None:
+                print("LLM not configured: set OPENROUTER_API_KEY "
+                      "(or provider key) in .env", file=sys.stderr)
+                return 2
+            print(components.consolidator.run_daily())
+            return 0
     return 1
 
 
