@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     ts TEXT NOT NULL,
     message TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS memory_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    layer TEXT NOT NULL,
+    key TEXT,
+    action TEXT NOT NULL,
+    before TEXT,
+    after TEXT
+);
 """
 
 
