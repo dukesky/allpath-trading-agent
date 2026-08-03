@@ -267,14 +267,22 @@ def test_build_jobs_swallows_daily_consolidation_failure(monkeypatch, capsys):
     monkeypatch.setattr(sched, "is_market_hours", lambda: False)
     monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
     consolidator = FakeConsolidator(fail=True)
+    notifier = DigestNotifier()
     scheduler = FakeScheduler()
     build_jobs(scheduler, FakeHolder(
-        _components(sentinel=FakeSentinel(), consolidator=consolidator)))
+        _components(sentinel=FakeSentinel(), consolidator=consolidator,
+                    notifier=notifier)))
 
     scheduler.job()  # must not raise
 
     assert consolidator.calls == 1
     assert "failed" in capsys.readouterr().out
+    # The digest is the user's daily signal that the system is alive — a
+    # broken consolidator must not also cost them that, today or on any
+    # future day (it doesn't poison the once-per-day gate either).
+    assert len(notifier.sent) == 1
+    scheduler.job()
+    assert len(notifier.sent) == 1  # still once-per-day, not retried
 
 
 def test_build_jobs_prints_nothing_on_a_normal_sentinel_pass(monkeypatch, capsys):
@@ -336,6 +344,30 @@ def test_build_jobs_digest_counts_only_sentinel_observations(monkeypatch):
     assert "0 rule trigger(s)" in body
 
 
+def test_build_jobs_digest_excludes_sentinel_errors(monkeypatch):
+    # A per-strategy failure (bad quote, etc.) logs under "sentinel_error",
+    # not "sentinel" — see Sentinel.run_once. If the digest ever counted
+    # those too, a day with only errors and zero real triggers would
+    # falsely tell the user a rule fired.
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    components = _components(
+        sentinel=FakeSentinel(), notifier=notifier,
+        observations=FakeObservations(
+            rows=[{"source": "sentinel_error"}, {"source": "sentinel_error"},
+                  {"source": "sentinel"}]))
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    _subject, body = notifier.sent[0]
+    assert "1 rule trigger(s)" in body
+
+
 def test_build_jobs_sends_digest_even_when_consolidation_disabled(monkeypatch):
     import allpath_trade.scheduler as sched
 
@@ -356,7 +388,13 @@ def test_build_jobs_sends_digest_even_when_consolidation_disabled(monkeypatch):
 
 
 def test_build_jobs_no_digest_before_close(monkeypatch):
-    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: True)
+    # Unlike its siblings above, this test's whole point is the gate being
+    # *closed* — it must not depend on the real wall clock, or it goes
+    # intermittently red whenever the suite runs on a weekday evening.
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: False)
     notifier = DigestNotifier()
     components = _components(sentinel=FakeSentinel(), notifier=notifier)
     scheduler = FakeScheduler()

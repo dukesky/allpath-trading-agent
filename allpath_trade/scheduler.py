@@ -99,7 +99,9 @@ def _send_daily_digest(components) -> None:
     accessor (there is no `journal.today()`). `triggers` counts today's
     "sentinel"-sourced rows in the observation log: `Sentinel._check_strategy`
     logs exactly one there per rule trigger regardless of disposition, so
-    this is a real count, not the brief's hardcoded placeholder. `since_iso`
+    this is a real count, not the brief's hardcoded placeholder. Per-strategy
+    failures (e.g. a bad quote) log under the distinct "sentinel_error"
+    source instead, so they can never inflate this count. `since_iso`
     is a UTC calendar-day boundary, matching `TradeJournal.trades_today`'s
     own day convention; `limit` is set high because `recent()`'s 200-row
     default would silently undercount on a very active day."""
@@ -129,12 +131,18 @@ def build_jobs(scheduler, holder) -> None:
             # Consolidation stays gated by its own setting; the digest email
             # fires unconditionally (it doesn't depend on daily_consolidation
             # being on). Both run under the same _maybe_run_daily call so
-            # they share one once-per-day gate — if consolidation raises,
-            # _maybe_run_daily's own handler logs it and the digest for
-            # today is skipped too, same as any other daily-job failure.
+            # they share one once-per-day gate. Consolidation failure is
+            # caught right here, separately from _maybe_run_daily's own
+            # handler, so it costs only itself: the digest is the user's
+            # daily signal that the system is alive, and a broken
+            # consolidator must not also silence that signal — it should be
+            # visible in the digest's own trigger/trade counts instead.
             consolidator = components.consolidator
             if consolidator is not None and components.settings.daily_consolidation:
-                consolidator.run_daily()
+                try:
+                    consolidator.run_daily()
+                except Exception as exc:  # noqa: BLE001 — see comment above
+                    print(f"[consolidation] failed: {exc}")
             _send_daily_digest(components)
 
         _maybe_run_daily(daily, state)

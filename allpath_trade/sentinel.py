@@ -70,7 +70,13 @@ class Sentinel:
             except Exception as exc:  # noqa: BLE001 — isolate per-strategy failures
                 report.errors.append(f"{doc.id}: {exc}")
                 if self.observations is not None:
-                    self.observations.add("sentinel", f"error: {doc.id}: {exc}")
+                    # Distinct source (not "sentinel") so a quote-fetch or
+                    # other per-strategy failure can never be mistaken for a
+                    # real rule trigger by anything counting "sentinel" rows
+                    # (the daily digest's trigger count) — even if a third
+                    # writer is added later, string-matching the text would
+                    # drift silently but a dedicated source cannot.
+                    self.observations.add("sentinel_error", f"{doc.id}: {exc}")
         return report
 
     def _check_strategy(self, doc: StrategyDoc, equity: Decimal,
@@ -127,8 +133,10 @@ class Sentinel:
 
         if intent is None:
             # Nothing was proposed (e.g. a sell rule fired with no position
-            # held) — there is nothing for the user to act on, so this is
-            # not worth an email.
+            # held) — there is no order to report, but the rule itself did
+            # fire and the user has no other way to learn that, so still
+            # notify (briefly) rather than staying silent.
+            self._notify_rule(doc, rule_id, condition, "skipped")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="skipped",
                                   detail="no actionable order (e.g. no position)")
@@ -162,10 +170,11 @@ class Sentinel:
             self._notify_queued(rid, ticker, action, doc.id, "")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="queued")
-        return self._agent_review(rid, doc, rule_id, rule_type, action, intent)
+        return self._agent_review(rid, doc, rule_id, rule_type, condition,
+                                  action, intent)
 
     def _agent_review(self, rid: int, doc: StrategyDoc, rule_id: str,
-                      rule_type: RuleType, action: str,
+                      rule_type: RuleType, condition: str, action: str,
                       intent: OrderIntent) -> TriggerOutcome:
         base = {"strategy_id": doc.id, "rule_id": rule_id}
         ticker = doc.position.ticker
@@ -224,7 +233,9 @@ class Sentinel:
             self._notify_order(ticker, intent.side.value, False, detail)
             return TriggerOutcome(**base, disposition="error", detail=detail)
         # The agent actively decided not to act, and the review is already
-        # resolved — nothing is left for the user to do, so no email either.
+        # resolved, so there's no order to report — but the rule the user
+        # wrote still fired, and this is the only place they'd learn that.
+        self._notify_rule(doc, rule_id, condition, "skipped")
         return TriggerOutcome(**base, disposition="skipped",
                               detail=f"agent skip: {analysis.reasoning[:300]}")
 
