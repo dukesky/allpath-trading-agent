@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
-from allpath_trade.memory.store import LAYER_BUDGETS
+from allpath_trade.memory.store import LAYER_BUDGETS, MemoryStoreError
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
 
@@ -36,8 +36,15 @@ def _layer_sections(c) -> list[dict]:
             sections.append({"title": title, "body": ""})
             continue
         for key in keys:
-            sections.append({"title": f"{title} — {key}",
-                             "body": c.memory.read(layer, key)})
+            try:
+                body = c.memory.read(layer, key)
+            except MemoryStoreError:
+                # A stray file whose stem the store's key pattern rejects
+                # (editor backup, sync-tool artifact, manual poking) never
+                # came through apply(), which enforces the same pattern on
+                # every write. Skip it rather than 500 the whole page.
+                continue
+            sections.append({"title": f"{title} — {key}", "body": body})
     return sections
 
 

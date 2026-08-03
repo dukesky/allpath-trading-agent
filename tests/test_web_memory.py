@@ -58,6 +58,38 @@ def test_stock_dossier_is_listed_under_its_own_key(client):
     assert "strong cash flow" in body
 
 
+def test_strategy_and_lesson_layers_are_listed_under_their_own_keys(client):
+    # Regression check: "strategy" and "lesson" are keyed layers too (one
+    # file per key), not flat files like "profile" -- the per-key loop must
+    # cover them, not just "stock". If the loop ever regressed to special-
+    # casing only "stock" again, path_for("strategy"/"lesson", None) would
+    # raise MemoryStoreError and 500 the whole page.
+    c = client.app.state.holder.get()
+    c.memory.apply("strategy", "momentum", "add", text="buy on breakout")
+    c.memory.apply("lesson", "overtrading", "add", text="cut position size")
+    body = client.get("/memory").text
+    assert "momentum" in body
+    assert "buy on breakout" in body
+    assert "overtrading" in body
+    assert "cut position size" in body
+
+
+def test_stray_file_with_invalid_key_name_is_skipped(client):
+    # A file that never went through apply() -- an editor backup, a sync
+    # tool, a user poking around the memory directory -- can have a stem
+    # that MemoryStore's key pattern rejects (e.g. a space). apply() itself
+    # can never produce such a file, since it enforces the same pattern on
+    # every write. The route must skip the bad file, not 500 the page.
+    c = client.app.state.holder.get()
+    c.memory.apply("stock", "aapl", "add", text="strong cash flow")
+    stray = c.memory.root / "stocks" / "stray backup.md"
+    stray.write_text("not a valid key")
+    r = client.get("/memory")
+    assert r.status_code == 200
+    assert "AAPL" in r.text
+    assert "strong cash flow" in r.text
+
+
 def test_html_in_a_memory_entry_is_rendered_inert(client):
     # Memory entries can contain text sourced from news/search results the
     # agent has read. The guard blocks URLs and imperative phrasing, but not
