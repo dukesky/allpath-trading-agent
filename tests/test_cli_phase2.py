@@ -141,6 +141,20 @@ def test_cli_output_is_english_only(tmp_path, capsys, monkeypatch):
     _clear_alpaca_env(monkeypatch)
     main(["check"])
 
+    # F4: `chat`'s banner and hint copy (CHAT_BANNER, the model/account line,
+    # the "orders & strategy changes always ask first" hint) print through
+    # rich's Console rather than the plain print() every command above uses
+    # -- a separate code path B4's original sweep never touched.
+    from allpath_trade.llm.base import LLMResponse
+    from tests.test_agent_loop import ScriptedLLM
+
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    chat_lines = iter(["hello", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(chat_lines))
+    main(["chat"], broker_factory=lambda s: FakeBroker(),
+        llm_factory=lambda s, tier: ScriptedLLM([LLMResponse(text="hi there")]))
+
     captured = capsys.readouterr()
     assert_english_only(captured.out)
     assert_english_only(captured.err)

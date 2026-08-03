@@ -80,8 +80,11 @@ def test_chat_wires_the_consolidator_flush_hook_into_the_compactor(tmp_path, mon
     consolidator = client.app.state.holder.get().consolidator
     assert consolidator is not None  # sanity: the hook has something to bind to
     assert hook is not None
-    assert hook.__self__ is consolidator
-    assert hook.__func__ is consolidator.run_post_chat.__func__
+    # F2: the hook is now a `functools.partial` binding `propagate=True`
+    # (was the bare bound method) -- see cli.py's counterpart test and
+    # Consolidator.run_post_chat's docstring for why.
+    assert hook.func == consolidator.run_post_chat
+    assert hook.keywords == {"propagate": True}
 
 
 def test_chat_shows_a_banner_instead_of_500_when_no_llm_key_is_configured(

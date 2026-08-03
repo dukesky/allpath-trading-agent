@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from functools import partial
+
+from pydantic import ValidationError
 
 from allpath_trade.broker.base import Broker
-from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.config import Settings, SettingsStore, describe_validation_error
 from allpath_trade.llm.base import LLMClient
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
@@ -246,10 +249,16 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> i
     # never runs until the user exits; a preference stated once early in a
     # long session could be compacted away long before that. No-op when no
     # LLM is configured (components.consolidator is None in that case).
+    # F2: `propagate=True` -- Compactor's own try/except is what turns a
+    # failed flush into "skip compaction this round, keep the messages",
+    # but only if the hook actually raises. run_post_chat's default swallows
+    # every failure into a string return, which reads to Compactor as an
+    # ordinary success.
     compactor = Compactor(
         memory_llm, store, budget_tokens=components.settings.context_budget_tokens,
-        on_before_compact=(components.consolidator.run_post_chat
-                           if components.consolidator is not None else None))
+        on_before_compact=(
+            partial(components.consolidator.run_post_chat, propagate=True)
+            if components.consolidator is not None else None))
     session = AgentSession(llm, registry, system, store=store,
                            conversation_id=cid, on_tool=on_tool,
                            compactor=compactor)
@@ -437,7 +446,21 @@ def main(argv: list[str] | None = None,
         return 0
     args = parser.parse_args(argv)
 
-    settings = SettingsStore().load()
+    try:
+        settings = SettingsStore().load()
+    except ValidationError as exc:
+        # F1: the range constraints Finding 4 put on Settings (sentinel
+        # interval >= 1, context budget >= 2000, smtp port in range) reject a
+        # value that was legal before this branch. Without this guard, an
+        # existing .env carrying such a value takes down every single
+        # command with a raw traceback -- including the settings page that
+        # could otherwise fix it, since `serve` loads settings the same way.
+        # Same friendly-error-and-exit-2 shape as the missing-credentials
+        # check just below, for the same reason: a config problem is the
+        # user's to fix in .env, not a crash to report.
+        print(f"Invalid setting in .env: {describe_validation_error(exc)}. "
+              "Fix or remove that line in .env, then try again.", file=sys.stderr)
+        return 2
 
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work without.

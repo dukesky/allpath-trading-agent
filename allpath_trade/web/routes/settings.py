@@ -7,7 +7,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
-from allpath_trade.config import Settings
+from allpath_trade.config import Settings, describe_validation_error
 from allpath_trade.scheduler import reschedule_sentinel_job
 from allpath_trade.web.auth import COOKIE
 from allpath_trade.web.routes.dashboard import nav_context
@@ -54,8 +54,7 @@ def _mask(value: str) -> str:
 
 
 def _validation_message(exc: ValidationError) -> str:
-    parts = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
-    return "Could not save: " + "; ".join(parts)
+    return "Could not save: " + describe_validation_error(exc)
 
 
 @router.get("/settings", response_class=HTMLResponse)

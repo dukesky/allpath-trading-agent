@@ -50,6 +50,24 @@ def test_status_without_keys_exits_2(tmp_path, capsys, monkeypatch):
     assert "ALPACA_API_KEY" in capsys.readouterr().err
 
 
+def test_an_out_of_range_env_value_exits_2_with_a_readable_message_not_a_traceback(
+        tmp_path, capsys, monkeypatch):
+    # F1: CONTEXT_BUDGET_TOKENS was unconstrained before Finding 4 put a
+    # floor on it (MIN_CONTEXT_BUDGET_TOKENS=2000, see config.py). A value
+    # that used to be legal now fails Settings' own validation the moment
+    # SettingsStore().load() runs inside main() -- unguarded, that's a raw
+    # pydantic ValidationError traceback out of *every* command, including
+    # "strategies", which needs no broker credentials at all.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("CONTEXT_BUDGET_TOKENS=1000\n")
+    code = main(["strategies"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "Traceback" not in err
+    assert "context_budget_tokens" in err
+    assert "greater than or equal to 2000" in err
+
+
 class RaisingBroker(Broker):
     name = "fake"
     is_paper = True
@@ -275,8 +293,14 @@ def test_chat_wires_the_consolidator_flush_hook_into_the_compactor(tmp_path, mon
     assert len(SpyCompactor.instances) == 1
     hook = SpyCompactor.instances[0].on_before_compact
     assert hook is not None
-    assert hook.__self__ is components.consolidator
-    assert hook.__func__ is components.consolidator.run_post_chat.__func__
+    # F2: the hook is now a `functools.partial` binding `propagate=True`
+    # (was the bare bound method) -- Compactor's own try/except can only
+    # treat a flush failure as "skip compaction, keep the messages" when the
+    # hook actually raises, and run_post_chat's default swallows failures
+    # into a string return instead. See Consolidator.run_post_chat's
+    # docstring.
+    assert hook.func == components.consolidator.run_post_chat
+    assert hook.keywords == {"propagate": True}
 
 
 def test_chat_consolidation_survives_a_mid_session_compaction(tmp_path, monkeypatch):

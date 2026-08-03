@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
-_CJK_LOW, _CJK_HIGH = "一", "鿿"
+# F4: U+4E00-U+9FFF (CJK Unified Ideographs) alone would catch realistic
+# Chinese prose but let a stray fullwidth comma or CJK-style bracket in an
+# otherwise-translated line pass. Also covers CJK Symbols and Punctuation
+# (U+3000-U+303F: `、。「」`), Halfwidth and Fullwidth Forms (U+FF00-U+FFEF:
+# `，！？（）`), and CJK Unified Ideographs Extension A (U+3400-U+4DBF) --
+# the same three gaps a leftover-Chinese-fragment bug (wave 2's Finding C4)
+# could otherwise slip through as.
+_CJK_RANGES = [
+    ("一", "鿿"),  # U+4E00-U+9FFF: CJK Unified Ideographs
+    ("㐀", "䶿"),  # U+3400-U+4DBF: CJK Unified Ideographs Extension A
+    ("　", "〿"),  # CJK Symbols and Punctuation
+    ("＀", "￯"),  # Halfwidth and Fullwidth Forms
+]
 
 
 def assert_english_only(text: str) -> None:
@@ -16,5 +28,5 @@ def assert_english_only(text: str) -> None:
     same invariant the same way instead of two of nine surfaces enforcing it
     and the rest trusting it by omission.
     """
-    offending = [ch for ch in text if _CJK_LOW <= ch <= _CJK_HIGH]
+    offending = [ch for ch in text if any(lo <= ch <= hi for lo, hi in _CJK_RANGES)]
     assert not offending, f"unexpected CJK character(s) in user-facing text: {offending!r}"

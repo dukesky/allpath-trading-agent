@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import dotenv_values, set_key
-from pydantic import Field
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Compactor reserves at least MIN_SUMMARY_RESERVE_TOKENS (600) off the cut
@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     web_token: str = ""
     daily_consolidation: bool = True
     consolidate_after_chat: bool = True
+
+
+def describe_validation_error(exc: ValidationError) -> str:
+    """One readable line per failing field, e.g. "sentinel_interval_minutes:
+    Input should be greater than or equal to 1" -- shared by the settings
+    route (pre-write validation, F1's sibling) and SettingsStore.load's own
+    caller in cli.py (an already-on-disk value that was legal before a range
+    constraint landed on it, per Finding 4)."""
+    parts = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+    return "; ".join(parts)
 
 
 class SettingsStore:

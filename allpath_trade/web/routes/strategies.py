@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.strategy.loader import is_valid_strategy_id
 from allpath_trade.strategy.model import RuleState, StrategyDoc
@@ -58,13 +58,13 @@ def index(request: Request) -> HTMLResponse:
 def detail(request: Request, strategy_id: str) -> HTMLResponse:
     c = request.app.state.holder.get()
     if not is_valid_strategy_id(strategy_id):
-        return _not_found(request, c, "Not processed: not found")
+        return _not_found(request, c, "Strategy not found")
     # A strategy whose YAML is missing, unparseable, or fails validation is
     # simply absent from load_all's result (errors are collected, not
     # raised) -- it 404s here rather than the page crashing on a bad file.
     doc = _find_doc(c, strategy_id)
     if doc is None:
-        return _not_found(request, c, "Not processed: not found")
+        return _not_found(request, c, "Strategy not found")
     path = c.strategies.directory / f"{strategy_id}.yaml"
     return templates.TemplateResponse(request, "strategy_detail.html", {
         "page": "strategies", "doc": doc,
@@ -77,7 +77,7 @@ def detail(request: Request, strategy_id: str) -> HTMLResponse:
 def rearm(request: Request, strategy_id: str, rule_id: str) -> Response:
     c = request.app.state.holder.get()
     if not is_valid_strategy_id(strategy_id):
-        return _not_found(request, c, "Not processed: not found")
+        return _not_found(request, c, "Strategy not found")
     # set_rule_state is a raw upsert keyed on (strategy_id, rule_id) with no
     # foreign-key check -- without confirming the strategy and rule exist
     # first, a well-formed-but-nonexistent id (or a real strategy with a
@@ -94,4 +94,9 @@ def rearm(request: Request, strategy_id: str, rule_id: str) -> Response:
         message = f"Not processed: rule '{rule_id}' not found in strategy '{strategy_id}'"
         return error_redirect(f"/strategies/{strategy_id}", message)
     c.strategies.set_rule_state(strategy_id, rule_id, RuleState.ARMED)
-    return error_redirect(f"/strategies/{strategy_id}")
+    # F7: this is the success path -- calling the "error" helper with no
+    # message worked (it degrades to a plain redirect when message is None)
+    # but the name says the opposite of what just happened. A bare
+    # RedirectResponse says exactly what it is, matching the plain-success
+    # redirects elsewhere in the app (e.g. settings.py's reset-token).
+    return RedirectResponse(f"/strategies/{strategy_id}", status_code=303)

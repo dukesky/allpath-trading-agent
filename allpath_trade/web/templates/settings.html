@@ -57,7 +57,18 @@
     <label>Check interval (minutes)</label><input name="sentinel_interval_minutes" value="{{ s.sentinel_interval_minutes }}" type="number">
     <label>Context budget (tokens)</label><input name="context_budget_tokens" value="{{ s.context_budget_tokens }}" type="number">
     <label class="check"><input type="checkbox" name="daily_consolidation" value="true" {{ 'checked' if s.daily_consolidation }}> Consolidate memory after the close</label>
-    <label class="check"><input type="checkbox" name="consolidate_after_chat" value="true" {{ 'checked' if s.consolidate_after_chat }}> Consolidate after each conversation</label>
+    {# F3: this setting only gates the terminal `chat` command's end-of-session
+       flush (cli.py's cmd_chat _finish()) -- the web chat has no "end of
+       chat" to hang that same gate off of (see Compactor.on_before_compact's
+       wiring in chat_service.py), so unchecking this box here changes
+       nothing observable on this page. Naming the surface it actually
+       controls, rather than gating the web hook on it too, keeps that hook
+       as the always-on backstop it was deliberately designed to be under
+       the web's one-conversation-forever model (Finding 8): a user who
+       leaves the box unchecked because they only meant "don't consolidate
+       my terminal sessions" should not silently lose the mid-conversation
+       safety net in their browser as a side effect. #}
+    <label class="check"><input type="checkbox" name="consolidate_after_chat" value="true" {{ 'checked' if s.consolidate_after_chat }}> Consolidate after each terminal chat session</label>
   </div>
 
   <h2>Access</h2>

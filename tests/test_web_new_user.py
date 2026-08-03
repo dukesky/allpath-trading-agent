@@ -79,8 +79,12 @@ def test_dashboard_shows_the_broker_unavailable_banner(client):
 
 
 def test_chat_shows_the_no_llm_key_banner(client):
+    # F5: `base.html` puts a "Settings" nav link on every page, so asserting
+    # only "Settings" in body passed whether or not the banner itself
+    # rendered -- assert on the banner's own copy instead (see
+    # _chat_messages.html's llm_error branch).
     body = client.get("/chat").text
-    assert "Settings" in body
+    assert "Chat needs an LLM key" in body
 
 
 def test_strategies_and_memory_show_their_own_empty_states(client):

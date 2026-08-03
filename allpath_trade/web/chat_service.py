@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from datetime import UTC, datetime
+from functools import partial
 
 from allpath_trade.agent.action_tools import register_action_tools
 from allpath_trade.agent.compact import Compactor
@@ -80,11 +81,16 @@ class ChatService:
         # hook is the only backstop against losing a preference the user
         # stated once and never repeated. No-op when no LLM is configured
         # (c.consolidator is None in that case).
+        # F2: `propagate=True` -- see cli.py's cmd_chat for why. Without it,
+        # a failed flush here reads to Compactor as an ordinary success and
+        # the older messages get summarized and dropped right after the
+        # flush meant to preserve them just failed.
         compactor = Compactor(
             build_llm(c.settings, tier="memory"), store,
             budget_tokens=c.settings.context_budget_tokens,
-            on_before_compact=(c.consolidator.run_post_chat
-                               if c.consolidator is not None else None))
+            on_before_compact=(
+                partial(c.consolidator.run_post_chat, propagate=True)
+                if c.consolidator is not None else None))
         return AgentSession(build_llm(c.settings, tier="chat"), registry, prompt,
                             store=store, conversation_id=conversation_id,
                             compactor=compactor,

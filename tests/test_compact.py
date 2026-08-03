@@ -353,6 +353,49 @@ def test_raising_flush_hook_degrades_without_dropping_messages(tmp_path, capsys)
     assert "compaction skipped" in capsys.readouterr().err
 
 
+def test_a_real_consolidator_flush_failure_skips_compaction_and_keeps_the_marker(tmp_path):
+    """F2: finding 8 was closed in name only -- both production call sites
+    bound Consolidator.run_post_chat directly, which catches its own
+    failures and returns a string like "consolidation failed: ...", so a
+    real flush failure read to Compactor as an ordinary success. The four
+    `on_before_compact` tests above exercise a `_boom` hook that raises -- a
+    shape no production caller could actually produce, since run_post_chat
+    never raises on its own. This binds the hook exactly the way cli.py and
+    chat_service.py now do (`functools.partial(consolidator.run_post_chat,
+    propagate=True)`) and fails it the way the real thing fails: the
+    memory-tier LLM being unreachable."""
+    from functools import partial
+
+    from allpath_trade.llm.base import LLMError
+    from allpath_trade.memory.consolidate import Consolidator
+    from allpath_trade.memory.observations import ObservationLog
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.journal import TradeJournal
+    from tests.test_agent_loop import ScriptedLLM
+
+    conn = connect(tmp_path / "t.db")
+    convo = ConversationStore(conn)
+    cid = convo.start()
+    for _ in range(6):
+        convo.append(cid, big("user", 3000))
+    history = convo.history(cid)
+
+    consolidator = Consolidator(
+        ScriptedLLM([LLMError("memory tier down")]),
+        MemoryStore(tmp_path / "memory", conn), ObservationLog(conn),
+        TradeJournal(conn), conn)
+    hook = partial(consolidator.run_post_chat, propagate=True)
+    summarizing_llm = ScriptedLLM([LLMResponse(text="should never be reached")])
+    c = Compactor(summarizing_llm, convo, budget_tokens=2200, on_before_compact=hook)
+
+    context, kept = c.maybe_compact(cid, history)
+
+    assert context == history
+    assert kept == history                      # no messages dropped
+    assert convo.summary(cid) == ("", 0)         # marker didn't move
+    assert len(summarizing_llm.seen) == 0        # never fell through to summarizing
+
+
 def test_cut_zero_returns_the_oversized_context_unchanged(tmp_path):
     """Every message here is bigger on its own than `target`, so no
     user-boundary suffix ever fits — _cut_index returns 0 and maybe_compact

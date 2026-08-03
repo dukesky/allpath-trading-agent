@@ -418,6 +418,26 @@ def test_reschedule_sentinel_job_updates_the_running_jobs_interval():
     assert scheduler.rescheduled == (SENTINEL_JOB_ID, "interval", {"minutes": 15})
 
 
+def test_reschedule_sentinel_job_moves_a_real_apschedulers_cadence():
+    # F6: the RecordingScheduler-based test above (and its web-route
+    # counterpart in test_web_settings.py) only proves we call the
+    # scheduler's API in a particular shape -- not that a real APScheduler
+    # accepts `id=` alongside `next_run_time` on add_job, or that
+    # reschedule_job actually finds and updates that job. Exercise a real,
+    # un-started BackgroundScheduler end to end instead of a fake.
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(lambda: None, "interval", minutes=60,
+                      next_run_time=datetime.now(UTC), id=SENTINEL_JOB_ID)
+
+    reschedule_sentinel_job(scheduler, 15)
+
+    job = scheduler.get_job(SENTINEL_JOB_ID)
+    assert job is not None
+    assert job.trigger.interval.total_seconds() == 15 * 60
+
+
 def test_build_jobs_no_digest_before_close(monkeypatch):
     import allpath_trade.scheduler as sched
 
