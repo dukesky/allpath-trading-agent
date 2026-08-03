@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from allpath_trade.notify import events
 from allpath_trade.sentinel import Sentinel, SentinelReport
 
 ET = ZoneInfo("America/New_York")
@@ -91,8 +92,28 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
     scheduler.start()
 
 
+def _send_daily_digest(components) -> None:
+    """Count today's activity and email a summary.
+
+    `trades` comes from `TradeJournal.trades_today()` — the journal's real
+    accessor (there is no `journal.today()`). `triggers` counts today's
+    "sentinel"-sourced rows in the observation log: `Sentinel._check_strategy`
+    logs exactly one there per rule trigger regardless of disposition, so
+    this is a real count, not the brief's hardcoded placeholder. `since_iso`
+    is a UTC calendar-day boundary, matching `TradeJournal.trades_today`'s
+    own day convention; `limit` is set high because `recent()`'s 200-row
+    default would silently undercount on a very active day."""
+    since_iso = datetime.now(UTC).date().isoformat()
+    triggers = sum(1 for row in components.observations.recent(
+        since_iso=since_iso, limit=10_000) if row["source"] == "sentinel")
+    subject, body = events.daily_digest(
+        triggers=triggers, trades=components.journal.trades_today(),
+        pending=len(components.queue.list()))
+    components.notifier.send(subject, body)
+
+
 def build_jobs(scheduler, holder) -> None:
-    """Attach the sentinel and the after-close consolidation to a scheduler
+    """Attach the sentinel and the after-close daily jobs to a scheduler
     owned by someone else (the `serve` process).
 
     Same job body as `run_daemon` (see `_run_sentinel_pass` /
@@ -103,11 +124,20 @@ def build_jobs(scheduler, holder) -> None:
     def job() -> None:
         components = holder.get()
         _run_sentinel_pass(lambda: components.sentinel)
-        consolidator = components.consolidator
-        daily_job = None
-        if consolidator is not None and components.settings.daily_consolidation:
-            daily_job = consolidator.run_daily
-        _maybe_run_daily(daily_job, state)
+
+        def daily() -> None:
+            # Consolidation stays gated by its own setting; the digest email
+            # fires unconditionally (it doesn't depend on daily_consolidation
+            # being on). Both run under the same _maybe_run_daily call so
+            # they share one once-per-day gate — if consolidation raises,
+            # _maybe_run_daily's own handler logs it and the digest for
+            # today is skipped too, same as any other daily-job failure.
+            consolidator = components.consolidator
+            if consolidator is not None and components.settings.daily_consolidation:
+                consolidator.run_daily()
+            _send_daily_digest(components)
+
+        _maybe_run_daily(daily, state)
 
     scheduler.add_job(job, "interval",
                       minutes=holder.settings().sentinel_interval_minutes,

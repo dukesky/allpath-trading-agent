@@ -150,10 +150,48 @@ class FakeHolder:
         return self._components.settings
 
 
-def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5):
+class FakeJournal:
+    def __init__(self, trades=0):
+        self._trades = trades
+
+    def trades_today(self):
+        return self._trades
+
+
+class FakeQueue:
+    def __init__(self, pending=None):
+        self._pending = pending if pending is not None else []
+
+    def list(self, status="pending"):
+        return self._pending
+
+
+class FakeObservations:
+    def __init__(self, rows=None):
+        self._rows = rows if rows is not None else []
+
+    def recent(self, since_iso=None, limit=200):
+        return self._rows
+
+
+class DigestNotifier:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, subject, body):
+        self.sent.append((subject, body))
+        return True
+
+
+def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5,
+                journal=None, queue=None, notifier=None, observations=None):
     return SimpleNamespace(
         sentinel=sentinel,
         consolidator=consolidator,
+        journal=journal if journal is not None else FakeJournal(),
+        queue=queue if queue is not None else FakeQueue(),
+        notifier=notifier if notifier is not None else DigestNotifier(),
+        observations=observations if observations is not None else FakeObservations(),
         settings=SimpleNamespace(daily_consolidation=daily_consolidation,
                                  sentinel_interval_minutes=interval),
     )
@@ -247,3 +285,83 @@ def test_build_jobs_prints_nothing_on_a_normal_sentinel_pass(monkeypatch, capsys
     scheduler.job()
 
     assert capsys.readouterr().out == ""
+
+
+# -- build_jobs: daily digest email --
+
+
+def test_build_jobs_sends_daily_digest_once_per_day_after_close(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    components = _components(
+        sentinel=FakeSentinel(), notifier=notifier,
+        journal=FakeJournal(trades=3), queue=FakeQueue(pending=[1, 2]),
+        observations=FakeObservations(
+            rows=[{"source": "sentinel"}, {"source": "sentinel"}, {"source": "chat"}]))
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+    scheduler.job()  # second tick same day: must not send again
+
+    assert len(notifier.sent) == 1
+    subject, body = notifier.sent[0]
+    assert subject == "[AllPath] Daily summary"
+    # 2 sentinel-sourced observations, 3 trades, 2 pending reviews
+    assert "2 rule trigger(s)" in body
+    assert "3 trade(s)" in body
+    assert "2 item(s) still waiting" in body
+    assert "http" not in body.lower() and "<" not in body
+
+
+def test_build_jobs_digest_counts_only_sentinel_observations(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    components = _components(
+        sentinel=FakeSentinel(), notifier=notifier,
+        observations=FakeObservations(
+            rows=[{"source": "chat"}, {"source": "consolidation"}]))
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    _subject, body = notifier.sent[0]
+    assert "0 rule trigger(s)" in body
+
+
+def test_build_jobs_sends_digest_even_when_consolidation_disabled(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    consolidator = FakeConsolidator()
+    components = _components(
+        sentinel=FakeSentinel(), notifier=notifier, consolidator=consolidator,
+        daily_consolidation=False)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    assert consolidator.calls == 0        # consolidation still respects its own flag
+    assert len(notifier.sent) == 1        # digest is a separate concern
+
+
+def test_build_jobs_no_digest_before_close(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    notifier = DigestNotifier()
+    components = _components(sentinel=FakeSentinel(), notifier=notifier)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    assert notifier.sent == []
