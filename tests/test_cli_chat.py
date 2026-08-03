@@ -127,6 +127,36 @@ def test_chat_eof_runs_same_post_chat_consolidation_as_exit(tmp_path, capsys, mo
     assert "dividends" in memory_file.read_text()
 
 
+def test_chat_finish_skips_consolidation_when_the_setting_is_disabled(
+        tmp_path, capsys, monkeypatch):
+    # Finding 7: consolidate_after_chat is a real Settings field and a live
+    # checkbox on the settings page, but until now nothing read it -- exit
+    # consolidated unconditionally regardless of what the user set.
+    setup_env(tmp_path, monkeypatch)
+    (tmp_path / ".env").write_text('CONSOLIDATE_AFTER_CHAT="false"\n')
+
+    chat_llm = ScriptedLLM([LLMResponse(text="hi there")])
+    memory_llm = ScriptedLLM([LLMResponse(text="should never be reached")])
+
+    monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
+                        lambda settings, tier: memory_llm)
+
+    lines = iter(["remember I prefer dividends"])
+
+    def input_then_eof(*a):
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError
+
+    monkeypatch.setattr("builtins.input", input_then_eof)
+    code = main(["chat"], broker_factory=lambda s: FakeBroker(),
+                llm_factory=lambda s, tier: chat_llm)
+    assert code == 0
+    assert not (tmp_path / "memory" / "user_profile.md").exists()
+    assert memory_llm.seen == []  # the consolidator's LLM was never touched
+
+
 def test_chat_double_ctrl_c_exits_gracefully(tmp_path, capsys, monkeypatch):
     setup_env(tmp_path, monkeypatch)
     presses = iter([KeyboardInterrupt, KeyboardInterrupt])

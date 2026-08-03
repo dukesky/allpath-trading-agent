@@ -20,7 +20,7 @@
   {% endif %}
   {% if item['agent_analysis'] %}
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
-    <p style="font-size:13px;margin:0 0 4px"><strong>Agent recommends:</strong> {{ item['agent_analysis'].get('recommend', 'no recommendation') }}</p>
+    <p style="font-size:13px;margin:0 0 4px"><strong>Agent recommends:</strong> {{ item['agent_analysis'].get('recommendation', 'no recommendation') }}</p>
     <p class="muted" style="font-size:13px;margin:0">{{ item['agent_analysis'].get('reasoning', '') }}</p>
     {% for src in item['agent_analysis'].get('sources', []) %}
     <p class="muted" style="font-size:12px;margin:2px 0">

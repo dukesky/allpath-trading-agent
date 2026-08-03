@@ -2,10 +2,13 @@
 {% block title %}Chat · AllPath Trade{% endblock %}
 {% block content %}
 {% include "_chat_messages.html" %}
+{% if not llm_error %}
 <form hx-post="/chat/send" hx-target="#messages" hx-swap="outerHTML"
       hx-on::after-request="this.reset()" class="row" style="margin-top:18px">
   <input name="message" placeholder="Ask your agent anything" autocomplete="off" autofocus>
   <button class="primary" type="submit">Send</button>
 </form>
-<p class="hint">Orders and strategy changes always wait for your approval.</p>
+<p class="hint">Orders always wait for your approval. Strategy changes need
+<code>allpath-trade chat</code> in a terminal for now.</p>
+{% endif %}
 {% endblock %}

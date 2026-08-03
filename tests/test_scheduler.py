@@ -2,7 +2,13 @@ import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from allpath_trade.scheduler import build_jobs, is_market_hours, run_daemon
+from allpath_trade.scheduler import (
+    SENTINEL_JOB_ID,
+    build_jobs,
+    is_market_hours,
+    reschedule_sentinel_job,
+    run_daemon,
+)
 from tests.test_sentinel import make, strategy_yaml
 
 # 2026-07-29 is a Wednesday. 15:00 UTC = 11:00 ET (EDT, UTC-4).
@@ -385,6 +391,31 @@ def test_build_jobs_sends_digest_even_when_consolidation_disabled(monkeypatch):
 
     assert consolidator.calls == 0        # consolidation still respects its own flag
     assert len(notifier.sent) == 1        # digest is a separate concern
+
+
+def test_build_jobs_registers_the_interval_job_under_a_stable_id():
+    # reschedule_sentinel_job needs a stable id to target -- without one,
+    # a settings-page interval change can only add a second interval job
+    # alongside the original, not replace it.
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FakeSentinel())))
+    assert scheduler.kwargs["id"] == SENTINEL_JOB_ID
+
+
+def test_reschedule_sentinel_job_updates_the_running_jobs_interval():
+    # Finding 5: changing the interval on the settings page must move the
+    # already-running job's cadence, not just what a *future* build_jobs
+    # call would register.
+    class RecordingScheduler:
+        def __init__(self):
+            self.rescheduled = None
+
+        def reschedule_job(self, job_id, trigger=None, **kwargs):
+            self.rescheduled = (job_id, trigger, kwargs)
+
+    scheduler = RecordingScheduler()
+    reschedule_sentinel_job(scheduler, 15)
+    assert scheduler.rescheduled == (SENTINEL_JOB_ID, "interval", {"minutes": 15})
 
 
 def test_build_jobs_no_digest_before_close(monkeypatch):

@@ -194,7 +194,7 @@ cookie 带 `HttpOnly` 和 `SameSite=Strict`。没有内置 HTTPS，所以只在�
 | Dashboard | 账户净值、持仓、生效中的策略、最近交易 |
 | Chat | 与 `allpath-trade chat` 相同的 agent，agent 提出的订单会以内联卡片等待确认 |
 | Pending | 确认队列——批准或拒绝 agent 提出的订单，每笔都带风控预检 |
-| Strategies | 策略文档与版本历史，只读；修改走 Chat，由 agent 起草变更后你来确认 |
+| Strategies | 策略文档与版本历史，只读；保存修改目前仍需在终端里用 `allpath-trade chat`（见[路线图](#路线图)） |
 | Memory | 四层记忆及其变更历史，只读 |
 | Settings | LLM / 券商密钥（只写，从不回显）、邮件通知设置、哨兵检查间隔、记忆沉淀开关 |
 

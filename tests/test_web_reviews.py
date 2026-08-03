@@ -1,8 +1,7 @@
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
+from allpath_trade.agent.review import ReviewAnalysis
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
@@ -39,12 +38,20 @@ def test_pending_items_are_listed(client):
 
 
 def test_agent_analysis_is_shown(client):
+    # Built by round-tripping through the real ReviewAnalysis model (the
+    # shape sentinel.py/review.py actually produce), not a hand-written
+    # dict -- a hand-written `{"recommend": ...}` fixture is exactly what
+    # let Finding 2 (the template reading the wrong field) go unnoticed:
+    # the old fixture happened to match the template's typo instead of the
+    # model's real field name.
     rid = queue_one(client)
-    client.app.state.holder.get().queue.attach_analysis(
-        rid, json.dumps({"recommend": "execute", "reasoning": "guidance raised",
-                         "sources": ["https://example.com/pr"]}))
+    analysis = ReviewAnalysis(recommendation="execute", reasoning="guidance raised",
+                              sources=["https://example.com/pr"])
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
     body = client.get("/reviews").text
     assert "guidance raised" in body
+    assert "Agent recommends:</strong> execute" in body
+    assert "no recommendation" not in body
 
 
 def test_approve_executes_through_the_queue(client):
@@ -147,9 +154,9 @@ def test_execution_failure_is_visible_now_and_on_a_later_visit(client, monkeypat
 
 def test_malicious_source_scheme_is_rendered_as_text_not_a_link(client):
     rid = queue_one(client)
-    client.app.state.holder.get().queue.attach_analysis(
-        rid, json.dumps({"recommend": "execute", "reasoning": "x",
-                         "sources": ["javascript:alert(1)"]}))
+    analysis = ReviewAnalysis(recommendation="execute", reasoning="x",
+                              sources=["javascript:alert(1)"])
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
     body = client.get("/reviews").text
     assert "javascript:alert(1)" in body
     assert '<a href="javascript:alert(1)"' not in body
@@ -157,9 +164,9 @@ def test_malicious_source_scheme_is_rendered_as_text_not_a_link(client):
 
 def test_http_source_is_rendered_as_a_safe_link(client):
     rid = queue_one(client)
-    client.app.state.holder.get().queue.attach_analysis(
-        rid, json.dumps({"recommend": "execute", "reasoning": "x",
-                         "sources": ["https://example.com/pr"]}))
+    analysis = ReviewAnalysis(recommendation="execute", reasoning="x",
+                              sources=["https://example.com/pr"])
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
     body = client.get("/reviews").text
     assert 'href="https://example.com/pr"' in body
     assert 'rel="noopener noreferrer"' in body

@@ -127,6 +127,57 @@ def test_propose_order_invalid_never_prompts(tmp_path):
     assert out.startswith("error:") and prompts == [] and executor.calls == []
 
 
+def test_draft_strategy_in_web_mode_says_it_cannot_save_yet(tmp_path):
+    # Finding 3: web mode is signaled by `order_sink` being set (the same
+    # wiring ChatService._build uses for propose_order) -- draft_strategy
+    # must not fall through to `confirm()` (which web mode always sets to
+    # `lambda _: False`) and tell the user they "declined" a save they were
+    # never asked about.
+    (tmp_path / "strategies").mkdir(exist_ok=True)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path / "strategies", conn)
+    reg = ToolRegistry()
+
+    class Sink:
+        def propose(self, intent):
+            pytest.fail("draft_strategy must never reach the order sink")
+
+    register_action_tools(
+        reg, strategies=store, executor=None,
+        confirm=lambda _prompt: pytest.fail("must not prompt in web mode"),
+        order_sink=Sink())
+
+    out = call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
+
+    assert "declined" not in out
+    assert "web chat" in out.lower()
+    assert "allpath-trade chat" in out
+    assert not (tmp_path / "strategies" / "new.yaml").exists()
+    assert store.versions("new") == []
+
+
+def test_draft_strategy_in_web_mode_still_reports_invalid_yaml(tmp_path):
+    # The web-mode short-circuit must not swallow real validation errors --
+    # a genuinely broken draft should still say so, not just "can't save yet".
+    (tmp_path / "strategies").mkdir(exist_ok=True)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path / "strategies", conn)
+    reg = ToolRegistry()
+
+    class Sink:
+        def propose(self, intent):
+            pytest.fail("must not be reached for an invalid draft")
+
+    register_action_tools(
+        reg, strategies=store, executor=None,
+        confirm=lambda _prompt: pytest.fail("must not prompt"), order_sink=Sink())
+
+    out = call(reg, "draft_strategy", strategy_id="bad",
+              yaml_text="name: x\nstatus: active\n", reason="x")
+
+    assert out.startswith("error:")
+
+
 def test_order_sink_takes_precedence_over_confirm(tmp_path):
     calls: list = []
 

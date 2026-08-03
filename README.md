@@ -197,7 +197,7 @@ is no built-in HTTPS, so only bind `--host 0.0.0.0` on a network you trust.
 | Dashboard | Account equity, positions, active strategies, recent trades |
 | Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes |
 | Pending | The confirmation queue — approve or reject agent-proposed orders, each with a risk pre-check |
-| Strategies | Strategy documents and version history, read-only; edits happen in Chat, where the agent drafts the change for you to approve |
+| Strategies | Strategy documents and version history, read-only; saving a change still requires `allpath-trade chat` in a terminal (see [Roadmap](#roadmap)) |
 | Memory | The four memory layers and their change history, read-only |
 | Settings | LLM/broker keys (write-only, never redisplayed), email notification settings, sentinel interval, and consolidation toggles |
 

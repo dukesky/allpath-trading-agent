@@ -13,6 +13,11 @@ ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
 CLOSE = time(16, 0)
 
+# Stable id for the interval job build_jobs registers, so a later settings
+# save can find and reschedule the same job instead of only being able to
+# add a second one alongside it (see reschedule_sentinel_job below).
+SENTINEL_JOB_ID = "sentinel_pass"
+
 
 def is_market_hours(now: datetime | None = None) -> bool:
     """US regular session, no holiday calendar yet (see docs/TODO.md)."""
@@ -149,4 +154,20 @@ def build_jobs(scheduler, holder) -> None:
 
     scheduler.add_job(job, "interval",
                       minutes=holder.settings().sentinel_interval_minutes,
-                      next_run_time=datetime.now(UTC))
+                      next_run_time=datetime.now(UTC), id=SENTINEL_JOB_ID)
+
+
+def reschedule_sentinel_job(scheduler, minutes: int) -> None:
+    """Apply a new sentinel_interval_minutes to the job build_jobs already
+    registered, without a process restart.
+
+    Settings edits go through ComponentHolder.rebuild(), which swaps the
+    component graph the *next* request reads -- but the APScheduler
+    instance already running the interval job lives on `app.state.scheduler`
+    (the `serve` process), a layer rebuild() never touches. Without this,
+    `context_budget_tokens` right next to this field on the settings page
+    takes effect immediately while the sentinel cadence silently doesn't
+    move until the process restarts (Finding 5). The caller is expected to
+    guard this against a scheduler that isn't running (a test build,
+    `allpath-trade run`'s own daemon) -- see routes/settings.py."""
+    scheduler.reschedule_job(SENTINEL_JOB_ID, trigger="interval", minutes=minutes)

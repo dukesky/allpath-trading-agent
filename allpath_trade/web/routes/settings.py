@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import secrets
+import sys
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 from allpath_trade.config import Settings
+from allpath_trade.scheduler import reschedule_sentinel_job
 from allpath_trade.web.auth import COOKIE
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
@@ -95,6 +97,7 @@ async def save(request: Request) -> Response:
             "masks": {f: _mask(str(getattr(current, f, ""))) for f in SECRET_FIELDS},
             **nav_context(c)}, status_code=400)
 
+    old_interval = current.sentinel_interval_minutes
     store = holder.store()
     for field, value in updates.items():
         store.set(field.upper(), value)
@@ -105,6 +108,21 @@ async def save(request: Request) -> Response:
     # `_service()` builds a fresh ChatService against the just-rebuilt
     # Components, so the next turn picks up the new provider/model/key.
     request.app.state.chat = None
+
+    new_interval = holder.get().settings.sentinel_interval_minutes
+    scheduler = getattr(request.app.state, "scheduler", None)
+    # `scheduler` is only set when `serve` started one (create_app's
+    # start_scheduler=True) -- a test build or the standalone `run` daemon
+    # has none, and rebuild() above already made the interval correct for
+    # the *next* full restart either way. A reschedule failure (e.g. the
+    # scheduler was mid-shutdown) must not turn a successful settings save
+    # into a 500 -- the write to .env already succeeded.
+    if scheduler is not None and new_interval != old_interval:
+        try:
+            reschedule_sentinel_job(scheduler, new_interval)
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            print(f"[settings] could not reschedule sentinel job: {exc}",
+                  file=sys.stderr)
     return RedirectResponse("/settings?saved=1", status_code=303)
 
 

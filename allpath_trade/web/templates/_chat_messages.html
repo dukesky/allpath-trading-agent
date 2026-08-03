@@ -1,4 +1,11 @@
 <div id="messages">
+{% if llm_error %}
+<div class="card" style="margin-bottom:12px">
+  <p><strong>Chat needs an LLM key.</strong> None is configured yet — add one
+  on the <a href="/settings">Settings</a> page, then reload this page.</p>
+  <p class="muted" style="font-size:13px;margin:6px 0 0">{{ llm_error }}</p>
+</div>
+{% else %}
 {% for m in messages %}
   {% if m['role'] == 'user' and m.get('kind') == 'system_note' %}
     {# An out-of-band event (approve/reject outcome), appended by
@@ -39,4 +46,5 @@
   </div>
   {% endif %}
 {% endfor %}
+{% endif %}
 </div>

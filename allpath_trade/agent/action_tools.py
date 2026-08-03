@@ -39,6 +39,21 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             doc = parse_strategy_text(strategy_id, yaml_text)
         except StrategyValidationError as exc:
             return f"error: {'; '.join(exc.errors)}"
+        if order_sink is not None:
+            # `order_sink` being set is exactly what marks this as the web
+            # chat (ChatService._build injects one; cmd_chat's terminal chat
+            # never does). Unlike propose_order, there is no queue/approval
+            # card for a strategy save yet -- that's real feature work,
+            # deliberately out of scope for this fix (see docs/TODO.md,
+            # Phase 5 leftovers). Falling through to the `confirm(...)`
+            # below would call web mode's `confirm=lambda _: False` and
+            # return "user declined", telling the user *they* rejected a
+            # save they were never asked about. Say what's actually true
+            # instead, after still validating the draft above so a genuinely
+            # broken YAML gets a real error either way.
+            return ("Strategy changes can't be saved from the web chat yet "
+                    "-- run `allpath-trade chat` in a terminal to save this "
+                    "one.")
         path = strategies.directory / f"{strategy_id}.yaml"
         old_text = path.read_text() if path.exists() else ""
         if old_text:

@@ -72,8 +72,19 @@ class ChatService:
         prompt = build_system_prompt(
             identity=load_identity(), broker=c.broker, journal=c.journal,
             strategies=c.strategies, queue=c.queue, memory=c.memory)
-        compactor = Compactor(build_llm(c.settings, tier="memory"), store,
-                              budget_tokens=c.settings.context_budget_tokens)
+        # Finding 8: flush durable preferences to curated memory before the
+        # older half of the conversation is dropped from context (see
+        # Compactor's docstring on on_before_compact). Under Phase 5's
+        # one-conversation-forever design there is no "end of chat" here to
+        # hang consolidation off of the way cli.py's cmd_chat does -- this
+        # hook is the only backstop against losing a preference the user
+        # stated once and never repeated. No-op when no LLM is configured
+        # (c.consolidator is None in that case).
+        compactor = Compactor(
+            build_llm(c.settings, tier="memory"), store,
+            budget_tokens=c.settings.context_budget_tokens,
+            on_before_compact=(c.consolidator.run_post_chat
+                               if c.consolidator is not None else None))
         return AgentSession(build_llm(c.settings, tier="chat"), registry, prompt,
                             store=store, conversation_id=conversation_id,
                             compactor=compactor,

@@ -4,6 +4,7 @@ import json
 import sys
 from collections.abc import Callable
 
+from allpath_trade.agent.tools import fence_external
 from allpath_trade.llm.base import LLMClient, LLMError
 from allpath_trade.store.conversations import ConversationStore
 
@@ -182,9 +183,26 @@ class Compactor:
     def _frame(self, summary: str, messages: list[dict]) -> list[dict]:
         if not summary.strip():
             return list(messages)
+        # `summary` is model-authored, but distilled from a transcript that
+        # includes `role: "tool"` messages -- fenced external content by the
+        # time it entered the older half of the conversation (readonly_tools
+        # wrap tool output the same way memory/consolidate.py wraps its own
+        # inputs). _summarize below flattens every message, tool output
+        # included, into the transcript it hands the summarizing LLM, so
+        # nothing here guarantees the resulting text is free of an
+        # embedded instruction. Framing it as a bare `system` message would
+        # let that content re-enter the conversation as a trusted
+        # instruction instead of the untrusted recap it actually is --
+        # exactly the boundary note_resolution/_protocol_only/readonly_tools
+        # are careful to hold everywhere else. Reuse the same fencing
+        # machinery rather than inventing a second convention; keeping the
+        # `system` role (rather than moving to `user`) avoids a "user"
+        # message immediately followed by another "user" turn, which some
+        # providers reject.
         return [{"role": "system",
-                 "content": "Briefing on the earlier part of this conversation:\n"
-                            + summary}, *messages]
+                 "content": fence_external(
+                     "Briefing on the earlier part of this conversation:\n"
+                     + summary)}, *messages]
 
     def _summarize(self, previous: str, older: list[dict]) -> str | None:
         transcript = "\n".join(

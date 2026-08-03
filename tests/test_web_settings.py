@@ -124,6 +124,52 @@ def test_saving_resets_the_chat_service_so_the_next_turn_picks_up_new_config(cli
     assert client.app.state.chat is None
 
 
+class _RecordingScheduler:
+    def __init__(self):
+        self.rescheduled = None
+
+    def reschedule_job(self, job_id, trigger=None, **kwargs):
+        self.rescheduled = (job_id, trigger, kwargs)
+
+    def shutdown(self, wait=True):
+        # create_app's lifespan (allpath_trade/web/app.py) calls this on
+        # teardown for whatever's on app.state.scheduler -- a fixture-set
+        # fake needs one too, or the TestClient context manager's own
+        # shutdown blows up on exit for tests that install this fake.
+        pass
+
+
+def test_changing_the_sentinel_interval_reschedules_the_running_job(client):
+    # Finding 5: without this wire-up, `sentinel_interval_minutes` reads back
+    # correctly everywhere but the actual cadence never moves until restart,
+    # while `context_budget_tokens` (right next to it on the same card) takes
+    # effect immediately -- an inconsistency the user has no way to notice
+    # from the UI alone.
+    scheduler = _RecordingScheduler()
+    client.app.state.scheduler = scheduler
+    r = client.post("/settings", data={"sentinel_interval_minutes": "15"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert scheduler.rescheduled == ("sentinel_pass", "interval", {"minutes": 15})
+
+
+def test_saving_without_changing_the_interval_does_not_reschedule(client):
+    scheduler = _RecordingScheduler()
+    client.app.state.scheduler = scheduler
+    current = client.app.state.holder.get().settings.sentinel_interval_minutes
+    client.post("/settings", data={"sentinel_interval_minutes": str(current)})
+    assert scheduler.rescheduled is None
+
+
+def test_saving_with_no_scheduler_running_does_not_crash(client):
+    # No `serve` process behind this test client -- app.state.scheduler is
+    # simply absent. A settings save must still succeed.
+    assert getattr(client.app.state, "scheduler", None) is None
+    r = client.post("/settings", data={"sentinel_interval_minutes": "20"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+
+
 def test_reset_token_invalidates_the_session(client):
     client.post("/settings/reset-token", follow_redirects=False)
     assert client.get("/", follow_redirects=False).status_code == 303
@@ -202,6 +248,34 @@ def test_a_non_numeric_value_in_a_numeric_field_does_not_brick_the_app(client, t
     assert "context_budget_tokens" in r.text
     assert env_path.read_text() == before
     assert client.get("/settings").status_code == 200
+
+
+def test_a_negative_sentinel_interval_is_refused_and_env_unchanged(client, tmp_path):
+    # Finding 4: a type check alone (int) lets -5 straight through -- the
+    # field needs its own ge=1 constraint, or APScheduler schedules a job
+    # that's perpetually overdue and hammers the broker in a hot loop.
+    env_path = tmp_path / ".env"
+    before = env_path.read_text()
+
+    r = client.post("/settings", data={"sentinel_interval_minutes": "-5"})
+
+    assert r.status_code == 400
+    assert "sentinel_interval_minutes" in r.text
+    assert env_path.read_text() == before
+    assert client.get("/settings").status_code == 200
+
+
+def test_a_zero_context_budget_is_refused_and_env_unchanged(client, tmp_path):
+    # A zero budget makes the "still under budget" check never pass, firing
+    # a memory-tier summarization call on every single turn.
+    env_path = tmp_path / ".env"
+    before = env_path.read_text()
+
+    r = client.post("/settings", data={"context_budget_tokens": "0"})
+
+    assert r.status_code == 400
+    assert "context_budget_tokens" in r.text
+    assert env_path.read_text() == before
 
 
 class _StubQueue:

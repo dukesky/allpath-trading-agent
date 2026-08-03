@@ -11,6 +11,6 @@
     <span style="margin-left:auto" class="muted">v{{ d.version }} · {{ d.status.value }} / {{ d.authorization.value }}</span>
   </div>
 </div>
-{% else %}<p class="muted">No strategies yet. Ask the agent to draft one in Chat.</p>{% endfor %}
+{% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
 {% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
 {% endblock %}

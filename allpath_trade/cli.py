@@ -239,12 +239,33 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> i
         from allpath_trade.llm.factory import build_llm
 
         memory_llm = build_llm(components.settings, tier="memory")
-    compactor = Compactor(memory_llm, store,
-                          budget_tokens=components.settings.context_budget_tokens)
+    # Finding 8: flush durable preferences to curated memory before the
+    # older half of the conversation is dropped from context -- see
+    # Compactor's docstring on on_before_compact. Without this the only
+    # backstop is _finish()'s end-of-session consolidation below, which
+    # never runs until the user exits; a preference stated once early in a
+    # long session could be compacted away long before that. No-op when no
+    # LLM is configured (components.consolidator is None in that case).
+    compactor = Compactor(
+        memory_llm, store, budget_tokens=components.settings.context_budget_tokens,
+        on_before_compact=(components.consolidator.run_post_chat
+                           if components.consolidator is not None else None))
     session = AgentSession(llm, registry, system, store=store,
                            conversation_id=cid, on_tool=on_tool,
                            compactor=compactor)
-    initial_len = len(session.history)
+    # Finding 6: a plain list index (`len(session.history)`) breaks the
+    # moment a compaction runs mid-session -- run_turn (loop.py) reassigns
+    # `session.history` to the trimmed tail maybe_compact returns, so its
+    # length can drop below whatever was captured here before any
+    # compaction happened, especially when resuming a conversation that
+    # already had history: `session.history[initial_len:]` then silently
+    # yields `[]` (or the wrong window) right when there's the most to
+    # remember. Turn ids are monotonic and the store keeps the full
+    # transcript regardless of what compaction trims from context (see
+    # compact.py's class docstring), so anchoring on the last stored turn id
+    # instead of a list length survives any number of compactions.
+    existing_ids = [tid for tid, _ in store.history_with_ids(cid)]
+    start_turn_id = existing_ids[-1] if existing_ids else 0
 
     mode = "paper" if components.broker.is_paper else "LIVE"
     console.print(f"[bold cyan]{CHAT_BANNER}[/bold cyan]")
@@ -254,8 +275,12 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> i
                   "orders & strategy changes always ask first\n")
 
     def _finish() -> None:
-        if components.consolidator is not None:
-            new_msgs = session.history[initial_len:]
+        # Finding 7: consolidate_after_chat is a real Settings field and a
+        # live checkbox on the settings page, but until now nothing read it
+        # -- this ran unconditionally regardless of what the user set.
+        if (components.consolidator is not None
+                and components.settings.consolidate_after_chat):
+            new_msgs = store.history(cid, after_turn_id=start_turn_id)
             if new_msgs:
                 try:
                     note = components.consolidator.run_post_chat(new_msgs)

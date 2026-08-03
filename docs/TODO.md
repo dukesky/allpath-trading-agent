@@ -48,6 +48,10 @@
 - [ ] 上下文个股档案包含非 active 策略的 ticker（轻微膨胀，预算兜底）
 
 ## Phase 5 遗留
+- [ ] Web chat 的 draft_strategy 审批卡片——目前 `order_sink` 只覆盖 propose_order，
+      strategy 草稿在 web 模式下完全无法保存（只如实告知用户改用终端
+      `allpath-trade chat`），需要仿照 Pending 队列给 strategy 保存也做一条
+      排队 + 批准的路径，而不是直接落盘（终审 Finding 3）
 - [ ] 策略 YAML 在线编辑（当前只读，修改走聊天让 agent 起草）
 - [ ] SSE 实时推送工具活动（当前为回合结束后整体刷新，见 `_chat_messages.html` 里的说明）
 - [ ] 手机推送通道（ntfy / Bark），比邮件更及时

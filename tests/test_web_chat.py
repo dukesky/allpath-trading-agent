@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import ClassVar
 
 from fastapi.testclient import TestClient
 
@@ -40,6 +41,85 @@ def make_client(tmp_path, monkeypatch, responses):
     client = TestClient(create_app(settings, broker=FakeBroker()))
     client.post("/login", data={"token": "secret"})
     return client
+
+
+class SpyCompactor:
+    """Stands in for allpath_trade.agent.compact.Compactor so a test can
+    inspect what ChatService._build constructed it with, without needing a
+    conversation big enough to actually trigger compaction. Mirrors
+    tests/test_cli.py's SpyCompactor, used the same way for cmd_chat."""
+
+    instances: ClassVar[list[SpyCompactor]] = []
+
+    def __init__(self, llm, store, budget_tokens=60_000, on_before_compact=None):
+        self.llm = llm
+        self.store = store
+        self.budget_tokens = budget_tokens
+        self.on_before_compact = on_before_compact
+        SpyCompactor.instances.append(self)
+
+    def maybe_compact(self, conversation_id, history):
+        return list(history), history
+
+
+def test_chat_wires_the_consolidator_flush_hook_into_the_compactor(tmp_path, monkeypatch):
+    # Finding 8: on_before_compact was dead code -- no production caller
+    # passed it, not ChatService._build, not cmd_chat. Under Phase 5's
+    # one-conversation-forever design that's the only backstop against
+    # losing a preference the user stated once and never repeated, since
+    # there is no "end of chat" here the way there is in the terminal.
+    SpyCompactor.instances = []
+    monkeypatch.setattr("allpath_trade.web.chat_service.Compactor", SpyCompactor)
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hi there")])
+
+    client.get("/chat")  # forces ChatService._build via session()
+
+    assert len(SpyCompactor.instances) == 1
+    hook = SpyCompactor.instances[0].on_before_compact
+    consolidator = client.app.state.holder.get().consolidator
+    assert consolidator is not None  # sanity: the hook has something to bind to
+    assert hook is not None
+    assert hook.__self__ is consolidator
+    assert hook.__func__ is consolidator.run_post_chat.__func__
+
+
+def test_chat_shows_a_banner_instead_of_500_when_no_llm_key_is_configured(
+        tmp_path, monkeypatch):
+    # Finding 1: `serve` only requires broker credentials -- the Settings
+    # page exists precisely so an LLM key can be added after the fact from
+    # the browser. Before this fix, ChatService._build's build_llm() call
+    # raised LLMConfigError with nothing downstream catching it, so "start
+    # serve, open Chat, get a stack trace" was the default first-run path.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret")
+    # No provider key anywhere -- build_llm raises LLMConfigError.
+    client = TestClient(create_app(settings, broker=FakeBroker()))
+    client.post("/login", data={"token": "secret"})
+
+    r = client.get("/chat")
+
+    assert r.status_code == 200
+    assert "Settings" in r.text
+    assert "OPENROUTER_API_KEY" in r.text
+
+
+def test_chat_send_also_degrades_instead_of_500_when_no_llm_key_is_configured(
+        tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret")
+    client = TestClient(create_app(settings, broker=FakeBroker()))
+    client.post("/login", data={"token": "secret"})
+
+    r = client.post("/chat/send", data={"message": "hi"})
+
+    assert r.status_code == 200
+    assert "Settings" in r.text
 
 
 def test_message_round_trip(tmp_path, monkeypatch):

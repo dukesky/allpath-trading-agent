@@ -40,7 +40,7 @@
     {% for r in s.rules %}{{ r.id }}: {{ r.state.value }}{% if not loop.last %} · {% endif %}{% endfor %}
   </div>
 </div>
-{% else %}<p class="muted">No strategies yet. Ask the agent to draft one in Chat.</p>{% endfor %}
+{% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
 {% for e in strategy_errors %}<p class="error">{{ e }}</p>{% endfor %}
 
 <h2>Recent trades</h2>
