@@ -1,0 +1,71 @@
+:root {
+  --bg: #14151a; --surface: #1b1d24; --line: #2b2e38;
+  --text: #e6e7ea; --muted: #9a9daa; --accent: #7f9cf5;
+  --up: #4ade80; --down: #f87171; --warn: #fbbf24;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg:#faf9f7; --surface:#fff; --line:#e5e3de; --text:#1a1a1a;
+          --muted:#6b6b6b; --accent:#3457b2; --up:#137a3d; --down:#b3261e; }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font-size:15px;
+  line-height:1.6; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+body.centered { display:flex; min-height:100vh; align-items:center; justify-content:center; }
+a { color:inherit; text-decoration:none; }
+nav { display:flex; gap:18px; align-items:center; padding:14px 20px;
+  border-bottom:1px solid var(--line); flex-wrap:wrap; }
+nav .brand { font-weight:500; letter-spacing:.02em; margin-right:auto; }
+nav a { color:var(--muted); font-size:14px; }
+nav a.on { color:var(--text); }
+.badge { background:var(--warn); color:#3a2a00; border-radius:999px;
+  padding:1px 7px; font-size:12px; margin-left:5px; }
+main { max-width:900px; margin:0 auto; padding:20px; }
+h1 { font-size:20px; font-weight:500; margin:0 0 16px; }
+h2 { font-size:13px; font-weight:400; color:var(--muted); margin:26px 0 10px;
+  text-transform:uppercase; letter-spacing:.06em; }
+.card { background:var(--surface); border:1px solid var(--line);
+  border-radius:12px; padding:16px; }
+.metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+.metric .label { color:var(--muted); font-size:13px; }
+.metric .value { font-family:var(--mono); font-size:24px; }
+table { width:100%; border-collapse:collapse; }
+td, th { padding:9px 0; border-top:1px solid var(--line); text-align:left;
+  font-weight:400; font-size:14px; }
+th { color:var(--muted); font-size:12px; border-top:none; }
+td.num, th.num { text-align:right; font-family:var(--mono); }
+.up { color:var(--up); } .down { color:var(--down); } .muted { color:var(--muted); }
+button, .btn { background:transparent; color:var(--text); border:1px solid var(--line);
+  border-radius:8px; padding:7px 14px; font-size:14px; cursor:pointer; font:inherit; }
+button.primary { border-color:var(--accent); color:var(--accent); }
+button.danger { border-color:var(--down); color:var(--down); }
+input, select, textarea { background:var(--bg); color:var(--text);
+  border:1px solid var(--line); border-radius:8px; padding:8px 10px;
+  font:inherit; font-size:14px; width:100%; }
+.login { width:320px; }
+.login h1 { margin-bottom:2px; }
+.hint, .error { font-size:12px; }
+.hint { color:var(--muted); margin-top:14px; }
+.error { color:var(--down); }
+.check { display:flex; gap:8px; align-items:center; font-size:13px;
+  color:var(--muted); margin:10px 0 16px; }
+.check input { width:auto; }
+.row { display:flex; gap:10px; align-items:center; }
+.msg { margin-bottom:14px; }
+.msg.user { display:flex; justify-content:flex-end; }
+.msg.user span { background:var(--surface); border-radius:12px 12px 2px 12px;
+  padding:9px 13px; max-width:78%; }
+/* Assistant text is escaped, not rendered as markup (see chat_service.py /
+   _chat_messages.html) -- pre-wrap keeps the model's own line breaks and
+   paragraphing readable without turning its output into live HTML. */
+.msg.assistant { white-space:pre-wrap; word-wrap:break-word; }
+/* An approve/reject outcome echoed back by ChatService.note_resolution --
+   deliberately not styled like .msg.user's right-aligned bubble, so it never
+   reads as something the human typed (see _chat_messages.html). */
+.msg.system { display:flex; justify-content:center; }
+.msg.system span { color:var(--muted); font-size:12px; font-family:var(--mono);
+  background:var(--surface); border-radius:8px; padding:6px 12px; }
+.activity { color:var(--muted); font-size:12px; font-family:var(--mono); }
+pre { font-family:var(--mono); font-size:13px; overflow-x:auto;
+  background:var(--surface); border:1px solid var(--line);
+  border-radius:8px; padding:12px; }

@@ -14,8 +14,8 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 TRUNCATION_MARKER = "\n…(truncated — use session_search)"
 
 
-class MemoryError(Exception):
-    pass
+class MemoryStoreError(Exception):
+    """Raised for invalid layers, keys, actions, or budget overruns."""
 
 
 class MemoryStore:
@@ -33,9 +33,9 @@ class MemoryStore:
         subdir = {"strategy": "strategies", "stock": "stocks",
                   "lesson": "lessons"}.get(layer)
         if subdir is None:
-            raise MemoryError(f"unknown memory layer: {layer!r}")
+            raise MemoryStoreError(f"unknown memory layer: {layer!r}")
         if not key or not _KEY_RE.match(key):
-            raise MemoryError(f"invalid memory key: {key!r}")
+            raise MemoryStoreError(f"invalid memory key: {key!r}")
         if layer == "stock":
             key = key.upper()
         return self.root / subdir / f"{key}.md"
@@ -58,9 +58,9 @@ class MemoryStore:
 
         if action == "add":
             if text is None:
-                raise MemoryError("add requires text")
+                raise MemoryStoreError("add requires text")
             if len(before) >= budget:
-                raise MemoryError(
+                raise MemoryStoreError(
                     f"{path.name} is over its {budget}-char budget — "
                     "replace or remove entries instead of adding")
             entry = text if text.startswith("- ") else f"- {text}"
@@ -68,24 +68,24 @@ class MemoryStore:
                 else entry + "\n"
         elif action in ("replace", "remove"):
             if not match:
-                raise MemoryError(f"{action} requires match")
+                raise MemoryStoreError(f"{action} requires match")
             blocks = [b for b in before.split("\n\n")]
             hits = [i for i, b in enumerate(blocks)
                     if b.strip().startswith("- ") and match in b]
             if not hits:
-                raise MemoryError(f"no entry matches {match!r}")
+                raise MemoryStoreError(f"no entry matches {match!r}")
             if len(hits) > 1:
-                raise MemoryError(
+                raise MemoryStoreError(
                     f"{len(hits)} entries match {match!r} — be more specific")
             if action == "remove":
                 del blocks[hits[0]]
             else:
                 if text is None:
-                    raise MemoryError("replace requires text")
+                    raise MemoryStoreError("replace requires text")
                 blocks[hits[0]] = text if text.startswith("- ") else f"- {text}"
             after = "\n\n".join(b for b in blocks if b.strip()) + "\n"
         else:
-            raise MemoryError(f"unknown action: {action!r}")
+            raise MemoryStoreError(f"unknown action: {action!r}")
 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(after)
@@ -96,6 +96,14 @@ class MemoryStore:
         self._conn.commit()
         rel = path.relative_to(self.root)
         return f"{action} ok: {rel}"
+
+    def recent_log(self, limit: int = 30) -> list[sqlite3.Row]:
+        """The change-audit trail the web memory page renders. Kept behind
+        this API like every other store the web layer reads from, rather
+        than a route querying `memory_log` with its own raw SQL."""
+        return list(self._conn.execute(
+            "SELECT ts, layer, key, action, after FROM memory_log"
+            " ORDER BY id DESC LIMIT ?", (limit,)))
 
     def render_for_context(self, layer: str, key: str | None = None,
                            budget: int | None = None) -> str:

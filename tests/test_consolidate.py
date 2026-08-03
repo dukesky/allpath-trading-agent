@@ -94,6 +94,39 @@ def test_post_chat_light_consolidation(tmp_path):
     assert "DCA" in memory.read("profile")
 
 
+def test_post_chat_propagate_mode_raises_on_llm_failure_instead_of_swallowing(tmp_path):
+    # F2: run_turn (agent/loop.py) already catches its own LLMError and
+    # returns a "(llm error: ...)" sentinel string rather than raising --
+    # propagate=True has to turn that sentinel into a real exception too, or
+    # the most likely real-world flush failure (the memory-tier LLM being
+    # unreachable) would still come back as an ordinary, non-exceptional
+    # return, exactly the gap Finding 8's fix left open.
+    from allpath_trade.llm.base import LLMError
+
+    c, memory, _obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
+    try:
+        c.run_post_chat(
+            [{"role": "user", "content": "remember I hate meme stocks"}],
+            propagate=True)
+        raised = False
+    except RuntimeError as exc:
+        raised = True
+        assert "llm error" in str(exc)
+    assert raised
+    assert memory.read("profile") == ""  # nothing written -- the flush never completed
+
+
+def test_post_chat_default_mode_still_swallows_the_same_failure(tmp_path):
+    # The CLI's own end-of-session call binds the default (propagate=False)
+    # and must keep never raising -- a raise there would abort the exit path
+    # over a best-effort memory write.
+    from allpath_trade.llm.base import LLMError
+
+    c, _memory, _obs = make(tmp_path, ScriptedLLM([LLMError("down")]))
+    out = c.run_post_chat([{"role": "user", "content": "remember I hate meme stocks"}])
+    assert "llm error" in out
+
+
 def test_iteration_exhaustion_does_not_advance_marker(tmp_path):
     llm = ScriptedLLM([tool_response("memory_read", {"layer": "profile"})
                        for _ in range(25)])

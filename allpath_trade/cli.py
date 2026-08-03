@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from functools import partial
+
+from pydantic import ValidationError
 
 from allpath_trade.broker.base import Broker
-from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.config import Settings, SettingsStore, describe_validation_error
 from allpath_trade.llm.base import LLMClient
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
@@ -45,6 +48,37 @@ def cmd_status(settings: Settings, broker: Broker) -> int:
         for r in rows:
             print(f"  #{r['id']} {r['ts'][:19]} {r['side']} {r['ticker']} "
                   f"[{r['status']}] {r['reason']}")
+    return 0
+
+
+def cmd_serve(settings: Settings, host: str | None, port: int | None) -> int:
+    import uvicorn
+
+    from allpath_trade.web.app import create_app
+    from allpath_trade.web.auth import ensure_token
+
+    host = host or settings.web_host
+    port = port or settings.web_port
+
+    # Must run before create_app: `ensure_token` mutates `settings.web_token`
+    # in place, and `create_app` hands that same `Settings` instance down
+    # through `build_components`/`ComponentHolder`. Calling it first only
+    # works today because of that by-reference aliasing; calling it before
+    # construction means first-run auth doesn't depend on that fact holding.
+    had_token = bool(settings.web_token)
+    token = ensure_token(SettingsStore(), settings)
+    app = create_app(settings, start_scheduler=True)
+
+    shown = "localhost" if host in {"127.0.0.1", "localhost"} else host
+    print(f"[allpath-trade] http://{shown}:{port}")
+    # The token is the session cookie's value -- only worth printing (into
+    # terminal scrollback and any log capture) the moment it's generated.
+    # On later starts, point at where it already lives instead of repeating it.
+    if had_token:
+        print("[allpath-trade] access token: unchanged (see WEB_TOKEN in .env)")
+    else:
+        print(f"[allpath-trade] access token: {token}")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 
 
@@ -120,7 +154,7 @@ def cmd_reviews(q, args) -> int:
 
 def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
     if layer:
-        from allpath_trade.memory.store import MemoryError as MemoryStoreError
+        from allpath_trade.memory.store import MemoryStoreError
 
         try:
             text = memory.read(layer, key)
@@ -149,12 +183,13 @@ CHAT_BANNER = r"""
 """
 
 
-def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
+def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> int:
     from rich.console import Console
     from rich.markdown import Markdown
     from rich.panel import Panel
 
     from allpath_trade.agent.action_tools import register_action_tools
+    from allpath_trade.agent.compact import Compactor
     from allpath_trade.agent.context import build_system_prompt, load_identity
     from allpath_trade.agent.loop import AgentSession
     from allpath_trade.agent.memory_tools import register_memory_tools
@@ -196,9 +231,50 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
                                  strategies=components.strategies,
                                  queue=components.queue,
                                  memory=components.memory)
+    # The terminal chat resumes the same unbounded conversation the web chat
+    # does (allpath_trade/web/chat_service.py ChatService._build) -- without
+    # a Compactor here too, a long-lived interactive session grows its
+    # context forever in exactly the same way. `memory_llm` is normally
+    # supplied by main() (built through the same injectable factory as the
+    # chat-tier `llm`, so tests can script it); build it directly here only
+    # for callers that construct cmd_chat's dependencies themselves.
+    if memory_llm is None:
+        from allpath_trade.llm.factory import build_llm
+
+        memory_llm = build_llm(components.settings, tier="memory")
+    # Finding 8: flush durable preferences to curated memory before the
+    # older half of the conversation is dropped from context -- see
+    # Compactor's docstring on on_before_compact. Without this the only
+    # backstop is _finish()'s end-of-session consolidation below, which
+    # never runs until the user exits; a preference stated once early in a
+    # long session could be compacted away long before that. No-op when no
+    # LLM is configured (components.consolidator is None in that case).
+    # F2: `propagate=True` -- Compactor's own try/except is what turns a
+    # failed flush into "skip compaction this round, keep the messages",
+    # but only if the hook actually raises. run_post_chat's default swallows
+    # every failure into a string return, which reads to Compactor as an
+    # ordinary success.
+    compactor = Compactor(
+        memory_llm, store, budget_tokens=components.settings.context_budget_tokens,
+        on_before_compact=(
+            partial(components.consolidator.run_post_chat, propagate=True)
+            if components.consolidator is not None else None))
     session = AgentSession(llm, registry, system, store=store,
-                           conversation_id=cid, on_tool=on_tool)
-    initial_len = len(session.history)
+                           conversation_id=cid, on_tool=on_tool,
+                           compactor=compactor)
+    # Finding 6: a plain list index (`len(session.history)`) breaks the
+    # moment a compaction runs mid-session -- run_turn (loop.py) reassigns
+    # `session.history` to the trimmed tail maybe_compact returns, so its
+    # length can drop below whatever was captured here before any
+    # compaction happened, especially when resuming a conversation that
+    # already had history: `session.history[initial_len:]` then silently
+    # yields `[]` (or the wrong window) right when there's the most to
+    # remember. Turn ids are monotonic and the store keeps the full
+    # transcript regardless of what compaction trims from context (see
+    # compact.py's class docstring), so anchoring on the last stored turn id
+    # instead of a list length survives any number of compactions.
+    existing_ids = [tid for tid, _ in store.history_with_ids(cid)]
+    start_turn_id = existing_ids[-1] if existing_ids else 0
 
     mode = "paper" if components.broker.is_paper else "LIVE"
     console.print(f"[bold cyan]{CHAT_BANNER}[/bold cyan]")
@@ -208,8 +284,12 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None) -> int:
                   "orders & strategy changes always ask first\n")
 
     def _finish() -> None:
-        if components.consolidator is not None:
-            new_msgs = session.history[initial_len:]
+        # Finding 7: consolidate_after_chat is a real Settings field and a
+        # live checkbox on the settings page, but until now nothing read it
+        # -- this ran unconditionally regardless of what the user set.
+        if (components.consolidator is not None
+                and components.settings.consolidate_after_chat):
+            new_msgs = store.history(cid, after_turn_id=start_turn_id)
             if new_msgs:
                 try:
                     note = components.consolidator.run_post_chat(new_msgs)
@@ -354,17 +434,37 @@ def main(argv: list[str] | None = None,
         description="Manually run the daily consolidation pass: recent trades, "
                     "triggers, and observations are distilled into the curated "
                     "memory layers. Normally runs automatically after close.")
+    p_serve = sub.add_parser(
+        "serve", help="run the web interface and sentinel",
+        description="Run the FastAPI web UI and the sentinel scheduler in one "
+                    "process. Requires Alpaca keys in .env.")
+    p_serve.add_argument("--host", default=None, help="bind address")
+    p_serve.add_argument("--port", type=int, default=None, help="port")
 
     if argv is not None and len(argv) == 0:
         parser.print_help()
         return 0
     args = parser.parse_args(argv)
 
-    settings = SettingsStore().load()
+    try:
+        settings = SettingsStore().load()
+    except ValidationError as exc:
+        # F1: the range constraints Finding 4 put on Settings (sentinel
+        # interval >= 1, context budget >= 2000, smtp port in range) reject a
+        # value that was legal before this branch. Without this guard, an
+        # existing .env carrying such a value takes down every single
+        # command with a raw traceback -- including the settings page that
+        # could otherwise fix it, since `serve` loads settings the same way.
+        # Same friendly-error-and-exit-2 shape as the missing-credentials
+        # check just below, for the same reason: a config problem is the
+        # user's to fix in .env, not a crash to report.
+        print(f"Invalid setting in .env: {describe_validation_error(exc)}. "
+              "Fix or remove that line in .env, then try again.", file=sys.stderr)
+        return 2
 
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work without.
-    needs_broker = args.command in {"status", "check", "run", "chat"} or (
+    needs_broker = args.command in {"status", "check", "run", "chat", "serve"} or (
         args.command == "reviews" and getattr(args, "reviews_command", None) == "approve") or (
         args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
@@ -380,6 +480,9 @@ def main(argv: list[str] | None = None,
 
     if args.command == "status":
         return cmd_status(settings, broker)
+
+    if args.command == "serve":
+        return cmd_serve(settings, args.host, args.port)
 
     if broker is not None:
         from allpath_trade.app import build_components
@@ -418,12 +521,18 @@ def main(argv: list[str] | None = None,
     if args.command == "chat":
         from allpath_trade.llm.factory import LLMConfigError, build_llm
 
+        factory = llm_factory or build_llm
         try:
-            llm = (llm_factory or build_llm)(settings, "chat")
+            llm = factory(settings, "chat")
+            # Same factory (real or injected) as the chat-tier client, so a
+            # test that scripts one scripts the other: the Compactor's LLM
+            # calls stay fully deterministic instead of quietly reaching a
+            # real provider the moment compaction triggers.
+            memory_llm = factory(settings, "memory")
         except LLMConfigError as exc:
             print(f"LLM not configured: {exc}", file=sys.stderr)
             return 2
-        return cmd_chat(components, llm, new=args.new)
+        return cmd_chat(components, llm, new=args.new, memory_llm=memory_llm)
     if args.command == "memory":
         if args.memory_command == "show":
             from allpath_trade.memory.store import MemoryStore

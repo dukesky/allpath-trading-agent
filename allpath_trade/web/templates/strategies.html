@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Strategies · AllPath Trade{% endblock %}
+{% block content %}
+<h1>Strategies</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% for d in docs %}
+<div class="card" style="margin-bottom:10px">
+  <div class="row">
+    <a href="/strategies/{{ d.id }}"><strong>{{ d.name }}</strong></a>
+    <span class="muted">· {{ d.position.ticker }}</span>
+    <span style="margin-left:auto" class="muted">v{{ d.version }} · {{ d.status.value }} / {{ d.authorization.value }}</span>
+  </div>
+</div>
+{% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
+{% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
+{% endblock %}

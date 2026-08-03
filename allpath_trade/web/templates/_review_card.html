@@ -1,0 +1,67 @@
+<div class="card" id="review-{{ item['id'] }}" style="margin-bottom:12px">
+  <div class="row">
+    <strong>{{ item['action'] }} · {{ item['ticker'] }}</strong>
+    <span class="muted">#{{ item['id'] }}</span>
+    <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
+  </div>
+  <p class="muted" style="font-size:13px;margin:6px 0">
+    {% if item['source'] == 'chat' %}
+    From chat — triggered on <code>{{ item['condition'] }}</code>
+    {% else %}
+    {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
+    {% endif %}
+  </p>
+  {% if item['intent'] %}
+  <p style="font-family:var(--mono);font-size:14px;margin:6px 0">
+    {{ item['intent']['side'] }}
+    {% if item['intent']['qty'] %}{{ item['intent']['qty'] }} shares{% else %}{{ item['intent']['notional'] | money }}{% endif %}
+    {{ item['intent']['ticker'] }}
+  </p>
+  {% endif %}
+  {% if item['agent_analysis'] %}
+  <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+    <p style="font-size:13px;margin:0 0 4px"><strong>Agent recommends:</strong> {{ item['agent_analysis'].get('recommendation', 'no recommendation') }}</p>
+    <p class="muted" style="font-size:13px;margin:0">{{ item['agent_analysis'].get('reasoning', '') }}</p>
+    {% for src in item['agent_analysis'].get('sources', []) %}
+    <p class="muted" style="font-size:12px;margin:2px 0">
+      {% if src.startswith('http://') or src.startswith('https://') %}
+      <a href="{{ src }}" target="_blank" rel="noopener noreferrer">{{ src }}</a>
+      {% else %}
+      {{ src }}
+      {% endif %}
+    </p>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if item['status'] == 'pending' %}
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="/reviews/{{ item['id'] }}/approve"><button class="primary" type="submit">Approve</button></form>
+    <form method="post" action="/reviews/{{ item['id'] }}/reject" style="display:flex;gap:6px;align-items:center">
+      <input type="text" name="note" placeholder="reason (optional)" style="font-size:13px">
+      <button class="danger" type="submit">Reject</button>
+    </form>
+  </div>
+  {% else %}
+  {# The persisted `status` column alone cannot tell "order went out" apart
+     from "risk gate blocked it" or "the broker call failed": approve() sets
+     status='approved' *before* executing, and leaves it there whichever of
+     those three things happens next (allpath_trade/store/reviews.py). The
+     outcome — and the risk-gate/broker detail — only lives in
+     `execution_result`, so render that instead of the bare status. #}
+  {% set er = item['execution_result'] %}
+  <p class="muted" style="font-size:13px;margin:10px 0 0">
+    {% if item['status'] == 'rejected' %}
+    Rejected{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
+    {% elif er and er.get('error') %}
+    Execution failed (review claimed, order status unknown) — {{ er['error'] }}
+    {% elif er and er.get('submitted') %}
+    Order submitted
+    {% elif er and not er.get('submitted', True) %}
+    Blocked by the risk gate — {{ er.get('decision', {}).get('reasons', []) | join('; ') }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
+    {{ item['resolved_ts'] | ago }}
+  </p>
+  {% endif %}
+</div>

@@ -336,3 +336,98 @@ def test_sentinel_records_observations(tmp_path):
     s.run_once()
     rows = s.observations.recent()
     assert rows and "t/r1" in rows[0]["text"] and rows[0]["subject"] == "AAPL"
+
+
+def test_strategy_error_recorded_under_distinct_source(tmp_path):
+    # Per-strategy failures (bad quote, etc.) must never share the
+    # "sentinel" source with real rule triggers — the daily digest counts
+    # "sentinel"-sourced rows as trigger count, so an error logged under
+    # that source would silently inflate it.
+    from allpath_trade.memory.observations import ObservationLog
+
+    class BadData(FakeData):
+        def get_quote(self, ticker):
+            raise ValueError("no price")
+
+    (tmp_path / "t.yaml").write_text(strategy_yaml())
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    ex = SpyExecutor()
+    s = Sentinel(store, BadData(), FakeBroker(), ex, ReviewQueue(conn, ex), SpyNotifier())
+    s.observations = ObservationLog(conn)
+    s.run_once()
+    rows = s.observations.recent()
+    assert rows and rows[0]["source"] == "sentinel_error"
+    assert all(r["source"] != "sentinel" for r in rows)
+
+
+def test_hard_auto_executed_notification_uses_order_result_event(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml())
+    s.run_once()
+    [(subject, body)] = n.sent
+    assert "AAPL" in subject and "order submitted" in subject
+    assert "sell" in body and "submitted" in body
+    assert "http" not in body.lower() and "<" not in body
+
+
+def test_notify_auth_notification_uses_rule_triggered_event(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="notify"))
+    s.run_once()
+    [(subject, body)] = n.sent
+    assert "AAPL" in subject and "rule r1 triggered" in subject
+    assert "t" in body and "r1" in body and "notified" in body
+
+
+def test_confirm_auth_queued_notification_uses_review_queued_event(tmp_path):
+    s, _store, _ex, q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.run_once()
+    [(subject, body)] = n.sent
+    assert "AAPL" in subject and "waiting for your approval" in subject
+    review_id = q.list()[0]["id"]
+    assert f"#{review_id}" in body and "sell all" in body and "t" in body
+
+
+def test_confirm_with_agent_queued_notification_includes_recommendation(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent("execute")
+    s.run_once()
+    [(subject, body)] = n.sent
+    assert "waiting for your approval" in subject
+    assert "agent recommends: execute" in body and "because" in body
+
+
+def test_no_position_sell_skipped_sends_notification(tmp_path):
+    # A rule the user wrote fired even though there was nothing to act on
+    # (no position to sell) — silence would leave them with no way to know
+    # it triggered at all, so this must still notify, briefly.
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(), qty="0")
+    s.run_once()
+    [(subject, body)] = n.sent
+    assert "AAPL" in subject and "rule r1 triggered" in subject
+    assert "skipped" in body
+
+
+def test_agent_skip_recommendation_sends_notification(tmp_path):
+    # Same reasoning as above: the agent reviewed and chose not to act, but
+    # the rule still fired and the review is already resolved (rejected) —
+    # this is exactly the case where the user has no other way to learn it.
+    s, _store, ex, _q, n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent("skip")
+    s.run_once()
+    assert ex.calls == []
+    [(subject, body)] = n.sent
+    assert "AAPL" in subject and "rule r1 triggered" in subject
+    assert "skipped" in body
+
+
+def test_hard_auto_gate_rejected_notification_uses_order_result_event(tmp_path):
+    (tmp_path / "t.yaml").write_text(strategy_yaml())
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    ex = SpyExecutor(reject_reasons=["exceeds max position size"])
+    n = SpyNotifier()
+    s = Sentinel(store, FakeData(), FakeBroker(), ex, ReviewQueue(conn, ex), n)
+    s.run_once()
+    [(subject, body)] = n.sent
+    assert "order not submitted" in subject
+    assert "exceeds max position size" in body

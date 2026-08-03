@@ -28,7 +28,7 @@ class EmailNotifier(Notifier):
         self._smtp = smtp_factory or functools.partial(
             smtplib.SMTP, timeout=_SMTP_TIMEOUT_SECONDS)
 
-    def send(self, subject: str, body: str) -> None:
+    def send(self, subject: str, body: str) -> bool:
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = self.sender or self.user
@@ -42,6 +42,8 @@ class EmailNotifier(Notifier):
                 smtp.send_message(msg)
         except Exception as exc:  # noqa: BLE001 — notification must not crash callers
             print(f"[notify] email send failed: {exc}", file=sys.stderr)
+            return False
+        return True
 
 
 def build_notifier(settings: Settings) -> Notifier:

@@ -11,16 +11,18 @@ class ObservationLog:
         self._conn = conn
 
     def add(self, source: str, text: str, subject: str | None = None) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO observations (ts, source, subject, text)"
-            " VALUES (?, ?, ?, ?)",
-            (datetime.now(UTC).isoformat(), source, subject, text))
-        content = f"{subject}: {text}" if subject else text
-        self._conn.execute(
-            "INSERT INTO search_index (kind, ref_id, subject, content)"
-            " VALUES ('observation', ?, ?, ?)",
-            (str(cur.lastrowid), source, content))
-        self._conn.commit()
+        # The record and its FTS index entry must land as a unit; see
+        # LockedConnection.transaction for why.
+        with self._conn.transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO observations (ts, source, subject, text)"
+                " VALUES (?, ?, ?, ?)",
+                (datetime.now(UTC).isoformat(), source, subject, text))
+            content = f"{subject}: {text}" if subject else text
+            conn.execute(
+                "INSERT INTO search_index (kind, ref_id, subject, content)"
+                " VALUES ('observation', ?, ?, ?)",
+                (str(cur.lastrowid), source, content))
         return cur.lastrowid
 
     def recent(self, since_iso: str | None = None,

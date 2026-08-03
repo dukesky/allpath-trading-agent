@@ -23,7 +23,7 @@
 
 ---
 
-> **Project status:** Phases 1-4 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; and the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions. The Web UI is next; see the [Roadmap](#roadmap). **Paper trading only by default.**
+> **Project status:** Phases 1-5 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Reflection loops are next; see the [Roadmap](#roadmap). **Paper trading only by default.**
 
 ## Table of Contents
 
@@ -33,6 +33,7 @@
 - [How It Works](#how-it-works)
 - [Safety Model](#safety-model)
 - [Getting Started](#getting-started)
+- [Web Interface](#web-interface)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
 - [Development](#development)
@@ -79,7 +80,7 @@ The framework is distributed as the Python package **`allpath-trade`** and is de
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                 Web UI (chat + dashboard)            │   Phase 5
+│                 Web UI (chat + dashboard)            │   ✅ Phase 5
 └──────────────────────────┬──────────────────────────┘
                            │ HTTP / WebSocket
 ┌──────────────────────────▼──────────────────────────┐
@@ -165,6 +166,47 @@ uv run allpath-trade chat   # talk to the agent (needs LLM + Alpaca keys in .env
 
 Expected output: your paper account equity, cash, buying power, open positions, and recent trade journal entries.
 
+### Run the web interface
+
+```bash
+uv run allpath-trade serve
+```
+
+Open `http://localhost:8791`. The access token is printed on startup and
+stored as `WEB_TOKEN` in `.env`. To reach it from your phone on the same
+network, bind to all interfaces:
+
+```bash
+uv run allpath-trade serve --host 0.0.0.0
+```
+
+The sentinel runs inside the same process, so this one command covers
+monitoring, consolidation, and the interface.
+
+## Web Interface
+
+`allpath-trade serve` runs the FastAPI app and the sentinel scheduler in one
+process (default port 8791). The token is generated once on first run and
+stored in `.env`; later starts reuse it instead of reprinting it, and the
+Settings page can reset it if it leaks. Sign in with the token at the
+printed URL — the session cookie is `HttpOnly` and `SameSite=Strict`. There
+is no built-in HTTPS, so only bind `--host 0.0.0.0` on a network you trust.
+
+| Page | Purpose |
+|---|---|
+| Dashboard | Account equity, positions, active strategies, recent trades |
+| Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes |
+| Pending | The confirmation queue — approve or reject agent-proposed orders, each with a risk pre-check |
+| Strategies | Strategy documents and version history, read-only; saving a change still requires `allpath-trade chat` in a terminal (see [Roadmap](#roadmap)) |
+| Memory | The four memory layers and their change history, read-only |
+| Settings | LLM/broker keys (write-only, never redisplayed), email notification settings, sentinel interval, and consolidation toggles |
+
+Orders the agent proposes in Chat never reach the broker directly — they
+land in the Pending queue exactly like a sentinel soft-rule trigger, and
+only your approval sends them on. Switching to live trading is not
+reachable from the web interface; that still requires editing `.env`
+directly (see [Safety Model](#safety-model)).
+
 ## Project Structure
 
 ```
@@ -186,8 +228,8 @@ allpath_trade/          # import package (PyPI/CLI name: allpath-trade)
 | 2 | **Strategy engine + sentinel loop** — YAML strategy documents, restricted-expression rule evaluator, versioning, scheduled monitoring, hard-rule auto-execution | ✅ Complete |
 | 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly, `allpath-trade chat` REPL, ReviewAgent-annotated sentinel triggers | ✅ Complete |
 | 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | ✅ Complete |
-| 5 | **Web UI + notifications** — chat, dashboard, pending-confirmation queue, settings, email | 🔜 Next |
-| 6 | **Reflection loops** — daily deep review, post-trade retrospectives | Planned |
+| 5 | **Web UI + notifications** — `allpath-trade serve`, token auth, chat, dashboard, pending-confirmation queue, settings, email | ✅ Complete |
+| 6 | **Reflection loops** — daily deep review, post-trade retrospectives | 🔜 Next |
 
 ## Development
 

@@ -2,12 +2,32 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.llm.base import LLMClient, LLMError, ToolCall
 from allpath_trade.store.conversations import ConversationStore
 
+if TYPE_CHECKING:
+    from allpath_trade.agent.compact import Compactor
+
 LIMIT_NOTICE = "(stopped: tool-call limit reached — ask me to continue if needed)"
+
+# The only fields any LLMClient's chat-completions message schema accepts.
+# History entries can carry extra bookkeeping fields that must never reach a
+# provider -- e.g. ChatService.note_resolution's `kind`/`display`, where
+# `display` is deliberately the *unfenced* text (see chat_service.py) kept
+# only for template rendering. Forwarding it verbatim would ship the exact
+# string fence_external exists to neutralize, and a strict endpoint may
+# reject an unknown field outright. Projecting once here, at the one place
+# `messages` is assembled for `llm.complete`, keeps every LLMClient
+# implementation protocol-clean without each one having to know which
+# fields on a history dict are presentation-only.
+_PROTOCOL_KEYS = ("role", "content", "tool_call_id", "tool_calls")
+
+
+def _protocol_only(message: dict) -> dict:
+    return {k: message[k] for k in _PROTOCOL_KEYS if k in message}
 
 
 class AgentSession:
@@ -17,7 +37,8 @@ class AgentSession:
     def __init__(self, llm: LLMClient, registry: ToolRegistry, system_prompt: str,
                  store: ConversationStore | None = None,
                  conversation_id: int | None = None, max_iters: int = 15,
-                 on_tool: Callable[[ToolCall], None] | None = None) -> None:
+                 on_tool: Callable[[ToolCall], None] | None = None,
+                 compactor: Compactor | None = None) -> None:
         self.llm = llm
         self.registry = registry
         self.system_prompt = system_prompt
@@ -25,10 +46,12 @@ class AgentSession:
         self.conversation_id = conversation_id
         self.max_iters = max_iters
         self.on_tool = on_tool
+        self.compactor = compactor
         self.persistence_failed = False
         self.history: list[dict] = []
         if store is not None and conversation_id is not None:
-            self.history = store.history(conversation_id)
+            _, through = store.summary(conversation_id)
+            self.history = store.history(conversation_id, after_turn_id=through)
 
     def _append(self, message: dict) -> None:
         """Record a message. History lives in memory first: a persistence
@@ -48,8 +71,20 @@ class AgentSession:
     def run_turn(self, user_text: str) -> str:
         self._append({"role": "user", "content": user_text})
         for _ in range(self.max_iters):
-            messages = [{"role": "system", "content": self.system_prompt},
-                        *self.history]
+            context = self.history
+            if self.compactor is not None and self.conversation_id is not None:
+                # `self.history` must stay exactly aligned with the stored
+                # summary marker across iterations and across turns — adopt
+                # the trimmed history maybe_compact returns rather than
+                # keeping the old (possibly now-summarized) messages around.
+                # See Compactor.maybe_compact's docstring: without this, the
+                # *next* compaction's cut index stops matching what
+                # history_with_ids fetches from the marker forward, and
+                # turns get silently and permanently dropped.
+                context, self.history = self.compactor.maybe_compact(
+                    self.conversation_id, self.history)
+            messages = [{"role": "system", "content": self.system_prompt}, *context]
+            messages = [_protocol_only(m) for m in messages]
             try:
                 resp = self.llm.complete(messages, tools=self.registry.specs())
             except LLMError as exc:

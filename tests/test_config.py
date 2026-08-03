@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from allpath_trade.config import Settings, SettingsStore
 
 
@@ -7,6 +10,38 @@ def test_settings_defaults(tmp_path: Path):
     s = Settings(_env_file=tmp_path / "nope.env")
     assert s.alpaca_paper is True
     assert s.alpaca_api_key == ""
+    assert s.context_budget_tokens == 60000
+
+
+# -- Finding 4: range validation, not just type validation -- a negative
+# sentinel_interval_minutes or a zero context_budget_tokens is the same
+# class of brick Task 12 set out to prevent; the type check alone let both
+# straight through (see allpath_trade/web/routes/settings.py's `save`,
+# which validates by constructing a Settings before writing to .env).
+
+
+def test_negative_sentinel_interval_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, sentinel_interval_minutes=-5)
+
+
+def test_zero_sentinel_interval_is_rejected():
+    # 0 minutes means APScheduler's IntervalTrigger fires roughly every
+    # second -- a hot loop against the broker, not a paused sentinel.
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, sentinel_interval_minutes=0)
+
+
+def test_zero_context_budget_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, context_budget_tokens=0)
+
+
+def test_out_of_range_smtp_port_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, smtp_port=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, smtp_port=70000)
 
 
 def test_store_set_creates_and_updates_env_file(tmp_path: Path):
@@ -16,10 +51,10 @@ def test_store_set_creates_and_updates_env_file(tmp_path: Path):
     store.set("ALPACA_SECRET_KEY", "s1")
     store.set("ALPACA_API_KEY", "k2")  # update in place
     text = env.read_text()
-    assert "ALPACA_API_KEY=k2" in text
-    assert "ALPACA_SECRET_KEY=s1" in text
-    assert text.count("ALPACA_API_KEY") == 1
+    # Values are quoted for safety, so we check the retrieved value instead
     assert store.get("ALPACA_API_KEY") == "k2"
+    assert store.get("ALPACA_SECRET_KEY") == "s1"
+    assert text.count("ALPACA_API_KEY") == 1
 
 
 def test_store_load_returns_settings(tmp_path: Path, monkeypatch):
@@ -31,3 +66,12 @@ def test_store_load_returns_settings(tmp_path: Path, monkeypatch):
     s = store.load()
     assert s.alpaca_api_key == "abc"
     assert s.alpaca_paper is True
+
+
+def test_set_preserves_values_with_spaces_hashes_and_equals(tmp_path: Path):
+    store = SettingsStore(tmp_path / ".env")
+    store.set("SMTP_FROM", "AllPath Trade <bot@example.com>")
+    store.set("WEB_TOKEN", "abc#def=ghi jkl")
+    reloaded = SettingsStore(tmp_path / ".env")
+    assert reloaded.get("SMTP_FROM") == "AllPath Trade <bot@example.com>"
+    assert reloaded.get("WEB_TOKEN") == "abc#def=ghi jkl"

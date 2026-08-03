@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
@@ -17,10 +18,19 @@ from allpath_trade.strategy.loader import (
 )
 from allpath_trade.strategy.store import StrategyStore
 
+# Import-time only: the agent package must not depend on the web package at
+# runtime (wrong dependency direction — the terminal CLI's tool layer would
+# drag in the web subpackage). A Protocol would decouple this fully, but the
+# annotation is the only use, and the test's duck-typed Sink shows a
+# structural type isn't needed here yet — TYPE_CHECKING is the smaller fix.
+if TYPE_CHECKING:
+    from allpath_trade.web.order_sink import QueueingOrderSink
+
 
 def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                           executor: Executor,
-                          confirm: Callable[[str], bool]) -> None:
+                          confirm: Callable[[str], bool],
+                          order_sink: QueueingOrderSink | None = None) -> None:
 
     def draft_strategy(strategy_id: str, yaml_text: str, reason: str) -> str:
         if not is_valid_strategy_id(strategy_id):
@@ -29,6 +39,21 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             doc = parse_strategy_text(strategy_id, yaml_text)
         except StrategyValidationError as exc:
             return f"error: {'; '.join(exc.errors)}"
+        if order_sink is not None:
+            # `order_sink` being set is exactly what marks this as the web
+            # chat (ChatService._build injects one; cmd_chat's terminal chat
+            # never does). Unlike propose_order, there is no queue/approval
+            # card for a strategy save yet -- that's real feature work,
+            # deliberately out of scope for this fix (see docs/TODO.md,
+            # Phase 5 leftovers). Falling through to the `confirm(...)`
+            # below would call web mode's `confirm=lambda _: False` and
+            # return "user declined", telling the user *they* rejected a
+            # save they were never asked about. Say what's actually true
+            # instead, after still validating the draft above so a genuinely
+            # broken YAML gets a real error either way.
+            return ("Strategy changes can't be saved from the web chat yet "
+                    "-- run `allpath-trade chat` in a terminal to save this "
+                    "one.")
         path = strategies.directory / f"{strategy_id}.yaml"
         old_text = path.read_text() if path.exists() else ""
         if old_text:
@@ -61,6 +86,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                 reason=reason)
         except (ValidationError, ValueError, InvalidOperation) as exc:
             return f"error: invalid order: {exc}"
+        if order_sink is not None:
+            # Web chat: no blocking confirm() here — queue it and return, the
+            # user resolves it with a button. The terminal path below is
+            # untouched and still used when order_sink is not injected.
+            return order_sink.propose(intent)
         size = f"qty {intent.qty}" if intent.qty else f"${intent.notional}"
         if not confirm(f"Submit order: {intent.side.value} {size} "
                        f"{intent.ticker}? Reason: {reason}"):

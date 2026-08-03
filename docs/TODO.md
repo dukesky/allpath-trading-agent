@@ -16,7 +16,6 @@
 - [ ] 美股节假日历法（当前仅按 ET 工作日 9:30–16:00 判断，节假日空跑无害但不精确）
 - [ ] 数据源冗余：Tiingo（EOD）、Finnhub（新闻/情绪）、Alpaca data，yfinance 故障时自动切换
 - [ ] **搜索升级**：web_search 从 DuckDuckGo（免费默认）扩展到更高质量的付费信息源——Tavily / Brave Search API（通用搜索，需 key）、Finnhub / Polygon news（金融专用新闻流）；接口已设计为可插拔，用户配了 key 即自动启用
-- [ ] SettingsStore `quote_mode="never"` 对含空格/#/= 值的破坏问题 —— **Phase 5 前必修**（Web UI 会写任意值）
 
 ## 券商
 
@@ -43,9 +42,21 @@
 - [ ] chat REPL：assistant 空文本时打印空行 `agent> `
 
 ## Phase 4 终审遗留（小项）
-- [ ] `allpath-trade/memory/store.py` 的 `MemoryError` 与内置异常同名——Phase 5 前重命名为 `MemoryStoreError`（保留别名）
 - [ ] consolidator 每日日期跟踪为进程内状态，重启后当日重跑（与 marker 过滤配合后已是无害 no-op，仍值得持久化）
 - [ ] 一字母 ticker 的 lessons 匹配已用词边界修复；更长期可给 lessons 加 frontmatter tickers 字段做精确匹配
 - [ ] observations.recent() 大积压时取最旧 200 条——积压场景应改为取最新
 - [ ] 上下文个股档案包含非 active 策略的 ticker（轻微膨胀，预算兜底）
-- [ ] 提炼频率/开关做成配置项（`DAILY_CONSOLIDATION=true`、`CONSOLIDATE_AFTER_CHAT=true`、收盘后时间点可调）——归入 Phase 5 设置页一起做
+
+## Phase 5 遗留
+- [ ] Web chat 的 draft_strategy 审批卡片——目前 `order_sink` 只覆盖 propose_order，
+      strategy 草稿在 web 模式下完全无法保存（只如实告知用户改用终端
+      `allpath-trade chat`），需要仿照 Pending 队列给 strategy 保存也做一条
+      排队 + 批准的路径，而不是直接落盘（终审 Finding 3）
+- [ ] 策略 YAML 在线编辑（当前只读，修改走聊天让 agent 起草）
+- [ ] SSE 实时推送工具活动（当前为回合结束后整体刷新，见 `_chat_messages.html` 里的说明）
+- [ ] 手机推送通道（ntfy / Bark），比邮件更及时
+- [ ] `serve` 的 HTTPS / 反向代理部署文档
+- [ ] 独立守护进程 `allpath-trade run` 不发送每日摘要邮件——`_send_daily_digest` 只挂在 `serve` 的 `build_jobs` 里，`cli.py` 的 `run` 分支的 `daily_job` 只跑 consolidation
+- [ ] 通知正文里插值的文本（规则 condition、执行 detail、agent 的 recommendation）未做 URL 清理——其中若混入裸链接，邮件客户端可能自动转成可点击链接，与"通知不含链接"的设计承诺相悖
+- [ ] 一个永久挂起的 broker 会耗尽 `_broker_pool`（`dashboard.py` 的 4-worker 专用线程池）——耗尽之后仪表盘会一直显示"unavailable"，即使 broker 后来恢复也不会自愈，直到进程重启；且因为 `ThreadPoolExecutor` 的 worker 是非 daemon 线程，一次挂起的调用还会拖慢 `serve` 的干净关闭。根治办法是给 broker 的 HTTP 客户端加 socket 级别的超时，而不是只在应用层 `.result(timeout=...)`
+- [ ] compaction 的 flush 钩子（`on_before_compact` 绑定到 `Consolidator.run_post_chat`）是在触发它的那个回合的 turn lock 内、同步跑一次记忆层 LLM 调用——长对话里某一回合会出现明显的延迟尖峰，理想情况应该异步/后台执行，不阻塞当前回合的响应

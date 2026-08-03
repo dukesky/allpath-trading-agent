@@ -268,7 +268,7 @@ memory/
 - 默认端口 **8791**（避开 3000/5000/7000/8000/8080 等常见占用；5000/7000 在 macOS 被 AirPlay 占用），`WEB_PORT` 可配。
 
 ### 数据库并发（前置改造）
-现全局单连接 + `check_same_thread=False`，是 Phase 2 为单线程守护进程所做的妥协。Web 请求线程与调度线程并发写会互踩事务。改为 **WAL 模式 + 每线程连接**（请求依赖注入 / `threading.local`）。
+现全局单连接 + `check_same_thread=False`，是 Phase 2 为单线程守护进程所做的妥协，Web 请求线程与调度线程并发写会互踩事务。改为 **`LockedConnection`：一把锁串行化同一个共享连接** + **WAL 模式**，比给每个 store 构造函数改传连接池/`threading.local` 更省事。多数写操作是"单条语句 + 立即 commit"，逐语句加锁已足够；少数跨两条语句的写入（记录 + FTS 索引项）通过显式的 `transaction()` 作用域串成一个整体，失败时用 `SAVEPOINT` 局部回滚（而非整连接 `rollback()`），只撤销该作用域自己写入的语句，不会波及另一线程尚未提交的写入；WAL + `busy_timeout` 负责读端。
 
 ### 鉴权
 - `WEB_TOKEN` 存 `.env`；首次 `serve` 时若为空则自动生成并打印在终端。
@@ -321,7 +321,7 @@ memory/
 
 ### 前置修复（实施前完成）
 1. `SettingsStore` 的 `quote_mode="never"` 会破坏含空格/`#`/`=` 的值——设置页写任意值，必修。
-2. `memory/store.py` 的 `MemoryError` 与内置异常同名，重命名为 `MemoryStoreError`（保留别名）。
+2. `memory/store.py` 的 `MemoryError` 与内置异常同名，重命名为 `MemoryStoreError`（不保留别名，调用点全部更新）。
 3. 上述 WAL + 每线程连接改造。
 
 ### 测试

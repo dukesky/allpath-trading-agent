@@ -86,7 +86,31 @@ class Consolidator:
         except Exception as exc:  # noqa: BLE001 — consolidation must degrade silently
             return f"consolidation failed: {exc}"
 
-    def run_post_chat(self, transcript: list[dict]) -> str:
+    def run_post_chat(self, transcript: list[dict], *, propagate: bool = False) -> str:
+        """`propagate=False` (the default): swallow any failure into a
+        string return, same as `run_daily` -- this is what the CLI's own
+        end-of-session call binds, where a raise must never abort the exit
+        path over a best-effort memory write.
+
+        `propagate=True`: let the failure raise instead. This is what both
+        production call sites bind as `Compactor.on_before_compact` (see its
+        docstring): Compactor's own try/except treats a *raised* exception
+        from the hook as "the flush failed, skip compaction this round,
+        don't discard the messages the flush was meant to preserve." Before
+        this parameter existed, both callers bound the swallowing default,
+        so a real flush failure came back as an ordinary string return that
+        Compactor had no way to tell apart from success -- it summarized,
+        advanced the marker, and discarded the messages anyway, silently
+        throwing away the very error this method already knew about.
+
+        AgentSession.run_turn (agent/loop.py) already catches its own most
+        common failure -- the memory-tier LLM being unreachable -- and
+        returns a `"(llm error: ...)"` sentinel string instead of raising
+        (the same sentinel run_daily's own incomplete-run check looks for).
+        `propagate` has to turn that sentinel into a real raise too, or the
+        most likely real-world flush failure would sail through as an
+        ordinary, non-exceptional return exactly like the bug this parameter
+        exists to fix."""
         try:
             lines = [f"{m['role']}: {m['content']}" for m in transcript
                      if m.get("role") in ("user", "assistant")
@@ -96,6 +120,11 @@ class Consolidator:
             prompt = POST_CHAT_PROMPT.format(
                 transcript=fence_external("\n".join(lines[-60:])))
             session = AgentSession(self.llm, self._registry(), prompt, max_iters=6)
-            return session.run_turn("Extract and record now.")
-        except Exception as exc:  # noqa: BLE001
+            result = session.run_turn("Extract and record now.")
+            if propagate and result.startswith(("(llm error:", "(stopped:")):
+                raise RuntimeError(result)
+            return result
+        except Exception as exc:
+            if propagate:
+                raise
             return f"consolidation failed: {exc}"

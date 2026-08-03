@@ -33,15 +33,19 @@ class ReviewQueue:
 
     def add(self, *, strategy_id: str, rule_id: str, ticker: str, rule_type: str,
             condition: str, action: str, snapshot: dict,
-            intent: OrderIntent | None) -> int:
+            intent: OrderIntent | None, source: str = "sentinel",
+            conversation_id: int | None = None,
+            risk_preview: str | None = None) -> int:
         cur = self._conn.execute(
             "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
-            " rule_type, condition, action, snapshot, intent)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " rule_type, condition, action, snapshot, intent, source,"
+            " conversation_id, risk_preview)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (datetime.now(UTC).isoformat(), strategy_id, rule_id, ticker,
              rule_type, condition, action,
              json.dumps(snapshot, default=_json_default),
-             intent.model_dump_json() if intent else None))
+             intent.model_dump_json() if intent else None, source,
+             conversation_id, risk_preview))
         self._conn.commit()
         return cur.lastrowid
 
