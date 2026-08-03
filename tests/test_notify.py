@@ -30,7 +30,7 @@ class StubSMTP:
 
 
 def test_console_notifier_prints(capsys):
-    ConsoleNotifier().send("subj", "body")
+    assert ConsoleNotifier().send("subj", "body") is True
     out = capsys.readouterr().out
     assert "subj" in out and "body" in out
 
@@ -38,7 +38,7 @@ def test_console_notifier_prints(capsys):
 def test_email_notifier_sends():
     n = EmailNotifier("smtp.x.com", 587, "u", "p", "from@x.com", "to@x.com",
                       smtp_factory=StubSMTP)
-    n.send("Trigger: AAPL", "details")
+    assert n.send("Trigger: AAPL", "details") is True
     smtp = StubSMTP.instances[-1]
     assert smtp.tls and smtp.creds == ("u", "p")
     [msg] = smtp.sent
@@ -52,7 +52,8 @@ def test_email_failure_does_not_raise(capsys):
 
     n = EmailNotifier("smtp.x.com", 587, "u", "p", "f@x.com", "t@x.com",
                       smtp_factory=broken)
-    n.send("s", "b")  # must not raise
+    # must not raise -- and the caller must be able to tell it failed.
+    assert n.send("s", "b") is False
 
 
 def test_default_smtp_factory_passes_timeout(monkeypatch):

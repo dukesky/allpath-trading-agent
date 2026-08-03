@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Settings · AllPath Trade{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+{% if saved %}<p class="muted">Saved. New conversations use the updated configuration.</p>{% endif %}
+{% if note %}<p class="muted">{{ note }}</p>{% endif %}
+
+<form method="post" action="/settings">
+  <h2>Model</h2>
+  <div class="card">
+    <label>Provider</label>
+    <select name="llm_provider">
+      {% for p in ['openrouter', 'openai', 'anthropic'] %}
+      <option value="{{ p }}" {{ 'selected' if s.llm_provider == p }}>{{ p }}</option>
+      {% endfor %}
+    </select>
+    <label>OpenRouter API key <span class="muted">{{ masks['openrouter_api_key'] or 'not set' }}</span></label>
+    <input name="openrouter_api_key" type="password" placeholder="Replace" autocomplete="off">
+    <label>OpenAI API key <span class="muted">{{ masks['openai_api_key'] or 'not set' }}</span></label>
+    <input name="openai_api_key" type="password" placeholder="Replace" autocomplete="off">
+    <label>Anthropic API key <span class="muted">{{ masks['anthropic_api_key'] or 'not set' }}</span></label>
+    <input name="anthropic_api_key" type="password" placeholder="Replace" autocomplete="off">
+    <label>Chat model</label><input name="chat_model" value="{{ s.chat_model }}">
+    <label>Sentinel review model</label><input name="review_model" value="{{ s.review_model }}">
+    <label>Memory model</label><input name="memory_model" value="{{ s.memory_model }}">
+  </div>
+
+  <h2>Brokerage</h2>
+  <div class="card">
+    <p class="muted">Alpaca · {{ 'paper' if s.alpaca_paper else 'LIVE' }}</p>
+    <label>API key <span class="muted">{{ masks['alpaca_api_key'] or 'not set' }}</span></label>
+    <input name="alpaca_api_key" type="password" placeholder="Replace" autocomplete="off">
+    <label>Secret key <span class="muted">{{ masks['alpaca_secret_key'] or 'not set' }}</span></label>
+    <input name="alpaca_secret_key" type="password" placeholder="Replace" autocomplete="off">
+    <p class="hint">Switching to live trading is not available here. Edit <code>ALPACA_PAPER</code> in <code>.env</code> — connecting real money should take a deliberate step.</p>
+  </div>
+
+  <h2>Email notifications</h2>
+  <div class="card">
+    <label>SMTP host</label><input name="smtp_host" value="{{ s.smtp_host }}">
+    <label>Port</label><input name="smtp_port" value="{{ s.smtp_port }}">
+    <label>Sender account</label><input name="smtp_user" value="{{ s.smtp_user }}">
+    <label>From header</label><input name="smtp_from" value="{{ s.smtp_from }}">
+    <label>App password <span class="muted">{{ masks['smtp_password'] or 'not set' }}</span></label>
+    <input name="smtp_password" type="password" placeholder="Replace" autocomplete="off">
+    <label>Send notifications to</label><input name="notify_to" value="{{ s.notify_to }}">
+    <p class="hint">Notifications report what happened; they never contain action links.</p>
+  </div>
+
+  <h2>Sentinel and memory</h2>
+  <div class="card">
+    <label>Check interval (minutes)</label><input name="sentinel_interval_minutes" value="{{ s.sentinel_interval_minutes }}">
+    <label>Context budget (tokens)</label><input name="context_budget_tokens" value="{{ s.context_budget_tokens }}">
+    <label class="check"><input type="checkbox" name="daily_consolidation" value="true" {{ 'checked' if s.daily_consolidation }}> Consolidate memory after the close</label>
+    <label class="check"><input type="checkbox" name="consolidate_after_chat" value="true" {{ 'checked' if s.consolidate_after_chat }}> Consolidate after each conversation</label>
+  </div>
+
+  <h2>Access</h2>
+  <div class="card">
+    <p class="muted">Listening on {{ s.web_host }}:{{ s.web_port }}</p>
+  </div>
+
+  <div class="row" style="margin-top:18px">
+    <button class="primary" type="submit">Save settings</button>
+  </div>
+</form>
+
+<div class="row" style="margin-top:12px">
+  <form method="post" action="/settings/test-email"><button type="submit">Send test email</button></form>
+  <form method="post" action="/settings/reset-token"><button class="danger" type="submit">Reset access token</button></form>
+</div>
+{% endblock %}
