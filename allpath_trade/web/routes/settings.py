@@ -31,6 +31,15 @@ SECRET_FIELDS = ["openrouter_api_key", "openai_api_key", "anthropic_api_key",
                  "alpaca_api_key", "alpaca_secret_key", "smtp_password"]
 
 
+# The last 4 characters are only ever unmasked when doing so still hides
+# more of the value than it shows. `len(value) > 4` (the old guard) let a
+# 5-character secret through with 4 of its 5 characters on screen -- not
+# meaningfully different from printing it outright. Requiring the hidden
+# remainder to outnumber the shown tail (len - 4 > 4, i.e. length > 8) is
+# the actual "long enough" the comment below claims.
+_MIN_LENGTH_TO_UNMASK_TAIL = 8
+
+
 def _mask(value: str) -> str:
     # At most the last 4 characters are ever disclosed, and only when the
     # value is long enough that doing so doesn't reveal the whole thing.
@@ -39,7 +48,7 @@ def _mask(value: str) -> str:
     # secret as a trailing one, so there is no "safe prefix" to expose.
     if not value:
         return ""
-    if len(value) > 4:
+    if len(value) > _MIN_LENGTH_TO_UNMASK_TAIL:
         return f"{'•' * 8}{value[-4:]}"
     return "•" * 8
 

@@ -5,6 +5,7 @@ from allpath_trade.agent.review import ReviewAnalysis
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
+from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
 
@@ -52,6 +53,14 @@ def test_agent_analysis_is_shown(client):
     assert "guidance raised" in body
     assert "Agent recommends:</strong> execute" in body
     assert "no recommendation" not in body
+
+
+def test_reviews_page_is_english_only(client):
+    rid = queue_one(client)
+    analysis = ReviewAnalysis(recommendation="execute", reasoning="guidance raised",
+                              sources=["https://example.com/pr"])
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
+    assert_english_only(client.get("/reviews").text)
 
 
 def test_approve_executes_through_the_queue(client):

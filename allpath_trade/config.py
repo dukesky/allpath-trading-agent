@@ -6,8 +6,8 @@ from dotenv import dotenv_values, set_key
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# A first-ever compaction reserves FIRST_SUMMARY_RESERVE_TOKENS (600) off the
-# cut target before there's a previous summary to size against (see
+# Compactor reserves at least MIN_SUMMARY_RESERVE_TOKENS (600) off the cut
+# target for the summary it's about to write, unconditionally (see
 # agent/compact.py) -- a budget at or below that leaves no room for an actual
 # conversation turn, so every single turn would force a summarization call.
 # 2000 is comfortably above that floor without needing to know Compactor's

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from allpath_trade.cli import main
+from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker  # reuse fixture broker
 
 STRAT = """
@@ -123,3 +124,23 @@ def test_reviews_approve_still_requires_credentials(tmp_path, capsys, monkeypatc
     _clear_alpaca_env(monkeypatch)
     assert main(["reviews", "approve", "1"]) == 2
     assert "ALPACA_API_KEY" in capsys.readouterr().err
+
+
+def test_cli_output_is_english_only(tmp_path, capsys, monkeypatch):
+    # B4: the shared English-only invariant applied to a non-web surface --
+    # every command below prints through a different code path (status
+    # lines, table rows, friendly-error messages, a missing-credentials
+    # exit), and CLI output was the one surface in the whole app the
+    # invariant had never touched at all.
+    setup_env(tmp_path, monkeypatch)
+    main(["check"], broker_factory=lambda s: FakeBroker())
+    main(["strategies"], broker_factory=lambda s: FakeBroker())
+    main(["rearm", "t", "r1"], broker_factory=lambda s: FakeBroker())
+    main(["reviews", "list"], broker_factory=lambda s: FakeBroker())
+    main(["rearm", "nope", "r1"], broker_factory=lambda s: FakeBroker())
+    _clear_alpaca_env(monkeypatch)
+    main(["check"])
+
+    captured = capsys.readouterr()
+    assert_english_only(captured.out)
+    assert_english_only(captured.err)

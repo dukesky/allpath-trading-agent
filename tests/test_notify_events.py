@@ -1,4 +1,5 @@
 from allpath_trade.notify import events
+from tests.helpers import assert_english_only
 
 
 def test_bodies_contain_no_links_or_html():
@@ -19,4 +20,4 @@ def test_bodies_are_english_only():
         events.daily_digest(triggers=2, trades=1, pending=3),
     ]:
         for text in (subject, body):
-            assert not any("一" <= ch <= "鿿" for ch in text)
+            assert_english_only(text)

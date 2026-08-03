@@ -12,6 +12,7 @@ from allpath_trade.broker.base import Order, OrderStatus
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient, LLMResponse
 from allpath_trade.web.app import create_app
+from tests.helpers import assert_english_only
 from tests.test_agent_loop import ScriptedLLM, tool_response
 from tests.test_sentinel import FakeBroker
 
@@ -120,6 +121,12 @@ def test_chat_send_also_degrades_instead_of_500_when_no_llm_key_is_configured(
 
     assert r.status_code == 200
     assert "Settings" in r.text
+
+
+def test_chat_page_is_english_only(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hello there")])
+    client.post("/chat/send", data={"message": "hi"})
+    assert_english_only(client.get("/chat").text)
 
 
 def test_message_round_trip(tmp_path, monkeypatch):
@@ -244,6 +251,40 @@ def test_rejection_echo_includes_the_note(tmp_path, monkeypatch):
     assert len(notes) == 1
     assert "rejected (changed my mind)" in notes[0]["display"]
     assert "order submitted" not in notes[0]["display"]
+
+
+def test_reject_note_lands_in_the_store_the_card_and_the_chat_echo(tmp_path, monkeypatch):
+    # A4: the existing coverage of a reject note was two separate unit
+    # slices -- test_rejection_echo_includes_the_note (below) only checks
+    # the chat echo, and the forged-marker test only checks fencing. Neither
+    # proves the note a user actually types into the reject form's
+    # `<input name="note">` (_review_card.html) round-trips end to end
+    # through the one path that folds untrusted user text into
+    # ReviewQueue.resolution_note: persisted on the row, rendered back on
+    # the reviews card, and echoed into the conversation the review came
+    # from -- all from the one POST.
+    client = make_client(tmp_path, monkeypatch, [
+        tool_response("propose_order", {"ticker": "AAPL", "side": "buy",
+                                        "notional": "500", "reason": "add"}),
+        LLMResponse(text="queued"),
+    ])
+    client.post("/chat/send", data={"message": "buy apple"})
+    rid = client.app.state.holder.get().queue.list("pending")[0]["id"]
+
+    r = client.post(f"/reviews/{rid}/reject", data={"note": "market looks shaky"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+
+    row = client.app.state.holder.get().queue.get(rid)
+    assert row["status"] == "rejected"
+    assert row["resolution_note"] == "market looks shaky"
+
+    card = client.get("/reviews").text
+    assert "market looks shaky" in card
+
+    notes = _echoed_notes(client)
+    assert len(notes) == 1
+    assert "market looks shaky" in notes[0]["display"]
 
 
 def test_a_forged_marker_in_a_reject_note_cannot_impersonate_a_system_line(

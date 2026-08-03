@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from urllib.parse import quote
-
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, Response
 
 from allpath_trade.strategy.loader import is_valid_strategy_id
 from allpath_trade.strategy.model import RuleState, StrategyDoc
-from allpath_trade.web.routes.dashboard import nav_context
+from allpath_trade.web.routes.dashboard import error_redirect, nav_context
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -29,6 +27,23 @@ def _find_doc(c, strategy_id: str) -> StrategyDoc | None:
     return None
 
 
+def _not_found(request: Request, c, message: str) -> HTMLResponse:
+    # Every other "resource not found" outcome on this page stays inside the
+    # app chrome (this module's own rearm redirects, reviews.py's
+    # _back_to_reviews) -- raising a bare HTTPException here was the one
+    # path left that dropped straight out of the templates into an unstyled
+    # `{"detail": "not found"}` JSON body instead of a page with nav and
+    # styling. Rendered as the strategies index (with the real doc list, so
+    # there's still somewhere to go) at a genuine 404 status, not a redirect
+    # -- unlike the POST-only rearm cases below, a GET to a missing resource
+    # should still answer 404, just from inside the app's own template.
+    errors: list[str] = []
+    docs = c.strategies.load_all(status=None, errors=errors)
+    return templates.TemplateResponse(request, "strategies.html", {
+        "page": "strategies", "docs": docs, "errors": errors,
+        "error": message, **nav_context(c)}, status_code=404)
+
+
 @router.get("/strategies", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
     c = request.app.state.holder.get()
@@ -41,15 +56,15 @@ def index(request: Request) -> HTMLResponse:
 
 @router.get("/strategies/{strategy_id}", response_class=HTMLResponse)
 def detail(request: Request, strategy_id: str) -> HTMLResponse:
-    if not is_valid_strategy_id(strategy_id):
-        raise HTTPException(status_code=404, detail="not found")
     c = request.app.state.holder.get()
+    if not is_valid_strategy_id(strategy_id):
+        return _not_found(request, c, "Not processed: not found")
     # A strategy whose YAML is missing, unparseable, or fails validation is
     # simply absent from load_all's result (errors are collected, not
     # raised) -- it 404s here rather than the page crashing on a bad file.
     doc = _find_doc(c, strategy_id)
     if doc is None:
-        raise HTTPException(status_code=404, detail="not found")
+        return _not_found(request, c, "Not processed: not found")
     path = c.strategies.directory / f"{strategy_id}.yaml"
     return templates.TemplateResponse(request, "strategy_detail.html", {
         "page": "strategies", "doc": doc,
@@ -60,9 +75,9 @@ def detail(request: Request, strategy_id: str) -> HTMLResponse:
 
 @router.post("/strategies/{strategy_id}/rules/{rule_id}/rearm")
 def rearm(request: Request, strategy_id: str, rule_id: str) -> Response:
-    if not is_valid_strategy_id(strategy_id):
-        raise HTTPException(status_code=404, detail="not found")
     c = request.app.state.holder.get()
+    if not is_valid_strategy_id(strategy_id):
+        return _not_found(request, c, "Not processed: not found")
     # set_rule_state is a raw upsert keyed on (strategy_id, rule_id) with no
     # foreign-key check -- without confirming the strategy and rule exist
     # first, a well-formed-but-nonexistent id (or a real strategy with a
@@ -74,10 +89,9 @@ def rearm(request: Request, strategy_id: str, rule_id: str) -> Response:
         # in the strategy's own page to surface the message -- report it on
         # the index instead, matching reviews.py's "Not processed: {exc}".
         message = f"Not processed: strategy '{strategy_id}' not found"
-        return RedirectResponse(f"/strategies?error={quote(message)}", status_code=303)
+        return error_redirect("/strategies", message)
     if not any(r.id == rule_id for r in doc.rules):
         message = f"Not processed: rule '{rule_id}' not found in strategy '{strategy_id}'"
-        return RedirectResponse(
-            f"/strategies/{strategy_id}?error={quote(message)}", status_code=303)
+        return error_redirect(f"/strategies/{strategy_id}", message)
     c.strategies.set_rule_state(strategy_id, rule_id, RuleState.ARMED)
-    return RedirectResponse(f"/strategies/{strategy_id}", status_code=303)
+    return error_redirect(f"/strategies/{strategy_id}")

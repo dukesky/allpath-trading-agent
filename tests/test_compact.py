@@ -136,7 +136,7 @@ def test_compaction_summarizes_the_oldest_messages(tmp_path):
         s.append(cid, big("assistant", 2000))
     llm = ScriptedLLM([LLMResponse(text="earlier: the user asked about NVDA")])
     # budget_tokens=3_000: a first-ever compaction reserves
-    # FIRST_SUMMARY_RESERVE_TOKENS off `target` before there's any previous
+    # MIN_SUMMARY_RESERVE_TOKENS off `target` before there's any previous
     # frame to measure — 2_000 no longer leaves enough room for a real cut
     # to be found (see compact.py); 3_000 is the smallest that still does.
     c = Compactor(llm, s, budget_tokens=3_000)
@@ -385,7 +385,7 @@ def test_second_compaction_round_sets_a_correct_marker(tmp_path):
         s.append(cid, big("assistant", 2000))
     # budget_tokens=3_000: see the reserve comment in the test above — 2_000
     # no longer forces a real cut on either round now that a first-ever
-    # compaction reserves FIRST_SUMMARY_RESERVE_TOKENS off `target`.
+    # compaction reserves MIN_SUMMARY_RESERVE_TOKENS off `target`.
     c1 = Compactor(ScriptedLLM([LLMResponse(text="round 1")]), s, budget_tokens=3_000)
     c1.maybe_compact(cid, s.history(cid))
     _, through1 = s.summary(cid)

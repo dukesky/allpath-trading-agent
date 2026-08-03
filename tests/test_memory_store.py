@@ -86,6 +86,18 @@ def test_memory_log_records_diffs(store, tmp_path):
     assert "hello" in row["after"]
 
 
+def test_recent_log_returns_newest_first_and_respects_limit(store):
+    # The web memory page (routes/memory.py) reads this instead of running
+    # its own SQL against `c.conn` -- exercised through the API a route
+    # actually calls, in newest-first order with a limit, not just "a row
+    # landed in the table" (test_memory_log_records_diffs above).
+    for i in range(5):
+        store.apply("profile", None, "add", text=f"entry {i}")
+    rows = store.recent_log(limit=3)
+    assert len(rows) == 3
+    assert "entry 4" in rows[0]["after"]  # most recent first
+
+
 def test_apply_enforces_guard_even_without_the_tool_layer(store, tmp_path):
     # apply() must reject a poisoned entry on its own — callers other than
     # the memory_update tool (e.g. future direct callers) get the same

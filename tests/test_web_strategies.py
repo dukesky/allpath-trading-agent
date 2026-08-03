@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.config import Settings
 from allpath_trade.strategy.model import RuleState
 from allpath_trade.web.app import create_app
+from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
 STRAT = """
@@ -38,8 +39,26 @@ def test_detail_shows_yaml_and_rules(client):
     assert "r1" in body
 
 
+def test_strategies_pages_are_english_only(client):
+    assert_english_only(client.get("/strategies").text)
+    assert_english_only(client.get("/strategies/semis").text)
+
+
 def test_unknown_strategy_returns_404(client):
     assert client.get("/strategies/nope").status_code == 404
+
+
+def test_unknown_strategy_404_stays_inside_the_app_chrome(client):
+    # C1: HTTPException(404) used to drop straight out of the templates
+    # into a bare `{"detail": "not found"}` JSON body -- the only one of six
+    # pages that did. It must render the same nav/layout every other error
+    # on this site does, just at a 404 status.
+    r = client.get("/strategies/nope")
+    assert r.status_code == 404
+    assert "allpath trade" in r.text.lower()  # base.html's nav brand
+    assert "<nav>" in r.text
+    assert "not found" in r.text.lower()
+    assert '{"detail"' not in r.text
 
 
 def test_path_traversal_is_refused(client):

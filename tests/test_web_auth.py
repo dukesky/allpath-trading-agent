@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
+from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
 
@@ -136,3 +137,21 @@ def test_healthz_with_trailing_slash_is_still_public(client):
     # health response, not a 303 to /login.
     r = client.get("/healthz/", follow_redirects=False)
     assert r.status_code != 303
+
+
+def test_login_page_is_english_only(client):
+    assert_english_only(client.get("/login").text)
+
+
+def test_htmx_request_on_an_expired_session_gets_a_client_side_redirect(client):
+    # C3: htmx follows a 303 as part of the same AJAX exchange and swaps
+    # whatever comes back into the request's hx-target -- on chat.html's
+    # `hx-post="/chat/send" hx-target="#messages"`, a 303 to /login means
+    # login.html's sign-in form gets spliced into the chat transcript
+    # instead of the user ever seeing a real login page. No session cookie
+    # is set on this fixture's client, matching an expired/never-established
+    # session hitting a POST via htmx.
+    r = client.post("/chat/send", data={"message": "hi"},
+                    headers={"HX-Request": "true"}, follow_redirects=False)
+    assert r.status_code != 303
+    assert r.headers.get("hx-redirect") == "/login"

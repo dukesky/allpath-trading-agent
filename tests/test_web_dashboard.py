@@ -1,8 +1,13 @@
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
+from allpath_trade.web.routes import dashboard as dashboard_route
+from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
 STRAT = """
@@ -34,8 +39,7 @@ def test_dashboard_shows_account_and_strategies(client):
 
 
 def test_dashboard_is_english_only(client):
-    body = client.get("/").text
-    assert not any("一" <= ch <= "鿿" for ch in body)
+    assert_english_only(client.get("/").text)
 
 
 def test_broker_outage_does_not_break_the_page(client, monkeypatch):
@@ -48,6 +52,40 @@ def test_broker_outage_does_not_break_the_page(client, monkeypatch):
     r = client.get("/")
     assert r.status_code == 200
     assert "unavailable" in r.text.lower()
+
+
+def test_a_hung_broker_call_degrades_to_the_banner_instead_of_holding_the_page(
+        client, monkeypatch):
+    # A5: a sync FastAPI handler runs in a bounded thread pool -- a broker
+    # call that just hangs (a phone that keeps reloading against a stalled
+    # Alpaca connection) must not be able to hold that worker, and enough
+    # concurrent hangs would otherwise starve every other page (login, chat,
+    # reviews) of workers too. The request must come back promptly with the
+    # existing "Broker unavailable" banner, not hang for as long as the
+    # broker call does.
+    monkeypatch.setattr(dashboard_route, "BROKER_TIMEOUT_SECONDS", 0.1)
+    release = threading.Event()
+    started = threading.Event()
+
+    def hang():
+        started.set()
+        release.wait(timeout=5)
+
+    holder = client.app.state.holder
+    monkeypatch.setattr(holder.get().broker, "get_account", hang)
+
+    start = time.monotonic()
+    r = client.get("/")
+    elapsed = time.monotonic() - start
+
+    assert r.status_code == 200
+    assert "unavailable" in r.text.lower()
+    # Bounded by the (patched, short) timeout, not by how long the broker
+    # call actually takes to return -- proves the request thread gave up
+    # rather than blocking on the hang.
+    assert elapsed < 2
+    assert started.is_set()  # the call did actually reach the broker
+    release.set()  # let the background call finish so it doesn't linger
 
 
 def test_dashboard_heading_is_strategies_not_active(client):

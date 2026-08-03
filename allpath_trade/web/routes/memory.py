@@ -51,8 +51,6 @@ def _layer_sections(c) -> list[dict]:
 @router.get("/memory", response_class=HTMLResponse)
 def memory(request: Request) -> HTMLResponse:
     c = request.app.state.holder.get()
-    log = list(c.conn.execute(
-        "SELECT ts, layer, key, action, after FROM memory_log"
-        " ORDER BY id DESC LIMIT 30"))
+    log = c.memory.recent_log(limit=30)
     return templates.TemplateResponse(request, "memory.html", {
         "page": "memory", "layers": _layer_sections(c), "log": log, **nav_context(c)})

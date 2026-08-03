@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
+from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
 
@@ -30,6 +31,12 @@ def test_audit_trail_is_shown(client):
     c = client.app.state.holder.get()
     c.memory.apply("profile", None, "add", text="likes semis")
     assert "add" in client.get("/memory").text
+
+
+def test_memory_page_is_english_only(client):
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="prefers dividend payers")
+    assert_english_only(client.get("/memory").text)
 
 
 def test_page_has_no_edit_controls(client):

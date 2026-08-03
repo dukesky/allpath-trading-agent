@@ -22,11 +22,14 @@ If an earlier briefing is included below, fold it into the new one rather
 than repeating it separately.
 """
 
-# SUMMARY_PROMPT's 400-word cap is ~600 tokens at estimate_tokens' rate. A
-# first-ever compaction has no previous frame to size against (the diff
-# below would be 0), so reserve that fixed amount instead of under-reserving
-# for the summary about to be written.
-FIRST_SUMMARY_RESERVE_TOKENS = 600
+# SUMMARY_PROMPT's 400-word cap is ~600 tokens at estimate_tokens' rate --
+# frame_cost (below) must never sit below this floor. It's not only a
+# first-compaction fallback: a *later* round's previous-summary diff can
+# also come out small (e.g. the discarded turns were mostly short tool
+# calls), and that diff describes the summary already in the frame, not the
+# new one this round is about to write. SUMMARY_PROMPT bounds the new one
+# the same way regardless, so the floor applies unconditionally.
+MIN_SUMMARY_RESERVE_TOKENS = 600
 
 # `target` must stay above zero even when frame_cost eats the whole budget,
 # or `_cut_index` can never find a fitting suffix and compaction deadlocks
@@ -123,12 +126,12 @@ class Compactor:
         # toward the budget (it's part of `framed`), but a plain cut over
         # `history` doesn't know that frame exists — so reserve that same
         # cost here (the current frame is a proxy for the new one, since both
-        # are bounded by the same summarization prompt). With no previous
-        # frame to measure, fall back to a fixed reserve for the summary
-        # about to be written instead.
+        # are bounded by the same summarization prompt). Floored at
+        # MIN_SUMMARY_RESERVE_TOKENS — see its comment for why that floor is
+        # unconditional, not just a no-previous-frame fallback.
         frame_cost = max(
             estimate_tokens(framed) - estimate_tokens(history) if previous.strip() else 0,
-            FIRST_SUMMARY_RESERVE_TOKENS)
+            MIN_SUMMARY_RESERVE_TOKENS)
         target = max((self.budget_tokens * 2) // 3 - frame_cost, MIN_CUT_TARGET_TOKENS)
         cut = _cut_index(history, target)
         if cut == 0:

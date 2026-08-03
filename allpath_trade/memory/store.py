@@ -97,6 +97,14 @@ class MemoryStore:
         rel = path.relative_to(self.root)
         return f"{action} ok: {rel}"
 
+    def recent_log(self, limit: int = 30) -> list[sqlite3.Row]:
+        """The change-audit trail the web memory page renders. Kept behind
+        this API like every other store the web layer reads from, rather
+        than a route querying `memory_log` with its own raw SQL."""
+        return list(self._conn.execute(
+            "SELECT ts, layer, key, action, after FROM memory_log"
+            " ORDER BY id DESC LIMIT ?", (limit,)))
+
     def render_for_context(self, layer: str, key: str | None = None,
                            budget: int | None = None) -> str:
         text = self.read(layer, key)

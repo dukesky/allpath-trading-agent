@@ -54,6 +54,18 @@ def install_auth(app: FastAPI) -> None:
 
         token = request.app.state.holder.settings().web_token
         if not _authorized(request, token):
+            if request.headers.get("hx-request") == "true":
+                # A plain 303 here is fine for a full page navigation (the
+                # browser just follows it), but htmx follows redirects as
+                # part of the same AJAX exchange and swaps whatever HTML
+                # comes back into the original target -- on chat.html's
+                # `hx-post="/chat/send" hx-target="#messages"`, that means
+                # login.html's form gets spliced into the chat transcript
+                # instead of the user ever seeing a real sign-in page.
+                # `HX-Redirect` is htmx's own escape hatch for this: any
+                # response carrying it triggers a full `window.location`
+                # navigation instead of a swap, regardless of status code.
+                return Response(status_code=200, headers={"HX-Redirect": "/login"})
             return RedirectResponse("/login", status_code=303)
 
         if request.method not in ("GET", "HEAD"):

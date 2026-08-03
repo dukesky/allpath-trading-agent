@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.config import Settings, SettingsStore
 from allpath_trade.web.app import create_app
 from allpath_trade.web.deps import ComponentHolder
+from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
 
@@ -59,6 +60,30 @@ def test_long_secret_is_never_echoed_back_even_partially_unmasked(client, tmp_pa
     assert secret[:6] not in body  # the old leading-character disclosure
     assert secret[-5:] not in body  # no more than 4 trailing characters
     assert secret[-4:] in body  # a mask is actually rendered, not blank
+
+
+def test_a_short_secret_falls_through_to_the_fixed_width_mask(client, tmp_path):
+    # A1: the old guard (`len(value) > 4`) unmasked the last 4 characters of
+    # a 5-character secret -- 4 of 5 characters on screen, which is not
+    # meaningfully different from showing it outright, and contradicted the
+    # comment's own claim that the tail is only shown "when the value is
+    # long enough that doing so doesn't reveal the whole thing." An 8-char
+    # secret (exactly at the new threshold) must still fall through to the
+    # plain dot mask -- none of it may leak.
+    (tmp_path / ".env").write_text(
+        'SMTP_PASSWORD="eightchr"\nWEB_TOKEN="secret"\n')
+    client.app.state.holder.rebuild()
+    body = client.get("/settings").text
+    assert "eightchr" not in body
+    assert "chr" not in body  # no trailing slice of it either
+    assert "•" * 8 in body  # the fixed-width mask is still rendered
+
+
+def test_settings_page_is_english_only(client, tmp_path):
+    (tmp_path / ".env").write_text(
+        'OPENROUTER_API_KEY="sk-or-v1-abcdefghijklmnop"\nWEB_TOKEN="secret"\n')
+    client.app.state.holder.rebuild()
+    assert_english_only(client.get("/settings").text)
 
 
 def test_saving_writes_env_and_rebuilds(client, tmp_path):
@@ -222,60 +247,56 @@ def test_note_query_param_cannot_inject_arbitrary_page_text(client):
     assert injected not in body
 
 
-def test_clearing_a_numeric_field_does_not_brick_the_app(client, tmp_path):
+@pytest.mark.parametrize("field,bad_value,expected_msg", [
+    # Blank / non-numeric text in a plain HTML input -- type-invalid, not
+    # merely out of range. `field in r.text` alone would also pass against
+    # a 400 that named the field but said nothing about *why* it failed
+    # (or, before Finding 4, a version that let these straight through) --
+    # asserting the pydantic error copy itself is the only way this test
+    # can actually distinguish "refused, and here's why" from "accepted".
+    pytest.param("sentinel_interval_minutes", "",
+                 "unable to parse string as an integer",
+                 id="clearing-a-numeric-field"),
+    pytest.param("context_budget_tokens", "lots",
+                 "unable to parse string as an integer",
+                 id="non-numeric-text"),
+    # Finding 4 regressions: type-valid but semantically absurd. A negative
+    # sentinel interval schedules a perpetually-overdue APScheduler job that
+    # hammers the broker in a hot loop; a zero context budget fires a
+    # memory-tier summarization call on every single turn.
+    pytest.param("sentinel_interval_minutes", "-5",
+                 "Input should be greater than or equal to 1",
+                 id="negative-sentinel-interval"),
+    pytest.param("context_budget_tokens", "0",
+                 "Input should be greater than or equal to 2000",
+                 id="zero-context-budget"),
+    # B1: the class of bug, not just the two fields Finding 4 happened to
+    # fix -- smtp_port is the third numeric field on this same form and had
+    # no web-route-level coverage at all (only a Settings()-level check in
+    # test_config.py, which never proves the *route* refuses it before
+    # writing .env).
+    pytest.param("smtp_port", "0",
+                 "Input should be greater than or equal to 1",
+                 id="smtp-port-below-range"),
+    pytest.param("smtp_port", "70000",
+                 "Input should be less than or equal to 65535",
+                 id="smtp-port-above-range"),
+])
+def test_a_type_valid_but_absurd_numeric_value_is_refused_and_env_unchanged(
+        client, tmp_path, field, bad_value, expected_msg):
     env_path = tmp_path / ".env"
     before = env_path.read_text()
 
-    r = client.post("/settings", data={"sentinel_interval_minutes": ""})
+    r = client.post("/settings", data={field: bad_value})
 
     assert r.status_code == 400
-    assert "sentinel_interval_minutes" in r.text
+    assert expected_msg in r.text
     # Nothing was written -- the whole point is that a bad value must never
     # reach disk, not just that the in-memory settings stay valid.
     assert env_path.read_text() == before
     # The app must still be able to load and re-render its own settings
     # page afterwards -- i.e. `.env` was never left in an unloadable state.
     assert client.get("/settings").status_code == 200
-
-
-def test_a_non_numeric_value_in_a_numeric_field_does_not_brick_the_app(client, tmp_path):
-    env_path = tmp_path / ".env"
-    before = env_path.read_text()
-
-    r = client.post("/settings", data={"context_budget_tokens": "lots"})
-
-    assert r.status_code == 400
-    assert "context_budget_tokens" in r.text
-    assert env_path.read_text() == before
-    assert client.get("/settings").status_code == 200
-
-
-def test_a_negative_sentinel_interval_is_refused_and_env_unchanged(client, tmp_path):
-    # Finding 4: a type check alone (int) lets -5 straight through -- the
-    # field needs its own ge=1 constraint, or APScheduler schedules a job
-    # that's perpetually overdue and hammers the broker in a hot loop.
-    env_path = tmp_path / ".env"
-    before = env_path.read_text()
-
-    r = client.post("/settings", data={"sentinel_interval_minutes": "-5"})
-
-    assert r.status_code == 400
-    assert "sentinel_interval_minutes" in r.text
-    assert env_path.read_text() == before
-    assert client.get("/settings").status_code == 200
-
-
-def test_a_zero_context_budget_is_refused_and_env_unchanged(client, tmp_path):
-    # A zero budget makes the "still under budget" check never pass, firing
-    # a memory-tier summarization call on every single turn.
-    env_path = tmp_path / ".env"
-    before = env_path.read_text()
-
-    r = client.post("/settings", data={"context_budget_tokens": "0"})
-
-    assert r.status_code == 400
-    assert "context_budget_tokens" in r.text
-    assert env_path.read_text() == before
 
 
 class _StubQueue:

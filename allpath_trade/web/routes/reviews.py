@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError
-from allpath_trade.web.routes.dashboard import nav_context
+from allpath_trade.web.routes.dashboard import error_redirect, nav_context
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -40,18 +39,9 @@ def reviews(request: Request) -> HTMLResponse:
 
 
 def _back_to_reviews(error: str | None = None) -> RedirectResponse:
-    # These routes are hit by a plain `<form method="post">`, not an htmx
-    # partial swap -- there is no element in the current page for a bare
-    # HTML fragment to swap into. Returning one directly would replace the
-    # whole tab with a single sentence and strand the user with no nav, no
-    # way back, nothing else to review. Redirecting back to /reviews (303,
-    # so the browser re-issues as GET) keeps the page coherent either way;
-    # the error, when there is one, rides along as a query param and is
-    # rendered at the top of the reviews page.
-    target = "/reviews"
-    if error:
-        target += f"?error={quote(error)}"
-    return RedirectResponse(target, status_code=303)
+    # Shared idiom -- see dashboard.py's error_redirect docstring for why
+    # this redirects instead of returning a fragment directly.
+    return error_redirect("/reviews", error)
 
 
 def _echo_resolution(request: Request, review_id: int, row_source: str, summary: str) -> None:
