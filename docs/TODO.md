@@ -16,7 +16,6 @@
 - [ ] 美股节假日历法（当前仅按 ET 工作日 9:30–16:00 判断，节假日空跑无害但不精确）
 - [ ] 数据源冗余：Tiingo（EOD）、Finnhub（新闻/情绪）、Alpaca data，yfinance 故障时自动切换
 - [ ] **搜索升级**：web_search 从 DuckDuckGo（免费默认）扩展到更高质量的付费信息源——Tavily / Brave Search API（通用搜索，需 key）、Finnhub / Polygon news（金融专用新闻流）；接口已设计为可插拔，用户配了 key 即自动启用
-- [ ] SettingsStore `quote_mode="never"` 对含空格/#/= 值的破坏问题 —— **Phase 5 前必修**（Web UI 会写任意值）
 
 ## 券商
 
@@ -43,9 +42,15 @@
 - [ ] chat REPL：assistant 空文本时打印空行 `agent> `
 
 ## Phase 4 终审遗留（小项）
-- [ ] `allpath-trade/memory/store.py` 的 `MemoryError` 与内置异常同名——Phase 5 前重命名为 `MemoryStoreError`（保留别名）
 - [ ] consolidator 每日日期跟踪为进程内状态，重启后当日重跑（与 marker 过滤配合后已是无害 no-op，仍值得持久化）
 - [ ] 一字母 ticker 的 lessons 匹配已用词边界修复；更长期可给 lessons 加 frontmatter tickers 字段做精确匹配
 - [ ] observations.recent() 大积压时取最旧 200 条——积压场景应改为取最新
 - [ ] 上下文个股档案包含非 active 策略的 ticker（轻微膨胀，预算兜底）
-- [ ] 提炼频率/开关做成配置项（`DAILY_CONSOLIDATION=true`、`CONSOLIDATE_AFTER_CHAT=true`、收盘后时间点可调）——归入 Phase 5 设置页一起做
+
+## Phase 5 遗留
+- [ ] 策略 YAML 在线编辑（当前只读，修改走聊天让 agent 起草）
+- [ ] SSE 实时推送工具活动（当前为回合结束后整体刷新，见 `_chat_messages.html` 里的说明）
+- [ ] 手机推送通道（ntfy / Bark），比邮件更及时
+- [ ] `serve` 的 HTTPS / 反向代理部署文档
+- [ ] 独立守护进程 `allpath-trade run` 不发送每日摘要邮件——`_send_daily_digest` 只挂在 `serve` 的 `build_jobs` 里，`cli.py` 的 `run` 分支的 `daily_job` 只跑 consolidation
+- [ ] 通知正文里插值的文本（规则 condition、执行 detail、agent 的 recommendation）未做 URL 清理——其中若混入裸链接，邮件客户端可能自动转成可点击链接，与"通知不含链接"的设计承诺相悖
