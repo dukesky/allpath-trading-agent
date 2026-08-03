@@ -3,7 +3,12 @@
 {% block content %}
 <h1>Settings</h1>
 {% if saved %}<p class="muted">Saved. New conversations use the updated configuration.</p>{% endif %}
-{% if note %}<p class="muted">{{ note }}</p>{% endif %}
+{# `note` is a fixed token from the server, never freeform text -- the copy
+   itself lives here, in one place, so a crafted query string can only ever
+   select between these two known messages, not inject its own. #}
+{% if note == 'email-sent' %}<p class="muted">Test email sent</p>{% endif %}
+{% if note == 'email-failed' %}<p class="muted">Test email failed — check SMTP settings and server logs</p>{% endif %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 <form method="post" action="/settings">
   <h2>Model</h2>
@@ -38,7 +43,7 @@
   <h2>Email notifications</h2>
   <div class="card">
     <label>SMTP host</label><input name="smtp_host" value="{{ s.smtp_host }}">
-    <label>Port</label><input name="smtp_port" value="{{ s.smtp_port }}">
+    <label>Port</label><input name="smtp_port" value="{{ s.smtp_port }}" type="number">
     <label>Sender account</label><input name="smtp_user" value="{{ s.smtp_user }}">
     <label>From header</label><input name="smtp_from" value="{{ s.smtp_from }}">
     <label>App password <span class="muted">{{ masks['smtp_password'] or 'not set' }}</span></label>
@@ -49,8 +54,8 @@
 
   <h2>Sentinel and memory</h2>
   <div class="card">
-    <label>Check interval (minutes)</label><input name="sentinel_interval_minutes" value="{{ s.sentinel_interval_minutes }}">
-    <label>Context budget (tokens)</label><input name="context_budget_tokens" value="{{ s.context_budget_tokens }}">
+    <label>Check interval (minutes)</label><input name="sentinel_interval_minutes" value="{{ s.sentinel_interval_minutes }}" type="number">
+    <label>Context budget (tokens)</label><input name="context_budget_tokens" value="{{ s.context_budget_tokens }}" type="number">
     <label class="check"><input type="checkbox" name="daily_consolidation" value="true" {{ 'checked' if s.daily_consolidation }}> Consolidate memory after the close</label>
     <label class="check"><input type="checkbox" name="consolidate_after_chat" value="true" {{ 'checked' if s.consolidate_after_chat }}> Consolidate after each conversation</label>
   </div>

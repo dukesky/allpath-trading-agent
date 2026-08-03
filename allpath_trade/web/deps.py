@@ -51,6 +51,15 @@ class ComponentHolder:
     def settings(self) -> Settings:
         return self.get().settings
 
+    def store(self) -> SettingsStore:
+        # Routes that write `.env` (the settings page) must go through this
+        # store, not construct their own `SettingsStore()` -- a route-local
+        # store defaults to `.env` relative to the process cwd, which only
+        # agrees with the store `rebuild()` reads from because `create_app`
+        # never passes a non-default `env_file` today. Sharing this one
+        # makes that agreement structural instead of coincidental.
+        return self._store
+
     def rebuild(self, settings: Settings | None = None) -> None:
         # Hold `_rebuild_lock` for the entire sequence, not just the
         # individual read and write. Two overlapping calls (e.g. a
