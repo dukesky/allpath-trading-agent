@@ -6,10 +6,31 @@ import pytest
 from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.web import models_catalog
 from allpath_trade.web.app import create_app
 from allpath_trade.web.deps import ComponentHolder
 from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
+
+# The catalog covers every field's default value (see config.py's
+# chat_model/review_model/memory_model defaults) so that, unless a test
+# deliberately stores an off-list value, none of the three selects trigger
+# the "stored value not in the list" prepend path by accident.
+FAKE_CATALOG = [
+    "anthropic/claude-haiku-4.5",
+    "anthropic/claude-opus-5",
+    "anthropic/claude-sonnet-5",
+    "openai/gpt-5.2",
+]
+
+
+@pytest.fixture(autouse=True)
+def _fake_model_catalog(monkeypatch):
+    # The settings page fetches the model catalog on every GET. Tests must
+    # never depend on, or wait on the timeout of, the real OpenRouter API --
+    # models_catalog.py already has its own test suite covering the fetch,
+    # cache, and fallback behavior in isolation.
+    monkeypatch.setattr(models_catalog, "list_models", lambda provider: list(FAKE_CATALOG))
 
 
 @pytest.fixture
@@ -97,6 +118,49 @@ def test_saving_writes_env_and_rebuilds(client, tmp_path):
     assert "anthropic/claude-opus-5" in text
     assert "AllPath Trade <bot@example.com>" in text
     assert client.app.state.holder.get().settings.chat_model == "anthropic/claude-opus-5"
+
+
+def test_model_fields_render_as_selects_with_the_stored_value_selected(client):
+    body = client.get("/settings").text
+    assert '<select name="chat_model"' in body
+    assert '<select name="review_model"' in body
+    assert '<select name="memory_model"' in body
+    # Settings() defaults (config.py) are all members of FAKE_CATALOG, so
+    # each should come back pre-selected rather than defaulting to the
+    # first catalog entry or nothing at all.
+    assert '<option value="anthropic/claude-sonnet-5" selected>' in body  # chat_model
+    assert '<option value="anthropic/claude-haiku-4.5" selected>' in body  # review_model
+    assert '<option value="anthropic/claude-opus-5" selected>' in body  # memory_model
+
+
+def test_a_stored_off_catalog_model_is_prepended_not_silently_swapped(client, tmp_path):
+    (tmp_path / ".env").write_text(
+        'CHAT_MODEL="custom-provider/exotic-model"\nWEB_TOKEN="secret"\n')
+    client.app.state.holder.rebuild()
+    body = client.get("/settings").text
+    # The off-list value must still be on the page, selected, as itself --
+    # not silently replaced by the first (or any) catalog entry.
+    assert '<option value="custom-provider/exotic-model" selected>' in body
+    assert 'custom-provider/exotic-model' in body
+
+
+def test_model_select_offers_a_custom_option_for_arbitrary_slugs(client):
+    body = client.get("/settings").text
+    assert '__custom__' in body
+    assert 'Custom' in body
+
+
+def test_saving_an_off_catalog_custom_model_value_persists(client, tmp_path):
+    # The <select>'s "Custom..." option reveals a plain text input via a
+    # small inline script, but the posted field name is unchanged either
+    # way -- the save handler (and its validation pipeline) must not need
+    # to know or care whether the value came from the dropdown or the
+    # custom text field.
+    r = client.post("/settings", data={"chat_model": "totally/custom-slug"},
+                     follow_redirects=False)
+    assert r.status_code == 303
+    assert client.app.state.holder.get().settings.chat_model == "totally/custom-slug"
+    assert "totally/custom-slug" in (tmp_path / ".env").read_text()
 
 
 def test_blank_secret_field_leaves_the_stored_value_alone(client, tmp_path):

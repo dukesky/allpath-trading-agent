@@ -10,6 +10,27 @@
 {% if note == 'email-failed' %}<p class="muted">Test email failed — check SMTP settings and server logs</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
+{# A model select offers every catalog entry for the active provider, plus
+   the currently stored value if it isn't already one of them (prepended, so
+   it's never silently swapped for something else) and a trailing "Custom..."
+   option. Picking "Custom..." reveals the paired text input via the inline
+   script below; whichever of the two is live carries the field's real name
+   (toggled with `disabled`, not by changing `name`, since a disabled
+   <select> can no longer be clicked back to a list value) so the posted
+   field name is always just e.g. "chat_model" -- the save handler doesn't
+   need to know a dropdown is involved at all. #}
+{% macro model_select(field, value, options) %}
+{% set full_options = ([value] if value not in options else []) + options %}
+<select name="{{ field }}" id="{{ field }}_select" onchange="allpathToggleCustomModel('{{ field }}')">
+  {% for m in full_options %}
+  <option value="{{ m }}" {{ 'selected' if value == m }}>{{ m }}</option>
+  {% endfor %}
+  <option value="__custom__">Custom…</option>
+</select>
+<input type="text" name="{{ field }}" id="{{ field }}_custom" value="{{ value }}"
+       placeholder="provider/model-slug" disabled style="display:none">
+{% endmacro %}
+
 <form method="post" action="/settings">
   <h2>Model</h2>
   <div class="card">
@@ -25,9 +46,10 @@
     <input name="openai_api_key" type="password" placeholder="Replace" autocomplete="off">
     <label>Anthropic API key <span class="muted">{{ masks['anthropic_api_key'] or 'not set' }}</span></label>
     <input name="anthropic_api_key" type="password" placeholder="Replace" autocomplete="off">
-    <label>Chat model</label><input name="chat_model" value="{{ s.chat_model }}">
-    <label>Sentinel review model</label><input name="review_model" value="{{ s.review_model }}">
-    <label>Memory model</label><input name="memory_model" value="{{ s.memory_model }}">
+    <label>Chat model</label>{{ model_select('chat_model', s.chat_model, model_options) }}
+    <label>Sentinel review model</label>{{ model_select('review_model', s.review_model, model_options) }}
+    <label>Memory model</label>{{ model_select('memory_model', s.memory_model, model_options) }}
+    <p class="hint">Changing provider and saving refreshes this list on the next visit. Pick "Custom…" to type a slug that isn't in the list.</p>
   </div>
 
   <h2>Brokerage</h2>
@@ -85,4 +107,27 @@
   <form method="post" action="/settings/test-email"><button type="submit">Send test email</button></form>
   <form method="post" action="/settings/reset-token"><button class="danger" type="submit">Reset access token</button></form>
 </div>
+
+<script>
+// Exactly one of the select/text pair for a given model field is ever
+// "live" (submitted under that field's name) at a time. The <select>'s
+// `name` attribute -- not `disabled` -- is what's toggled off while
+// "Custom..." is active: a disabled <select> can no longer be clicked, so
+// the user would have no way back to a list value. Removing just the name
+// keeps it fully interactive while excluding it from the submitted form;
+// the text input is the one that gets `disabled` toggled, since it only
+// ever needs to be excluded, never clicked back into a previous state.
+function allpathToggleCustomModel(field) {
+  var select = document.getElementById(field + '_select');
+  var custom = document.getElementById(field + '_custom');
+  var isCustom = select.value === '__custom__';
+  if (isCustom) {
+    select.removeAttribute('name');
+  } else {
+    select.setAttribute('name', field);
+  }
+  custom.disabled = !isCustom;
+  custom.style.display = isCustom ? 'inline-block' : 'none';
+}
+</script>
 {% endblock %}

@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from allpath_trade.config import Settings, describe_validation_error
 from allpath_trade.scheduler import reschedule_sentinel_job
+from allpath_trade.web import models_catalog
 from allpath_trade.web.auth import COOKIE
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
@@ -64,6 +65,12 @@ def settings_page(request: Request, saved: str = "", note: str = "") -> HTMLResp
     return templates.TemplateResponse(request, "settings.html", {
         "page": "settings", "s": s, "saved": bool(saved), "note": note, "error": "",
         "masks": {f: _mask(str(getattr(s, f, ""))) for f in SECRET_FIELDS},
+        # Fetched (or served from cache/fallback) for the *active* provider
+        # only -- all three model fields share one provider, so one catalog
+        # covers all three selects. models_catalog.list_models() carries its
+        # own timeout and any-failure fallback, so this can never be what
+        # makes a GET here hang or 500.
+        "model_options": models_catalog.list_models(s.llm_provider),
         **nav_context(c)})
 
 
@@ -103,6 +110,7 @@ async def save(request: Request) -> Response:
             "page": "settings", "s": current, "saved": False, "note": "",
             "error": _validation_message(exc),
             "masks": {f: _mask(str(getattr(current, f, ""))) for f in SECRET_FIELDS},
+            "model_options": models_catalog.list_models(current.llm_provider),
             **nav_context(c)}, status_code=400)
 
     old_interval = current.sentinel_interval_minutes
