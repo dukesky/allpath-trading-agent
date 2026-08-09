@@ -67,6 +67,18 @@ input, select, textarea { background:var(--bg); color:var(--text);
 .msg.system { display:flex; justify-content:center; }
 .msg.system span { color:var(--muted); font-size:12px; font-family:var(--mono);
   background:var(--surface); border-radius:8px; padding:6px 12px; }
+/* Client-only optimistic indicator appended by chat.html's script between
+   request-start and swap -- never server-rendered (see _chat_messages.html
+   and its test coverage in tests/test_web_chat.py). */
+.msg.thinking { color:var(--muted); font-size:13px; font-family:var(--mono); }
+.msg.thinking .dots { display:inline-block; animation:thinking-pulse 1.2s ease-in-out infinite; }
+@keyframes thinking-pulse {
+  0%, 100% { opacity:.25; }
+  50% { opacity:1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg.thinking .dots { animation:none; opacity:.7; }
+}
 .activity { color:var(--muted); font-size:12px; font-family:var(--mono); }
 pre { font-family:var(--mono); font-size:13px; overflow-x:auto;
   background:var(--surface); border:1px solid var(--line);
