@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import concurrent.futures
+import re
+import time
+from decimal import Decimal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from allpath_trade.app import Components
+from allpath_trade.broker.base import Position
+from allpath_trade.data.base import DataSource, Quote
+from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -40,6 +46,103 @@ def _with_timeout(fn):
     return _broker_pool.submit(fn).result(timeout=BROKER_TIMEOUT_SECONDS)
 
 
+_QUOTE_CACHE_TTL_SECONDS = 60
+# Module-level so it survives across requests within the process (not just
+# within one page render) -- every dashboard reload would otherwise hit
+# yfinance once per strategy, and a phone that auto-refreshes hammers it.
+# Keyed by ticker; value is (fetched_at, Quote | None) -- a failed lookup is
+# cached too, so a ticker yfinance can't resolve doesn't get retried on
+# every single reload either.
+_quote_cache: dict[str, tuple[float, Quote | None]] = {}
+
+
+def _cached_quote(data: DataSource, ticker: str) -> Quote | None:
+    now = time.monotonic()
+    cached = _quote_cache.get(ticker)
+    if cached is not None and now - cached[0] < _QUOTE_CACHE_TTL_SECONDS:
+        return cached[1]
+    try:
+        found = _with_timeout(lambda: data.get_quote(ticker))
+    except Exception:  # noqa: BLE001 — a quote failure must render "—", never an error page
+        found = None
+    _quote_cache[ticker] = (now, found)
+    return found
+
+
+# Deliberately shallow: matches the first "price <op> number" it finds in a
+# rule's condition text. Conditions like "rsi < 30" or compound boolean
+# expressions ("price < 205 and position_weight < target_weight" -- the
+# first comparison still matches here, which is intentional: the leading
+# price check is the one worth surfacing as a key level) are handled
+# best-effort; anything with no "price" comparison at all is omitted rather
+# than guessed.
+_LEVEL_RE = re.compile(r"price\s*([<>]=?)\s*([\d.]+)")
+
+
+def _key_level(rule) -> str | None:
+    """Label a rule's price level using only the three combinations the
+    product brief calls out explicitly: a hard sell rule below price is a
+    stop, a sell rule above price is a target, a buy rule below price is an
+    add zone. Every other combination (soft sell below, buy above, an
+    action that mentions neither buy nor sell) is omitted rather than
+    guessed."""
+    match = _LEVEL_RE.search(rule.condition)
+    if not match:
+        return None
+    op, value = match.group(1), match.group(2)
+    action = rule.action.lower()
+    below = op.startswith("<")
+    if rule.type == RuleType.HARD and "sell" in action and below:
+        label = "stop"
+    elif "sell" in action and not below:
+        label = "target"
+    elif "buy" in action and below:
+        label = "add zone"
+    else:
+        return None
+    return f"{label} {op} {value}"
+
+
+def summarize_strategy(doc: StrategyDoc, position: Position | None, quote: Quote | None, *,
+                        equity: Decimal | None = None, has_pending: bool = False) -> dict:
+    """Pure function -- no I/O, no template lookups. The dashboard card
+    renders only this dict, so the card's content is testable without
+    parsing HTML. Callers do the I/O (broker position lookup, cached quote
+    fetch, pending-review lookup) and pass the results in."""
+    key_levels = [level for r in doc.rules if (level := _key_level(r)) is not None]
+
+    current_weight_pct = None
+    if position is not None and equity:
+        current_weight_pct = float(position.market_value / equity * 100)
+
+    target_weight_pct = None
+    if doc.position.target_weight is not None:
+        target_weight_pct = float(doc.position.target_weight * 100)
+
+    alerts = []
+    if any(r.state == RuleState.TRIGGERED for r in doc.rules):
+        alerts.append("rule triggered")
+    if has_pending:
+        alerts.append("pending review")
+
+    return {
+        "id": doc.id,
+        "ticker": doc.position.ticker,
+        "name": doc.name,
+        "status": doc.status.value,
+        "auth": doc.authorization.value,
+        "key_levels": key_levels,
+        "current_weight_pct": current_weight_pct,
+        "target_weight_pct": target_weight_pct,
+        "price": quote.price if quote is not None else None,
+        # Quote (allpath_trade/data/base.py) carries only a last price, no
+        # previous close -- there is nothing to compare against, so
+        # direction degrades to neutral rather than being invented.
+        "price_class": "",
+        "alerts": alerts,
+    }
+
+
 def error_redirect(target: str, message: str | None = None) -> RedirectResponse:
     """The shared "303 back to a page, error riding along as a query
     param" idiom. Every POST-triggered failure across the app (reviews.py's
@@ -71,8 +174,18 @@ def dashboard(request: Request) -> HTMLResponse:
 
     errors: list[str] = []
     strategies = c.strategies.load_all(status=None, errors=errors)
+    positions_by_ticker = {p.ticker: p for p in positions}
+    pending_strategy_ids = {row["strategy_id"] for row in c.queue.list("pending")}
+    equity = account.equity if account is not None else None
+    strategy_cards = [
+        summarize_strategy(
+            s, positions_by_ticker.get(s.position.ticker),
+            _cached_quote(c.data, s.position.ticker),
+            equity=equity, has_pending=s.id in pending_strategy_ids)
+        for s in strategies
+    ]
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
-        "broker_error": broker_error, "strategies": strategies,
+        "broker_error": broker_error, "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": c.journal.recent(limit=8),
         **nav_context(c)})
