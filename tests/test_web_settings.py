@@ -446,6 +446,16 @@ def test_note_query_param_cannot_inject_arbitrary_page_text(client):
     pytest.param("smtp_port", "70000",
                  "Input should be less than or equal to 65535",
                  id="smtp-port-above-range"),
+    # Finding 1 of the Task 8 review: urllib.request.Request raises
+    # ValueError("unknown url type") for a scheme-less URL, and the
+    # settings-page hint literally says "paste the topic URL here" -- a
+    # pasted-without-scheme value like "ntfy.sh/my-topic" is the expected
+    # mistake, not an edge case. Must be refused here, before it ever
+    # reaches .env, not discovered later as a 500 on save-and-test or a
+    # silently swallowed sentinel_error.
+    pytest.param("ntfy_url", "ntfy.sh/my-topic",
+                 "must be empty or start with http:// or https://",
+                 id="ntfy-url-missing-scheme"),
 ])
 def test_a_type_valid_but_absurd_numeric_value_is_refused_and_env_unchanged(
         client, tmp_path, field, bad_value, expected_msg):

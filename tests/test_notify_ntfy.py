@@ -78,3 +78,14 @@ def test_http_error_returns_false_and_never_raises(monkeypatch, capsys):
 def test_empty_ntfy_url_never_constructs_a_notifier():
     s = Settings(_env_file=None)
     assert not isinstance(build_notifier(s), NtfyNotifier)
+
+
+def test_scheme_less_url_returns_false_and_never_raises():
+    # Belt-and-braces for Finding 1 of the Task 8 review: Settings now
+    # rejects a scheme-less ntfy_url before it can reach here, but the
+    # notifier's own never-raises contract (base.py's Notifier.send
+    # docstring) must hold regardless of where the URL came from --
+    # urllib.request.Request("garbage", ...) raises ValueError("unknown url
+    # type") if construction weren't inside the try.
+    n = NtfyNotifier("garbage")
+    assert n.send("s", "b") is False

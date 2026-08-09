@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import dotenv_values, set_key
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Compactor reserves at least MIN_SUMMARY_RESERVE_TOKENS (600) off the cut
@@ -35,6 +35,22 @@ class Settings(BaseSettings):
     # the full topic URL the app POSTs to, e.g. "https://ntfy.sh/my-topic".
     # Blank means the channel is not configured -- see build_notifier.
     ntfy_url: str = ""
+
+    @field_validator("ntfy_url")
+    @classmethod
+    def _ntfy_url_needs_a_scheme(cls, v: str) -> str:
+        # urllib.request.Request raises ValueError("unknown url type") for a
+        # scheme-less URL -- and the settings-page hint literally says "paste
+        # the topic URL here", so a value like "ntfy.sh/my-topic" (no
+        # "https://") is the expected mistake, not an edge case. Catching it
+        # here means the settings page rejects it with an inline error before
+        # it ever reaches .env, instead of persisting a value that later
+        # bricks the sentinel's send (undercounting the daily digest) and the
+        # save-and-test POST (a 500 after the bad value was already saved).
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("must be empty or start with http:// or https://")
+        return v
+
     # Same class of brick Task 12 set out to prevent (see Finding 4 of the
     # Phase 5 final review): APScheduler's IntervalTrigger does not validate
     # positivity. 0 or a negative interval doesn't fail to schedule -- it

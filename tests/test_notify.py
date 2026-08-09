@@ -179,3 +179,12 @@ def test_send_test_notification_reports_test_partial_when_some_multi_channels_de
 def test_send_test_notification_reports_test_failed_when_no_multi_channel_delivers():
     multi = MultiNotifier([_RecordingNotifier(False), _RecordingNotifier(False)])
     assert send_test_notification(multi, "s", "b") == "test_failed"
+
+
+def test_send_test_notification_does_not_report_test_ok_for_an_empty_multinotifier():
+    # Finding 3 of the Task 8 review: `delivered == len(results)` is
+    # vacuously true for zero children, so without a guard an empty
+    # MultiNotifier would report "test_ok" -- nothing sent, reported as
+    # sent. Not reachable via build_notifier today, but this is the exact
+    # failure class this function exists to prevent.
+    assert send_test_notification(MultiNotifier([]), "s", "b") != "test_ok"

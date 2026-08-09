@@ -26,13 +26,18 @@ class NtfyNotifier(Notifier):
         self.url = url
 
     def send(self, subject: str, body: str) -> bool:
-        req = urllib.request.Request(
-            self.url,
-            data=body.encode("utf-8"),
-            headers={"Title": subject},
-            method="POST",
-        )
         try:
+            # Request(...) itself can raise (e.g. ValueError("unknown url
+            # type") for a scheme-less self.url) -- Settings validates
+            # ntfy_url before it ever reaches here, but this notifier's
+            # never-raises contract has to hold regardless of where the URL
+            # came from, so construction stays inside the try too.
+            req = urllib.request.Request(
+                self.url,
+                data=body.encode("utf-8"),
+                headers={"Title": subject},
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=_NTFY_TIMEOUT_SECONDS) as resp:
                 status = getattr(resp, "status", None)
                 if status is None:

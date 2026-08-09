@@ -31,12 +31,12 @@
 
 <h2>Notifications</h2>
 <div class="card">
-  <p class="muted">Email notifications for this strategy's rule triggers, orders, and queued reviews are currently {{ 'on' if doc.notify_email else 'off' }}. This does not change whether rules fire, execute, or queue for review — only whether you get emailed about it.</p>
+  <p class="muted">Notifications (email and push) for this strategy's rule triggers, orders, and queued reviews are currently {{ 'on' if doc.notify_email else 'off' }}. This does not change whether rules fire, execute, or queue for review — only whether you get notified about it.</p>
   {% if doc.authorization.value == 'notify' and not doc.notify_email %}
-  <p class="hint">This strategy is notify-only: with email off, a trigger will only be visible on this page and the dashboard.</p>
+  <p class="hint">This strategy is notify-only: with notifications off, a trigger will only be visible on this page and the dashboard.</p>
   {% endif %}
   <form method="post" action="/strategies/{{ doc.id }}/notify-email">
-    <button type="submit">{{ 'Turn off' if doc.notify_email else 'Turn on' }} email notifications</button>
+    <button type="submit">{{ 'Turn off' if doc.notify_email else 'Turn on' }} notifications (email and push)</button>
   </form>
 </div>
 

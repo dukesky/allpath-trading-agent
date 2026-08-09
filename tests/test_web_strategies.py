@@ -235,8 +235,9 @@ def _write_strategy(client, strategy_id, *, authorization, notify_email):
 def test_notify_only_strategy_with_email_off_shows_warning(client):
     _write_strategy(client, "silent", authorization="notify", notify_email=False)
     body = client.get("/strategies/silent").text
-    assert ("This strategy is notify-only: with email off, a trigger will "
-            "only be visible on this page and the dashboard.") in body
+    assert ("This strategy is notify-only: with notifications off, a "
+            "trigger will only be visible on this page and the "
+            "dashboard.") in body
 
 
 def test_notify_only_strategy_with_email_on_shows_no_warning(client):

@@ -69,7 +69,13 @@ def send_test_notification(notifier: Notifier, subject: str, body: str) -> str:
     else:
         results = [notifier.send(subject, body)]
     delivered = sum(results)
-    if delivered == len(results):
+    # `results` is only empty for a MultiNotifier with zero children -- not
+    # reachable today (build_notifier never constructs one with no children),
+    # but `delivered == len(results)` is vacuously true for an empty list, so
+    # without this guard a no-op MultiNotifier would report "test_ok": the
+    # exact "nothing sent reported as sent" class this function exists to
+    # prevent.
+    if results and delivered == len(results):
         return "test_ok"
     if delivered == 0:
         return "test_failed"
