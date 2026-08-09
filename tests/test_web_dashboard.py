@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.broker.base import Position
 from allpath_trade.config import Settings
 from allpath_trade.data.base import Quote
-from allpath_trade.scheduler import SENTINEL_HEARTBEAT_KEY
+from allpath_trade.scheduler import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
 from allpath_trade.strategy.model import (
     Authorization,
     PositionPlan,
@@ -356,6 +356,40 @@ def test_sentinel_heartbeat_status_malformed_value_degrades_to_never_ran():
     assert result == {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
 
 
+def test_sentinel_heartbeat_status_market_closed_says_paused_not_checked():
+    # Finding 2 (final review, phase5.5-ui-polish): the scheduler ticks --
+    # and writes the heartbeat -- every interval regardless of market hours,
+    # so "last check Nm ago" outside market hours (a weekend, after close)
+    # falsely claims an evaluation that never happened.
+    raw = (_FROZEN_NOW - timedelta(minutes=5)).isoformat()
+    result = sentinel_heartbeat_status(raw, 60, market_open_raw="false", now=_FROZEN_NOW)
+    assert result["text"] == "Sentinel: monitoring paused (market closed) · last tick 5m ago"
+
+
+def test_sentinel_heartbeat_status_market_open_keeps_last_check_copy():
+    raw = (_FROZEN_NOW - timedelta(minutes=5)).isoformat()
+    result = sentinel_heartbeat_status(raw, 60, market_open_raw="true", now=_FROZEN_NOW)
+    assert result["text"] == "Sentinel: last check 5m ago · interval 60m"
+
+
+def test_sentinel_heartbeat_status_missing_market_flag_keeps_last_check_copy():
+    # A heartbeat written before SENTINEL_MARKET_OPEN_KEY existed (or by a
+    # caller that never set it) must not be misread as "market closed" --
+    # default to today's copy rather than guessing.
+    raw = (_FROZEN_NOW - timedelta(minutes=5)).isoformat()
+    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    assert result["text"] == "Sentinel: last check 5m ago · interval 60m"
+
+
+def test_sentinel_heartbeat_status_staleness_warning_still_keys_off_tick_age_when_paused():
+    # Finding 2's "update the staleness warning to use tick age regardless"
+    # -- a paused (market-closed) heartbeat that is nonetheless stale (the
+    # daemon itself may have died) must still warn.
+    raw = (_FROZEN_NOW - timedelta(minutes=200)).isoformat()
+    result = sentinel_heartbeat_status(raw, 60, market_open_raw="false", now=_FROZEN_NOW)
+    assert result["warn"] is True
+
+
 # --- rendered dashboard page -----------------------------------------------
 
 def test_dashboard_strategy_card_shows_compact_summary(client):
@@ -469,3 +503,83 @@ def test_dashboard_sentinel_heartbeat_recent_does_not_carry_the_warn_class(clien
     body = client.get("/").text
 
     assert '<p class="muted">Sentinel: last check 12m ago' in body
+
+
+def test_dashboard_sentinel_heartbeat_shows_paused_copy_when_market_was_closed(
+        client, monkeypatch):
+    # Finding 2: on a Sunday (or any tick recorded while the market was
+    # closed) the dashboard must say monitoring was paused, not that a check
+    # ran.
+    frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)  # 2026-08-09 is a Sunday
+    monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
+    c = client.app.state.holder.get()
+    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+                    (frozen_now - timedelta(minutes=5)).isoformat())
+    c.app_state.set(SENTINEL_MARKET_OPEN_KEY, "false")
+
+    body = client.get("/").text
+
+    assert "Sentinel: monitoring paused (market closed) · last tick 5m ago" in body
+    assert "Sentinel: last check" not in body
+
+
+# --- Finding 1 (final review, phase5.5-ui-polish): heartbeat hoisted above
+# the strategy/quote loop, and one shared budget bounds total quote time ----
+
+def test_dashboard_heartbeat_line_renders_even_when_every_quote_hangs(client, monkeypatch):
+    # 1a: sentinel_status must be computed before the strategy/quote loop
+    # runs, so the "is my system wedged?" line is never itself held hostage
+    # by a hanging data source.
+    monkeypatch.setattr(dashboard_route, "QUOTES_BUDGET_SECONDS", 0.05)
+    monkeypatch.setattr(dashboard_route, "BROKER_TIMEOUT_SECONDS", 0.2)
+    data = client.app.state.holder.get().data
+    release = threading.Event()
+
+    def hang(ticker):
+        release.wait(timeout=5)
+        raise RuntimeError("never resolves in time")
+
+    monkeypatch.setattr(data, "get_quote", hang)
+    dashboard_route._quote_cache.clear()
+
+    body = client.get("/").text
+
+    assert "Sentinel: never ran (daemon not running?)" in body
+    release.set()  # let the background call finish so it doesn't linger
+
+
+def test_dashboard_quote_budget_bounds_total_time_across_many_strategies(
+        client, monkeypatch, tmp_path):
+    # 1b: without a shared budget, N strategies against a hanging data
+    # source cost N * BROKER_TIMEOUT_SECONDS; with the budget, only the
+    # calls that start before the deadline ever block at all -- total time
+    # stays close to one BROKER_TIMEOUT_SECONDS, not N of them.
+    for i in range(4):
+        (tmp_path / "strategies" / f"extra{i}.yaml").write_text(f"""
+name: "Extra {i}"
+status: active
+position: {{ticker: TICK{i}, target_weight: 5%}}
+rules: []
+""")
+    monkeypatch.setattr(dashboard_route, "BROKER_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(dashboard_route, "QUOTES_BUDGET_SECONDS", 0.05)
+    data = client.app.state.holder.get().data
+    release = threading.Event()
+
+    def hang(ticker):
+        release.wait(timeout=5)
+        raise RuntimeError("never resolves in time")
+
+    monkeypatch.setattr(data, "get_quote", hang)
+    dashboard_route._quote_cache.clear()
+
+    start = time.monotonic()
+    r = client.get("/")
+    elapsed = time.monotonic() - start
+
+    assert r.status_code == 200
+    # 5 strategies total * 0.3s BROKER_TIMEOUT_SECONDS would be 1.5s without
+    # the shared budget; the budget bounds this to roughly one timeout.
+    assert elapsed < 1.0
+    assert "—" in r.text  # at least the skipped tickers render as a dash
+    release.set()

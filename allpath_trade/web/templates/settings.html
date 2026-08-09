@@ -5,7 +5,7 @@
 {% if saved %}<p class="muted">Saved. New conversations use the updated configuration.</p>{% endif %}
 {# `note` is a fixed token from the server, never freeform text -- the copy
    itself lives here, in one place, so a crafted query string can only ever
-   select between these two known messages, not inject its own. #}
+   select between these four known messages, not inject its own. #}
 {% if note == 'test_ok' %}<p class="muted">Test notification sent</p>{% endif %}
 {% if note == 'test_partial' %}<p class="muted">Test notification reached some channels but not others — check the failing channel's settings and server logs</p>{% endif %}
 {% if note == 'test_failed' %}<p class="muted">Test notification failed on every configured channel — check your settings and server logs</p>{% endif %}
@@ -16,9 +16,10 @@
    the currently stored value if it isn't already one of them (prepended, so
    it's never silently swapped for something else) and a trailing "Custom..."
    option. Picking "Custom..." reveals the paired text input via the inline
-   script below; whichever of the two is live carries the field's real name
-   (toggled with `disabled`, not by changing `name`, since a disabled
-   <select> can no longer be clicked back to a list value) so the posted
+   script below (allpathToggleCustomModel); whichever of the two is live
+   carries the field's real name -- toggled by adding/removing the `name`
+   attribute itself, not by disabling the other one, since a disabled
+   <select> can no longer be clicked back to a list value -- so the posted
    field name is always just e.g. "chat_model" -- the save handler doesn't
    need to know a dropdown is involved at all. #}
 {% macro model_select(field, value, options) %}

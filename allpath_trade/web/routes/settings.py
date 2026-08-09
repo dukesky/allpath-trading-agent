@@ -113,11 +113,29 @@ async def save(request: Request) -> Response:
         Settings(_env_file=None, **candidate)
     except ValidationError as exc:
         c = holder.get()
+        # Redisplay exactly what the user typed for every PLAIN_FIELDS input,
+        # not the last-saved value -- a validation failure on, say,
+        # sentinel_interval_minutes must not also discard an unrelated,
+        # perfectly valid smtp_host edit sitting in the same form. This is a
+        # raw, unvalidated copy for *display only*: model_copy(update=...)
+        # bypasses Settings' own type coercion/validation (unlike
+        # constructing a new Settings(**candidate), which is exactly what
+        # just failed above), so an out-of-range or non-numeric string can
+        # sit in `s.sentinel_interval_minutes` here purely to be echoed back
+        # into its <input value="...">. Secrets are deliberately excluded --
+        # `updates` only ever holds a secret when the user typed a new one,
+        # and secrets still render through `masks`, never as plain text.
+        display = current.model_copy(
+            update={f: updates[f] for f in PLAIN_FIELDS if f in updates})
         return templates.TemplateResponse(request, "settings.html", {
-            "page": "settings", "s": current, "saved": False, "note": "",
+            "page": "settings", "s": display, "saved": False, "note": "",
             "error": _validation_message(exc),
             "masks": {f: _mask(str(getattr(current, f, ""))) for f in SECRET_FIELDS},
-            "model_options": models_catalog.list_models(current.llm_provider),
+            # display.llm_provider, not current.llm_provider -- the user may
+            # have changed the provider dropdown in the same submit that
+            # failed validation elsewhere; the catalog must match whichever
+            # provider is actually selected on the redisplayed page.
+            "model_options": models_catalog.list_models(display.llm_provider),
             **nav_context(c)}, status_code=400)
 
     old_interval = current.sentinel_interval_minutes

@@ -3,6 +3,13 @@ from __future__ import annotations
 import sqlite3
 
 SENTINEL_HEARTBEAT_KEY = "sentinel_last_pass"
+# Written alongside SENTINEL_HEARTBEAT_KEY on every scheduler tick, market
+# open or closed -- "true"/"false" -- so a reader of the heartbeat can tell
+# a real sentinel evaluation from a tick where the daemon proved it was
+# alive but skipped the actual check (market closed). Without this, the
+# dashboard's "last check Nm ago" is indistinguishable from "last tick Nm
+# ago, nothing evaluated since" -- misleading on a weekend or after close.
+SENTINEL_MARKET_OPEN_KEY = "sentinel_last_pass_market_open"
 
 
 class AppState:

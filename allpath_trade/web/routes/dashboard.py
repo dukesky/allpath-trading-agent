@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from allpath_trade.app import Components
 from allpath_trade.broker.base import Position
 from allpath_trade.data.base import DataSource, Quote
-from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY
+from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.templating import templates
 
@@ -33,6 +33,15 @@ BROKER_TIMEOUT_SECONDS = 10
 # killed (Python has no way to force that), but nothing here waits on it.
 _broker_pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=4, thread_name_prefix="dashboard-broker")
+
+# One shared budget for *all* quote lookups in a single dashboard render, not
+# BROKER_TIMEOUT_SECONDS per strategy -- a cold cache against N strategies
+# with an unresponsive data source would otherwise cost up to
+# N * BROKER_TIMEOUT_SECONDS on top of the two broker calls above. A module
+# attribute, read at call time rather than a bound default, for the same
+# reason as BROKER_TIMEOUT_SECONDS: tests need to shrink it to prove the
+# budget is enforced without waiting out the real value.
+QUOTES_BUDGET_SECONDS = 10
 
 
 def nav_context(components: Components) -> dict:
@@ -168,11 +177,24 @@ def _parse_heartbeat_ts(raw: str) -> datetime:
 
 
 def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
+                              market_open_raw: str | None = None,
                               now: datetime | None = None) -> dict:
-    """Pure function -- takes an already-read `app_state.get(...)` value, no
+    """Pure function -- takes already-read `app_state.get(...)` values, no
     I/O, so it's testable without a store (same shape as summarize_strategy
     above). A malformed stored value degrades to the same "never ran" copy
-    as a missing one, rather than 500ing the dashboard."""
+    as a missing one, rather than 500ing the dashboard.
+
+    `market_open_raw` is the SENTINEL_MARKET_OPEN_KEY value written
+    alongside the heartbeat timestamp (scheduler.py's `_run_sentinel_pass`).
+    The scheduler ticks -- and writes the heartbeat -- on every interval,
+    market open or closed; only the *evaluation* is gated on market hours.
+    Saying "last check Nm ago" when the last tick landed outside market
+    hours (a weekend, after close) is a claim nothing was actually checked.
+    `market_open_raw is None` covers a heartbeat written before this field
+    existed -- treated as open, i.e. today's copy, rather than guessing.
+    The staleness warning still keys off tick age either way: the tick
+    itself is real proof of life regardless of whether the market was open
+    when it landed."""
     if raw is None:
         return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
     try:
@@ -182,10 +204,11 @@ def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
     elapsed = (now or _utcnow()) - last
     minutes = max(0, int(elapsed.total_seconds() // 60))
     warn = minutes > 2 * interval_minutes
-    return {
-        "text": f"Sentinel: last check {minutes}m ago · interval {interval_minutes}m",
-        "warn": warn,
-    }
+    if market_open_raw == "false":
+        text = f"Sentinel: monitoring paused (market closed) · last tick {minutes}m ago"
+    else:
+        text = f"Sentinel: last check {minutes}m ago · interval {interval_minutes}m"
+    return {"text": text, "warn": warn}
 
 
 def error_redirect(target: str, message: str | None = None) -> RedirectResponse:
@@ -206,6 +229,15 @@ def error_redirect(target: str, message: str | None = None) -> RedirectResponse:
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     c = request.app.state.holder.get()
+
+    # Computed first, before either the broker calls or the strategy/quote
+    # loop below -- this line's entire purpose is answering "is my system
+    # wedged?", so it must never wait behind up to 2 * BROKER_TIMEOUT_SECONDS
+    # of broker calls plus the quote budget below to reach the page.
+    sentinel_status = sentinel_heartbeat_status(
+        c.app_state.get(SENTINEL_HEARTBEAT_KEY), c.settings.sentinel_interval_minutes,
+        market_open_raw=c.app_state.get(SENTINEL_MARKET_OPEN_KEY))
+
     account = None
     positions: list = []
     broker_error = ""
@@ -222,15 +254,24 @@ def dashboard(request: Request) -> HTMLResponse:
     positions_by_ticker = {p.ticker: p for p in positions}
     pending_strategy_ids = {row["strategy_id"] for row in c.queue.list("pending")}
     equity = account.equity if account is not None else None
-    strategy_cards = [
-        summarize_strategy(
-            s, positions_by_ticker.get(s.position.ticker),
-            _cached_quote(c.data, s.position.ticker),
-            equity=equity, has_pending=s.id in pending_strategy_ids)
-        for s in strategies
-    ]
-    sentinel_status = sentinel_heartbeat_status(
-        c.app_state.get(SENTINEL_HEARTBEAT_KEY), c.settings.sentinel_interval_minutes)
+
+    # One shared QUOTES_BUDGET_SECONDS deadline for the whole loop, not a
+    # fresh BROKER_TIMEOUT_SECONDS allowance per strategy -- once it's spent,
+    # remaining tickers render as "—" instead of each queuing another call
+    # against the (already possibly saturated, see _broker_pool's comment
+    # above) pool. A call already in flight when the deadline lands still
+    # runs to completion in the background; there's no way to cancel a
+    # thread mid-call, only to stop waiting on it (that's _with_timeout's
+    # job, per-call).
+    quote_deadline = time.monotonic() + QUOTES_BUDGET_SECONDS
+    strategy_cards = []
+    for s in strategies:
+        quote = (_cached_quote(c.data, s.position.ticker)
+                 if time.monotonic() < quote_deadline else None)
+        strategy_cards.append(summarize_strategy(
+            s, positions_by_ticker.get(s.position.ticker), quote,
+            equity=equity, has_pending=s.id in pending_strategy_ids))
+
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
         "broker_error": broker_error, "strategy_cards": strategy_cards,

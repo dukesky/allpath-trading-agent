@@ -9,7 +9,11 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from allpath_trade.notify import events
 from allpath_trade.sentinel import Sentinel, SentinelReport
-from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, AppState
+from allpath_trade.store.app_state import (
+    SENTINEL_HEARTBEAT_KEY,
+    SENTINEL_MARKET_OPEN_KEY,
+    AppState,
+)
 
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
@@ -51,10 +55,18 @@ def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
     market open or closed: it proves the *scheduler* is alive, not the
     market, and this is the one job body both `run_daemon` (the headless
     daemon) and `build_jobs` (the `serve` process) call through, so writing
-    it here covers both without duplicating the call site."""
+    it here covers both without duplicating the call site.
+
+    The market-open flag is written in the same try block, right alongside
+    the timestamp -- a reader needs both together to tell "the scheduler
+    ticked, and the sentinel actually ran" from "the scheduler ticked, but
+    the market was closed so nothing was evaluated" (dashboard.py's
+    sentinel_heartbeat_status uses it for exactly that)."""
     if app_state is not None:
         try:
             app_state.set(SENTINEL_HEARTBEAT_KEY, datetime.now(UTC).isoformat())
+            app_state.set(SENTINEL_MARKET_OPEN_KEY,
+                          "true" if is_market_hours() else "false")
         except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
             print(f"[heartbeat] failed: {exc}", file=sys.stderr)
     if is_market_hours():

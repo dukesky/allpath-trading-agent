@@ -399,6 +399,42 @@ def test_save_and_test_with_invalid_field_sends_nothing_and_returns_400(
     assert notifier.calls == []
 
 
+def test_invalid_field_does_not_discard_other_typed_fields_on_redisplay(client, tmp_path):
+    # Finding 3 (final review, phase5.5-ui-polish): a validation failure on
+    # one field must not throw away everything else the user typed in the
+    # same submit -- the 400 branch used to re-render from the last-saved
+    # Settings, discarding any unrelated, perfectly valid edit sitting in
+    # the same form (e.g. a corrected smtp_host typed alongside a mistyped
+    # interval).
+    env_path = tmp_path / ".env"
+    before = env_path.read_text()
+
+    r = client.post("/settings", data={
+        "sentinel_interval_minutes": "not-a-number",
+        "smtp_host": "smtp.newhost.example.com",
+    })
+
+    assert r.status_code == 400
+    assert "smtp.newhost.example.com" in r.text
+    # Still refused, still nothing written -- only the redisplay changed.
+    assert env_path.read_text() == before
+
+
+def test_invalid_field_redisplay_does_not_leak_the_typed_invalid_value_as_a_secret(
+        client, tmp_path):
+    # Secrets must keep going through `masks`, never straight text, even on
+    # the redisplay path -- a blank/omitted secret field in the failing POST
+    # must not somehow end up rendered in the clear.
+    (tmp_path / ".env").write_text(
+        'OPENROUTER_API_KEY="keep-me-secret"\nWEB_TOKEN="secret"\n')
+    client.app.state.holder.rebuild()
+
+    r = client.post("/settings", data={"sentinel_interval_minutes": "not-a-number"})
+
+    assert r.status_code == 400
+    assert "keep-me-secret" not in r.text
+
+
 def test_test_email_route_is_gone(client):
     assert client.post("/settings/test-email", follow_redirects=False).status_code == 404
 

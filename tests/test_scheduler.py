@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from allpath_trade.scheduler import (
     SENTINEL_JOB_ID,
+    SENTINEL_MARKET_OPEN_KEY,
     build_jobs,
     is_market_hours,
     reschedule_sentinel_job,
@@ -524,6 +525,43 @@ def test_build_jobs_no_digest_before_close(monkeypatch):
     scheduler.job()
 
     assert notifier.sent == []
+
+
+def test_build_jobs_records_market_open_true_alongside_heartbeat_when_open(monkeypatch):
+    # Finding 2 (final review, phase5.5-ui-polish): the dashboard needs to
+    # tell a real evaluation apart from a tick where the market was simply
+    # closed -- this is the flag it reads to do that.
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    app_state = FakeAppState()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FakeSentinel(),
+                                                 app_state=app_state)))
+
+    scheduler.job()
+
+    assert app_state.get(SENTINEL_MARKET_OPEN_KEY) == "true"
+
+
+def test_build_jobs_records_market_open_false_alongside_heartbeat_when_closed(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    sentinel = FakeSentinel()
+    app_state = FakeAppState()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=sentinel, app_state=app_state)))
+
+    scheduler.job()
+
+    assert sentinel.calls == 0  # market closed: sentinel itself did not run
+    assert app_state.get(SENTINEL_MARKET_OPEN_KEY) == "false"
+
+
+def test_run_daemon_records_market_open_flag_too(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    app_state = FakeAppState()
+
+    run_daemon(lambda: None, 5, scheduler_cls=ImmediateScheduler, app_state=app_state)
+
+    assert app_state.get(SENTINEL_MARKET_OPEN_KEY) == "false"
 
 
 def test_build_jobs_sentinel_runs_even_if_heartbeat_write_fails(monkeypatch, capsys):
