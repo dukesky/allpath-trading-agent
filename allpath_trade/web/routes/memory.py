@@ -52,7 +52,6 @@ def _layer_sections(c, layer: str | None = None) -> list[dict]:
 @router.get("/memory", response_class=HTMLResponse)
 def memory(request: Request) -> HTMLResponse:
     c = request.app.state.holder.get()
-    log = c.memory.recent_log(limit=30)
     tab = request.query_params.get("tab", "profile")
 
     # Unknown tabs fall back to profile
@@ -62,8 +61,10 @@ def memory(request: Request) -> HTMLResponse:
     # Build layers based on active tab
     if tab == "changes":
         layers = []
+        log = c.memory.recent_log(limit=30)
     else:
         layers = _layer_sections(c, tab)
+        log = []
 
     return templates.TemplateResponse(request, "memory.html", {
         "page": "memory",
