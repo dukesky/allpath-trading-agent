@@ -274,12 +274,44 @@ class _RecordingNotifier:
         return self.ok
 
 
-def test_test_email_button_reports_success(client):
-    notifier = _RecordingNotifier(ok=True)
-    client.app.state.holder.get().notifier = notifier
-    r = client.post("/settings/test-email", follow_redirects=False)
+def _install_notifier_spy(monkeypatch, ok: bool) -> _RecordingNotifier:
+    # A successful `action=save_and_test` always calls `holder.rebuild()`
+    # before sending, and `rebuild()` throws away the old `Components` --
+    # including whatever notifier a test had assigned directly onto it --
+    # and builds a brand new one via `build_components` (allpath_trade/app.py),
+    # which always calls `build_notifier(settings)` for the real thing. To
+    # inject a spy that survives that rebuild, patch `build_notifier` itself
+    # rather than an instance attribute that rebuild would discard.
+    import allpath_trade.app as app_module
+
+    spy = _RecordingNotifier(ok)
+    monkeypatch.setattr(app_module, "build_notifier", lambda settings: spy)
+    return spy
+
+
+def test_save_and_test_persists_changes_and_sends_exactly_once(client, tmp_path, monkeypatch):
+    # The old design posted the test button to a separate form, which
+    # reloaded the page from stored settings and discarded whatever the user
+    # had just typed into the main form. `action=save_and_test` must run the
+    # *same* save path as a normal submit -- persisting first -- and then
+    # send exactly one test notification against the just-saved config.
+    notifier = _install_notifier_spy(monkeypatch, ok=True)
+    r = client.post("/settings", data={
+        "action": "save_and_test",
+        "smtp_host": "smtp.example.com",
+        "smtp_from": "AllPath Trade <bot@example.com>",
+    }, follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/settings?note=email-sent"
+    text = (tmp_path / ".env").read_text()
+    assert "smtp.example.com" in text
+    assert client.app.state.holder.get().settings.smtp_host == "smtp.example.com"
+    assert len(notifier.calls) == 1
+
+
+def test_save_and_test_reports_success(client, monkeypatch):
+    notifier = _install_notifier_spy(monkeypatch, ok=True)
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
+    assert r.status_code == 303
     body = client.get(r.headers["location"]).text
     assert notifier.calls  # a send was actually attempted
     # Exact copy, not a loose substring like "sent" -- a future unrelated
@@ -290,16 +322,39 @@ def test_test_email_button_reports_success(client):
     assert "Test email failed" not in body
 
 
-def test_test_email_button_reports_failure(client):
-    notifier = _RecordingNotifier(ok=False)
-    client.app.state.holder.get().notifier = notifier
-    r = client.post("/settings/test-email", follow_redirects=False)
+def test_save_and_test_reports_failure(client, monkeypatch):
+    notifier = _install_notifier_spy(monkeypatch, ok=False)
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/settings?note=email-failed"
     body = client.get(r.headers["location"]).text
     assert notifier.calls  # a send was actually attempted
     assert "Test email failed" in body
     assert "Test email sent" not in body
+
+
+def test_save_and_test_with_invalid_field_sends_nothing_and_returns_400(
+        client, tmp_path, monkeypatch):
+    # A validation failure with action=save_and_test must behave exactly
+    # like a failed normal save: nothing written, nothing sent, 400 back.
+    # No rebuild happens on this path, so a plain instance assignment (rather
+    # than the rebuild-surviving `_install_notifier_spy`) is enough here.
+    notifier = _RecordingNotifier(ok=True)
+    client.app.state.holder.get().notifier = notifier
+    env_path = tmp_path / ".env"
+    before = env_path.read_text()
+
+    r = client.post("/settings", data={
+        "action": "save_and_test",
+        "sentinel_interval_minutes": "not-a-number",
+    })
+
+    assert r.status_code == 400
+    assert env_path.read_text() == before
+    assert notifier.calls == []
+
+
+def test_test_email_route_is_gone(client):
+    assert client.post("/settings/test-email", follow_redirects=False).status_code == 404
 
 
 def test_note_query_param_cannot_inject_arbitrary_page_text(client):

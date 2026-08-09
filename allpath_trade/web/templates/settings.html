@@ -6,8 +6,8 @@
 {# `note` is a fixed token from the server, never freeform text -- the copy
    itself lives here, in one place, so a crafted query string can only ever
    select between these two known messages, not inject its own. #}
-{% if note == 'email-sent' %}<p class="muted">Test email sent</p>{% endif %}
-{% if note == 'email-failed' %}<p class="muted">Test email failed — check SMTP settings and server logs</p>{% endif %}
+{% if note == 'email_ok' %}<p class="muted">Test email sent</p>{% endif %}
+{% if note == 'email_failed' %}<p class="muted">Test email failed — check SMTP settings and server logs</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 {# A model select offers every catalog entry for the active provider, plus
@@ -99,12 +99,17 @@
   </div>
 
   <div class="row" style="margin-top:18px">
-    <button class="primary" type="submit">Save settings</button>
+    <button class="primary" type="submit" name="action" value="save">Save settings</button>
+    {# Same form, same submit -- the only difference from the plain save
+       button is this field's value. Because it's one <form>, whatever the
+       user typed into the fields above is included in this POST too, so a
+       save-and-test click can no longer discard unsaved input the way the
+       old standalone test-email form did. #}
+    <button type="submit" name="action" value="save_and_test">Save and send test email</button>
   </div>
 </form>
 
 <div class="row" style="margin-top:12px">
-  <form method="post" action="/settings/test-email"><button type="submit">Send test email</button></form>
   <form method="post" action="/settings/reset-token"><button class="danger" type="submit">Reset access token</button></form>
 </div>
 

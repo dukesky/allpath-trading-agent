@@ -79,6 +79,12 @@ async def save(request: Request) -> Response:
     form = await request.form()
     holder = request.app.state.holder
     current = holder.get().settings
+    # The "Save and send test email" button is the same <form> as the normal
+    # save button -- only the submitted `action` differs -- so a save-and-test
+    # click still carries whatever the user just typed, unlike the old
+    # separate-form design where posting the test button reloaded the page
+    # from stored settings and threw that input away.
+    send_test = str(form.get("action", "")) == "save_and_test"
 
     updates: dict[str, str] = {}
     for field in BOOLEAN_FIELDS:
@@ -139,27 +145,26 @@ async def save(request: Request) -> Response:
         except Exception as exc:  # noqa: BLE001 — see comment above
             print(f"[settings] could not reschedule sentinel job: {exc}",
                   file=sys.stderr)
+
+    if send_test:
+        # Only reachable after the save above already succeeded -- a
+        # validation failure returns from the `except ValidationError` branch
+        # long before this point, so a rejected save can never trigger a send.
+        # Notifier.send() swallows its own exceptions (a broken notifier must
+        # never crash the caller) and reports the outcome only through its
+        # return value -- that return value is what turns this from "a
+        # request happened" into "the user learns whether it worked".
+        ok = holder.get().notifier.send(
+            "AllPath Trade test",
+            "This is a test notification. If you are reading it, "
+            "email delivery works.")
+        # The redirect only ever carries a fixed, known token -- never
+        # freeform text -- so a crafted `?note=...` link can't make this page
+        # render arbitrary copy. The actual message lives in one place: the
+        # template.
+        note = "email_ok" if ok else "email_failed"
+        return RedirectResponse(f"/settings?saved=1&note={note}", status_code=303)
     return RedirectResponse("/settings?saved=1", status_code=303)
-
-
-@router.post("/settings/test-email")
-def test_email(request: Request) -> Response:
-    c = request.app.state.holder.get()
-    # Notifier.send() swallows its own exceptions (a broken notifier must
-    # never crash the caller) and reports the outcome only through its
-    # return value -- that return value is what turns this from "a request
-    # happened" into "the user learns whether it worked", which is the
-    # whole point of a test button for a channel whose only other failure
-    # mode is a notification that silently never arrives.
-    ok = c.notifier.send(
-        "AllPath Trade test",
-        "This is a test notification. If you are reading it, "
-        "email delivery works.")
-    # The redirect only ever carries a fixed, known token -- never freeform
-    # text -- so a crafted `?note=...` link can't make this page render
-    # arbitrary copy. The actual message lives in one place: the template.
-    note = "email-sent" if ok else "email-failed"
-    return RedirectResponse(f"/settings?note={note}", status_code=303)
 
 
 @router.post("/settings/reset-token")
