@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+SENTINEL_HEARTBEAT_KEY = "sentinel_last_pass"
+
 
 class AppState:
     """Get/set access to the `app_state` key-value table.

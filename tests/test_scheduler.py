@@ -524,3 +524,27 @@ def test_build_jobs_no_digest_before_close(monkeypatch):
     scheduler.job()
 
     assert notifier.sent == []
+
+
+def test_build_jobs_sentinel_runs_even_if_heartbeat_write_fails(monkeypatch, capsys):
+    """Finding 1: a failed heartbeat write must not skip the sentinel pass."""
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    sentinel = FakeSentinel()
+    scheduler = FakeScheduler()
+
+    class FailingAppState:
+        def set(self, key, value):
+            raise RuntimeError("database is locked")
+
+        def get(self, key):
+            return None
+
+    components = _components(sentinel=sentinel, app_state=FailingAppState())
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    assert sentinel.calls == 1  # sentinel ran despite the heartbeat failure
+    stderr = capsys.readouterr().err
+    assert "heartbeat" in stderr
+    assert "failed" in stderr

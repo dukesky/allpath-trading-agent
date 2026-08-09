@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from allpath_trade.app import Components
 from allpath_trade.broker.base import Position
 from allpath_trade.data.base import DataSource, Quote
-from allpath_trade.scheduler import SENTINEL_HEARTBEAT_KEY
+from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.templating import templates
 
@@ -173,12 +173,11 @@ def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
     I/O, so it's testable without a store (same shape as summarize_strategy
     above). A malformed stored value degrades to the same "never ran" copy
     as a missing one, rather than 500ing the dashboard."""
-    if raw is not None:
-        try:
-            last = _parse_heartbeat_ts(raw)
-        except (TypeError, ValueError):
-            raw = None
     if raw is None:
+        return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
+    try:
+        last = _parse_heartbeat_ts(raw)
+    except (TypeError, ValueError):
         return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
     elapsed = (now or _utcnow()) - last
     minutes = max(0, int(elapsed.total_seconds() // 60))

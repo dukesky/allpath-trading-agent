@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
@@ -8,9 +9,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from allpath_trade.notify import events
 from allpath_trade.sentinel import Sentinel, SentinelReport
-from allpath_trade.store.app_state import AppState
-
-SENTINEL_HEARTBEAT_KEY = "sentinel_last_pass"
+from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, AppState
 
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
@@ -54,7 +53,10 @@ def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
     daemon) and `build_jobs` (the `serve` process) call through, so writing
     it here covers both without duplicating the call site."""
     if app_state is not None:
-        app_state.set(SENTINEL_HEARTBEAT_KEY, datetime.now(UTC).isoformat())
+        try:
+            app_state.set(SENTINEL_HEARTBEAT_KEY, datetime.now(UTC).isoformat())
+        except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
+            print(f"[heartbeat] failed: {exc}", file=sys.stderr)
     if is_market_hours():
         report = get_sentinel().run_once()
     else:
