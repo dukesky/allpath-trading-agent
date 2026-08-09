@@ -23,7 +23,7 @@
 
 ---
 
-> **Project status:** Phases 1-5 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Reflection loops are next; see the [Roadmap](#roadmap). **Paper trading only by default.**
+> **Project status:** Phases 1-5 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Reflection loops are next; see the [Roadmap](#roadmap). **Paper trading only by default.**
 
 ## Table of Contents
 
@@ -95,7 +95,7 @@ The framework is distributed as the Python package **`allpath-trade`** and is de
 │  └──────┬─────────────────────────────────────────┘ │
 │  ┌──────▼──────┐  ┌────────────┐  ┌──────────────┐  │
 │  │ Broker layer│  │ Data layer │  │ Notifications│  │   ✅ Phase 1
-│  │ (Alpaca)    │  │ (yfinance) │  │ (email)      │  │
+│  │ (Alpaca)    │  │ (yfinance) │  │ (email, ntfy)│  │
 │  └─────────────┘  └────────────┘  └──────────────┘  │
 │        SQLite (strategies · memory · trade journal)  │
 └─────────────────────────────────────────────────────┘
@@ -194,18 +194,23 @@ is no built-in HTTPS, so only bind `--host 0.0.0.0` on a network you trust.
 
 | Page | Purpose |
 |---|---|
-| Dashboard | Account equity, positions, active strategies, recent trades |
-| Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes |
+| Dashboard | Account equity, positions, active strategies (compact cards), recent trades, and a sentinel heartbeat so you can see at a glance that scheduled monitoring is actually running |
+| Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes; your message appears instantly with a "thinking" indicator while the agent works |
 | Pending | The confirmation queue — approve or reject agent-proposed orders, each with a risk pre-check |
-| Strategies | Strategy documents and version history, read-only; saving a change still requires `allpath-trade chat` in a terminal (see [Roadmap](#roadmap)) |
-| Memory | The four memory layers and their change history, read-only |
-| Settings | LLM/broker keys (write-only, never redisplayed), email notification settings, sentinel interval, and consolidation toggles |
+| Strategies | Strategy documents, lifecycle badges, and version history, read-only except for a per-strategy notification toggle; saving a rule change still requires `allpath-trade chat` in a terminal (see [Roadmap](#roadmap)) |
+| Memory | The four memory layers, tabbed, plus their change history — read-only |
+| Settings | LLM/broker keys (write-only, never redisplayed); model dropdowns fed by a cached OpenRouter catalog; email and ntfy push notification settings with a save-and-test button that reports each channel's outcome; sentinel interval and consolidation toggles |
 
 Orders the agent proposes in Chat never reach the broker directly — they
 land in the Pending queue exactly like a sentinel soft-rule trigger, and
 only your approval sends them on. Switching to live trading is not
 reachable from the web interface; that still requires editing `.env`
 directly (see [Safety Model](#safety-model)).
+
+Daily memory consolidation reads the day's conversation turns from every
+web chat session, not just terminal ones, so lessons and preferences you
+share in the browser make it into curated memory the same as a terminal
+session would.
 
 ## Project Structure
 
@@ -229,6 +234,7 @@ allpath_trade/          # import package (PyPI/CLI name: allpath-trade)
 | 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly, `allpath-trade chat` REPL, ReviewAgent-annotated sentinel triggers | ✅ Complete |
 | 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | ✅ Complete |
 | 5 | **Web UI + notifications** — `allpath-trade serve`, token auth, chat, dashboard, pending-confirmation queue, settings, email | ✅ Complete |
+| 5.5 | **UI polish + notification completion** — sticky nav, compact strategy cards, chat instant feedback, strategy lifecycle badges, tabbed memory page, model dropdowns from a cached catalog, save-and-test notifications, sentinel heartbeat, ntfy push, daily consolidation reads web chat | ✅ Complete |
 | 6 | **Reflection loops** — daily deep review, post-trade retrospectives | 🔜 Next |
 
 ## Development

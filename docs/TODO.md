@@ -54,9 +54,23 @@
       排队 + 批准的路径，而不是直接落盘（终审 Finding 3）
 - [ ] 策略 YAML 在线编辑（当前只读，修改走聊天让 agent 起草）
 - [ ] SSE 实时推送工具活动（当前为回合结束后整体刷新，见 `_chat_messages.html` 里的说明）
-- [ ] 手机推送通道（ntfy / Bark），比邮件更及时
 - [ ] `serve` 的 HTTPS / 反向代理部署文档
 - [ ] 独立守护进程 `allpath-trade run` 不发送每日摘要邮件——`_send_daily_digest` 只挂在 `serve` 的 `build_jobs` 里，`cli.py` 的 `run` 分支的 `daily_job` 只跑 consolidation
 - [ ] 通知正文里插值的文本（规则 condition、执行 detail、agent 的 recommendation）未做 URL 清理——其中若混入裸链接，邮件客户端可能自动转成可点击链接，与"通知不含链接"的设计承诺相悖
 - [ ] 一个永久挂起的 broker 会耗尽 `_broker_pool`（`dashboard.py` 的 4-worker 专用线程池）——耗尽之后仪表盘会一直显示"unavailable"，即使 broker 后来恢复也不会自愈，直到进程重启；且因为 `ThreadPoolExecutor` 的 worker 是非 daemon 线程，一次挂起的调用还会拖慢 `serve` 的干净关闭。根治办法是给 broker 的 HTTP 客户端加 socket 级别的超时，而不是只在应用层 `.result(timeout=...)`
 - [ ] compaction 的 flush 钩子（`on_before_compact` 绑定到 `Consolidator.run_post_chat`）是在触发它的那个回合的 turn lock 内、同步跑一次记忆层 LLM 调用——长对话里某一回合会出现明显的延迟尖峰，理想情况应该异步/后台执行，不阻塞当前回合的响应
+
+## Phase 5.5 遗留
+- [ ] 每日沉淀（daily consolidation）读取网页对话的排水速率固定为每天最多 150 条过滤后的
+      turn 行（`TURN_LINES_CAP`，`allpath_trade/memory/consolidate.py`），没有补跑循环——
+      如果某一天产生的合格 turn 持续超过这个量，没消费完的部分只会顺延到第二天，长期高频
+      对话场景下积压会越滚越大，没有机制能一次性追上
+- [ ] `run_daily` 的"无事可沉淀"短路分支只检查 `events` 和过滤后的 `turn_lines` 是否都为
+      空；如果这一批抓到的 turn 全部是被过滤掉的系统/工具消息（`eligible` 为空但 `turns`
+      非空），短路会在推进 turn marker 之前就直接返回"nothing to consolidate"，导致这批
+      已经读过的 ineligible turn 下次仍会被重新抓取——无害但白做一遍，且与 `_turn_lines`
+      自己文档字符串里"只有工具/系统消息的一批也必须清空队列"的承诺不一致
+- [ ] ntfy.sh 上的公开主题目前仅靠主题名本身的不可猜测性保护（设置页提示与
+      `.env.example` 里已提醒使用长且随机的主题名），通知正文又带 ticker、买卖方向、拒单
+      详情——值得后续给 ntfy 通道加认证头（access token / Bearer）支持，而不是只依赖主题名
+      保密
