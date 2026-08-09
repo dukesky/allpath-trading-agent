@@ -120,6 +120,19 @@ def test_saving_writes_env_and_rebuilds(client, tmp_path):
     assert client.app.state.holder.get().settings.chat_model == "anthropic/claude-opus-5"
 
 
+def test_ntfy_url_field_renders_and_round_trips(client, tmp_path):
+    body = client.get("/settings").text
+    assert 'name="ntfy_url"' in body
+    assert "Install the ntfy app and subscribe to your topic" in body
+
+    r = client.post("/settings", data={"ntfy_url": "https://ntfy.sh/my-topic"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "https://ntfy.sh/my-topic" in (tmp_path / ".env").read_text()
+    assert client.app.state.holder.get().settings.ntfy_url == "https://ntfy.sh/my-topic"
+    assert "https://ntfy.sh/my-topic" in client.get("/settings").text
+
+
 def test_model_fields_render_as_selects_with_the_stored_value_selected(client):
     body = client.get("/settings").text
     assert '<select name="chat_model"' in body
@@ -318,8 +331,8 @@ def test_save_and_test_reports_success(client, monkeypatch):
     # label (e.g. "failover") must not be able to break this test, and this
     # must not be able to pass against a page that merely fails to mention
     # failure at all.
-    assert "Test email sent" in body
-    assert "Test email failed" not in body
+    assert "Test notification sent" in body
+    assert "Test notification failed" not in body
 
 
 def test_save_and_test_reports_failure(client, monkeypatch):
@@ -328,8 +341,41 @@ def test_save_and_test_reports_failure(client, monkeypatch):
     assert r.status_code == 303
     body = client.get(r.headers["location"]).text
     assert notifier.calls  # a send was actually attempted
-    assert "Test email failed" in body
-    assert "Test email sent" not in body
+    assert "Test notification failed on every configured channel" in body
+    assert "Test notification sent" not in body
+
+
+def test_save_and_test_with_only_console_configured_reports_not_configured(client):
+    # Nothing was ever set up -- no SMTP, no ntfy -- so the real notifier
+    # built for this holder is a bare ConsoleNotifier. ConsoleNotifier.send()
+    # always returns True, but reporting "sent" here would be a lie the user
+    # acts on: nothing left this process. This is the deferred Task 6 finding
+    # the brief calls out explicitly.
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
+    assert r.status_code == 303
+    body = client.get(r.headers["location"]).text
+    assert "No notification channel is configured" in body
+    assert "Test notification sent" not in body
+
+
+def test_save_and_test_with_one_of_two_channels_working_reports_partial(client, monkeypatch):
+    # Patch build_notifier itself (see _install_notifier_spy's comment above
+    # on why an instance attribute would be discarded by rebuild()) to
+    # return a MultiNotifier with one working and one broken child, the way
+    # a real email+ntfy configuration where only one channel is healthy
+    # would compose.
+    import allpath_trade.app as app_module
+    from allpath_trade.notify.base import MultiNotifier
+
+    working = _RecordingNotifier(ok=True)
+    broken = _RecordingNotifier(ok=False)
+    monkeypatch.setattr(app_module, "build_notifier",
+                        lambda settings: MultiNotifier([working, broken]))
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
+    assert r.status_code == 303
+    body = client.get(r.headers["location"]).text
+    assert working.calls and broken.calls  # both channels actually attempted
+    assert "Test notification reached some channels but not others" in body
 
 
 def test_save_and_test_with_invalid_field_sends_nothing_and_returns_400(

@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = ""
     notify_to: str = ""
+    # Push notification channel via ntfy (https://ntfy.sh or self-hosted):
+    # the full topic URL the app POSTs to, e.g. "https://ntfy.sh/my-topic".
+    # Blank means the channel is not configured -- see build_notifier.
+    ntfy_url: str = ""
     # Same class of brick Task 12 set out to prevent (see Finding 4 of the
     # Phase 5 final review): APScheduler's IntervalTrigger does not validate
     # positivity. 0 or a negative interval doesn't fail to schedule -- it

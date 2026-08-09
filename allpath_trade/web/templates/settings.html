@@ -6,8 +6,10 @@
 {# `note` is a fixed token from the server, never freeform text -- the copy
    itself lives here, in one place, so a crafted query string can only ever
    select between these two known messages, not inject its own. #}
-{% if note == 'email_ok' %}<p class="muted">Test email sent</p>{% endif %}
-{% if note == 'email_failed' %}<p class="muted">Test email failed — check SMTP settings and server logs</p>{% endif %}
+{% if note == 'test_ok' %}<p class="muted">Test notification sent</p>{% endif %}
+{% if note == 'test_partial' %}<p class="muted">Test notification reached some channels but not others — check the failing channel's settings and server logs</p>{% endif %}
+{% if note == 'test_failed' %}<p class="muted">Test notification failed on every configured channel — check your settings and server logs</p>{% endif %}
+{% if note == 'test_none' %}<p class="muted">No notification channel is configured, so nothing was sent — add email or push settings below first</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 {# A model select offers every catalog entry for the active provider, plus
@@ -74,6 +76,12 @@
     <p class="hint">Notifications report what happened; they never contain action links.</p>
   </div>
 
+  <h2>Push notifications</h2>
+  <div class="card">
+    <label>ntfy topic URL</label><input name="ntfy_url" value="{{ s.ntfy_url }}" placeholder="https://ntfy.sh/your-topic">
+    <p class="hint">Install the ntfy app and subscribe to your topic, then paste the topic URL here.</p>
+  </div>
+
   <h2>Sentinel and memory</h2>
   <div class="card">
     <label>Check interval (minutes)</label><input name="sentinel_interval_minutes" value="{{ s.sentinel_interval_minutes }}" type="number">
@@ -105,7 +113,7 @@
        user typed into the fields above is included in this POST too, so a
        save-and-test click can no longer discard unsaved input the way the
        old standalone test-email form did. #}
-    <button type="submit" name="action" value="save_and_test">Save and send test email</button>
+    <button type="submit" name="action" value="save_and_test">Save and send test notification</button>
   </div>
 </form>
 

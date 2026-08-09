@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 from allpath_trade.config import Settings, describe_validation_error
+from allpath_trade.notify.base import send_test_notification
 from allpath_trade.scheduler import reschedule_sentinel_job
 from allpath_trade.web import models_catalog
 from allpath_trade.web.auth import COOKIE
@@ -19,7 +20,7 @@ router = APIRouter()
 # Plain values: rendered, editable, rewritten on every save.
 PLAIN_FIELDS = ["llm_provider", "chat_model", "review_model", "memory_model",
                 "smtp_host", "smtp_port", "smtp_user", "smtp_from", "notify_to",
-                "sentinel_interval_minutes", "context_budget_tokens"]
+                "ntfy_url", "sentinel_interval_minutes", "context_budget_tokens"]
 
 # Checkbox values: a browser omits an unchecked box from the form body
 # entirely, so these need explicit "present -> true, absent -> false"
@@ -154,15 +155,20 @@ async def save(request: Request) -> Response:
         # never crash the caller) and reports the outcome only through its
         # return value -- that return value is what turns this from "a
         # request happened" into "the user learns whether it worked".
-        ok = holder.get().notifier.send(
+        # send_test_notification (notify/base.py) dispatches on the
+        # notifier's own type -- ConsoleNotifier / a single channel /
+        # MultiNotifier -- rather than this route re-deriving which channels
+        # are configured from Settings fields, so this stays a one-line call
+        # regardless of how many channels exist.
+        note = send_test_notification(
+            holder.get().notifier,
             "AllPath Trade test",
             "This is a test notification. If you are reading it, "
-            "email delivery works.")
+            "notification delivery works.")
         # The redirect only ever carries a fixed, known token -- never
         # freeform text -- so a crafted `?note=...` link can't make this page
         # render arbitrary copy. The actual message lives in one place: the
         # template.
-        note = "email_ok" if ok else "email_failed"
         return RedirectResponse(f"/settings?saved=1&note={note}", status_code=303)
     return RedirectResponse("/settings?saved=1", status_code=303)
 
