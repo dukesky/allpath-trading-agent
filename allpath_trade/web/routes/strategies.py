@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import yaml
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from allpath_trade.strategy.loader import is_valid_strategy_id
+from allpath_trade.strategy.loader import is_valid_strategy_id, parse_strategy_text
 from allpath_trade.strategy.model import RuleState, StrategyDoc
 from allpath_trade.web.routes.dashboard import error_redirect, nav_context
 from allpath_trade.web.templating import templates
@@ -14,6 +15,27 @@ router = APIRouter()
 # table on every detail-page load; the store keeps every row (other
 # callers, e.g. action-tool tests, rely on that), so the cap lives here.
 _MAX_VERSIONS_SHOWN = 20
+
+
+def _lifecycle_chips(doc: StrategyDoc, has_pending: bool) -> list[str]:
+    """Computed "what's actually happening right now" chips, shown next to
+    the doc.status.value chip. Mirrors dashboard.summarize_strategy's alert
+    logic (same RuleState.TRIGGERED check, same has_pending shape) rather
+    than inventing a third way to answer "is anything running" -- the one
+    difference is a count ("N triggered") instead of a flat "rule
+    triggered" string, since this page has room to be specific."""
+    triggered = sum(1 for r in doc.rules if r.state == RuleState.TRIGGERED)
+    chips = []
+    if triggered:
+        chips.append(f"{triggered} triggered")
+    if has_pending:
+        chips.append("pending review")
+    return chips
+
+
+def _chips_by_id(c, docs: list[StrategyDoc]) -> dict[str, list[str]]:
+    pending_strategy_ids = {row["strategy_id"] for row in c.queue.list("pending")}
+    return {doc.id: _lifecycle_chips(doc, doc.id in pending_strategy_ids) for doc in docs}
 
 
 def _find_doc(c, strategy_id: str) -> StrategyDoc | None:
@@ -41,6 +63,7 @@ def _not_found(request: Request, c, message: str) -> HTMLResponse:
     docs = c.strategies.load_all(status=None, errors=errors)
     return templates.TemplateResponse(request, "strategies.html", {
         "page": "strategies", "docs": docs, "errors": errors,
+        "chips": _chips_by_id(c, docs),
         "error": message, **nav_context(c)}, status_code=404)
 
 
@@ -51,6 +74,7 @@ def index(request: Request) -> HTMLResponse:
     docs = c.strategies.load_all(status=None, errors=errors)
     return templates.TemplateResponse(request, "strategies.html", {
         "page": "strategies", "docs": docs, "errors": errors,
+        "chips": _chips_by_id(c, docs),
         "error": request.query_params.get("error"), **nav_context(c)})
 
 
@@ -66,11 +90,40 @@ def detail(request: Request, strategy_id: str) -> HTMLResponse:
     if doc is None:
         return _not_found(request, c, "Strategy not found")
     path = c.strategies.directory / f"{strategy_id}.yaml"
+    has_pending = any(row["strategy_id"] == strategy_id
+                      for row in c.queue.list("pending"))
     return templates.TemplateResponse(request, "strategy_detail.html", {
         "page": "strategies", "doc": doc,
+        "chips": _lifecycle_chips(doc, has_pending),
         "yaml_text": path.read_text() if path.exists() else "",
         "versions": c.strategies.versions(strategy_id)[:_MAX_VERSIONS_SHOWN],
         "error": request.query_params.get("error"), **nav_context(c)})
+
+
+@router.post("/strategies/{strategy_id}/notify-email")
+def toggle_notify_email(request: Request, strategy_id: str) -> Response:
+    c = request.app.state.holder.get()
+    if not is_valid_strategy_id(strategy_id):
+        return _not_found(request, c, "Strategy not found")
+    # Same existence check the detail page uses -- an id that is well-formed
+    # but doesn't correspond to a real, loadable strategy has no page of its
+    # own to redirect back to, so this 404s rather than bouncing to the
+    # index with an error banner the way rearm (which always has a real
+    # strategy to point at) does.
+    if _find_doc(c, strategy_id) is None:
+        return _not_found(request, c, "Strategy not found")
+    path = c.strategies.directory / f"{strategy_id}.yaml"
+    # Re-parse the raw file text (not the merged doc from _find_doc, which
+    # has SQLite's runtime rule state folded in) -- writing that back would
+    # bake a triggered rule's runtime state into the YAML, which is
+    # supposed to live only in SQLite (see StrategyStore's docstring).
+    current = parse_strategy_text(strategy_id, path.read_text())
+    updated = current.model_copy(update={"notify_email": not current.notify_email})
+    new_text = yaml.safe_dump(updated.model_dump(mode="json"), sort_keys=False,
+                              allow_unicode=True)
+    path.write_text(new_text)
+    c.strategies.snapshot_version(updated, "notify_email toggled via web")
+    return RedirectResponse(f"/strategies/{strategy_id}", status_code=303)
 
 
 @router.post("/strategies/{strategy_id}/rules/{rule_id}/rearm")

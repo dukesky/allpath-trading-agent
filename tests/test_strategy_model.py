@@ -2,9 +2,14 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
-from allpath_trade.strategy.loader import StrategyValidationError, load_strategy
+from allpath_trade.strategy.loader import (
+    StrategyValidationError,
+    load_strategy,
+    parse_strategy_text,
+)
 from allpath_trade.strategy.model import (
     Authorization,
     PositionPlan,
@@ -111,7 +116,23 @@ def test_load_action_typo_collects_error_not_crash(tmp_path):
 
 
 def test_parse_strategy_text_matches_load(tmp_path):
-    from allpath_trade.strategy.loader import parse_strategy_text
-
     doc = parse_strategy_text("aapl-long", GOOD_YAML)
     assert doc.id == "aapl-long" and doc.position.ticker == "AAPL"
+
+
+def test_notify_email_defaults_true_when_absent(tmp_path):
+    # Backward compatibility: a YAML written before this field existed (and
+    # GOOD_YAML above, which has no notify_email key) must still load as
+    # notifying -- the toggle is opt-out, not opt-in.
+    doc = load_strategy(write(tmp_path, GOOD_YAML))
+    assert doc.notify_email is True
+
+
+def test_notify_email_false_round_trips_through_parse_and_dump(tmp_path):
+    text = GOOD_YAML + "\nnotify_email: false\n"
+    doc = parse_strategy_text("aapl-long", text)
+    assert doc.notify_email is False
+    dumped = yaml.safe_dump(doc.model_dump(mode="json"), sort_keys=False,
+                            allow_unicode=True)
+    reparsed = parse_strategy_text("aapl-long", dumped)
+    assert reparsed.notify_email is False

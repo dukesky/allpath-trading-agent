@@ -3,14 +3,21 @@
 {% block content %}
 <h1>Strategies</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
-{% for d in docs %}
+{% for ticker, group in docs | groupby('position.ticker') %}
+<h2>{{ ticker }}</h2>
+{% for d in group %}
 <div class="card" style="margin-bottom:10px">
   <div class="row">
-    <a href="/strategies/{{ d.id }}"><strong>{{ d.name }}</strong></a>
-    <span class="muted">· {{ d.position.ticker }}</span>
-    <span style="margin-left:auto" class="muted">v{{ d.version }} · {{ d.status.value }} / {{ d.authorization.value }}</span>
+    <strong>{{ d.name }}</strong>
+    <span class="muted">· v{{ d.version }} · {{ d.authorization.value }}</span>
+    <a style="margin-left:auto" href="/strategies/{{ d.id }}">View details</a>
+  </div>
+  <div class="row" style="margin-top:6px">
+    <span class="badge">{{ d.status.value }}</span>
+    {% for chip in chips[d.id] %}<span class="badge">{{ chip }}</span>{% endfor %}
   </div>
 </div>
+{% endfor %}
 {% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
 {% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
 {% endblock %}

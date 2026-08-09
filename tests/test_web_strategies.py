@@ -112,6 +112,75 @@ def test_detail_page_caps_rendered_version_history(client):
     assert "edit-5</td>" not in body  # oldest trimmed
 
 
+def test_strategies_list_shows_status_and_lifecycle_chips(client):
+    c = client.app.state.holder.get()
+    c.strategies.set_rule_state("semis", "r1", RuleState.TRIGGERED)
+    c.queue.add(strategy_id="semis", rule_id="r1", ticker="AAPL", rule_type="hard",
+                condition="price < 100", action="sell all", snapshot={}, intent=None)
+    body = client.get("/strategies").text
+    assert "active" in body
+    assert "1 triggered" in body
+    assert "pending review" in body
+
+
+def test_strategies_list_omits_chips_when_nothing_is_running(client):
+    body = client.get("/strategies").text
+    assert "triggered" not in body
+    assert "pending review" not in body
+
+
+def test_notify_email_toggle_flips_field_and_records_a_version(client):
+    store = client.app.state.holder.get().strategies
+    doc = next(d for d in store.load_all(status=None, errors=[]) if d.id == "semis")
+    assert doc.notify_email is True
+
+    r = client.post("/strategies/semis/notify-email", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/strategies/semis"
+
+    doc2 = next(d for d in store.load_all(status=None, errors=[]) if d.id == "semis")
+    assert doc2.notify_email is False
+    versions = store.versions("semis")
+    assert versions[0]["reason"] == "notify_email toggled via web"
+
+    # Toggling again flips it back -- and it's a genuine YAML rewrite each
+    # time, not a string edit (rule fields must still round-trip untouched).
+    client.post("/strategies/semis/notify-email")
+    doc3 = next(d for d in store.load_all(status=None, errors=[]) if d.id == "semis")
+    assert doc3.notify_email is True
+    assert doc3.rules[0].condition == "price < 100"
+
+
+def test_notify_email_toggle_does_not_persist_runtime_rule_state(client):
+    # rule state lives in SQLite, not the YAML -- writing the file back
+    # through the parse/dump round trip must not bake a triggered rule's
+    # runtime state into the source of truth.
+    store = client.app.state.holder.get().strategies
+    store.set_rule_state("semis", "r1", RuleState.TRIGGERED)
+    client.post("/strategies/semis/notify-email")
+    path = store.directory / "semis.yaml"
+    assert "triggered" not in path.read_text()
+    # the SQLite-backed state is unaffected by the toggle
+    doc = next(d for d in store.load_all(status=None, errors=[]) if d.id == "semis")
+    assert doc.rules[0].state.value == "triggered"
+
+
+def test_notify_email_toggle_unknown_strategy_404s(client):
+    r = client.post("/strategies/nope/notify-email")
+    assert r.status_code == 404
+
+
+def test_notify_email_toggle_path_traversal_is_refused(client):
+    r = client.post("/strategies/..%2f..%2fetc%2fpasswd/notify-email",
+                    follow_redirects=False)
+    assert r.status_code in (400, 404)
+
+
+def test_detail_page_shows_notify_email_toggle_control(client):
+    body = client.get("/strategies/semis").text
+    assert 'action="/strategies/semis/notify-email"' in body
+
+
 def test_rearm_of_bogus_rule_on_a_real_strategy_is_not_processed(client):
     store = client.app.state.holder.get().strategies
     r = client.post("/strategies/semis/rules/no-such-rule/rearm")

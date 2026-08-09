@@ -18,8 +18,8 @@ from allpath_trade.strategy.store import StrategyStore
 
 
 def strategy_yaml(auth="auto", rule_type="hard", condition="price < 250",
-                  action="sell all", status="active"):
-    return f"""
+                  action="sell all", status="active", notify_email=True):
+    text = f"""
 name: "T"
 status: {status}
 authorization: {auth}
@@ -27,6 +27,9 @@ position: {{ticker: AAPL, target_weight: 15%}}
 rules:
   - {{id: r1, type: {rule_type}, condition: "{condition}", action: "{action}"}}
 """
+    if not notify_email:
+        text += "notify_email: false\n"
+    return text
 
 
 class FakeData(DataSource):
@@ -418,6 +421,34 @@ def test_agent_skip_recommendation_sends_notification(tmp_path):
     [(subject, body)] = n.sent
     assert "AAPL" in subject and "rule r1 triggered" in subject
     assert "skipped" in body
+
+
+def test_notify_email_false_suppresses_notification_but_still_executes(tmp_path):
+    # The flag gates the email only -- the disposition (execute/queue/record)
+    # must happen exactly as if notify_email were true.
+    s, store, ex, _q, n = make(tmp_path, strategy_yaml(notify_email=False))
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "executed"
+    assert len(ex.calls) == 1
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED
+    assert n.sent == []
+
+
+def test_notify_email_false_suppresses_notification_but_still_queues(tmp_path):
+    s, _store, ex, q, n = make(tmp_path, strategy_yaml(auth="confirm", notify_email=False))
+    report = s.run_once()
+    assert report.outcomes[0].disposition == "queued"
+    assert len(q.list()) == 1
+    assert ex.calls == []
+    assert n.sent == []
+
+
+def test_notify_email_true_still_notifies(tmp_path):
+    # Sanity check the default (and explicit true) is unaffected.
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(notify_email=True))
+    s.run_once()
+    assert len(n.sent) == 1
 
 
 def test_hard_auto_gate_rejected_notification_uses_order_result_event(tmp_path):
