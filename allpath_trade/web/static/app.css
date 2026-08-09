@@ -88,3 +88,10 @@ input, select, textarea { background:var(--bg); color:var(--text);
 pre { font-family:var(--mono); font-size:13px; overflow-x:auto;
   background:var(--surface); border:1px solid var(--line);
   border-radius:8px; padding:12px; }
+.tabs { display:flex; gap:0; border-bottom:1px solid var(--line);
+  margin:20px 0; }
+.tab-link { flex:0 0 auto; padding:10px 14px; font-size:14px;
+  color:var(--muted); border-bottom:2px solid transparent; cursor:pointer;
+  text-decoration:none; }
+.tab-link:hover { color:var(--text); }
+.tab-link.on { color:var(--text); border-bottom-color:var(--text); }

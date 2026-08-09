@@ -30,7 +30,8 @@ def test_layers_are_rendered(client):
 def test_audit_trail_is_shown(client):
     c = client.app.state.holder.get()
     c.memory.apply("profile", None, "add", text="likes semis")
-    assert "add" in client.get("/memory").text
+    # Audit trail is on the changes tab
+    assert "add" in client.get("/memory?tab=changes").text
 
 
 def test_memory_page_is_english_only(client):
@@ -60,7 +61,7 @@ def test_stock_dossier_is_listed_under_its_own_key(client):
     # the same directory the store actually writes to.
     c = client.app.state.holder.get()
     c.memory.apply("stock", "aapl", "add", text="strong cash flow")
-    body = client.get("/memory").text
+    body = client.get("/memory?tab=stock").text
     assert "AAPL" in body
     assert "strong cash flow" in body
 
@@ -74,9 +75,12 @@ def test_strategy_and_lesson_layers_are_listed_under_their_own_keys(client):
     c = client.app.state.holder.get()
     c.memory.apply("strategy", "momentum", "add", text="buy on breakout")
     c.memory.apply("lesson", "overtrading", "add", text="cut position size")
-    body = client.get("/memory").text
+    # Check strategy tab
+    body = client.get("/memory?tab=strategy").text
     assert "momentum" in body
     assert "buy on breakout" in body
+    # Check lesson tab
+    body = client.get("/memory?tab=lesson").text
     assert "overtrading" in body
     assert "cut position size" in body
 
@@ -91,7 +95,7 @@ def test_stray_file_with_invalid_key_name_is_skipped(client):
     c.memory.apply("stock", "aapl", "add", text="strong cash flow")
     stray = c.memory.root / "stocks" / "stray backup.md"
     stray.write_text("not a valid key")
-    r = client.get("/memory")
+    r = client.get("/memory?tab=stock")
     assert r.status_code == 200
     assert "AAPL" in r.text
     assert "strong cash flow" in r.text
@@ -117,3 +121,96 @@ def test_audit_trail_content_is_also_rendered_inert(client):
     c.memory.apply("profile", None, "add", text="<b>bold</b> pick")
     body = client.get("/memory").text
     assert "<b>bold</b>" not in body
+
+
+def test_default_tab_shows_profile_only(client):
+    # Default tab is profile, so only profile content is visible.
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="profile content")
+    c.memory.apply("stock", "aapl", "add", text="stock content")
+    c.memory.apply("strategy", "momentum", "add", text="strategy content")
+    c.memory.apply("lesson", "overtrading", "add", text="lesson content")
+    body = client.get("/memory").text
+    assert "profile content" in body
+    # Other layers should not be shown in default tab
+    assert "stock content" not in body
+    assert "strategy content" not in body
+    assert "lesson content" not in body
+
+
+def test_tab_query_param_stock_shows_stock_layer(client):
+    # ?tab=stock shows only stock dossier sections.
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="profile content")
+    c.memory.apply("stock", "aapl", "add", text="apple dossier")
+    body = client.get("/memory?tab=stock").text
+    assert "apple dossier" in body
+    assert "AAPL" in body
+    # Profile and other layers should not be shown
+    assert "profile content" not in body
+
+
+def test_tab_query_param_strategy_shows_strategy_layer(client):
+    # ?tab=strategy shows only strategy sections.
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="profile content")
+    c.memory.apply("strategy", "momentum", "add", text="momentum notes")
+    body = client.get("/memory?tab=strategy").text
+    assert "momentum notes" in body
+    assert "momentum" in body
+    # Profile should not be shown
+    assert "profile content" not in body
+
+
+def test_tab_query_param_lesson_shows_lesson_layer(client):
+    # ?tab=lesson shows only lesson sections.
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="profile content")
+    c.memory.apply("lesson", "overtrading", "add", text="cut position size")
+    body = client.get("/memory?tab=lesson").text
+    assert "cut position size" in body
+    assert "overtrading" in body
+    # Profile should not be shown
+    assert "profile content" not in body
+
+
+def test_tab_changes_shows_audit_trail(client):
+    # ?tab=changes shows the audit trail/log.
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="profile content")
+    body = client.get("/memory?tab=changes").text
+    # Audit trail should be shown
+    assert "add" in body
+    # Layer sections should not be shown (no h2 title for Profile layer)
+    # The content may appear in the audit log, but not as a separate section
+    lines = body.split('\n')
+    # Find the Profile h2 in the layer content section (not in the table)
+    has_profile_section = any('<h2>Profile</h2>' in line for line in lines)
+    assert not has_profile_section
+    # Recent changes table should be present
+    assert "Recent changes" in body
+
+
+def test_unknown_tab_falls_back_to_profile(client):
+    # Unknown tab values should not 500, but fall back to profile.
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="profile content")
+    c.memory.apply("stock", "aapl", "add", text="stock content")
+    r = client.get("/memory?tab=invalid")
+    assert r.status_code == 200
+    assert "profile content" in r.text
+    # Stock should not be shown (we're on profile tab)
+    assert "stock content" not in r.text
+
+
+def test_memory_page_with_tabs_has_no_edit_controls(client):
+    # Read-only assertion still holds with tab navigation.
+    c = client.app.state.holder.get()
+    c.memory.apply("profile", None, "add", text="content")
+    c.memory.apply("stock", "aapl", "add", text="stock content")
+    # Check all tabs for edit controls
+    for tab in ["profile", "strategy", "stock", "lesson", "changes"]:
+        body = client.get(f"/memory?tab={tab}").text.lower()
+        assert "<textarea" not in body
+        assert "delete" not in body
+        assert "<form" not in body

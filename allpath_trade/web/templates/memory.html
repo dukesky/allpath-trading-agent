@@ -4,12 +4,15 @@
 <h1>Memory</h1>
 <p class="hint">Memory is written by the agent during consolidation, and every write is scanned for injected instructions. To change something, tell the agent in Chat.</p>
 
-{% for layer in layers %}
-<h2>{{ layer.title }}</h2>
-{% if layer.body.strip() %}<pre>{{ layer.body }}</pre>
-{% else %}<p class="muted">Empty.</p>{% endif %}
-{% endfor %}
+<div class="tabs">
+  <a href="/memory?tab=profile" class="tab-link{% if active_tab == 'profile' %} on{% endif %}">Profile</a>
+  <a href="/memory?tab=strategy" class="tab-link{% if active_tab == 'strategy' %} on{% endif %}">Strategy</a>
+  <a href="/memory?tab=stock" class="tab-link{% if active_tab == 'stock' %} on{% endif %}">Stocks</a>
+  <a href="/memory?tab=lesson" class="tab-link{% if active_tab == 'lesson' %} on{% endif %}">Lessons</a>
+  <a href="/memory?tab=changes" class="tab-link{% if active_tab == 'changes' %} on{% endif %}">Changes</a>
+</div>
 
+{% if active_tab == 'changes' %}
 <h2>Recent changes</h2>
 {% if log %}
 <table>
@@ -24,4 +27,11 @@
   {% endfor %}
 </table>
 {% else %}<p class="muted">Nothing recorded yet.</p>{% endif %}
+{% else %}
+{% for layer in layers %}
+<h2>{{ layer.title }}</h2>
+{% if layer.body.strip() %}<pre>{{ layer.body }}</pre>
+{% else %}<p class="muted">Empty.</p>{% endif %}
+{% endfor %}
+{% endif %}
 {% endblock %}
