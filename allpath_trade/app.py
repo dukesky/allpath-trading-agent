@@ -16,6 +16,7 @@ from allpath_trade.notify.email import build_notifier
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 from allpath_trade.sentinel import Sentinel
 from allpath_trade.store.app_state import AppState
+from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.reviews import ReviewQueue
@@ -77,7 +78,9 @@ def build_components(settings: Settings, broker: Broker | None = None,
                                 queue=queue)
         sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
         consolidator = Consolidator(build_llm(settings, tier="memory"), memory,
-                                    observations, journal, conn)
+                                    observations, journal, conn,
+                                    conversations=ConversationStore(conn),
+                                    app_state=app_state)
     except LLMConfigError:
         pass  # no LLM configured: Phase 2 behavior
     return Components(settings=settings, broker=broker, data=data, journal=journal,

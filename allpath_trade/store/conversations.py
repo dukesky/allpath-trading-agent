@@ -57,6 +57,19 @@ class ConversationStore:
             (conversation_id, after_turn_id))
         return [(r["id"], json.loads(r["message"])) for r in rows]
 
+    def turns_since(self, after_turn_id: int = 0) -> list[tuple[int, dict]]:
+        """All turns across every conversation with id > after_turn_id,
+        oldest first. Unlike `history`/`history_with_ids`, which are scoped
+        to one conversation (a single chat session), this spans the whole
+        table -- the daily consolidator aggregates a day's worth of web and
+        terminal chats together, not one session at a time, so it needs a
+        global watermark rather than a per-conversation one."""
+        rows = self._conn.execute(
+            "SELECT id, message FROM conversation_turns"
+            " WHERE id > ? ORDER BY id",
+            (after_turn_id,))
+        return [(r["id"], json.loads(r["message"])) for r in rows]
+
     def summary(self, conversation_id: int) -> tuple[str, int]:
         row = self._conn.execute(
             "SELECT summary, summarized_through FROM conversations WHERE id = ?",
