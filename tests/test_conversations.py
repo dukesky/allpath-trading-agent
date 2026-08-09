@@ -41,6 +41,29 @@ def test_summary_columns_migrated(tmp_path):
     connect(tmp_path / "db.sqlite")  # idempotent second run
 
 
+def test_turns_since_respects_limit_and_stays_oldest_first(tmp_path):
+    # Finding 3: without a SQL-level LIMIT, a first run after upgrade (or
+    # after any gap) loads and JSON-parses the ENTIRE turn history in one
+    # shot while holding the connection -- a stall on the live chat thread,
+    # not just extra work. `limit` bounds the fetch to the OLDEST
+    # unconsumed turns (still ORDER BY id), so callers can page forward
+    # from wherever the last page actually stopped.
+    s = make(tmp_path)
+    cid = s.start()
+    for i in range(5):
+        s.append(cid, {"role": "user", "content": f"turn {i}"})
+
+    first_page = s.turns_since(0, limit=3)
+    assert [m["content"] for _tid, m in first_page] == ["turn 0", "turn 1", "turn 2"]
+
+    last_id = first_page[-1][0]
+    second_page = s.turns_since(last_id, limit=3)
+    assert [m["content"] for _tid, m in second_page] == ["turn 3", "turn 4"]
+
+    # limit=None (the default) keeps the old unbounded behavior
+    assert len(s.turns_since(0)) == 5
+
+
 def test_a_system_note_is_indexed_by_its_readable_display_text(tmp_path):
     # ChatService.note_resolution stores `content` as the fence_external-
     # wrapped text (what the model sees) and `display` as the plain,

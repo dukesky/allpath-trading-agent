@@ -272,3 +272,155 @@ def test_daily_consolidation_nothing_at_all_still_short_circuits(tmp_path):
     llm = ScriptedLLM([])  # any LLM call would blow up: script exhausted
     c, _memory, _obs, _convo, _app_state = make(tmp_path, llm)
     assert c.run_daily() == "nothing to consolidate"
+
+
+def test_daily_consolidation_turn_lines_do_not_evict_trade_events(tmp_path):
+    # Finding 1 (Critical). Pre-fix: `events.extend(turn_lines)` then
+    # `events[-100:]` sliced the COMBINED list, so >=100 turn lines alone
+    # pushed every trade/observation out of the tail -- while the
+    # observation marker still advanced past them via observations.add,
+    # so executed trades and sentinel firings were gone for good just
+    # because the user chatted a lot. This seeds 150 turn lines (order:
+    # trades appended to `events` BEFORE turn_lines, exactly like
+    # production) plus 5 distinct trades and asserts all 5 survive.
+    llm = ScriptedLLM([LLMResponse(text="ok")])
+    c, _memory, _obs, convo, _app_state = make(tmp_path, llm)
+    cid = convo.start()
+    for i in range(150):
+        _seed_web_turn(convo, cid, "user", f"chat line {i}")
+    for i in range(5):
+        intent = OrderIntent(ticker="AAPL", side=OrderSide.BUY, notional=Decimal(500),
+                             reason=f"trade-marker-{i}", strategy_id="aapl-long")
+        order = Order(id=f"o{i}", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                      notional=Decimal(500), status=OrderStatus.FILLED,
+                      filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                      submitted_at=datetime.now(UTC))
+        c.journal.record(intent, RiskDecision(approved=True), order)
+
+    c.run_daily()
+
+    prompt = llm.seen[0][0]["content"]
+    for i in range(5):
+        assert f"trade-marker-{i}" in prompt
+
+
+def test_daily_consolidation_truncates_oversized_turn_content(tmp_path):
+    # Finding 2 (Important). A single pasted-report turn used to contribute
+    # one unbounded line; large enough and the memory-tier LLM call would
+    # error, leaving both markers unmoved and re-offering the same
+    # oversized turn (plus every new one) forever -- a wedge that never
+    # self-heals. Each turn's content must be truncated before it reaches
+    # the prompt, not silently dropped.
+    from allpath_trade.memory.consolidate import TURN_LINE_CHAR_CAP
+
+    llm = ScriptedLLM([LLMResponse(text="ok")])
+    c, _memory, _obs, convo, _app_state = make(tmp_path, llm)
+    cid = convo.start()
+    huge = "x" * 50_000
+    _seed_web_turn(convo, cid, "user", huge)
+
+    c.run_daily()
+
+    prompt = llm.seen[0][0]["content"]
+    assert huge not in prompt
+    assert "x" * TURN_LINE_CHAR_CAP in prompt
+    assert "x" * (TURN_LINE_CHAR_CAP + 1) not in prompt
+
+
+def test_daily_consolidation_marker_only_advances_past_turns_actually_sent(tmp_path):
+    # Finding 3 (Important). Turns beyond TURN_LINES_CAP must roll into the
+    # next run instead of being marked consumed without ever reaching a
+    # prompt. Monkeypatch the cap down to 2 so the scenario is cheap: seed
+    # 3 turns, run once, and confirm the 3rd (dropped by the cap) still
+    # shows up on the next run rather than being silently skipped.
+    import allpath_trade.memory.consolidate as consolidate_module
+    from allpath_trade.memory.consolidate import TURN_MARKER_KEY
+
+    orig_cap = consolidate_module.TURN_LINES_CAP
+    consolidate_module.TURN_LINES_CAP = 2
+    try:
+        llm = ScriptedLLM([LLMResponse(text="first batch")])
+        c, _memory, _obs, convo, app_state = make(tmp_path, llm)
+        cid = convo.start()
+        _seed_web_turn(convo, cid, "user", "oldest turn")
+        _seed_web_turn(convo, cid, "user", "middle turn")
+        _seed_web_turn(convo, cid, "user", "newest turn")
+
+        out1 = c.run_daily()
+        assert out1 == "first batch"
+        prompt1 = llm.seen[0][0]["content"]
+        assert "oldest turn" in prompt1
+        assert "middle turn" in prompt1
+        assert "newest turn" not in prompt1  # capped out, must roll over
+
+        c.llm = ScriptedLLM([LLMResponse(text="second batch")])
+        out2 = c.run_daily()
+        assert out2 == "second batch"
+        prompt2 = c.llm.seen[0][0]["content"]
+        assert "newest turn" in prompt2  # picked up, not lost
+        assert app_state.get(TURN_MARKER_KEY) is not None
+    finally:
+        consolidate_module.TURN_LINES_CAP = orig_cap
+
+
+def test_consolidator_requires_app_state_when_conversations_given(tmp_path):
+    # Finding 4 (Important). Without app_state, `_last_turn_marker` returns
+    # 0 forever, so every run_daily call would re-read and re-distill the
+    # ENTIRE conversation history from turn id 0 -- a slow corruption loop,
+    # not graceful degradation. Must fail loudly at construction time.
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn)
+    obs = ObservationLog(conn)
+    convo = ConversationStore(conn)
+    try:
+        Consolidator(ScriptedLLM([LLMResponse(text="x")]), memory, obs,
+                     TradeJournal(conn), conn, conversations=convo,
+                     app_state=None)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+
+def test_system_note_echoes_are_excluded_from_turn_lines(tmp_path):
+    # Finding 5 (Minor). ChatService.note_resolution appends approval/fill
+    # echoes as role="user", kind="system_note" -- these are out-of-band
+    # bookkeeping, not user-authored text, and shouldn't burn a slot in the
+    # turn-lines cap or read to the memory LLM as something the user typed.
+    llm = ScriptedLLM([LLMResponse(text="ok")])
+    c, _memory, _obs, convo, _app_state = make(tmp_path, llm)
+    cid = convo.start()
+    convo.append(cid, {"role": "user", "content": "resolution: order filled",
+                       "kind": "system_note", "display": "resolution: order filled"})
+    _seed_web_turn(convo, cid, "user", "a real user message")
+
+    c.run_daily()
+
+    prompt = llm.seen[0][0]["content"]
+    assert "resolution: order filled" not in prompt
+    assert "a real user message" in prompt
+
+
+def test_run_daily_reports_truthfully_when_only_turn_marker_write_fails(tmp_path):
+    # Finding 6 (Minor). If app_state.set raises after observations.add
+    # already succeeded, memory WAS written (memory_update tool calls ran
+    # inside session.run_turn) and the observation marker already
+    # advanced -- only the turn watermark failed to persist. The return
+    # string must say so, not claim blanket "consolidation failed".
+    llm = ScriptedLLM([LLMResponse(text="noted")])
+    c, _memory, obs, convo, app_state = make(tmp_path, llm)
+    cid = convo.start()
+    _seed_web_turn(convo, cid, "user", "remember I like index funds")
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("disk full")
+
+    app_state.set = boom
+
+    out = c.run_daily()
+
+    assert "turn marker write failed" in out
+    assert "disk full" in out
+    assert "consolidation failed" not in out
+    # the observation marker (and thus the memory write) already landed
+    assert any(r["source"] == "consolidator" for r in obs.recent())
