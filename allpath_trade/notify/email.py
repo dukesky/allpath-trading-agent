@@ -7,7 +7,8 @@ from collections.abc import Callable
 from email.message import EmailMessage
 
 from allpath_trade.config import Settings
-from allpath_trade.notify.base import ConsoleNotifier, Notifier
+from allpath_trade.notify.base import ConsoleNotifier, MultiNotifier, Notifier
+from allpath_trade.notify.ntfy import NtfyNotifier
 
 _SMTP_TIMEOUT_SECONDS = 10
 
@@ -47,8 +48,15 @@ class EmailNotifier(Notifier):
 
 
 def build_notifier(settings: Settings) -> Notifier:
+    channels: list[Notifier] = []
     if settings.smtp_host and settings.notify_to:
-        return EmailNotifier(settings.smtp_host, settings.smtp_port,
-                             settings.smtp_user, settings.smtp_password,
-                             settings.smtp_from, settings.notify_to)
+        channels.append(EmailNotifier(settings.smtp_host, settings.smtp_port,
+                                      settings.smtp_user, settings.smtp_password,
+                                      settings.smtp_from, settings.notify_to))
+    if settings.ntfy_url:
+        channels.append(NtfyNotifier(settings.ntfy_url))
+    if len(channels) > 1:
+        return MultiNotifier(channels)
+    if channels:
+        return channels[0]
     return ConsoleNotifier()

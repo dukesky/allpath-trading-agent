@@ -150,15 +150,15 @@ class Sentinel:
                 result = self.executor.execute(intent)
             except Exception as exc:  # noqa: BLE001 — any executor failure must
                 # still be reported and notified, not crash the sentinel pass.
-                self._notify_order(ticker, intent.side.value, False, str(exc))
+                self._notify_order(doc, ticker, intent.side.value, False, str(exc))
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                       disposition="error", detail=str(exc))
             if result.submitted:
-                self._notify_order(ticker, intent.side.value, True, "submitted")
+                self._notify_order(doc, ticker, intent.side.value, True, "submitted")
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                       disposition="executed", detail="submitted")
             detail = "; ".join(result.decision.reasons)
-            self._notify_order(ticker, intent.side.value, False, detail)
+            self._notify_order(doc, ticker, intent.side.value, False, detail)
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="rejected", detail=detail)
         # confirm auth (both types), or auto+soft
@@ -167,7 +167,7 @@ class Sentinel:
                              condition=condition, action=action,
                              snapshot=snapshot, intent=intent)
         if self.review_agent is None:
-            self._notify_queued(rid, ticker, action, doc.id, "")
+            self._notify_queued(doc, rid, ticker, action, "")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="queued")
         return self._agent_review(rid, doc, rule_id, rule_type, condition,
@@ -184,7 +184,7 @@ class Sentinel:
             analysis = self.review_agent.analyze(dict(self.queue.get(rid)))
             self.queue.attach_analysis(rid, analysis.model_dump_json())
         except Exception as exc:  # noqa: BLE001 — a failed review must never lose the trigger
-            self._notify_queued(rid, ticker, action, doc.id, "")
+            self._notify_queued(doc, rid, ticker, action, "")
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
 
@@ -192,7 +192,7 @@ class Sentinel:
             # The LLM's output couldn't be parsed as a recommendation at all —
             # this is not a genuine "skip" decision, so don't act on it.
             # Leave the trigger pending for human review.
-            self._notify_queued(rid, ticker, action, doc.id, "")
+            self._notify_queued(doc, rid, ticker, action, "")
             return TriggerOutcome(
                 **base, disposition="queued",
                 detail="analysis unparseable — left for human review")
@@ -201,7 +201,7 @@ class Sentinel:
                       and rule_type == RuleType.SOFT)
         if not autonomous:
             recommendation = f"{analysis.recommendation} — {analysis.reasoning[:300]}"
-            self._notify_queued(rid, ticker, action, doc.id, recommendation)
+            self._notify_queued(doc, rid, ticker, action, recommendation)
             return TriggerOutcome(**base, disposition="queued",
                                   detail="analysis attached: " + recommendation)
 
@@ -213,24 +213,24 @@ class Sentinel:
                 result = self.queue.approve(rid)
             except ExecutionError as exc:
                 detail = f"agent-approved but execution failed: {exc}"
-                self._notify_order(ticker, intent.side.value, False, detail)
+                self._notify_order(doc, ticker, intent.side.value, False, detail)
                 return TriggerOutcome(**base, disposition="error", detail=detail)
             except ReviewError as exc:
                 detail = f"review already resolved elsewhere: {exc}"
-                self._notify_order(ticker, intent.side.value, False, detail)
+                self._notify_order(doc, ticker, intent.side.value, False, detail)
                 return TriggerOutcome(**base, disposition="error", detail=detail)
             detail = ("agent-approved; submitted" if result.submitted else
                       "agent-approved; risk gate rejected: "
                       + "; ".join(result.decision.reasons))
             disposition = "executed" if result.submitted else "rejected"
-            self._notify_order(ticker, intent.side.value, result.submitted, detail)
+            self._notify_order(doc, ticker, intent.side.value, result.submitted, detail)
             return TriggerOutcome(**base, disposition=disposition, detail=detail)
 
         try:
             self.queue.reject(rid, note=analysis.reasoning[:500])
         except ReviewError as exc:
             detail = f"review already resolved elsewhere: {exc}"
-            self._notify_order(ticker, intent.side.value, False, detail)
+            self._notify_order(doc, ticker, intent.side.value, False, detail)
             return TriggerOutcome(**base, disposition="error", detail=detail)
         # The agent actively decided not to act, and the review is already
         # resolved, so there's no order to report — but the rule the user
@@ -244,17 +244,27 @@ class Sentinel:
         subject, body = events.rule_triggered(
             strategy_id=doc.id, rule_id=rule_id, ticker=doc.position.ticker,
             condition=condition, disposition=disposition)
-        self.notifier.send(subject, body)
+        self._send(doc, subject, body)
 
-    def _notify_order(self, ticker: str, side: str, submitted: bool,
+    def _notify_order(self, doc: StrategyDoc, ticker: str, side: str, submitted: bool,
                       detail: str) -> None:
         subject, body = events.order_result(
             ticker=ticker, side=side, submitted=submitted, detail=detail)
-        self.notifier.send(subject, body)
+        self._send(doc, subject, body)
 
-    def _notify_queued(self, review_id: int, ticker: str, action: str,
-                       strategy_id: str, recommendation: str) -> None:
+    def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
+                       recommendation: str) -> None:
         subject, body = events.review_queued(
             review_id=review_id, ticker=ticker, action=action,
-            strategy_id=strategy_id, recommendation=recommendation)
+            strategy_id=doc.id, recommendation=recommendation)
+        self._send(doc, subject, body)
+
+    def _send(self, doc: StrategyDoc, subject: str, body: str) -> None:
+        # notify_email is a notification preference, not a trading
+        # parameter -- it gates delivery of the email/push here only. By the
+        # time any _notify_* method runs, the disposition (executed, queued,
+        # rejected, recorded) has already happened; skipping the send never
+        # skips that.
+        if not doc.notify_email:
+            return
         self.notifier.send(subject, body)

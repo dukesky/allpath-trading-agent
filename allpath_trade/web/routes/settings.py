@@ -8,7 +8,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 from allpath_trade.config import Settings, describe_validation_error
+from allpath_trade.notify.base import send_test_notification
 from allpath_trade.scheduler import reschedule_sentinel_job
+from allpath_trade.web import models_catalog
 from allpath_trade.web.auth import COOKIE
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
@@ -18,7 +20,7 @@ router = APIRouter()
 # Plain values: rendered, editable, rewritten on every save.
 PLAIN_FIELDS = ["llm_provider", "chat_model", "review_model", "memory_model",
                 "smtp_host", "smtp_port", "smtp_user", "smtp_from", "notify_to",
-                "sentinel_interval_minutes", "context_budget_tokens"]
+                "ntfy_url", "sentinel_interval_minutes", "context_budget_tokens"]
 
 # Checkbox values: a browser omits an unchecked box from the form body
 # entirely, so these need explicit "present -> true, absent -> false"
@@ -64,6 +66,12 @@ def settings_page(request: Request, saved: str = "", note: str = "") -> HTMLResp
     return templates.TemplateResponse(request, "settings.html", {
         "page": "settings", "s": s, "saved": bool(saved), "note": note, "error": "",
         "masks": {f: _mask(str(getattr(s, f, ""))) for f in SECRET_FIELDS},
+        # Fetched (or served from cache/fallback) for the *active* provider
+        # only -- all three model fields share one provider, so one catalog
+        # covers all three selects. models_catalog.list_models() carries its
+        # own timeout and any-failure fallback, so this can never be what
+        # makes a GET here hang or 500.
+        "model_options": models_catalog.list_models(s.llm_provider),
         **nav_context(c)})
 
 
@@ -72,6 +80,12 @@ async def save(request: Request) -> Response:
     form = await request.form()
     holder = request.app.state.holder
     current = holder.get().settings
+    # The "Save and send test email" button is the same <form> as the normal
+    # save button -- only the submitted `action` differs -- so a save-and-test
+    # click still carries whatever the user just typed, unlike the old
+    # separate-form design where posting the test button reloaded the page
+    # from stored settings and threw that input away.
+    send_test = str(form.get("action", "")) == "save_and_test"
 
     updates: dict[str, str] = {}
     for field in BOOLEAN_FIELDS:
@@ -99,10 +113,29 @@ async def save(request: Request) -> Response:
         Settings(_env_file=None, **candidate)
     except ValidationError as exc:
         c = holder.get()
+        # Redisplay exactly what the user typed for every PLAIN_FIELDS input,
+        # not the last-saved value -- a validation failure on, say,
+        # sentinel_interval_minutes must not also discard an unrelated,
+        # perfectly valid smtp_host edit sitting in the same form. This is a
+        # raw, unvalidated copy for *display only*: model_copy(update=...)
+        # bypasses Settings' own type coercion/validation (unlike
+        # constructing a new Settings(**candidate), which is exactly what
+        # just failed above), so an out-of-range or non-numeric string can
+        # sit in `s.sentinel_interval_minutes` here purely to be echoed back
+        # into its <input value="...">. Secrets are deliberately excluded --
+        # `updates` only ever holds a secret when the user typed a new one,
+        # and secrets still render through `masks`, never as plain text.
+        display = current.model_copy(
+            update={f: updates[f] for f in PLAIN_FIELDS if f in updates})
         return templates.TemplateResponse(request, "settings.html", {
-            "page": "settings", "s": current, "saved": False, "note": "",
+            "page": "settings", "s": display, "saved": False, "note": "",
             "error": _validation_message(exc),
             "masks": {f: _mask(str(getattr(current, f, ""))) for f in SECRET_FIELDS},
+            # display.llm_provider, not current.llm_provider -- the user may
+            # have changed the provider dropdown in the same submit that
+            # failed validation elsewhere; the catalog must match whichever
+            # provider is actually selected on the redisplayed page.
+            "model_options": models_catalog.list_models(display.llm_provider),
             **nav_context(c)}, status_code=400)
 
     old_interval = current.sentinel_interval_minutes
@@ -131,27 +164,31 @@ async def save(request: Request) -> Response:
         except Exception as exc:  # noqa: BLE001 — see comment above
             print(f"[settings] could not reschedule sentinel job: {exc}",
                   file=sys.stderr)
+
+    if send_test:
+        # Only reachable after the save above already succeeded -- a
+        # validation failure returns from the `except ValidationError` branch
+        # long before this point, so a rejected save can never trigger a send.
+        # Notifier.send() swallows its own exceptions (a broken notifier must
+        # never crash the caller) and reports the outcome only through its
+        # return value -- that return value is what turns this from "a
+        # request happened" into "the user learns whether it worked".
+        # send_test_notification (notify/base.py) dispatches on the
+        # notifier's own type -- ConsoleNotifier / a single channel /
+        # MultiNotifier -- rather than this route re-deriving which channels
+        # are configured from Settings fields, so this stays a one-line call
+        # regardless of how many channels exist.
+        note = send_test_notification(
+            holder.get().notifier,
+            "AllPath Trade test",
+            "This is a test notification. If you are reading it, "
+            "notification delivery works.")
+        # The redirect only ever carries a fixed, known token -- never
+        # freeform text -- so a crafted `?note=...` link can't make this page
+        # render arbitrary copy. The actual message lives in one place: the
+        # template.
+        return RedirectResponse(f"/settings?saved=1&note={note}", status_code=303)
     return RedirectResponse("/settings?saved=1", status_code=303)
-
-
-@router.post("/settings/test-email")
-def test_email(request: Request) -> Response:
-    c = request.app.state.holder.get()
-    # Notifier.send() swallows its own exceptions (a broken notifier must
-    # never crash the caller) and reports the outcome only through its
-    # return value -- that return value is what turns this from "a request
-    # happened" into "the user learns whether it worked", which is the
-    # whole point of a test button for a channel whose only other failure
-    # mode is a notification that silently never arrives.
-    ok = c.notifier.send(
-        "AllPath Trade test",
-        "This is a test notification. If you are reading it, "
-        "email delivery works.")
-    # The redirect only ever carries a fixed, known token -- never freeform
-    # text -- so a crafted `?note=...` link can't make this page render
-    # arbitrary copy. The actual message lives in one place: the template.
-    note = "email-sent" if ok else "email-failed"
-    return RedirectResponse(f"/settings?note={note}", status_code=303)
 
 
 @router.post("/settings/reset-token")

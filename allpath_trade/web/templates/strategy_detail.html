@@ -2,7 +2,11 @@
 {% block title %}{{ doc.name }} · AllPath Trade{% endblock %}
 {% block content %}
 <h1>{{ doc.name }}</h1>
-<p class="muted">{{ doc.id }} · v{{ doc.version }} · {{ doc.status.value }} / {{ doc.authorization.value }}</p>
+<p class="muted">{{ doc.id }} · v{{ doc.version }} · {{ doc.authorization.value }}</p>
+<div class="row" style="margin-top:6px;margin-bottom:16px">
+  <span class="chip">{{ doc.status.value }}</span>
+  {% for chip in chips %}<span class="badge">{{ chip }}</span>{% endfor %}
+</div>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 <h2>Rules</h2>
@@ -24,6 +28,17 @@
   {% endfor %}
 </table>
 <p class="hint">Re-arming a triggered rule makes it eligible to fire and place an order again — it is not a neutral reset.</p>
+
+<h2>Notifications</h2>
+<div class="card">
+  <p class="muted">Notifications (email and push) for this strategy's rule triggers, orders, and queued reviews are currently {{ 'on' if doc.notify_email else 'off' }}. This does not change whether rules fire, execute, or queue for review — only whether you get notified about it.</p>
+  {% if doc.authorization.value == 'notify' and not doc.notify_email %}
+  <p class="hint">This strategy is notify-only: with notifications off, a trigger will only be visible on this page and the dashboard.</p>
+  {% endif %}
+  <form method="post" action="/strategies/{{ doc.id }}/notify-email">
+    <button type="submit">{{ 'Turn off' if doc.notify_email else 'Turn on' }} notifications (email and push)</button>
+  </form>
+</div>
 
 <h2>Definition</h2>
 <pre>{{ yaml_text }}</pre>

@@ -2,6 +2,7 @@
 {% block title %}Dashboard · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Dashboard</h1>
+<p class="{{ 'warn' if sentinel_status.warn else 'muted' }}">{{ sentinel_status.text }}</p>
 
 {% if broker_error %}<p class="error">{{ broker_error }}</p>{% endif %}
 {% if account %}
@@ -29,17 +30,23 @@
 {% else %}<p class="muted">No open positions.</p>{% endif %}
 
 <h2>Strategies</h2>
-{% for s in strategies %}
-<div class="card" style="margin-bottom:10px">
+{% for s in strategy_cards %}
+<a class="card strategy-card" href="/strategies/{{ s.id }}">
   <div class="row">
-    <a href="/strategies/{{ s.id }}"><strong>{{ s.name }}</strong></a>
-    <span class="muted">· {{ s.position.ticker }}</span>
-    <span style="margin-left:auto" class="muted">{{ s.status.value }} / {{ s.authorization.value }}</span>
+    <strong>{{ s.ticker }}</strong>
+    <span class="muted">{{ s.name }}</span>
+    <span style="margin-left:auto" class="muted">{{ s.status }} / {{ s.auth }}</span>
   </div>
-  <div class="muted" style="font-size:13px">
-    {% for r in s.rules %}{{ r.id }}: {{ r.state.value }}{% if not loop.last %} · {% endif %}{% endfor %}
+  <div class="row" style="margin-top:6px;font-size:13px">
+    <span class="muted">
+      {% if s.current_weight_pct is not none %}{{ "%.1f"|format(s.current_weight_pct) }}%{% else %}—{% endif %}
+      {% if s.target_weight_pct is not none %} of {{ "%.1f"|format(s.target_weight_pct) }}% target{% endif %}
+    </span>
+    {% if s.key_levels %}<span class="muted">· {{ s.key_levels | join(" · ") }}</span>{% endif %}
+    <span style="margin-left:auto" class="{{ s.price_class }}">{{ s.price | money }}</span>
   </div>
-</div>
+  {% if s.alerts %}<div class="muted" style="font-size:12px;margin-top:4px">{{ s.alerts | join(" · ") }}</div>{% endif %}
+</a>
 {% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
 {% for e in strategy_errors %}<p class="error">{{ e }}</p>{% endfor %}
 

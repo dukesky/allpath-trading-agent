@@ -402,6 +402,65 @@ class BlockingLLM(LLMClient):
         return self.responses.pop(0)
 
 
+def test_chat_page_has_optimistic_echo_and_disable_hooks(tmp_path, monkeypatch):
+    # Task 2: the form must wire up the client-side instant-echo /
+    # thinking-indicator / double-send-guard behavior via htmx hooks and
+    # hx-disabled-elt, so a slow /chat/send turn doesn't look like a no-op
+    # to the user (see .superpowers/sdd/task-2-brief.md). We can only assert
+    # on the rendered markup here -- the actual DOM manipulation on submit
+    # needs a browser.
+    client = make_client(tmp_path, monkeypatch, [])
+    body = client.get("/chat").text
+
+    assert "hx-on::before-request" in body
+    assert "hx-on::after-request" in body
+    # Declarative disable/re-enable (htmx re-enables on htmx:afterRequest
+    # for the success, non-2xx, AND network-error paths alike -- see Qt/Yt
+    # in the vendored htmx.min.js) covers the double-send guard for both the
+    # button and the input (so Enter in a disabled input can't resubmit).
+    assert 'hx-disabled-elt="#chat-send, #chat-input"' in body
+    assert 'id="chat-send"' in body
+    assert 'id="chat-input"' in body
+    # The optimistic bubble is built in JS via textContent, never innerHTML
+    # -- the user's own typed text must not become an XSS vector on the
+    # client-only path (the server-rendered fragment is escaped separately).
+    assert "innerHTML" not in body
+    assert "textContent" in body
+
+
+def test_server_rendered_fragment_never_contains_the_thinking_indicator(
+        tmp_path, monkeypatch):
+    # The indicator only ever exists client-side, between request-start and
+    # swap -- the swap of #messages wholesale is what removes it. If the
+    # server ever rendered it, a page reload mid-turn (or a slow request)
+    # would show a permanently "thinking" agent with nothing to clear it.
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hello there")])
+    # POST /chat/send returns only _chat_messages.html (no <script>), so
+    # this is a clean check that the indicator markup itself is absent --
+    # not just that some JS source happens to mention the phrase.
+    r = client.post("/chat/send", data={"message": "hi"})
+    assert 'id="thinking"' not in r.text
+    assert "Agent is thinking" not in r.text
+
+    # The full page (GET /chat) legitimately contains the phrase once, as a
+    # JS string literal inside the <script> block that builds the indicator
+    # element -- that's the client-side code, not server-rendered output.
+    # What must never appear is the indicator *element* itself.
+    reload_body = client.get("/chat").text
+    assert 'id="thinking"' not in reload_body
+    assert 'class="msg thinking"' not in reload_body
+
+
+def test_chat_error_line_placeholder_is_hidden_by_default(tmp_path, monkeypatch):
+    # The inline error line for a failed send exists in the markup from the
+    # start (JS just unhides it), so there's something for the after-request
+    # handler to populate -- but it must not be visible on a normal load.
+    client = make_client(tmp_path, monkeypatch, [])
+    body = client.get("/chat").text
+    assert 'id="chat-error"' in body
+    assert 'id="chat-error" hidden' in body or 'hidden id="chat-error"' in body
+
+
 def test_a_second_send_waits_for_the_first_turn_to_finish(tmp_path, monkeypatch):
     # ChatService is process-wide state shared by every request. Without
     # serializing turns, two concurrent POST /chat/send calls would both

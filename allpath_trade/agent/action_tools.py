@@ -13,6 +13,7 @@ from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.strategy.loader import (
     StrategyValidationError,
+    atomic_write_text,
     is_valid_strategy_id,
     parse_strategy_text,
 )
@@ -72,7 +73,7 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         if not confirm(f"Save strategy '{strategy_id}' v{doc.version}?"
                        f" Reason: {reason}\n{diff or new_text}"):
             return "user declined"
-        path.write_text(new_text)
+        atomic_write_text(path, new_text)
         strategies.snapshot_version(doc, reason)
         return f"saved {strategy_id} v{doc.version}"
 

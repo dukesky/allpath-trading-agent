@@ -6,10 +6,31 @@ import pytest
 from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.web import models_catalog
 from allpath_trade.web.app import create_app
 from allpath_trade.web.deps import ComponentHolder
 from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
+
+# The catalog covers every field's default value (see config.py's
+# chat_model/review_model/memory_model defaults) so that, unless a test
+# deliberately stores an off-list value, none of the three selects trigger
+# the "stored value not in the list" prepend path by accident.
+FAKE_CATALOG = [
+    "anthropic/claude-haiku-4.5",
+    "anthropic/claude-opus-5",
+    "anthropic/claude-sonnet-5",
+    "openai/gpt-5.2",
+]
+
+
+@pytest.fixture(autouse=True)
+def _fake_model_catalog(monkeypatch):
+    # The settings page fetches the model catalog on every GET. Tests must
+    # never depend on, or wait on the timeout of, the real OpenRouter API --
+    # models_catalog.py already has its own test suite covering the fetch,
+    # cache, and fallback behavior in isolation.
+    monkeypatch.setattr(models_catalog, "list_models", lambda provider: list(FAKE_CATALOG))
 
 
 @pytest.fixture
@@ -97,6 +118,62 @@ def test_saving_writes_env_and_rebuilds(client, tmp_path):
     assert "anthropic/claude-opus-5" in text
     assert "AllPath Trade <bot@example.com>" in text
     assert client.app.state.holder.get().settings.chat_model == "anthropic/claude-opus-5"
+
+
+def test_ntfy_url_field_renders_and_round_trips(client, tmp_path):
+    body = client.get("/settings").text
+    assert 'name="ntfy_url"' in body
+    assert "Install the ntfy app and subscribe to your topic" in body
+
+    r = client.post("/settings", data={"ntfy_url": "https://ntfy.sh/my-topic"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "https://ntfy.sh/my-topic" in (tmp_path / ".env").read_text()
+    assert client.app.state.holder.get().settings.ntfy_url == "https://ntfy.sh/my-topic"
+    assert "https://ntfy.sh/my-topic" in client.get("/settings").text
+
+
+def test_model_fields_render_as_selects_with_the_stored_value_selected(client):
+    body = client.get("/settings").text
+    assert '<select name="chat_model"' in body
+    assert '<select name="review_model"' in body
+    assert '<select name="memory_model"' in body
+    # Settings() defaults (config.py) are all members of FAKE_CATALOG, so
+    # each should come back pre-selected rather than defaulting to the
+    # first catalog entry or nothing at all.
+    assert '<option value="anthropic/claude-sonnet-5" selected>' in body  # chat_model
+    assert '<option value="anthropic/claude-haiku-4.5" selected>' in body  # review_model
+    assert '<option value="anthropic/claude-opus-5" selected>' in body  # memory_model
+
+
+def test_a_stored_off_catalog_model_is_prepended_not_silently_swapped(client, tmp_path):
+    (tmp_path / ".env").write_text(
+        'CHAT_MODEL="custom-provider/exotic-model"\nWEB_TOKEN="secret"\n')
+    client.app.state.holder.rebuild()
+    body = client.get("/settings").text
+    # The off-list value must still be on the page, selected, as itself --
+    # not silently replaced by the first (or any) catalog entry.
+    assert '<option value="custom-provider/exotic-model" selected>' in body
+    assert 'custom-provider/exotic-model' in body
+
+
+def test_model_select_offers_a_custom_option_for_arbitrary_slugs(client):
+    body = client.get("/settings").text
+    assert '__custom__' in body
+    assert 'Custom' in body
+
+
+def test_saving_an_off_catalog_custom_model_value_persists(client, tmp_path):
+    # The <select>'s "Custom..." option reveals a plain text input via a
+    # small inline script, but the posted field name is unchanged either
+    # way -- the save handler (and its validation pipeline) must not need
+    # to know or care whether the value came from the dropdown or the
+    # custom text field.
+    r = client.post("/settings", data={"chat_model": "totally/custom-slug"},
+                     follow_redirects=False)
+    assert r.status_code == 303
+    assert client.app.state.holder.get().settings.chat_model == "totally/custom-slug"
+    assert "totally/custom-slug" in (tmp_path / ".env").read_text()
 
 
 def test_blank_secret_field_leaves_the_stored_value_alone(client, tmp_path):
@@ -210,32 +287,156 @@ class _RecordingNotifier:
         return self.ok
 
 
-def test_test_email_button_reports_success(client):
-    notifier = _RecordingNotifier(ok=True)
-    client.app.state.holder.get().notifier = notifier
-    r = client.post("/settings/test-email", follow_redirects=False)
+def _install_notifier_spy(monkeypatch, ok: bool) -> _RecordingNotifier:
+    # A successful `action=save_and_test` always calls `holder.rebuild()`
+    # before sending, and `rebuild()` throws away the old `Components` --
+    # including whatever notifier a test had assigned directly onto it --
+    # and builds a brand new one via `build_components` (allpath_trade/app.py),
+    # which always calls `build_notifier(settings)` for the real thing. To
+    # inject a spy that survives that rebuild, patch `build_notifier` itself
+    # rather than an instance attribute that rebuild would discard.
+    import allpath_trade.app as app_module
+
+    spy = _RecordingNotifier(ok)
+    monkeypatch.setattr(app_module, "build_notifier", lambda settings: spy)
+    return spy
+
+
+def test_save_and_test_persists_changes_and_sends_exactly_once(client, tmp_path, monkeypatch):
+    # The old design posted the test button to a separate form, which
+    # reloaded the page from stored settings and discarded whatever the user
+    # had just typed into the main form. `action=save_and_test` must run the
+    # *same* save path as a normal submit -- persisting first -- and then
+    # send exactly one test notification against the just-saved config.
+    notifier = _install_notifier_spy(monkeypatch, ok=True)
+    r = client.post("/settings", data={
+        "action": "save_and_test",
+        "smtp_host": "smtp.example.com",
+        "smtp_from": "AllPath Trade <bot@example.com>",
+    }, follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/settings?note=email-sent"
+    text = (tmp_path / ".env").read_text()
+    assert "smtp.example.com" in text
+    assert client.app.state.holder.get().settings.smtp_host == "smtp.example.com"
+    assert len(notifier.calls) == 1
+
+
+def test_save_and_test_reports_success(client, monkeypatch):
+    notifier = _install_notifier_spy(monkeypatch, ok=True)
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
+    assert r.status_code == 303
     body = client.get(r.headers["location"]).text
     assert notifier.calls  # a send was actually attempted
     # Exact copy, not a loose substring like "sent" -- a future unrelated
     # label (e.g. "failover") must not be able to break this test, and this
     # must not be able to pass against a page that merely fails to mention
     # failure at all.
-    assert "Test email sent" in body
-    assert "Test email failed" not in body
+    assert "Test notification sent" in body
+    assert "Test notification failed" not in body
 
 
-def test_test_email_button_reports_failure(client):
-    notifier = _RecordingNotifier(ok=False)
-    client.app.state.holder.get().notifier = notifier
-    r = client.post("/settings/test-email", follow_redirects=False)
+def test_save_and_test_reports_failure(client, monkeypatch):
+    notifier = _install_notifier_spy(monkeypatch, ok=False)
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/settings?note=email-failed"
     body = client.get(r.headers["location"]).text
     assert notifier.calls  # a send was actually attempted
-    assert "Test email failed" in body
-    assert "Test email sent" not in body
+    assert "Test notification failed on every configured channel" in body
+    assert "Test notification sent" not in body
+
+
+def test_save_and_test_with_only_console_configured_reports_not_configured(client):
+    # Nothing was ever set up -- no SMTP, no ntfy -- so the real notifier
+    # built for this holder is a bare ConsoleNotifier. ConsoleNotifier.send()
+    # always returns True, but reporting "sent" here would be a lie the user
+    # acts on: nothing left this process. This is the deferred Task 6 finding
+    # the brief calls out explicitly.
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
+    assert r.status_code == 303
+    body = client.get(r.headers["location"]).text
+    assert "No notification channel is configured" in body
+    assert "Test notification sent" not in body
+
+
+def test_save_and_test_with_one_of_two_channels_working_reports_partial(client, monkeypatch):
+    # Patch build_notifier itself (see _install_notifier_spy's comment above
+    # on why an instance attribute would be discarded by rebuild()) to
+    # return a MultiNotifier with one working and one broken child, the way
+    # a real email+ntfy configuration where only one channel is healthy
+    # would compose.
+    import allpath_trade.app as app_module
+    from allpath_trade.notify.base import MultiNotifier
+
+    working = _RecordingNotifier(ok=True)
+    broken = _RecordingNotifier(ok=False)
+    monkeypatch.setattr(app_module, "build_notifier",
+                        lambda settings: MultiNotifier([working, broken]))
+    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
+    assert r.status_code == 303
+    body = client.get(r.headers["location"]).text
+    assert working.calls and broken.calls  # both channels actually attempted
+    assert "Test notification reached some channels but not others" in body
+
+
+def test_save_and_test_with_invalid_field_sends_nothing_and_returns_400(
+        client, tmp_path, monkeypatch):
+    # A validation failure with action=save_and_test must behave exactly
+    # like a failed normal save: nothing written, nothing sent, 400 back.
+    # No rebuild happens on this path, so a plain instance assignment (rather
+    # than the rebuild-surviving `_install_notifier_spy`) is enough here.
+    notifier = _RecordingNotifier(ok=True)
+    client.app.state.holder.get().notifier = notifier
+    env_path = tmp_path / ".env"
+    before = env_path.read_text()
+
+    r = client.post("/settings", data={
+        "action": "save_and_test",
+        "sentinel_interval_minutes": "not-a-number",
+    })
+
+    assert r.status_code == 400
+    assert env_path.read_text() == before
+    assert notifier.calls == []
+
+
+def test_invalid_field_does_not_discard_other_typed_fields_on_redisplay(client, tmp_path):
+    # Finding 3 (final review, phase5.5-ui-polish): a validation failure on
+    # one field must not throw away everything else the user typed in the
+    # same submit -- the 400 branch used to re-render from the last-saved
+    # Settings, discarding any unrelated, perfectly valid edit sitting in
+    # the same form (e.g. a corrected smtp_host typed alongside a mistyped
+    # interval).
+    env_path = tmp_path / ".env"
+    before = env_path.read_text()
+
+    r = client.post("/settings", data={
+        "sentinel_interval_minutes": "not-a-number",
+        "smtp_host": "smtp.newhost.example.com",
+    })
+
+    assert r.status_code == 400
+    assert "smtp.newhost.example.com" in r.text
+    # Still refused, still nothing written -- only the redisplay changed.
+    assert env_path.read_text() == before
+
+
+def test_invalid_field_redisplay_does_not_leak_the_typed_invalid_value_as_a_secret(
+        client, tmp_path):
+    # Secrets must keep going through `masks`, never straight text, even on
+    # the redisplay path -- a blank/omitted secret field in the failing POST
+    # must not somehow end up rendered in the clear.
+    (tmp_path / ".env").write_text(
+        'OPENROUTER_API_KEY="keep-me-secret"\nWEB_TOKEN="secret"\n')
+    client.app.state.holder.rebuild()
+
+    r = client.post("/settings", data={"sentinel_interval_minutes": "not-a-number"})
+
+    assert r.status_code == 400
+    assert "keep-me-secret" not in r.text
+
+
+def test_test_email_route_is_gone(client):
+    assert client.post("/settings/test-email", follow_redirects=False).status_code == 404
 
 
 def test_note_query_param_cannot_inject_arbitrary_page_text(client):
@@ -281,6 +482,16 @@ def test_note_query_param_cannot_inject_arbitrary_page_text(client):
     pytest.param("smtp_port", "70000",
                  "Input should be less than or equal to 65535",
                  id="smtp-port-above-range"),
+    # Finding 1 of the Task 8 review: urllib.request.Request raises
+    # ValueError("unknown url type") for a scheme-less URL, and the
+    # settings-page hint literally says "paste the topic URL here" -- a
+    # pasted-without-scheme value like "ntfy.sh/my-topic" is the expected
+    # mistake, not an edge case. Must be refused here, before it ever
+    # reaches .env, not discovered later as a 500 on save-and-test or a
+    # silently swallowed sentinel_error.
+    pytest.param("ntfy_url", "ntfy.sh/my-topic",
+                 "must be empty or start with http:// or https://",
+                 id="ntfy-url-missing-scheme"),
 ])
 def test_a_type_valid_but_absurd_numeric_value_is_refused_and_env_unchanged(
         client, tmp_path, field, bad_value, expected_msg):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from pathlib import Path
 
 import yaml
@@ -15,6 +17,26 @@ _VALID_STRATEGY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 def is_valid_strategy_id(strategy_id: str) -> bool:
     return bool(_VALID_STRATEGY_ID.match(strategy_id))
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` without ever exposing a truncated file to a
+    concurrent reader. The sentinel scheduler polls strategy YAML from the
+    same process that serves web writes (draft_strategy, the notify-email
+    toggle), so a plain `write_text` -- which truncates the file before the
+    new bytes land -- has a window where a mid-write read sees a
+    valid-but-empty prefix. `rules` then defaults to `[]`, so that pass
+    silently evaluates zero rules (including a hard stop-loss) with no error
+    raised. Writing to a temp file in the same directory and `os.replace`ing
+    it over the target is atomic on POSIX: readers see either the old
+    content or the new content, never a partial write."""
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(text)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 class StrategyValidationError(Exception):

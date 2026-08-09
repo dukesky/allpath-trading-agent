@@ -14,18 +14,25 @@ body { margin:0; background:var(--bg); color:var(--text); font-size:15px;
 body.centered { display:flex; min-height:100vh; align-items:center; justify-content:center; }
 a { color:inherit; text-decoration:none; }
 nav { display:flex; gap:18px; align-items:center; padding:14px 20px;
-  border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  border-bottom:1px solid var(--line); flex-wrap:wrap;
+  position:sticky; top:0; z-index:10; background:var(--bg); }
 nav .brand { font-weight:500; letter-spacing:.02em; margin-right:auto; }
 nav a { color:var(--muted); font-size:14px; }
 nav a.on { color:var(--text); }
 .badge { background:var(--warn); color:#3a2a00; border-radius:999px;
   padding:1px 7px; font-size:12px; margin-left:5px; }
+/* Neutral lifecycle status (active/draft/...) -- greyscale so it never
+   competes with .badge's amber, which is reserved for things that actually
+   need attention (N triggered, pending review, the nav's pending count). */
+.chip { background:transparent; color:var(--muted); border:1px solid var(--line);
+  border-radius:999px; padding:1px 7px; font-size:12px; margin-left:5px; }
 main { max-width:900px; margin:0 auto; padding:20px; }
 h1 { font-size:20px; font-weight:500; margin:0 0 16px; }
 h2 { font-size:13px; font-weight:400; color:var(--muted); margin:26px 0 10px;
   text-transform:uppercase; letter-spacing:.06em; }
 .card { background:var(--surface); border:1px solid var(--line);
   border-radius:12px; padding:16px; }
+.strategy-card { display:block; margin-bottom:10px; }
 .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
 .metric .label { color:var(--muted); font-size:13px; }
 .metric .value { font-family:var(--mono); font-size:24px; }
@@ -35,6 +42,7 @@ td, th { padding:9px 0; border-top:1px solid var(--line); text-align:left;
 th { color:var(--muted); font-size:12px; border-top:none; }
 td.num, th.num { text-align:right; font-family:var(--mono); }
 .up { color:var(--up); } .down { color:var(--down); } .muted { color:var(--muted); }
+.warn { color:var(--warn); }
 button, .btn { background:transparent; color:var(--text); border:1px solid var(--line);
   border-radius:8px; padding:7px 14px; font-size:14px; cursor:pointer; font:inherit; }
 button.primary { border-color:var(--accent); color:var(--accent); }
@@ -65,7 +73,26 @@ input, select, textarea { background:var(--bg); color:var(--text);
 .msg.system { display:flex; justify-content:center; }
 .msg.system span { color:var(--muted); font-size:12px; font-family:var(--mono);
   background:var(--surface); border-radius:8px; padding:6px 12px; }
+/* Client-only optimistic indicator appended by chat.html's script between
+   request-start and swap -- never server-rendered (see _chat_messages.html
+   and its test coverage in tests/test_web_chat.py). */
+.msg.thinking { color:var(--muted); font-size:13px; font-family:var(--mono); }
+.msg.thinking .dots { display:inline-block; animation:thinking-pulse 1.2s ease-in-out infinite; }
+@keyframes thinking-pulse {
+  0%, 100% { opacity:.25; }
+  50% { opacity:1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg.thinking .dots { animation:none; opacity:.7; }
+}
 .activity { color:var(--muted); font-size:12px; font-family:var(--mono); }
 pre { font-family:var(--mono); font-size:13px; overflow-x:auto;
   background:var(--surface); border:1px solid var(--line);
   border-radius:8px; padding:12px; }
+.tabs { display:flex; gap:0; border-bottom:1px solid var(--line);
+  margin:20px 0; }
+.tab-link { flex:0 0 auto; padding:10px 14px; font-size:14px;
+  color:var(--muted); border-bottom:2px solid transparent; cursor:pointer;
+  text-decoration:none; }
+.tab-link:hover { color:var(--text); }
+.tab-link.on { color:var(--text); border-bottom-color:var(--text); }

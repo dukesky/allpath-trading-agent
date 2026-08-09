@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, time
 from zoneinfo import ZoneInfo
@@ -8,6 +9,11 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from allpath_trade.notify import events
 from allpath_trade.sentinel import Sentinel, SentinelReport
+from allpath_trade.store.app_state import (
+    SENTINEL_HEARTBEAT_KEY,
+    SENTINEL_MARKET_OPEN_KEY,
+    AppState,
+)
 
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
@@ -37,12 +43,32 @@ def _is_after_close(now: datetime | None = None) -> bool:
 
 
 def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
-                       on_report: Callable[[SentinelReport | None], None] | None = None) -> None:
+                       on_report: Callable[[SentinelReport | None], None] | None = None,
+                       app_state: AppState | None = None) -> None:
     """Run one sentinel pass, but only during market hours.
 
     `on_report` (if given) is called with the resulting `SentinelReport`, or
     with `None` when the pass was skipped because the market is closed — the
-    only place that wants to know is `run_daemon`'s terminal output."""
+    only place that wants to know is `run_daemon`'s terminal output.
+
+    The heartbeat write (`app_state`, if given) happens unconditionally,
+    market open or closed: it proves the *scheduler* is alive, not the
+    market, and this is the one job body both `run_daemon` (the headless
+    daemon) and `build_jobs` (the `serve` process) call through, so writing
+    it here covers both without duplicating the call site.
+
+    The market-open flag is written in the same try block, right alongside
+    the timestamp -- a reader needs both together to tell "the scheduler
+    ticked, and the sentinel actually ran" from "the scheduler ticked, but
+    the market was closed so nothing was evaluated" (dashboard.py's
+    sentinel_heartbeat_status uses it for exactly that)."""
+    if app_state is not None:
+        try:
+            app_state.set(SENTINEL_HEARTBEAT_KEY, datetime.now(UTC).isoformat())
+            app_state.set(SENTINEL_MARKET_OPEN_KEY,
+                          "true" if is_market_hours() else "false")
+        except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
+            print(f"[heartbeat] failed: {exc}", file=sys.stderr)
     if is_market_hours():
         report = get_sentinel().run_once()
     else:
@@ -71,7 +97,8 @@ def _maybe_run_daily(daily_job: Callable[[], None] | None, state: dict) -> None:
 
 def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
                scheduler_cls: type = BlockingScheduler,
-               daily_job: Callable[[], None] | None = None) -> None:
+               daily_job: Callable[[], None] | None = None,
+               app_state: AppState | None = None) -> None:
     state = {"last_daily": None}
 
     def report_progress(report: SentinelReport | None) -> None:
@@ -86,7 +113,7 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
             print(f"  error: {e}")
 
     def job() -> None:
-        _run_sentinel_pass(sentinel_factory, report_progress)
+        _run_sentinel_pass(sentinel_factory, report_progress, app_state)
         _maybe_run_daily(daily_job, state)
 
     scheduler = scheduler_cls()
@@ -130,7 +157,7 @@ def build_jobs(scheduler, holder) -> None:
 
     def job() -> None:
         components = holder.get()
-        _run_sentinel_pass(lambda: components.sentinel)
+        _run_sentinel_pass(lambda: components.sentinel, app_state=components.app_state)
 
         def daily() -> None:
             # Consolidation stays gated by its own setting; the digest email

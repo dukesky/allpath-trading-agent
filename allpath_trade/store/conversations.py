@@ -57,6 +57,33 @@ class ConversationStore:
             (conversation_id, after_turn_id))
         return [(r["id"], json.loads(r["message"])) for r in rows]
 
+    def turns_since(self, after_turn_id: int = 0,
+                    limit: int | None = None) -> list[tuple[int, dict]]:
+        """All turns across every conversation with id > after_turn_id,
+        oldest first. Unlike `history`/`history_with_ids`, which are scoped
+        to one conversation (a single chat session), this spans the whole
+        table -- the daily consolidator aggregates a day's worth of web and
+        terminal chats together, not one session at a time, so it needs a
+        global watermark rather than a per-conversation one.
+
+        `limit`, when given, adds a SQL-level `LIMIT` (still oldest-first,
+        so it bounds the OLDEST unconsumed turns, never skips ahead to the
+        newest). Without it, a first run after upgrade -- or any run after
+        a long gap -- has `after_turn_id` far behind and this query would
+        load and JSON-parse the ENTIRE turn history in one shot while
+        holding the connection, stalling the live chat thread behind it,
+        not just doing extra work. Defaults to `None` (unbounded) to keep
+        existing direct callers/tests working; production consolidation
+        always passes an explicit bound (see `TURN_FETCH_LIMIT` in
+        `memory/consolidate.py`)."""
+        query = "SELECT id, message FROM conversation_turns WHERE id > ? ORDER BY id"
+        params: tuple = (after_turn_id,)
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (after_turn_id, limit)
+        rows = self._conn.execute(query, params)
+        return [(r["id"], json.loads(r["message"])) for r in rows]
+
     def summary(self, conversation_id: int) -> tuple[str, int]:
         row = self._conn.execute(
             "SELECT summary, summarized_through FROM conversations WHERE id = ?",

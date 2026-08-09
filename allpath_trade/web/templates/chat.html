@@ -3,12 +3,105 @@
 {% block content %}
 {% include "_chat_messages.html" %}
 {% if not llm_error %}
-<form hx-post="/chat/send" hx-target="#messages" hx-swap="outerHTML"
-      hx-on::after-request="this.reset()" class="row" style="margin-top:18px">
-  <input name="message" placeholder="Ask your agent anything" autocomplete="off" autofocus>
-  <button class="primary" type="submit">Send</button>
+<form id="chat-form" hx-post="/chat/send" hx-target="#messages" hx-swap="outerHTML"
+      hx-disabled-elt="#chat-send, #chat-input"
+      hx-on::before-request="chatOnBeforeRequest(event)"
+      hx-on::after-request="chatOnAfterRequest(event)"
+      class="row" style="margin-top:18px">
+  <input name="message" id="chat-input" placeholder="Ask your agent anything" autocomplete="off" autofocus>
+  <button class="primary" type="submit" id="chat-send">Send</button>
 </form>
+<p class="error" id="chat-error" hidden></p>
 <p class="hint">Orders always wait for your approval. Strategy changes need
 <code>allpath-trade chat</code> in a terminal for now.</p>
+<script>
+  // Task 5.5-2: instant echo + thinking indicator for the slow (10-60s)
+  // synchronous /chat/send turn, so the user gets immediate feedback that
+  // their message went out instead of assuming Send did nothing and
+  // clicking it again. Real streaming (SSE) is a deferred TODO -- this is
+  // the cheap 80%: "your message was sent, the agent is working". The
+  // htmx swap of #messages on a successful response removes everything
+  // this script appends; nothing here is server-rendered (see
+  // _chat_messages.html, which never emits #thinking).
+  (function () {
+    var lastBubble = null;
+    var lastIndicator = null;
+
+    function buildUserBubble(text) {
+      // textContent only -- raw HTML assignment is deliberately avoided --
+      // so the user's own typed text can't become an XSS vector in this
+      // client-only optimistic path (the server-rendered fragment is
+      // escaped separately by Jinja autoescaping).
+      var wrap = document.createElement("div");
+      wrap.className = "msg user";
+      var span = document.createElement("span");
+      span.textContent = text;
+      wrap.appendChild(span);
+      return wrap;
+    }
+
+    function buildThinkingIndicator() {
+      var el = document.createElement("div");
+      el.className = "msg thinking";
+      el.id = "thinking";
+      el.textContent = "Agent is thinking";
+      var dots = document.createElement("span");
+      dots.className = "dots";
+      dots.textContent = "…";
+      el.appendChild(dots);
+      return el;
+    }
+
+    window.chatOnBeforeRequest = function (evt) {
+      var input = document.getElementById("chat-input");
+      var text = input ? input.value.trim() : "";
+      if (!input || !text) {
+        evt.preventDefault();
+        return;
+      }
+      var form = evt.target;
+      form.dataset.lastMessage = input.value;
+      var messages = document.getElementById("messages");
+      if (messages) {
+        lastBubble = buildUserBubble(text);
+        lastIndicator = buildThinkingIndicator();
+        messages.appendChild(lastBubble);
+        messages.appendChild(lastIndicator);
+      }
+      var errorEl = document.getElementById("chat-error");
+      if (errorEl) errorEl.hidden = true;
+    };
+
+    window.chatOnAfterRequest = function (evt) {
+      var form = evt.target;
+      if (evt.detail.successful) {
+        lastBubble = null;
+        lastIndicator = null;
+        form.reset();
+        return;
+      }
+      // Error path (network drop, a non-2xx status): htmx does not swap
+      // #messages here, so the optimistic bubble and the indicator we
+      // appended above are still in the DOM and would otherwise be
+      // duplicated (or left permanently "thinking") on retry -- remove
+      // them by hand and hand the typed text back to the input.
+      if (lastIndicator && lastIndicator.parentNode) {
+        lastIndicator.parentNode.removeChild(lastIndicator);
+      }
+      if (lastBubble && lastBubble.parentNode) {
+        lastBubble.parentNode.removeChild(lastBubble);
+      }
+      lastIndicator = null;
+      lastBubble = null;
+      var input = document.getElementById("chat-input");
+      if (input) input.value = form.dataset.lastMessage || input.value;
+      var errorEl = document.getElementById("chat-error");
+      if (errorEl) {
+        errorEl.textContent = "Could not reach the agent -- your message was not sent. Try again.";
+        errorEl.hidden = false;
+      }
+    };
+  })();
+</script>
 {% endif %}
 {% endblock %}
