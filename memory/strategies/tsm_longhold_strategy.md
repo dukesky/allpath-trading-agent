@@ -1,0 +1,1 @@
+- TSM long-hold strategy: Core position (10% target). Buy <$410 ($4k initial), <$390 ($3.5k), <$375 ($2.5k). Sell 30% at >$480, 20% at >30% profit. Stop loss $350. Hold 6-12 months, reeval quarterly.

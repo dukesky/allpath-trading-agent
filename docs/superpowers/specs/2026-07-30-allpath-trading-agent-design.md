@@ -327,6 +327,26 @@ memory/
 ### 测试
 FastAPI `TestClient` + `FakeBroker` + `ScriptedLLM`：未登录跳转、令牌登录、Approve 走风控、**Web 层无法绕过风控守门**、跨站请求被拒、SSE 活动流、设置写盘往返（专测含空格与 `#` 的值）、上下文压缩触发与压缩前刷写。不做浏览器端 E2E。
 
+## 5.5 Phase 5.5 详细设计：UI 打磨 + 通知补全（2026-08-09 用户实测反馈定稿）
+
+用户使用一周后的七条反馈 + 三个运维缺口。所有界面文案仍全英文。
+
+**产品原则（用户拍板）**：策略的交易参数（触发价、目标仓位等）**不开放页面直改**——中长线 agent 的定位决定了改参数必须经过与 agent 的讨论，防止情绪化操作。页面上可操作的只有非交易参数（re-arm、每策略通知开关）。
+
+### UI 打磨
+- **吸顶导航**：nav 改 sticky，下滑时保持可见。
+- **Dashboard 策略摘要卡**：每策略一张紧凑卡——ticker、状态徽标、当前仓位 vs 目标仓位、从规则里提取的关键点位（止损/止盈价）、现价及涨跌（红绿仅表盈亏方向）。详情全部移到 Strategies 页。现价经带超时的报价通道取得，短缓存防止每次刷新都打网络。
+- **Chat 即时反馈**：点 Send 后立即将用户消息落入对话框、显示 "Agent is thinking…" 动画指示、禁用发送键；响应到达后整体替换。防误触重发。（逐工具 SSE 流式仍在 TODO，不在本期。）
+- **Strategies 页强化**：按股票分卡；生命周期徽标（draft/active/paused/archived + 运行态：有规则已触发、有单待确认）；点开进详情（规则、版本历史、YAML）。每策略 `notify_email` 开关（YAML 新字段，默认 true；页面可切换——通知偏好不是交易参数）。
+- **Memory 页分 tab**：Profile / Strategy / 每股票子项 / Lessons / Recent changes 五个 tab，htmx 局部切换。仍严格只读。
+- **Settings 模型下拉**：三档模型改为下拉选择。openrouter provider 时服务端拉 OpenRouter 公开 `/models` API（无需 key），过滤对话模型、缓存 1 小时、失败退回内置列表；anthropic/openai 用内置列表。保留 "custom" 选项允许手输任意 slug。
+- **Settings 测试邮件体验**：Send test email 并入主表单为"保存并测试"——先走同一套校验+保存，再发测试信，结果以页面横幅呈现（sending → sent/failed + 原因）。未保存的输入不再丢失。
+
+### 通知补全
+- **哨兵心跳**：每轮哨兵通过后写心跳（复用 observations，source=`heartbeat`，仅保留最新语义）；Dashboard 显示 "Sentinel: last check N min ago"，超过 2×interval 显示告警色。解决"跑了一周无从得知它活着"。
+- **ntfy 推送通道**：新 `NtfyNotifier`（POST 到用户自配的 ntfy topic URL，无账号体系，手机装 ntfy app 订阅即收横幅）。`NTFY_URL` 设置项 + Settings 页字段 + 测试按钮。与邮件并行（组合 Notifier，各自失败互不影响）。正文同样无链接。
+- **网页对话进入提炼**：每日提炼的输入加入当天新增对话轮次（自提炼标记以来），修复"网页聊天永不进记忆"缺口（网页会话无退出时刻，post-chat 提炼只覆盖终端）。对话文本照旧过 fence + 注入扫描。
+
 ## 6. 风控守门层
 
 所有订单意图的必经之路，纯确定性代码，LLM 不可绕过。检查项（用户可配）：单笔金额上限、单股仓位上限、当日交易次数上限、账户现金下限、授权级别匹配、live/paper 开关。任何检查不过 → 拒单 + 记录 + 通知。

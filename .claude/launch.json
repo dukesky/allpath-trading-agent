@@ -1,0 +1,9 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "allpath-serve",
+      "url": "http://localhost:8791"
+    }
+  ]
+}

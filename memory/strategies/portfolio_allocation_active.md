@@ -1,0 +1,1 @@
+- 4 active strategies: NVDA (20%, $8k invested), TSM (10%, pending), MU (8%, pending entry), AAPL (15%, pending $275). Cash reserve ~$47-50k. Total portfolio approach: long-core + swing-satellite.

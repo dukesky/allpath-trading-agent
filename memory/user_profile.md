@@ -2,4 +2,4 @@
 
 - $100,000 trading account
 
-- NVDA $8,000 existing position; also considering AAPL
+- 已持有 NVDA 约 $8,000（首批建仓，目标 $20,000）；另在考虑 AAPL。
