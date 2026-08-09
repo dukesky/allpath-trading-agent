@@ -15,6 +15,7 @@ from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.email import build_notifier
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 from allpath_trade.sentinel import Sentinel
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.reviews import ReviewQueue
@@ -36,6 +37,7 @@ class Components:
     conn: sqlite3.Connection
     observations: ObservationLog
     memory: MemoryStore
+    app_state: AppState
     consolidator: Consolidator | None = None
 
 
@@ -58,6 +60,7 @@ def build_components(settings: Settings, broker: Broker | None = None,
     notifier = build_notifier(settings)
     observations = ObservationLog(conn)
     memory = MemoryStore(settings.memory_dir, conn)
+    app_state = AppState(conn)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
                        observations=observations)
     consolidator: Consolidator | None = None
@@ -81,4 +84,4 @@ def build_components(settings: Settings, broker: Broker | None = None,
                       gate=gate, executor=executor, queue=queue,
                       strategies=strategies, notifier=notifier, sentinel=sentinel,
                       conn=conn, observations=observations, memory=memory,
-                      consolidator=consolidator)
+                      app_state=app_state, consolidator=consolidator)

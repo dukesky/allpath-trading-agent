@@ -88,6 +88,16 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     kind UNINDEXED, ref_id UNINDEXED, subject, content
 );
+
+-- Tiny key-value table for process-level facts that don't belong in any
+-- append-only journal (observations) or one-row-per-entity table
+-- (rule_states). The sentinel heartbeat is the first tenant: one row,
+-- overwritten on every pass, so it stays invisible to consolidation instead
+-- of accumulating an hourly row forever. See AppState (store/app_state.py).
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 

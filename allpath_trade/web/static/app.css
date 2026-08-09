@@ -42,6 +42,7 @@ td, th { padding:9px 0; border-top:1px solid var(--line); text-align:left;
 th { color:var(--muted); font-size:12px; border-top:none; }
 td.num, th.num { text-align:right; font-family:var(--mono); }
 .up { color:var(--up); } .down { color:var(--down); } .muted { color:var(--muted); }
+.warn { color:var(--warn); }
 button, .btn { background:transparent; color:var(--text); border:1px solid var(--line);
   border-radius:8px; padding:7px 14px; font-size:14px; cursor:pointer; font:inherit; }
 button.primary { border-color:var(--accent); color:var(--accent); }

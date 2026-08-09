@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.broker.base import Position
 from allpath_trade.config import Settings
 from allpath_trade.data.base import Quote
+from allpath_trade.scheduler import SENTINEL_HEARTBEAT_KEY
 from allpath_trade.strategy.model import (
     Authorization,
     PositionPlan,
@@ -20,7 +21,10 @@ from allpath_trade.strategy.model import (
 )
 from allpath_trade.web.app import create_app
 from allpath_trade.web.routes import dashboard as dashboard_route
-from allpath_trade.web.routes.dashboard import summarize_strategy
+from allpath_trade.web.routes.dashboard import (
+    sentinel_heartbeat_status,
+    summarize_strategy,
+)
 from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
@@ -298,6 +302,60 @@ def test_summarize_strategy_status_and_auth_and_id():
     assert result["name"] == "Semis core"
 
 
+# --- sentinel_heartbeat_status: pure function, no HTML/store needed --------
+
+_FROZEN_NOW = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+
+
+def test_sentinel_heartbeat_status_never_ran_when_row_absent():
+    result = sentinel_heartbeat_status(None, 60, now=_FROZEN_NOW)
+    assert result == {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
+
+
+def test_sentinel_heartbeat_status_shows_minutes_ago():
+    raw = (_FROZEN_NOW - timedelta(minutes=12)).isoformat()
+    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    assert result["text"] == "Sentinel: last check 12m ago · interval 60m"
+    assert result["warn"] is False
+
+
+def test_sentinel_heartbeat_status_warns_past_twice_the_interval():
+    raw = (_FROZEN_NOW - timedelta(minutes=121)).isoformat()  # > 2 * 60
+    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    assert result["warn"] is True
+
+
+def test_sentinel_heartbeat_status_no_warn_at_exactly_twice_the_interval():
+    raw = (_FROZEN_NOW - timedelta(minutes=120)).isoformat()  # exactly 2 * 60
+    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    assert result["warn"] is False
+
+
+def test_sentinel_heartbeat_status_tolerates_a_naive_timestamp():
+    # AppState always writes an aware ISO string, but a stray naive value
+    # (e.g. hand-edited, or written by some future caller) must not 500 the
+    # dashboard -- treat it as UTC like every other timestamp in this
+    # codebase (see fmt.ago).
+    raw = (_FROZEN_NOW - timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    assert result["text"] == "Sentinel: last check 5m ago · interval 60m"
+
+
+def test_sentinel_heartbeat_status_tolerates_a_non_utc_offset():
+    # A heartbeat written with a different UTC offset representation (e.g.
+    # a future non-UTC writer) must still diff correctly against `now`.
+    from zoneinfo import ZoneInfo
+
+    et_time = _FROZEN_NOW.astimezone(ZoneInfo("America/New_York")) - timedelta(minutes=8)
+    result = sentinel_heartbeat_status(et_time.isoformat(), 60, now=_FROZEN_NOW)
+    assert result["text"] == "Sentinel: last check 8m ago · interval 60m"
+
+
+def test_sentinel_heartbeat_status_malformed_value_degrades_to_never_ran():
+    result = sentinel_heartbeat_status("not-a-timestamp", 60, now=_FROZEN_NOW)
+    assert result == {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
+
+
 # --- rendered dashboard page -----------------------------------------------
 
 def test_dashboard_strategy_card_shows_compact_summary(client):
@@ -360,3 +418,54 @@ def test_dashboard_pending_review_shows_alert(client):
 
 def test_dashboard_is_english_only_with_strategy_cards(client):
     assert_english_only(client.get("/").text)
+
+
+# --- rendered sentinel heartbeat line ---------------------------------------
+
+def test_dashboard_sentinel_heartbeat_never_ran_on_fresh_install(client):
+    # No sentinel pass has ever recorded a heartbeat -- a fresh install, or
+    # a user who has only ever run one-shot CLI commands (never `serve` or
+    # `run`), must not be told a stale time; the copy must make clear the
+    # daemon may simply never have started.
+    body = client.get("/").text
+    assert "Sentinel: never ran (daemon not running?)" in body
+
+
+def test_dashboard_sentinel_heartbeat_shows_minutes_ago(client, monkeypatch):
+    frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
+    c = client.app.state.holder.get()
+    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+                    (frozen_now - timedelta(minutes=12)).isoformat())
+
+    body = client.get("/").text
+
+    assert "Sentinel: last check 12m ago" in body
+    # Settings() defaults sentinel_interval_minutes to 60 -- see config.py.
+    assert "interval 60m" in body
+
+
+def test_dashboard_sentinel_heartbeat_stale_carries_the_warn_class(client, monkeypatch):
+    frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
+    c = client.app.state.holder.get()
+    # Default interval is 60min, so 2x is 120min -- 200min is well past it.
+    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+                    (frozen_now - timedelta(minutes=200)).isoformat())
+
+    body = client.get("/").text
+
+    assert "Sentinel: last check 200m ago" in body
+    assert '<p class="warn">Sentinel: last check 200m ago' in body
+
+
+def test_dashboard_sentinel_heartbeat_recent_does_not_carry_the_warn_class(client, monkeypatch):
+    frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
+    c = client.app.state.holder.get()
+    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+                    (frozen_now - timedelta(minutes=12)).isoformat())
+
+    body = client.get("/").text
+
+    assert '<p class="muted">Sentinel: last check 12m ago' in body

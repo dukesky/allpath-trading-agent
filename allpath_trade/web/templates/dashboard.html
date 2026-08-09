@@ -2,6 +2,7 @@
 {% block title %}Dashboard · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Dashboard</h1>
+<p class="{{ 'warn' if sentinel_status.warn else 'muted' }}">{{ sentinel_status.text }}</p>
 
 {% if broker_error %}<p class="error">{{ broker_error }}</p>{% endif %}
 {% if account %}

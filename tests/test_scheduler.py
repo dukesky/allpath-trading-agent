@@ -180,6 +180,22 @@ class FakeObservations:
         return self._rows
 
 
+class FakeAppState:
+    """Stands in for allpath_trade.store.app_state.AppState -- a plain dict
+    is enough to prove build_jobs/run_daemon call .set() with the right key,
+    without touching a real sqlite connection (that's AppState's own test,
+    tests/test_app_state.py)."""
+
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    def set(self, key, value):
+        self.values[key] = value
+
+    def get(self, key):
+        return self.values.get(key)
+
+
 class DigestNotifier:
     def __init__(self):
         self.sent = []
@@ -190,7 +206,8 @@ class DigestNotifier:
 
 
 def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5,
-                journal=None, queue=None, notifier=None, observations=None):
+                journal=None, queue=None, notifier=None, observations=None,
+                app_state=None):
     return SimpleNamespace(
         sentinel=sentinel,
         consolidator=consolidator,
@@ -198,6 +215,7 @@ def _components(sentinel, consolidator=None, daily_consolidation=True, interval=
         queue=queue if queue is not None else FakeQueue(),
         notifier=notifier if notifier is not None else DigestNotifier(),
         observations=observations if observations is not None else FakeObservations(),
+        app_state=app_state if app_state is not None else FakeAppState(),
         settings=SimpleNamespace(daily_consolidation=daily_consolidation,
                                  sentinel_interval_minutes=interval),
     )
@@ -234,6 +252,58 @@ def test_build_jobs_skips_sentinel_when_market_closed(monkeypatch):
     scheduler.job()
 
     assert sentinel.calls == 0
+
+
+def test_build_jobs_records_heartbeat_when_market_open(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: True)
+    monkeypatch.setattr(sched, "datetime", SimpleNamespace(
+        now=lambda tz=None: datetime(2026, 8, 9, 15, 0, tzinfo=UTC)))
+    app_state = FakeAppState()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FakeSentinel(),
+                                                 app_state=app_state)))
+
+    scheduler.job()
+
+    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == "2026-08-09T15:00:00+00:00"
+
+
+def test_build_jobs_records_heartbeat_even_when_market_closed(monkeypatch):
+    # This is the whole point of the feature: the heartbeat proves the
+    # *scheduler* is alive, not the market -- it must fire on every tick,
+    # not only the ticks where is_market_hours() happens to be True. This
+    # suite already burned once on an unpatched clock (_is_after_close), so
+    # both is_market_hours and the clock are patched explicitly here rather
+    # than trusted to the real wall clock.
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "datetime", SimpleNamespace(
+        now=lambda tz=None: datetime(2026, 8, 9, 3, 0, tzinfo=UTC)))
+    sentinel = FakeSentinel()
+    app_state = FakeAppState()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=sentinel, app_state=app_state)))
+
+    scheduler.job()
+
+    assert sentinel.calls == 0  # market closed: sentinel itself did not run
+    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == "2026-08-09T03:00:00+00:00"
+
+
+def test_run_daemon_records_heartbeat_even_when_market_closed(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "datetime", SimpleNamespace(
+        now=lambda tz=None: datetime(2026, 8, 9, 3, 0, tzinfo=UTC)))
+    app_state = FakeAppState()
+
+    run_daemon(lambda: None, 5, scheduler_cls=ImmediateScheduler, app_state=app_state)
+
+    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == "2026-08-09T03:00:00+00:00"
 
 
 def test_build_jobs_runs_daily_consolidation_once_per_day_after_close(monkeypatch):

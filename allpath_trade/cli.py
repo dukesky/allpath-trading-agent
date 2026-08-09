@@ -510,7 +510,7 @@ def main(argv: list[str] | None = None,
         if components.consolidator is not None:
             daily = lambda: print("[memory] " + components.consolidator.run_daily())
         run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
-                   daily_job=daily)
+                   daily_job=daily, app_state=components.app_state)
         return 0
     if args.command == "strategies":
         return cmd_strategies(settings, store)

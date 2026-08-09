@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import re
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import quote
 
@@ -12,6 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from allpath_trade.app import Components
 from allpath_trade.broker.base import Position
 from allpath_trade.data.base import DataSource, Quote
+from allpath_trade.scheduler import SENTINEL_HEARTBEAT_KEY
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.templating import templates
 
@@ -143,6 +145,50 @@ def summarize_strategy(doc: StrategyDoc, position: Position | None, quote: Quote
     }
 
 
+def _utcnow() -> datetime:
+    # A plain module-level function, not a bound default argument, so tests
+    # can monkeypatch it to a frozen instant (dashboard_route._utcnow) the
+    # same way the scheduler tests patch its clock -- that suite already
+    # burned once on an unpatched clock (_is_after_close in test_scheduler.py).
+    return datetime.now(UTC)
+
+
+def _parse_heartbeat_ts(raw: str) -> datetime:
+    """Parse a heartbeat timestamp written by AppState.set.
+
+    AppState always writes `datetime.now(UTC).isoformat()`, but tolerate a
+    naive value (interpreted as UTC, matching every other timestamp in this
+    codebase -- see fmt.ago) or a non-UTC offset (converted to UTC) rather
+    than assuming the exact representation that happens to be written today.
+    """
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
+                              now: datetime | None = None) -> dict:
+    """Pure function -- takes an already-read `app_state.get(...)` value, no
+    I/O, so it's testable without a store (same shape as summarize_strategy
+    above). A malformed stored value degrades to the same "never ran" copy
+    as a missing one, rather than 500ing the dashboard."""
+    if raw is not None:
+        try:
+            last = _parse_heartbeat_ts(raw)
+        except (TypeError, ValueError):
+            raw = None
+    if raw is None:
+        return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
+    elapsed = (now or _utcnow()) - last
+    minutes = max(0, int(elapsed.total_seconds() // 60))
+    warn = minutes > 2 * interval_minutes
+    return {
+        "text": f"Sentinel: last check {minutes}m ago · interval {interval_minutes}m",
+        "warn": warn,
+    }
+
+
 def error_redirect(target: str, message: str | None = None) -> RedirectResponse:
     """The shared "303 back to a page, error riding along as a query
     param" idiom. Every POST-triggered failure across the app (reviews.py's
@@ -184,8 +230,11 @@ def dashboard(request: Request) -> HTMLResponse:
             equity=equity, has_pending=s.id in pending_strategy_ids)
         for s in strategies
     ]
+    sentinel_status = sentinel_heartbeat_status(
+        c.app_state.get(SENTINEL_HEARTBEAT_KEY), c.settings.sentinel_interval_minutes)
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
         "broker_error": broker_error, "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": c.journal.recent(limit=8),
+        "sentinel_status": sentinel_status,
         **nav_context(c)})
