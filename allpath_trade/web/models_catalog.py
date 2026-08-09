@@ -21,6 +21,7 @@ exactly one GET with no need for anything httpx adds over the stdlib for that
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import time
 import urllib.request
@@ -29,6 +30,25 @@ from typing import Any
 _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _TIMEOUT_SECONDS = 5
 _CACHE_TTL_SECONDS = 3600
+
+# `urlopen(..., timeout=_TIMEOUT_SECONDS)` alone does not bound wall-clock
+# time: CPython's socket.create_connection() resolves DNS via
+# getaddrinfo() *before* the socket timeout takes effect, and a redirect
+# chain gets a fresh `timeout` window per hop. A firewalled/sandboxed
+# deployment with a stalled resolver for openrouter.ai can therefore hang
+# well past 5 seconds, contradicting the "never blocks" contract above.
+#
+# Running the fetch on a worker thread and bounding the wait with
+# `future.result(timeout=...)` enforces a true wall-clock deadline no
+# matter where inside the call it's stuck. This mirrors
+# `allpath_trade.web.routes.dashboard`'s `_with_timeout` / `_broker_pool`
+# pattern exactly (submit-then-bounded-`.result()`); it isn't reused
+# directly because that pool is sized and named for dashboard broker
+# polling, and importing it here would couple two independently-owned
+# route modules together for one GET elsewhere. A single-worker local pool
+# gets the same guarantee without the cross-module coupling.
+_fetch_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="models-catalog-fetch")
 
 # Current, sensible slugs as of this writing. These are what the dropdown
 # (and any code path that never reaches the network) shows -- they are not
@@ -87,6 +107,29 @@ def _fetch_openrouter_models() -> list[str]:
     return sorted(ids)
 
 
+def _fetch_and_cache_openrouter_models() -> list[str]:
+    """The unit of work submitted to `_fetch_pool`. Writes a successful
+    result straight to `_cache` itself, rather than leaving that to the
+    caller in `list_models`.
+
+    That matters because the caller waits for this with a bounded
+    `future.result(timeout=...)` (see `list_models`) -- if the deadline
+    expires first, Python has no way to cancel a thread that's already
+    running, so this function keeps executing in the background after
+    `list_models` has already returned the fallback list. If it goes on to
+    succeed, writing `_cache` here means that late result still isn't
+    wasted: the *next* call to `list_models` finds a warm cache instead of
+    hitting the network again. A late write racing a fresh one from a
+    subsequent call is harmless -- both are valid successful fetches, and
+    whichever lands last just becomes the current cache entry.
+    """
+    models = _fetch_openrouter_models()
+    if models:
+        global _cache
+        _cache = (time.time(), models)
+    return models
+
+
 def list_models(provider: str) -> list[str]:
     """The model slugs to offer for `provider`. Never raises and never
     blocks past `_TIMEOUT_SECONDS` -- callers (the settings page) can call
@@ -102,7 +145,15 @@ def list_models(provider: str) -> list[str]:
         return _cache[1]
 
     try:
-        models = _fetch_openrouter_models()
+        # `.result(timeout=...)` is what actually enforces the wall-clock
+        # deadline -- it raises concurrent.futures.TimeoutError as soon as
+        # _TIMEOUT_SECONDS elapses, regardless of whether the submitted
+        # call has even started yet (queued behind an earlier hung fetch)
+        # or is stuck inside DNS resolution, connect, read, or a redirect.
+        # Reading `_TIMEOUT_SECONDS` here rather than capturing it as a
+        # default argument keeps it monkeypatchable by tests.
+        models = _fetch_pool.submit(_fetch_and_cache_openrouter_models).result(
+            timeout=_TIMEOUT_SECONDS)
     except Exception:  # noqa: BLE001 — any failure (network, timeout, bad
         # JSON, unexpected schema) must degrade to the fallback list rather
         # than take the settings page down with it; see module docstring.

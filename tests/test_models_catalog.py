@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 from typing import Self
 
@@ -125,6 +127,51 @@ def test_cache_expires_after_its_ttl(monkeypatch):
     models_catalog.list_models("openrouter")
 
     assert len(calls) == 2
+
+
+def test_stalled_fetch_returns_fallback_within_a_bounded_wall_clock_deadline(monkeypatch):
+    # Regression test: `urlopen(..., timeout=N)` alone does not bound
+    # wall-clock time -- CPython resolves DNS via getaddrinfo() *before*
+    # the socket timeout takes effect, so a stalled resolver (a
+    # firewalled/sandboxed deployment with no route to openrouter.ai) can
+    # hang past `_TIMEOUT_SECONDS`. `_fetch_openrouter_models` sleeping well
+    # past the deadline stands in for that stall; `list_models` must still
+    # return the fallback within a bounded time by enforcing the deadline
+    # itself (via `_fetch_pool` / `future.result(timeout=...)`), not by
+    # trusting `urlopen`'s own timeout to cover every failure mode.
+    #
+    # A short, injected deadline (not the real 5s production one) keeps
+    # this test fast rather than sleeping out a real production timeout.
+    deadline = 0.2
+    monkeypatch.setattr(models_catalog, "_TIMEOUT_SECONDS", deadline)
+
+    finished = threading.Event()
+
+    def _stalled(*a, **k):
+        time.sleep(deadline * 5)
+        finished.set()
+        return ["late-result-should-not-affect-this-test"]
+
+    monkeypatch.setattr(models_catalog, "_fetch_openrouter_models", _stalled)
+
+    started = time.monotonic()
+    models = models_catalog.list_models("openrouter")
+    elapsed = time.monotonic() - started
+
+    assert models == models_catalog.FALLBACK_MODELS["openrouter"]
+    # Generous bound (2x the deadline) to avoid flakiness under CI
+    # scheduling jitter, while still proving the wait is bounded rather
+    # than open-ended -- the stalled fetch itself sleeps 5x the deadline,
+    # so this can only pass if `.result(timeout=...)` actually cut the
+    # wait short instead of riding along with the stalled call.
+    assert elapsed < deadline * 2
+
+    # Let the abandoned background fetch actually finish (and write its
+    # late result to `_cache`, per `_fetch_and_cache_openrouter_models`'s
+    # docstring) before this test returns -- otherwise its thread could
+    # still be running when the next test's autouse `_cold_cache` fixture
+    # resets `_cache`, and then clobber that reset out from under it.
+    assert finished.wait(timeout=deadline * 20)
 
 
 def test_anthropic_and_openai_return_the_static_list_and_never_touch_the_network(monkeypatch):
