@@ -195,3 +195,57 @@ def test_rearm_of_bogus_rule_on_a_real_strategy_is_not_processed(client):
         "SELECT * FROM rule_states WHERE strategy_id = ? AND rule_id = ?",
         ("semis", "no-such-rule")).fetchall()
     assert rows == []
+
+
+def test_status_chip_and_alert_chip_use_different_classes(client):
+    # Finding 1: lifecycle status ("active") must not render in the same
+    # amber .badge used for things that need attention (N triggered,
+    # pending review) -- it should carry the neutral .chip class instead.
+    c = client.app.state.holder.get()
+    c.strategies.set_rule_state("semis", "r1", RuleState.TRIGGERED)
+    c.queue.add(strategy_id="semis", rule_id="r1", ticker="AAPL", rule_type="hard",
+                condition="price < 100", action="sell all", snapshot={}, intent=None)
+
+    list_body = client.get("/strategies").text
+    assert '<span class="chip">active</span>' in list_body
+    assert '<span class="badge">1 triggered</span>' in list_body
+    assert '<span class="badge">pending review</span>' in list_body
+    assert '<span class="badge">active</span>' not in list_body
+
+    detail_body = client.get("/strategies/semis").text
+    assert '<span class="chip">active</span>' in detail_body
+    assert '<span class="badge">1 triggered</span>' in detail_body
+    assert '<span class="badge">active</span>' not in detail_body
+
+
+def _write_strategy(client, strategy_id, *, authorization, notify_email):
+    store = client.app.state.holder.get().strategies
+    text = (
+        f'name: "{strategy_id}"\n'
+        "status: active\n"
+        f"authorization: {authorization}\n"
+        f"notify_email: {str(notify_email).lower()}\n"
+        "position: {ticker: MSFT, target_weight: 10%}\n"
+        "rules:\n"
+        '  - {id: r1, type: soft, condition: "price < 100", action: "sell 10%"}\n'
+    )
+    (store.directory / f"{strategy_id}.yaml").write_text(text)
+
+
+def test_notify_only_strategy_with_email_off_shows_warning(client):
+    _write_strategy(client, "silent", authorization="notify", notify_email=False)
+    body = client.get("/strategies/silent").text
+    assert ("This strategy is notify-only: with email off, a trigger will "
+            "only be visible on this page and the dashboard.") in body
+
+
+def test_notify_only_strategy_with_email_on_shows_no_warning(client):
+    _write_strategy(client, "loud", authorization="notify", notify_email=True)
+    body = client.get("/strategies/loud").text
+    assert "notify-only" not in body
+
+
+def test_non_notify_strategy_with_email_off_shows_no_warning(client):
+    _write_strategy(client, "confirmed", authorization="confirm", notify_email=False)
+    body = client.get("/strategies/confirmed").text
+    assert "notify-only" not in body

@@ -4,7 +4,11 @@ import yaml
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from allpath_trade.strategy.loader import is_valid_strategy_id, parse_strategy_text
+from allpath_trade.strategy.loader import (
+    atomic_write_text,
+    is_valid_strategy_id,
+    parse_strategy_text,
+)
 from allpath_trade.strategy.model import RuleState, StrategyDoc
 from allpath_trade.web.routes.dashboard import error_redirect, nav_context
 from allpath_trade.web.templating import templates
@@ -121,7 +125,7 @@ def toggle_notify_email(request: Request, strategy_id: str) -> Response:
     updated = current.model_copy(update={"notify_email": not current.notify_email})
     new_text = yaml.safe_dump(updated.model_dump(mode="json"), sort_keys=False,
                               allow_unicode=True)
-    path.write_text(new_text)
+    atomic_write_text(path, new_text)
     c.strategies.snapshot_version(updated, "notify_email toggled via web")
     return RedirectResponse(f"/strategies/{strategy_id}", status_code=303)
 

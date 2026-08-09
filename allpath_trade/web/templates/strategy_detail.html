@@ -4,7 +4,7 @@
 <h1>{{ doc.name }}</h1>
 <p class="muted">{{ doc.id }} · v{{ doc.version }} · {{ doc.authorization.value }}</p>
 <div class="row" style="margin-top:6px;margin-bottom:16px">
-  <span class="badge">{{ doc.status.value }}</span>
+  <span class="chip">{{ doc.status.value }}</span>
   {% for chip in chips %}<span class="badge">{{ chip }}</span>{% endfor %}
 </div>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
@@ -31,7 +31,10 @@
 
 <h2>Notifications</h2>
 <div class="card">
-  <p class="muted">Email notifications for this strategy's rule triggers, orders, and queued reviews are currently {{ 'on' if doc.notify_email else 'off' }}. This does not change whether rules fire, execute, or queue for review -- only whether you get emailed about it.</p>
+  <p class="muted">Email notifications for this strategy's rule triggers, orders, and queued reviews are currently {{ 'on' if doc.notify_email else 'off' }}. This does not change whether rules fire, execute, or queue for review — only whether you get emailed about it.</p>
+  {% if doc.authorization.value == 'notify' and not doc.notify_email %}
+  <p class="hint">This strategy is notify-only: with email off, a trigger will only be visible on this page and the dashboard.</p>
+  {% endif %}
   <form method="post" action="/strategies/{{ doc.id }}/notify-email">
     <button type="submit">{{ 'Turn off' if doc.notify_email else 'Turn on' }} email notifications</button>
   </form>

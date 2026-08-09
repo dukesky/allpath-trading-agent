@@ -21,6 +21,11 @@ nav a { color:var(--muted); font-size:14px; }
 nav a.on { color:var(--text); }
 .badge { background:var(--warn); color:#3a2a00; border-radius:999px;
   padding:1px 7px; font-size:12px; margin-left:5px; }
+/* Neutral lifecycle status (active/draft/...) -- greyscale so it never
+   competes with .badge's amber, which is reserved for things that actually
+   need attention (N triggered, pending review, the nav's pending count). */
+.chip { background:transparent; color:var(--muted); border:1px solid var(--line);
+  border-radius:999px; padding:1px 7px; font-size:12px; margin-left:5px; }
 main { max-width:900px; margin:0 auto; padding:20px; }
 h1 { font-size:20px; font-weight:500; margin:0 0 16px; }
 h2 { font-size:13px; font-weight:400; color:var(--muted); margin:26px 0 10px;
