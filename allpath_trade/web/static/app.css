@@ -78,6 +78,14 @@ main a:not(.card):not(.tab-link):hover { text-decoration:underline; }
 .chip { background:var(--surface-2); color:var(--muted); border:1px solid var(--line);
   border-radius:999px; padding:2px 9px; font-size:12px; margin-left:5px; }
 .chip:first-child { margin-left:0; }
+/* Market open/closed pill, next to the sentinel heartbeat line. The dot
+   alone carries the open/closed color -- .up here is the one place a
+   universally-read "live" indicator, not a P/L direction, borrows the
+   green; the pill text itself stays neutral chip color like every other
+   chip. Closed uses the same muted dot color as everything else. */
+.market-pill { margin-left:0; margin-right:8px; }
+.market-pill .dot { color:var(--muted); }
+.market-pill.open .dot { color:var(--up); }
 
 main { max-width:960px; margin:0 auto; padding:28px 24px 64px; }
 h1 { font-size:22px; font-weight:600; letter-spacing:-.01em; margin:0 0 18px; }

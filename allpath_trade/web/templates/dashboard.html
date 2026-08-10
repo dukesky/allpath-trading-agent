@@ -2,7 +2,7 @@
 {% block title %}Dashboard · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Dashboard</h1>
-<p class="{{ 'warn' if sentinel_status.warn else 'muted' }}">{{ sentinel_status.text }}</p>
+<p class="{{ 'warn' if sentinel_status.warn else 'muted' }}">{{ sentinel_status.text }} <span class="chip market-pill {{ 'open' if market_open else 'closed' }}"><span class="dot">●</span> Market {{ 'open' if market_open else 'closed' }}</span></p>
 
 {% if broker_error %}<p class="error">{{ broker_error }}</p>{% endif %}
 {% if account %}

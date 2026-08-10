@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from allpath_trade.app import Components
 from allpath_trade.broker.base import Position
 from allpath_trade.data.base import DataSource, Quote
+from allpath_trade.scheduler import is_market_hours
 from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.templating import templates
@@ -251,6 +252,14 @@ def dashboard(request: Request) -> HTMLResponse:
         c.app_state.get(SENTINEL_HEARTBEAT_KEY), c.settings.sentinel_interval_minutes,
         market_open_raw=c.app_state.get(SENTINEL_MARKET_OPEN_KEY))
 
+    # Same is_market_hours the scheduler/sentinel gate their pass on (see
+    # allpath_trade/scheduler.py) -- reused rather than reimplemented so the
+    # pill can never disagree with what actually decided whether today's
+    # sentinel pass ran. Like that function, this is weekday+hours only, no
+    # holiday calendar (see docs/TODO.md): the pill will read "open" on a
+    # market holiday, same limitation the heartbeat line already carries.
+    market_open = is_market_hours()
+
     account = None
     positions: list = []
     broker_error = ""
@@ -289,5 +298,5 @@ def dashboard(request: Request) -> HTMLResponse:
         "page": "dashboard", "account": account, "positions": positions,
         "broker_error": broker_error, "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": c.journal.recent(limit=8),
-        "sentinel_status": sentinel_status,
+        "sentinel_status": sentinel_status, "market_open": market_open,
         **nav_context(c)})

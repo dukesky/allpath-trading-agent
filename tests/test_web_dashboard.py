@@ -151,6 +151,25 @@ def test_dashboard_heading_is_strategies_not_active(client):
     assert "Active strategies" not in body
 
 
+def test_dashboard_shows_open_pill_when_market_is_open(client, monkeypatch):
+    # Patched, never the real clock -- dashboard_route.is_market_hours is
+    # the same allpath_trade.scheduler.is_market_hours the sentinel gates
+    # its pass on, imported directly into dashboard.py.
+    monkeypatch.setattr(dashboard_route, "is_market_hours", lambda: True)
+    body = client.get("/").text
+    assert 'class="chip market-pill open"' in body
+    assert "Market open" in body
+    assert "Market closed" not in body
+
+
+def test_dashboard_shows_closed_pill_when_market_is_closed(client, monkeypatch):
+    monkeypatch.setattr(dashboard_route, "is_market_hours", lambda: False)
+    body = client.get("/").text
+    assert 'class="chip market-pill closed"' in body
+    assert "Market closed" in body
+    assert "Market open" not in body
+
+
 def test_position_at_zero_pl_has_no_color_class(client, monkeypatch):
     from decimal import Decimal
 
