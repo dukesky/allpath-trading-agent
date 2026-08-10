@@ -184,6 +184,21 @@ def test_blank_secret_field_leaves_the_stored_value_alone(client, tmp_path):
     assert "keep-me" in (tmp_path / ".env").read_text()
 
 
+def test_gmail_app_password_grouping_spaces_are_stripped_on_save(client, tmp_path):
+    # Gmail shows app passwords as "abcd efgh ijkl mnop"; users paste that
+    # verbatim and SMTP auth then fails with an opaque 535. The save path
+    # strips the grouping when the value has exactly that shape.
+    client.post("/settings", data={"smtp_password": "khei moik oppb dssr"})
+    assert "'kheimoikoppbdssr'" in (tmp_path / ".env").read_text()
+
+
+def test_passwords_that_merely_contain_spaces_are_stored_verbatim(client, tmp_path):
+    # Only the exact 4x4-lowercase Gmail shape is rewritten -- a real
+    # password containing spaces must reach .env byte-for-byte.
+    client.post("/settings", data={"smtp_password": "correct horse battery staple9"})
+    assert "'correct horse battery staple9'" in (tmp_path / ".env").read_text()
+
+
 def test_paper_mode_cannot_be_switched_from_the_page(client):
     body = client.get("/settings").text
     assert 'name="alpaca_paper"' not in body

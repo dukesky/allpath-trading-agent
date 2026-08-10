@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 import sys
 
@@ -31,6 +32,20 @@ BOOLEAN_FIELDS = ["daily_consolidation", "consolidate_after_chat"]
 # Secret values: never rendered back. A blank field means "leave it alone".
 SECRET_FIELDS = ["openrouter_api_key", "openai_api_key", "anthropic_api_key",
                  "alpaca_api_key", "alpaca_secret_key", "smtp_password"]
+
+# Gmail displays app passwords as "abcd efgh ijkl mnop"; pasting that
+# verbatim used to store the spaces and fail SMTP auth with an opaque 535.
+# Strip the grouping ONLY when the value has exactly that shape -- a real
+# password that legitimately contains spaces never matches four
+# space-separated groups of four lowercase letters, so nothing else is
+# rewritten (and .env stays a byte-for-byte store for every other value).
+_GMAIL_APP_PASSWORD_RE = re.compile(r"^[a-z]{4}( [a-z]{4}){3}$")
+
+
+def _normalize_app_password(value: str) -> str:
+    if _GMAIL_APP_PASSWORD_RE.match(value):
+        return value.replace(" ", "")
+    return value
 
 
 # The last 4 characters are only ever unmasked when doing so still hides
@@ -95,6 +110,8 @@ async def save(request: Request) -> Response:
             updates[field] = str(form[field]).strip()
     for field in SECRET_FIELDS:
         value = str(form.get(field, "")).strip()
+        if field == "smtp_password":
+            value = _normalize_app_password(value)
         if value:  # blank means "keep what is stored"
             updates[field] = value
     # ALPACA_PAPER is deliberately absent: switching to real money should
