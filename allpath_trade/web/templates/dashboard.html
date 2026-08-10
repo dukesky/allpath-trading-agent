@@ -32,20 +32,38 @@
 <h2>Strategies</h2>
 {% for s in strategy_cards %}
 <a class="card strategy-card" href="/strategies/{{ s.id }}">
-  <div class="row">
-    <strong>{{ s.ticker }}</strong>
-    <span class="muted">{{ s.name }}</span>
-    <span style="margin-left:auto" class="muted">{{ s.status }} / {{ s.auth }}</span>
+  <div class="strategy-card-head">
+    <div class="strategy-card-title">
+      <span class="strategy-ticker">{{ s.ticker }}</span>
+      <span class="muted">{{ s.name }}</span>
+    </div>
+    <div class="strategy-card-price">
+      <span class="{{ s.price_class }}">{{ s.price | money }}{% if s.day_change_pct is not none %} {{ "%+.1f"|format(s.day_change_pct) }}%{% endif %}</span>
+    </div>
   </div>
-  <div class="row" style="margin-top:6px;font-size:13px">
-    <span class="muted">
+  <div class="strategy-card-meta">
+    <span class="chip">{{ s.status }}</span>
+    <span class="muted" style="font-size:12px">{{ s.auth }}</span>
+    <span class="strategy-weight">
       {% if s.current_weight_pct is not none %}{{ "%.1f"|format(s.current_weight_pct) }}%{% else %}—{% endif %}
-      {% if s.target_weight_pct is not none %} of {{ "%.1f"|format(s.target_weight_pct) }}% target{% endif %}
+      {% if s.target_weight_pct is not none %}<span class="muted"> of {{ "%.1f"|format(s.target_weight_pct) }}% target</span>{% endif %}
     </span>
-    {% if s.key_levels %}<span class="muted">· {{ s.key_levels | join(" · ") }}</span>{% endif %}
-    <span style="margin-left:auto" class="{{ s.price_class }}">{{ s.price | money }}{% if s.day_change_pct is not none %} {{ "%+.1f"|format(s.day_change_pct) }}%{% endif %}</span>
   </div>
-  {% if s.alerts %}<div class="muted" style="font-size:12px;margin-top:4px">{{ s.alerts | join(" · ") }}</div>{% endif %}
+  {% if s.target_weight_pct and s.current_weight_pct is not none %}
+  {% set ratio = (s.current_weight_pct / s.target_weight_pct * 100) %}
+  {% set capped = 100 if ratio > 100 else ratio %}
+  <div class="weight-bar"><div class="weight-bar-fill{% if ratio > 100 %} over{% endif %}" style="width:{{ '%.1f'|format(capped) }}%"></div></div>
+  {% endif %}
+  {% if s.key_levels %}
+  <div class="levels">
+    {% for lvl in s.key_levels %}<span class="level-chip{% if lvl.startswith('stop') %} stop{% elif lvl.startswith('target') %} target{% elif lvl.startswith('add zone') %} add{% endif %}">{{ lvl }}</span>{% endfor %}
+  </div>
+  {% endif %}
+  {% if s.alerts %}
+  <div class="strategy-alerts">
+    {% for a in s.alerts %}<span class="alert-chip">{{ a }}</span>{% endfor %}
+  </div>
+  {% endif %}
 </a>
 {% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
 {% for e in strategy_errors %}<p class="error">{{ e }}</p>{% endfor %}
