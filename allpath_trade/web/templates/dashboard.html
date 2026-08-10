@@ -38,7 +38,14 @@
       <span class="muted">{{ s.name }}</span>
     </div>
     <div class="strategy-card-price">
-      <span class="{{ s.price_class }}">{{ s.price | money }}{% if s.day_change_pct is not none %} {{ "%+.1f"|format(s.day_change_pct) }}%{% endif %}</span>
+      {# Two decimals, and nothing at all once it rounds to zero -- one
+         decimal renders +-0.04% as a coloured "+0.0%"/"-0.0%", and a
+         truly flat quote as a signed "+0.0%", both of which read as a
+         real (if tiny) move that isn't there. price_class (up/down/
+         neutral) is untouched by this -- flat already computes "" there;
+         this only hides the percentage text itself. #}
+      {% set day_change_rounded = s.day_change_pct | round(2) if s.day_change_pct is not none else none %}
+      <span class="{{ s.price_class }}">{{ s.price | money }}{% if day_change_rounded %} {{ "%+.2f"|format(s.day_change_pct) }}%{% endif %}</span>
     </div>
   </div>
   <div class="strategy-card-meta">
@@ -51,7 +58,11 @@
   </div>
   {% if s.target_weight_pct and s.current_weight_pct is not none %}
   {% set ratio = (s.current_weight_pct / s.target_weight_pct * 100) %}
-  {% set capped = 100 if ratio > 100 else ratio %}
+  {# A short position gives current_weight_pct a negative sign, so ratio
+     can go negative too -- an unclamped negative width is invalid CSS
+     (silently dropped, but still wrong to emit) rather than the empty bar
+     a weight of zero-or-below should render as. #}
+  {% set capped = 100 if ratio > 100 else (0 if ratio < 0 else ratio) %}
   <div class="weight-bar"><div class="weight-bar-fill{% if ratio > 100 %} over{% endif %}" style="width:{{ '%.1f'|format(capped) }}%"></div></div>
   {% endif %}
   {% if s.key_levels %}

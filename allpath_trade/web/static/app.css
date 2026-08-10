@@ -61,9 +61,14 @@ nav a.on { color:var(--text); font-weight:600; border-bottom-color:var(--accent)
 /* Bare inline text links (Strategies' "View details", a source URL in a
    review's agent analysis) get no other affordance -- .strategy-card is
    also an <a> but is excluded via :not(.card), since a whole card reading
-   as "a link" via its border/hover is already the affordance there. */
-main a:not(.card) { color:var(--accent); }
-main a:not(.card):hover { text-decoration:underline; }
+   as "a link" via its border/hover is already the affordance there.
+   .tab-link is excluded too: it's an <a> with its own color/hover/active
+   rules below, and this selector's specificity (0-1-2) would otherwise
+   beat .tab-link's (0-1-0) -- forcing every *inactive* tab to accent blue
+   while .tab-link.on's higher specificity (0-2-0) kept the *active* tab
+   plain text, inverting which tab reads as selected. */
+main a:not(.card):not(.tab-link) { color:var(--accent); }
+main a:not(.card):not(.tab-link):hover { text-decoration:underline; }
 
 .badge { background:var(--warn); color:#3a2a00; border-radius:999px;
   padding:1px 7px; font-size:12px; font-weight:600; margin-left:5px; }

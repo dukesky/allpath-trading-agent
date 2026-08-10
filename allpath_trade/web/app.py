@@ -24,8 +24,20 @@ def static_content_hash(path: Path) -> str:
     file produces a changed URL, so a stale cache entry (keyed on the old
     URL) is simply never reused. Takes a path rather than reading STATIC_DIR
     itself so tests can point it at a temp copy instead of mutating the real
-    shipped asset."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:8]
+    shipped asset.
+
+    A missing/unreadable file (a packaging error that dropped app.css from
+    the wheel, a permissions issue) degrades to a constant "0" rather than
+    letting a bare FileNotFoundError/OSError out of create_app -- that would
+    contradict the mkdir-tolerance of the STATIC_DIR.mkdir() call right
+    before this runs, crashing startup opaquely over what's ultimately just
+    a cache-busting nicety. The URL still works either way (StaticFiles
+    still serves the real file); only the busting query param goes stale
+    across a deploy until the packaging issue is fixed."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:8]
+    except OSError:
+        return "0"
 
 
 def _start_scheduler(app: FastAPI, scheduler_cls: type) -> None:

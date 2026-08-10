@@ -62,6 +62,14 @@ def test_static_asset_version_is_stable_across_renders(client):
     assert v1 == v2
 
 
+def test_static_content_hash_returns_zero_when_file_is_missing(tmp_path):
+    # A packaging error (app.css dropped from the wheel) must not crash
+    # create_app -- that would contradict STATIC_DIR.mkdir()'s own
+    # tolerance for a fresh install the line right above it.
+    missing = tmp_path / "does-not-exist.css"
+    assert static_content_hash(missing) == "0"
+
+
 def test_static_content_hash_changes_when_file_content_changes(tmp_path):
     # A temp copy, never the real shipped asset -- mutating
     # allpath_trade/web/static/app.css would poison every other test run

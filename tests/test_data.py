@@ -8,8 +8,16 @@ import pytest
 from allpath_trade.data.yf import YFinanceSource
 
 
+class YFRateLimitError(Exception):
+    """Stand-in for yfinance's own exceptions.YFRateLimitError -- real
+    fast_info["regular_market_previous_close"] access can raise this (or
+    other request-layer exceptions) out of the history() call it triggers
+    on a cache miss, never KeyError. A plain-dict fake wouldn't exercise
+    that shape at all."""
+
+
 class StubTicker:
-    fast_info: ClassVar[dict] = {"last_price": 201.37, "previous_close": 198.20}
+    fast_info: ClassVar[dict] = {"last_price": 201.37, "regular_market_previous_close": 198.20}
 
     def history(self, period, interval="1d"):
         idx = pd.to_datetime(["2026-07-28", "2026-07-29"])
@@ -27,11 +35,20 @@ class NoPriceTicker:
         return pd.DataFrame()
 
 
-class NoPreviousCloseTicker:
-    """fast_info that has a price but no previous_close key at all -- some
-    tickers (illiquid, freshly listed) yfinance can't supply it for."""
+class PreviousCloseFailsTicker:
+    """fast_info that has a price but raises fetching previous_close --
+    mirrors a real FastInfo whose regular_market_previous_close access hits
+    a rate limit or other transport error while last_price already
+    resolved. The price must survive; only the day-change comparison is
+    lost."""
 
-    fast_info: ClassVar[dict] = {"last_price": 201.37}
+    class _FastInfo:
+        def __getitem__(self, key):
+            if key == "last_price":
+                return 201.37
+            raise YFRateLimitError("rate limited")
+
+    fast_info = _FastInfo()
 
     def history(self, period, interval="1d"):
         return pd.DataFrame()
@@ -49,10 +66,12 @@ def test_get_quote_returns_decimal_price():
     assert isinstance(q.as_of, datetime)
 
 
-def test_get_quote_previous_close_none_when_fast_info_lacks_it():
-    # No second network call is made to get it -- both fields come off the
-    # same fast_info access (see the comment in YFinanceSource.get_quote).
-    source = YFinanceSource(ticker_factory=lambda t: NoPreviousCloseTicker())
+def test_get_quote_previous_close_failure_leaves_price_intact():
+    # A previous-close read that raises (rate limit, or any other
+    # transport error -- real yfinance never raises plain KeyError here,
+    # see PreviousCloseFailsTicker) must not cost the price: the price was
+    # already resolved from a separate fast_info access above it.
+    source = YFinanceSource(ticker_factory=lambda t: PreviousCloseFailsTicker())
     q = source.get_quote("aapl")
     assert q.price == Decimal("201.37")
     assert q.previous_close is None

@@ -16,8 +16,16 @@ class YFinanceSource(DataSource):
     def get_quote(self, ticker: str) -> Quote:
         ticker = ticker.strip().upper()
         # A single fast_info access -- it's yfinance's own lazily-populated,
-        # cached-per-Ticker-instance dict, so reading previous_close off the
-        # same object below costs no extra network round trip.
+        # cached-per-Ticker-instance object. `last_price` below populates it
+        # by fetching a 1y daily-bar history (FastInfo._get_1y_prices).
+        # `regular_market_previous_close` is read deliberately instead of
+        # the more obvious `previous_close`: `previous_close` pulls from a
+        # *different* cache slot (a separate 5d/1h/prepost history call --
+        # a second Yahoo request, sometimes a third if that comes back
+        # empty and it falls back to `.info`), while
+        # `regular_market_previous_close` reuses the same 1y DataFrame
+        # `last_price` already populated on this FastInfo instance, so it
+        # costs no extra network round trip.
         fast_info = self._ticker(ticker).fast_info
         try:
             price = fast_info["last_price"]
@@ -26,8 +34,12 @@ class YFinanceSource(DataSource):
         if price is None:
             raise ValueError(f"no price available for {ticker}")
         try:
-            previous_close = fast_info["previous_close"]
-        except KeyError:
+            previous_close = fast_info["regular_market_previous_close"]
+        except Exception:  # noqa: BLE001 — real yfinance raises rate-limit/HTTP
+            # errors (e.g. YFRateLimitError) out of the history() call this
+            # triggers on a cache miss, not just KeyError; losing the day's
+            # comparison point must not cost the price itself, which is
+            # already resolved above.
             previous_close = None
         return Quote(
             ticker=ticker,
