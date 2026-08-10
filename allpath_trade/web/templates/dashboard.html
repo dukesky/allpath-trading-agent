@@ -43,7 +43,7 @@
       {% if s.target_weight_pct is not none %} of {{ "%.1f"|format(s.target_weight_pct) }}% target{% endif %}
     </span>
     {% if s.key_levels %}<span class="muted">· {{ s.key_levels | join(" · ") }}</span>{% endif %}
-    <span style="margin-left:auto" class="{{ s.price_class }}">{{ s.price | money }}</span>
+    <span style="margin-left:auto" class="{{ s.price_class }}">{{ s.price | money }}{% if s.day_change_pct is not none %} {{ "%+.1f"|format(s.day_change_pct) }}%{% endif %}</span>
   </div>
   {% if s.alerts %}<div class="muted" style="font-size:12px;margin-top:4px">{{ s.alerts | join(" · ") }}</div>{% endif %}
 </a>

@@ -15,14 +15,26 @@ class YFinanceSource(DataSource):
 
     def get_quote(self, ticker: str) -> Quote:
         ticker = ticker.strip().upper()
+        # A single fast_info access -- it's yfinance's own lazily-populated,
+        # cached-per-Ticker-instance dict, so reading previous_close off the
+        # same object below costs no extra network round trip.
+        fast_info = self._ticker(ticker).fast_info
         try:
-            price = self._ticker(ticker).fast_info["last_price"]
+            price = fast_info["last_price"]
         except KeyError:
             price = None
         if price is None:
             raise ValueError(f"no price available for {ticker}")
-        return Quote(ticker=ticker, price=Decimal(str(price)),
-                     as_of=datetime.now(UTC))
+        try:
+            previous_close = fast_info["previous_close"]
+        except KeyError:
+            previous_close = None
+        return Quote(
+            ticker=ticker,
+            price=Decimal(str(price)),
+            previous_close=Decimal(str(previous_close)) if previous_close is not None else None,
+            as_of=datetime.now(UTC),
+        )
 
     def get_bars(self, ticker: str, days: int = 365) -> list[Bar]:
         ticker = ticker.strip().upper()

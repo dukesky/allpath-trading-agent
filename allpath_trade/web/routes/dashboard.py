@@ -136,6 +136,21 @@ def summarize_strategy(doc: StrategyDoc, position: Position | None, quote: Quote
     if has_pending:
         alerts.append("pending review")
 
+    # Quote.previous_close (allpath_trade/data/base.py) is optional -- a
+    # data source that can't supply it (or a quote lookup that failed
+    # entirely) leaves it None. Only when both price and a non-zero
+    # previous_close are present is there anything to compare against;
+    # otherwise direction degrades to neutral rather than being invented,
+    # and no percentage is rendered at all.
+    day_change_pct = None
+    price_class = ""
+    if quote is not None and quote.price is not None and quote.previous_close:
+        day_change_pct = float((quote.price - quote.previous_close) / quote.previous_close * 100)
+        if day_change_pct > 0:
+            price_class = "up"
+        elif day_change_pct < 0:
+            price_class = "down"
+
     return {
         "id": doc.id,
         "ticker": doc.position.ticker,
@@ -146,10 +161,8 @@ def summarize_strategy(doc: StrategyDoc, position: Position | None, quote: Quote
         "current_weight_pct": current_weight_pct,
         "target_weight_pct": target_weight_pct,
         "price": quote.price if quote is not None else None,
-        # Quote (allpath_trade/data/base.py) carries only a last price, no
-        # previous close -- there is nothing to compare against, so
-        # direction degrades to neutral rather than being invented.
-        "price_class": "",
+        "day_change_pct": day_change_pct,
+        "price_class": price_class,
         "alerts": alerts,
     }
 

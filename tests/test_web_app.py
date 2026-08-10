@@ -1,8 +1,10 @@
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings
-from allpath_trade.web.app import create_app
+from allpath_trade.web.app import create_app, static_content_hash
 from tests.test_sentinel import FakeBroker
 
 
@@ -25,6 +27,52 @@ def test_healthz_needs_no_auth(client):
 def test_components_are_available_on_the_app(client):
     holder = client.app.state.holder
     assert holder.get().broker is not None
+
+
+# --- Fix 2 (Phase 5.5.2): static asset cache-busting ------------------------
+# StaticFiles serves app.css/htmx.min.js with no Cache-Control header, so a
+# browser's heuristic caching can serve a stale copy indefinitely after a
+# deploy. Versioning the URL with a content hash means a changed file is a
+# changed URL, so a stale cache entry is simply never reused again.
+
+def test_rendered_page_versions_the_stylesheet_url(client):
+    # No login in this fixture -- the auth middleware 303s to /login, and
+    # TestClient follows redirects, landing on login.html, which links the
+    # same app.css and must carry the same cache-busting treatment.
+    body = client.get("/").text
+    match = re.search(r'/static/app\.css\?v=([0-9a-f]{8})"', body)
+    assert match is not None
+
+
+def test_rendered_page_versions_the_htmx_script_url(client):
+    # login.html doesn't load htmx.min.js (no htmx usage on that page) --
+    # check base.html's own script tag on an authenticated page instead.
+    client.post("/login", data={"token": "secret"})
+    body = client.get("/chat").text
+    match = re.search(r'/static/htmx\.min\.js\?v=([0-9a-f]{8})"', body)
+    assert match is not None
+
+
+def test_static_asset_version_is_stable_across_renders(client):
+    client.post("/login", data={"token": "secret"})
+    body1 = client.get("/chat").text
+    body2 = client.get("/chat").text
+    v1 = re.search(r'app\.css\?v=([0-9a-f]{8})', body1).group(1)
+    v2 = re.search(r'app\.css\?v=([0-9a-f]{8})', body2).group(1)
+    assert v1 == v2
+
+
+def test_static_content_hash_changes_when_file_content_changes(tmp_path):
+    # A temp copy, never the real shipped asset -- mutating
+    # allpath_trade/web/static/app.css would poison every other test run
+    # sharing the process/checkout.
+    css = tmp_path / "app.css"
+    css.write_text("body { color: red; }")
+    h1 = static_content_hash(css)
+    assert len(h1) == 8
+    css.write_text("body { color: blue; }")
+    h2 = static_content_hash(css)
+    assert h1 != h2
 
 
 # -- start_scheduler=True: the actual "FastAPI + sentinel in one process"

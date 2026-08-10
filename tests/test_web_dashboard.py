@@ -42,8 +42,9 @@ class FakeDataSource:
     network on every call, which the dashboard now does on every page
     load. Tests must never depend on network access."""
 
-    def __init__(self, price: str = "210.00"):
+    def __init__(self, price: str = "210.00", previous_close: str | None = None):
         self.price = Decimal(price)
+        self.previous_close = Decimal(previous_close) if previous_close is not None else None
         self.calls: list[str] = []
         self.fail = False
 
@@ -51,7 +52,8 @@ class FakeDataSource:
         self.calls.append(ticker)
         if self.fail:
             raise RuntimeError("no price available")
-        return Quote(ticker=ticker, price=self.price, as_of=datetime.now(UTC))
+        return Quote(ticker=ticker, price=self.price, previous_close=self.previous_close,
+                     as_of=datetime.now(UTC))
 
     def get_bars(self, ticker: str, days: int = 365):
         raise NotImplementedError
@@ -268,10 +270,42 @@ def test_summarize_strategy_price_none_without_quote():
 
 
 def test_summarize_strategy_price_class_is_neutral():
-    # Quote has no previous-close field (see allpath_trade/data/base.py) --
-    # there is nothing to compare the current price against, so direction
-    # must degrade to neutral rather than being invented.
+    # _quote() leaves previous_close at its default of None -- there is
+    # nothing to compare the current price against, so direction must
+    # degrade to neutral rather than being invented, and no percentage is
+    # rendered.
     result = summarize_strategy(_doc(), None, _quote("212.50"))
+    assert result["price_class"] == ""
+    assert result["day_change_pct"] is None
+
+
+def test_summarize_strategy_price_class_up_with_positive_day_change():
+    quote = Quote(ticker="AAPL", price=Decimal("212.50"), previous_close=Decimal("200.00"),
+                  as_of=datetime.now(UTC))
+    result = summarize_strategy(_doc(), None, quote)
+    assert result["price_class"] == "up"
+    assert result["day_change_pct"] == pytest.approx(6.25)
+
+
+def test_summarize_strategy_price_class_down_with_negative_day_change():
+    quote = Quote(ticker="AAPL", price=Decimal("190.00"), previous_close=Decimal("200.00"),
+                  as_of=datetime.now(UTC))
+    result = summarize_strategy(_doc(), None, quote)
+    assert result["price_class"] == "down"
+    assert result["day_change_pct"] == pytest.approx(-5.0)
+
+
+def test_summarize_strategy_price_class_neutral_when_flat():
+    quote = Quote(ticker="AAPL", price=Decimal("200.00"), previous_close=Decimal("200.00"),
+                  as_of=datetime.now(UTC))
+    result = summarize_strategy(_doc(), None, quote)
+    assert result["price_class"] == ""
+    assert result["day_change_pct"] == 0.0
+
+
+def test_summarize_strategy_day_change_none_without_quote():
+    result = summarize_strategy(_doc(), None, None)
+    assert result["day_change_pct"] is None
     assert result["price_class"] == ""
 
 
@@ -410,6 +444,29 @@ def test_dashboard_no_longer_lists_rule_ids_directly(client):
     # Strategies page -- the dashboard only shows the compact card.
     body = client.get("/").text
     assert "r1: armed" not in body
+
+
+def test_dashboard_strategy_card_shows_green_up_change(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="210.00", previous_close="200.00"))
+    dashboard_route._quote_cache.clear()
+    body = client.get("/").text
+    assert 'class="up">$210.00 +5.0%</span>' in body
+
+
+def test_dashboard_strategy_card_shows_red_down_change(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="190.00", previous_close="200.00"))
+    dashboard_route._quote_cache.clear()
+    body = client.get("/").text
+    assert 'class="down">$190.00 -5.0%</span>' in body
+
+
+def test_dashboard_strategy_card_no_change_without_previous_close(client):
+    # The fixture's FakeDataSource defaults previous_close to None -- no
+    # percentage must be rendered, and the class must stay neutral.
+    body = client.get("/").text
+    assert 'class="">$210.00</span>' in body
 
 
 def test_dashboard_quote_failure_renders_dash_not_error(client):
