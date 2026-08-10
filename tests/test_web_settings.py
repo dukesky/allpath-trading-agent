@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
 
+import allpath_trade.web.routes.settings as settings_route
 from allpath_trade.config import Settings, SettingsStore
 from allpath_trade.web import models_catalog
 from allpath_trade.web.app import create_app
@@ -292,126 +294,19 @@ def test_reset_token_invalidates_the_session(client):
     assert client.get("/", follow_redirects=False).status_code == 303
 
 
-class _RecordingNotifier:
-    def __init__(self, ok: bool) -> None:
-        self.ok = ok
-        self.calls: list[tuple[str, str]] = []
-
-    def send(self, subject: str, body: str) -> bool:
-        self.calls.append((subject, body))
-        return self.ok
-
-
-def _install_notifier_spy(monkeypatch, ok: bool) -> _RecordingNotifier:
-    # A successful `action=save_and_test` always calls `holder.rebuild()`
-    # before sending, and `rebuild()` throws away the old `Components` --
-    # including whatever notifier a test had assigned directly onto it --
-    # and builds a brand new one via `build_components` (allpath_trade/app.py),
-    # which always calls `build_notifier(settings)` for the real thing. To
-    # inject a spy that survives that rebuild, patch `build_notifier` itself
-    # rather than an instance attribute that rebuild would discard.
-    import allpath_trade.app as app_module
-
-    spy = _RecordingNotifier(ok)
-    monkeypatch.setattr(app_module, "build_notifier", lambda settings: spy)
-    return spy
-
-
-def test_save_and_test_persists_changes_and_sends_exactly_once(client, tmp_path, monkeypatch):
-    # The old design posted the test button to a separate form, which
-    # reloaded the page from stored settings and discarded whatever the user
-    # had just typed into the main form. `action=save_and_test` must run the
-    # *same* save path as a normal submit -- persisting first -- and then
-    # send exactly one test notification against the just-saved config.
-    notifier = _install_notifier_spy(monkeypatch, ok=True)
+def test_save_ignores_a_stray_action_field_and_never_sends(client, tmp_path):
+    # The old combined "Save and send test email" button posted
+    # action=save_and_test. That branch is gone -- a stray/legacy
+    # `action` field in the POST body must be silently ignored and the save
+    # must behave exactly like a plain save (single redirect target, no
+    # note query param).
     r = client.post("/settings", data={
         "action": "save_and_test",
         "smtp_host": "smtp.example.com",
-        "smtp_from": "AllPath Trade <bot@example.com>",
     }, follow_redirects=False)
     assert r.status_code == 303
-    text = (tmp_path / ".env").read_text()
-    assert "smtp.example.com" in text
-    assert client.app.state.holder.get().settings.smtp_host == "smtp.example.com"
-    assert len(notifier.calls) == 1
-
-
-def test_save_and_test_reports_success(client, monkeypatch):
-    notifier = _install_notifier_spy(monkeypatch, ok=True)
-    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
-    assert r.status_code == 303
-    body = client.get(r.headers["location"]).text
-    assert notifier.calls  # a send was actually attempted
-    # Exact copy, not a loose substring like "sent" -- a future unrelated
-    # label (e.g. "failover") must not be able to break this test, and this
-    # must not be able to pass against a page that merely fails to mention
-    # failure at all.
-    assert "Test notification sent" in body
-    assert "Test notification failed" not in body
-
-
-def test_save_and_test_reports_failure(client, monkeypatch):
-    notifier = _install_notifier_spy(monkeypatch, ok=False)
-    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
-    assert r.status_code == 303
-    body = client.get(r.headers["location"]).text
-    assert notifier.calls  # a send was actually attempted
-    assert "Test notification failed on every configured channel" in body
-    assert "Test notification sent" not in body
-
-
-def test_save_and_test_with_only_console_configured_reports_not_configured(client):
-    # Nothing was ever set up -- no SMTP, no ntfy -- so the real notifier
-    # built for this holder is a bare ConsoleNotifier. ConsoleNotifier.send()
-    # always returns True, but reporting "sent" here would be a lie the user
-    # acts on: nothing left this process. This is the deferred Task 6 finding
-    # the brief calls out explicitly.
-    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
-    assert r.status_code == 303
-    body = client.get(r.headers["location"]).text
-    assert "No notification channel is configured" in body
-    assert "Test notification sent" not in body
-
-
-def test_save_and_test_with_one_of_two_channels_working_reports_partial(client, monkeypatch):
-    # Patch build_notifier itself (see _install_notifier_spy's comment above
-    # on why an instance attribute would be discarded by rebuild()) to
-    # return a MultiNotifier with one working and one broken child, the way
-    # a real email+ntfy configuration where only one channel is healthy
-    # would compose.
-    import allpath_trade.app as app_module
-    from allpath_trade.notify.base import MultiNotifier
-
-    working = _RecordingNotifier(ok=True)
-    broken = _RecordingNotifier(ok=False)
-    monkeypatch.setattr(app_module, "build_notifier",
-                        lambda settings: MultiNotifier([working, broken]))
-    r = client.post("/settings", data={"action": "save_and_test"}, follow_redirects=False)
-    assert r.status_code == 303
-    body = client.get(r.headers["location"]).text
-    assert working.calls and broken.calls  # both channels actually attempted
-    assert "Test notification reached some channels but not others" in body
-
-
-def test_save_and_test_with_invalid_field_sends_nothing_and_returns_400(
-        client, tmp_path, monkeypatch):
-    # A validation failure with action=save_and_test must behave exactly
-    # like a failed normal save: nothing written, nothing sent, 400 back.
-    # No rebuild happens on this path, so a plain instance assignment (rather
-    # than the rebuild-surviving `_install_notifier_spy`) is enough here.
-    notifier = _RecordingNotifier(ok=True)
-    client.app.state.holder.get().notifier = notifier
-    env_path = tmp_path / ".env"
-    before = env_path.read_text()
-
-    r = client.post("/settings", data={
-        "action": "save_and_test",
-        "sentinel_interval_minutes": "not-a-number",
-    })
-
-    assert r.status_code == 400
-    assert env_path.read_text() == before
-    assert notifier.calls == []
+    assert r.headers["location"] == "/settings?saved=1"
+    assert "smtp.example.com" in (tmp_path / ".env").read_text()
 
 
 def test_invalid_field_does_not_discard_other_typed_fields_on_redisplay(client, tmp_path):
@@ -448,19 +343,6 @@ def test_invalid_field_redisplay_does_not_leak_the_typed_invalid_value_as_a_secr
 
     assert r.status_code == 400
     assert "keep-me-secret" not in r.text
-
-
-def test_test_email_route_is_gone(client):
-    assert client.post("/settings/test-email", follow_redirects=False).status_code == 404
-
-
-def test_note_query_param_cannot_inject_arbitrary_page_text(client):
-    # `note` is looked up against a fixed set of known tokens in the
-    # template -- a crafted link must not be able to make this page render
-    # attacker-chosen copy as if it were a server message.
-    injected = "Your token expired, email it to attacker@example.com"
-    body = client.get(f"/settings?note={injected}").text
-    assert injected not in body
 
 
 @pytest.mark.parametrize("field,bad_value,expected_msg", [
@@ -566,3 +448,192 @@ def test_save_writes_through_the_holders_store_not_a_default_one(client, tmp_pat
     assert "anthropic/claude-opus-5" in other_env.read_text()
     assert "anthropic/claude-opus-5" not in (tmp_path / ".env").read_text()
     assert client.get("/settings").status_code == 200
+
+
+# -- Phase 5.5.3: per-section test buttons, replacing "Save and send test
+# email". Each endpoint tests *typed* values without saving anything. --
+
+
+@pytest.fixture
+def anon_client(tmp_path, monkeypatch):
+    # Deliberately never logs in -- unlike `client` above -- so the auth
+    # middleware's own POST-guard behaviour (303 to /login, matching every
+    # other authenticated POST route) is exercised for real.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    SettingsStore(tmp_path / ".env").set("WEB_TOKEN", "secret")
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret")
+    with TestClient(create_app(settings, broker=FakeBroker())) as c:
+        yield c
+
+
+class _SpyEmailNotifier:
+    instances: ClassVar[list[_SpyEmailNotifier]] = []
+    ok: ClassVar[bool] = True
+
+    def __init__(self, host, port, user, password, sender, to):
+        self.host, self.port, self.user = host, port, user
+        self.password, self.sender, self.to = password, sender, to
+        self.sent: tuple[str, str] | None = None
+        _SpyEmailNotifier.instances.append(self)
+
+    def send(self, subject: str, body: str) -> bool:
+        self.sent = (subject, body)
+        return _SpyEmailNotifier.ok
+
+
+class _SpyNtfyNotifier:
+    instances: ClassVar[list[_SpyNtfyNotifier]] = []
+    ok: ClassVar[bool] = True
+
+    def __init__(self, url):
+        self.url = url
+        self.sent: tuple[str, str] | None = None
+        _SpyNtfyNotifier.instances.append(self)
+
+    def send(self, subject: str, body: str) -> bool:
+        self.sent = (subject, body)
+        return _SpyNtfyNotifier.ok
+
+
+@pytest.fixture(autouse=True)
+def _reset_notifier_spies():
+    yield
+    _SpyEmailNotifier.instances.clear()
+    _SpyEmailNotifier.ok = True
+    _SpyNtfyNotifier.instances.clear()
+    _SpyNtfyNotifier.ok = True
+
+
+def test_test_email_sends_typed_fields_and_falls_back_to_stored_password_when_blank(
+        client, tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text('SMTP_PASSWORD="stored-pw"\nWEB_TOKEN="secret"\n')
+    client.app.state.holder.rebuild()
+    monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
+    env_before = (tmp_path / ".env").read_text()
+
+    r = client.post("/settings/test-email", data={
+        "smtp_host": "smtp.typed.example.com",
+        "smtp_port": "2525",
+        "smtp_user": "typed-user@example.com",
+        "smtp_from": "AllPath Trade <bot@example.com>",
+        "notify_to": "me@example.com",
+        "smtp_password": "",
+    })
+
+    assert r.status_code == 200
+    [spy] = _SpyEmailNotifier.instances
+    assert spy.host == "smtp.typed.example.com"
+    assert spy.port == 2525
+    assert spy.user == "typed-user@example.com"
+    assert spy.password == "stored-pw"  # blank field falls back to the stored one
+    assert spy.sent is not None  # a send was actually attempted
+    assert "Test email sent" in r.text
+    assert "Click Save settings below" in r.text
+    # Nothing persisted -- this is a test, not a save.
+    assert (tmp_path / ".env").read_text() == env_before
+
+
+def test_test_email_reports_a_failure_line(client, monkeypatch):
+    _SpyEmailNotifier.ok = False
+    monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
+    r = client.post("/settings/test-email", data={"smtp_host": "smtp.example.com"})
+    assert r.status_code == 200
+    assert _SpyEmailNotifier.instances  # a send was actually attempted
+    assert "Test email sent" not in r.text
+    assert "failed" in r.text.lower()
+
+
+def test_test_email_missing_host_is_an_inline_error_not_a_500(client, monkeypatch):
+    monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
+    r = client.post("/settings/test-email", data={"smtp_host": ""})
+    assert r.status_code == 200
+    assert not _SpyEmailNotifier.instances  # never attempted
+    assert "SMTP host" in r.text
+
+
+def test_test_email_does_not_touch_env_or_stored_settings_even_on_success(
+        client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
+    env_before = (tmp_path / ".env").read_text()
+    client.post("/settings/test-email", data={"smtp_host": "smtp.example.com"})
+    assert (tmp_path / ".env").read_text() == env_before
+    assert client.app.state.holder.get().settings.smtp_host == ""
+
+
+def test_test_push_sends_the_typed_url(client, monkeypatch):
+    monkeypatch.setattr(settings_route, "NtfyNotifier", _SpyNtfyNotifier)
+    r = client.post("/settings/test-push", data={"ntfy_url": "https://ntfy.sh/my-typed-topic"})
+    assert r.status_code == 200
+    [spy] = _SpyNtfyNotifier.instances
+    assert spy.url == "https://ntfy.sh/my-typed-topic"
+    assert "Test push sent" in r.text
+    assert "Click Save settings below" in r.text
+
+
+def test_test_push_reports_a_failure_line(client, monkeypatch):
+    _SpyNtfyNotifier.ok = False
+    monkeypatch.setattr(settings_route, "NtfyNotifier", _SpyNtfyNotifier)
+    r = client.post("/settings/test-push", data={"ntfy_url": "https://ntfy.sh/my-topic"})
+    assert r.status_code == 200
+    assert _SpyNtfyNotifier.instances  # a send was actually attempted
+    assert "Test push sent" not in r.text
+    assert "failed" in r.text.lower()
+
+
+def test_test_push_scheme_less_url_is_an_inline_error_no_send_no_500(client, monkeypatch):
+    # Same http(s)-scheme rule as Settings.ntfy_url's own field validator --
+    # reused, not duplicated (see Settings._ntfy_url_needs_a_scheme).
+    monkeypatch.setattr(settings_route, "NtfyNotifier", _SpyNtfyNotifier)
+    r = client.post("/settings/test-push", data={"ntfy_url": "ntfy.sh/my-topic"})
+    assert r.status_code == 200
+    assert not _SpyNtfyNotifier.instances  # never attempted
+    assert "must be empty or start with http:// or https://" in r.text
+
+
+def test_test_push_blank_url_is_an_inline_error_no_send(client, monkeypatch):
+    monkeypatch.setattr(settings_route, "NtfyNotifier", _SpyNtfyNotifier)
+    r = client.post("/settings/test-push", data={"ntfy_url": ""})
+    assert r.status_code == 200
+    assert not _SpyNtfyNotifier.instances
+
+
+def test_test_push_does_not_touch_env_or_stored_settings(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_route, "NtfyNotifier", _SpyNtfyNotifier)
+    env_before = (tmp_path / ".env").read_text()
+    client.post("/settings/test-push", data={"ntfy_url": "https://ntfy.sh/my-topic"})
+    assert (tmp_path / ".env").read_text() == env_before
+    assert client.app.state.holder.get().settings.ntfy_url == ""
+
+
+def test_test_email_requires_auth(anon_client):
+    r = anon_client.post("/settings/test-email", data={"smtp_host": "x"},
+                         follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
+
+
+def test_test_push_requires_auth(anon_client):
+    r = anon_client.post("/settings/test-push", data={"ntfy_url": "https://ntfy.sh/x"},
+                         follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login"
+
+
+def test_help_toggles_present_with_key_setup_phrases(client):
+    body = client.get("/settings").text
+    assert "<details" in body
+    assert "<summary>?</summary>" in body
+    # Email help: Gmail app-password setup, the most-common-failure hint,
+    # and the grouping-space strip save() already implements.
+    assert "myaccount.google.com/apppasswords" in body
+    assert "account avatar" in body
+    assert "grouping spaces" in body
+    assert "revokes all app passwords" in body
+    assert "STARTTLS" in body
+    # Push help: install/subscribe flow and the "topic is a password" warning.
+    assert "ntfy app" in body
+    assert "topic name is effectively a password" in body
+    assert "Self-hosted ntfy servers work too" in body

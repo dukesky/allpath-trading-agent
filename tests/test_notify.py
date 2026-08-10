@@ -1,7 +1,7 @@
 from typing import ClassVar
 
 from allpath_trade.config import Settings
-from allpath_trade.notify.base import ConsoleNotifier, MultiNotifier, send_test_notification
+from allpath_trade.notify.base import ConsoleNotifier, MultiNotifier
 from allpath_trade.notify.email import EmailNotifier, build_notifier
 from allpath_trade.notify.ntfy import NtfyNotifier
 
@@ -147,44 +147,3 @@ def test_multi_notifier_send_is_true_if_any_child_delivered():
 def test_multi_notifier_send_each_reports_per_channel_results():
     multi = MultiNotifier([_RecordingNotifier(True), _RecordingNotifier(False)])
     assert multi.send_each("s", "b") == [True, False]
-
-
-def test_send_test_notification_reports_test_none_for_console_without_sending(capsys):
-    # ConsoleNotifier.send() always returns True, but nothing was actually
-    # configured -- send_test_notification must not let that masquerade as
-    # a delivered test.
-    console = ConsoleNotifier()
-    code = send_test_notification(console, "s", "b")
-    assert code == "test_none"
-
-
-def test_send_test_notification_reports_test_ok_for_a_single_working_channel():
-    assert send_test_notification(_RecordingNotifier(True), "s", "b") == "test_ok"
-
-
-def test_send_test_notification_reports_test_failed_for_a_single_broken_channel():
-    assert send_test_notification(_RecordingNotifier(False), "s", "b") == "test_failed"
-
-
-def test_send_test_notification_reports_test_ok_when_all_multi_channels_deliver():
-    multi = MultiNotifier([_RecordingNotifier(True), _RecordingNotifier(True)])
-    assert send_test_notification(multi, "s", "b") == "test_ok"
-
-
-def test_send_test_notification_reports_test_partial_when_some_multi_channels_deliver():
-    multi = MultiNotifier([_RecordingNotifier(True), _RecordingNotifier(False)])
-    assert send_test_notification(multi, "s", "b") == "test_partial"
-
-
-def test_send_test_notification_reports_test_failed_when_no_multi_channel_delivers():
-    multi = MultiNotifier([_RecordingNotifier(False), _RecordingNotifier(False)])
-    assert send_test_notification(multi, "s", "b") == "test_failed"
-
-
-def test_send_test_notification_does_not_report_test_ok_for_an_empty_multinotifier():
-    # Finding 3 of the Task 8 review: `delivered == len(results)` is
-    # vacuously true for zero children, so without a guard an empty
-    # MultiNotifier would report "test_ok" -- nothing sent, reported as
-    # sent. Not reachable via build_notifier today, but this is the exact
-    # failure class this function exists to prevent.
-    assert send_test_notification(MultiNotifier([]), "s", "b") != "test_ok"

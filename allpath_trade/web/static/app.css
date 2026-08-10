@@ -141,6 +141,19 @@ label:first-child { margin-top:0; }
   color:var(--muted); margin:14px 0 18px; }
 .check input { width:auto; }
 .row { display:flex; gap:10px; align-items:center; }
+
+/* Settings page: a `?` toggle next to a section heading that expands
+   detailed setup instructions (Gmail app passwords, ntfy topics) without
+   any JS -- <details>/<summary> does the disclosure natively. */
+.help-toggle summary { list-style:none; cursor:pointer; color:var(--muted);
+  font-size:11px; width:17px; height:17px; line-height:16px; text-align:center;
+  border:1px solid var(--line); border-radius:999px; user-select:none; }
+.help-toggle summary::-webkit-details-marker { display:none; }
+.help-toggle summary:hover { color:var(--text); border-color:var(--muted-2); }
+.help-toggle[open] summary { color:var(--text); border-color:var(--muted-2); }
+.help-toggle .hint { max-width:560px; }
+.help-toggle p { margin:0 0 8px; }
+.help-toggle p:last-child { margin-bottom:0; }
 .msg { margin-bottom:14px; }
 .msg.user { display:flex; justify-content:flex-end; }
 .msg.user span { background:var(--accent-soft); color:var(--text);
