@@ -194,6 +194,13 @@ def test_gmail_app_password_grouping_spaces_are_stripped_on_save(client, tmp_pat
     assert "'kheimoikoppbdssr'" in (tmp_path / ".env").read_text()
 
 
+def test_app_password_with_no_break_space_separators_is_cleaned(client, tmp_path):
+    # Google's dialog copies the grouping as U+00A0 on some platforms;
+    # smtplib dies locally on any non-ASCII, so these MUST be stripped too.
+    client.post("/settings", data={"smtp_password": "khei moik oppb dssr"})
+    assert "'kheimoikoppbdssr'" in (tmp_path / ".env").read_text()
+
+
 def test_passwords_that_merely_contain_spaces_are_stored_verbatim(client, tmp_path):
     # Only the exact 4x4-lowercase Gmail shape is rewritten -- a real
     # password containing spaces must reach .env byte-for-byte.

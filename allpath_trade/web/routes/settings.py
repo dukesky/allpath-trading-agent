@@ -36,17 +36,18 @@ SECRET_FIELDS = ["openrouter_api_key", "openai_api_key", "anthropic_api_key",
                  "alpaca_api_key", "alpaca_secret_key", "smtp_password"]
 
 # Gmail displays app passwords as "abcd efgh ijkl mnop"; pasting that
-# verbatim used to store the spaces and fail SMTP auth with an opaque 535.
-# Strip the grouping ONLY when the value has exactly that shape -- a real
-# password that legitimately contains spaces never matches four
-# space-separated groups of four lowercase letters, so nothing else is
-# rewritten (and .env stays a byte-for-byte store for every other value).
-_GMAIL_APP_PASSWORD_RE = re.compile(r"^[a-z]{4}( [a-z]{4}){3}$")
-
-
+# verbatim used to store the separators and fail SMTP auth. The separators
+# are not always plain spaces: Google's dialog copies U+00A0 (no-break
+# space) on some platforms, which smtplib can't even ASCII-encode -- the
+# send then dies locally with UnicodeEncodeError before reaching Google
+# (seen in the field on macOS). So: drop ALL Unicode whitespace, and use
+# the cleaned form only when what remains is exactly the 16 lowercase
+# letters of an app password. Any other value -- including a real password
+# that merely contains spaces -- is stored byte-for-byte as typed.
 def _normalize_app_password(value: str) -> str:
-    if _GMAIL_APP_PASSWORD_RE.match(value):
-        return value.replace(" ", "")
+    cleaned = "".join(value.split())  # str.split() splits on all Unicode whitespace
+    if re.fullmatch(r"[a-z]{16}", cleaned):
+        return cleaned
     return value
 
 
