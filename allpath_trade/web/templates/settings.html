@@ -3,13 +3,6 @@
 {% block content %}
 <h1>Settings</h1>
 {% if saved %}<p class="muted">Saved. New conversations use the updated configuration.</p>{% endif %}
-{# `note` is a fixed token from the server, never freeform text -- the copy
-   itself lives here, in one place, so a crafted query string can only ever
-   select between these four known messages, not inject its own. #}
-{% if note == 'test_ok' %}<p class="muted">Test notification sent</p>{% endif %}
-{% if note == 'test_partial' %}<p class="muted">Test notification reached some channels but not others — check the failing channel's settings and server logs</p>{% endif %}
-{% if note == 'test_failed' %}<p class="muted">Test notification failed on every configured channel — check your settings and server logs</p>{% endif %}
-{% if note == 'test_none' %}<p class="muted">No notification channel is configured, so nothing was sent — add email or push settings below first</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 {# A model select offers every catalog entry for the active provider, plus
@@ -65,8 +58,26 @@
     <p class="hint">Switching to live trading is not available here. Edit <code>ALPACA_PAPER</code> in <code>.env</code> — connecting real money should take a deliberate step.</p>
   </div>
 
-  <h2>Email notifications</h2>
-  <div class="card">
+  <div class="row section-header" style="margin:34px 0 14px">
+    <h2 style="margin:0">Email notifications</h2>
+    <details class="help-toggle">
+      <summary aria-label="Setup help">?</summary>
+      <div class="hint">
+        <p>Gmail needs a 2-Step Verification app password. Generate one at
+        <code>myaccount.google.com/apppasswords</code> — first check the
+        account avatar in the top-right corner is the account you put in
+        "Sender account" below; signing in as the wrong Google account is
+        the most common reason a test fails. Copy the password straight
+        from the dialog — pasting it with Gmail's grouping spaces is fine,
+        the form strips them. The sender account and the account that
+        generated the password must match, and changing the Google
+        account password revokes all app passwords issued under it.</p>
+        <p>Using a different provider? Set the SMTP host, port, and enable
+        STARTTLS as your provider documents.</p>
+      </div>
+    </details>
+  </div>
+  <div class="card" id="email-card">
     <label>SMTP host</label><input name="smtp_host" value="{{ s.smtp_host }}">
     <label>Port</label><input name="smtp_port" value="{{ s.smtp_port }}" type="number">
     <label>Sender account</label><input name="smtp_user" value="{{ s.smtp_user }}">
@@ -75,12 +86,52 @@
     <input name="smtp_password" type="password" placeholder="Replace" autocomplete="off">
     <label>Send notifications to</label><input name="notify_to" value="{{ s.notify_to }}">
     <p class="hint">Notifications report what happened; they never contain action links.</p>
+    <div class="row" style="margin-top:14px">
+      {# `type="button"` keeps this out of the form's own submit. For a
+         non-GET request htmx always includes the closest enclosing
+         `<form>` -- which here is the whole settings form, API keys and
+         all -- so scoping to just this card's fields is `hx-params`'s job,
+         not `hx-include`'s: `hx-params` is an allowlist applied to the
+         fully-assembled request parameters (verified against the vendored
+         allpath_trade/web/static/htmx.min.js: its `hn`/filterValues step
+         runs last, after hx-include, and for a plain comma list rebuilds
+         the FormData from only the named keys). Nothing outside this list
+         is ever sent, and the endpoint below never saves or echoes what it
+         receives regardless. #}
+      <button type="button" hx-post="/settings/test-email"
+              hx-params="smtp_host,smtp_port,smtp_user,smtp_password,smtp_from,notify_to"
+              hx-target="#email-test-result" hx-swap="innerHTML"
+              hx-disabled-elt="this" hx-indicator="#email-test-indicator">Test</button>
+      <span id="email-test-indicator" class="htmx-indicator hint">Sending…</span>
+    </div>
+    <div id="email-test-result"></div>
   </div>
 
-  <h2>Push notifications</h2>
-  <div class="card">
+  <div class="row section-header" style="margin:34px 0 14px">
+    <h2 style="margin:0">Push notifications</h2>
+    <details class="help-toggle">
+      <summary aria-label="Setup help">?</summary>
+      <div class="hint">
+        <p>Install the free ntfy app (iOS or Android, no account needed)
+        and subscribe to a topic with a long, random name, then paste
+        <code>https://ntfy.sh/&lt;topic&gt;</code> here.
+        The topic name is effectively a password — anyone who knows it can
+        read your notifications, so keep it unguessable.
+        Self-hosted ntfy servers work too.</p>
+      </div>
+    </details>
+  </div>
+  <div class="card" id="push-card">
     <label>ntfy topic URL</label><input name="ntfy_url" value="{{ s.ntfy_url }}" placeholder="https://ntfy.sh/your-topic">
-    <p class="hint">Install the ntfy app and subscribe to your topic, then paste the topic URL here. On ntfy.sh a topic is protected only by its name's obscurity — use a long, unguessable topic name; anyone who knows it can read your notifications.</p>
+    <p class="hint">Install the ntfy app and subscribe to your topic, then paste the topic URL here.</p>
+    <div class="row" style="margin-top:14px">
+      {# Same hx-params allowlist reasoning as the email Test button above. #}
+      <button type="button" hx-post="/settings/test-push" hx-params="ntfy_url"
+              hx-target="#push-test-result" hx-swap="innerHTML"
+              hx-disabled-elt="this" hx-indicator="#push-test-indicator">Test</button>
+      <span id="push-test-indicator" class="htmx-indicator hint">Sending…</span>
+    </div>
+    <div id="push-test-result"></div>
   </div>
 
   <h2>Sentinel and memory</h2>
@@ -108,13 +159,7 @@
   </div>
 
   <div class="row" style="margin-top:18px">
-    <button class="primary" type="submit" name="action" value="save">Save settings</button>
-    {# Same form, same submit -- the only difference from the plain save
-       button is this field's value. Because it's one <form>, whatever the
-       user typed into the fields above is included in this POST too, so a
-       save-and-test click can no longer discard unsaved input the way the
-       old standalone test-email form did. #}
-    <button type="submit" name="action" value="save_and_test">Save and send test notification</button>
+    <button class="primary" type="submit">Save settings</button>
   </div>
 </form>
 

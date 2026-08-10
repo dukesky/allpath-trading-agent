@@ -7,9 +7,11 @@ import sys
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from allpath_trade.config import Settings, describe_validation_error
-from allpath_trade.notify.base import send_test_notification
+from allpath_trade.notify.email import EmailNotifier
+from allpath_trade.notify.ntfy import NtfyNotifier
 from allpath_trade.scheduler import reschedule_sentinel_job
 from allpath_trade.web import models_catalog
 from allpath_trade.web.auth import COOKIE
@@ -75,11 +77,11 @@ def _validation_message(exc: ValidationError) -> str:
 
 
 @router.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request, saved: str = "", note: str = "") -> HTMLResponse:
+def settings_page(request: Request, saved: str = "") -> HTMLResponse:
     c = request.app.state.holder.get()
     s = c.settings
     return templates.TemplateResponse(request, "settings.html", {
-        "page": "settings", "s": s, "saved": bool(saved), "note": note, "error": "",
+        "page": "settings", "s": s, "saved": bool(saved), "error": "",
         "masks": {f: _mask(str(getattr(s, f, ""))) for f in SECRET_FIELDS},
         # Fetched (or served from cache/fallback) for the *active* provider
         # only -- all three model fields share one provider, so one catalog
@@ -95,12 +97,6 @@ async def save(request: Request) -> Response:
     form = await request.form()
     holder = request.app.state.holder
     current = holder.get().settings
-    # The "Save and send test email" button is the same <form> as the normal
-    # save button -- only the submitted `action` differs -- so a save-and-test
-    # click still carries whatever the user just typed, unlike the old
-    # separate-form design where posting the test button reloaded the page
-    # from stored settings and threw that input away.
-    send_test = str(form.get("action", "")) == "save_and_test"
 
     updates: dict[str, str] = {}
     for field in BOOLEAN_FIELDS:
@@ -145,7 +141,7 @@ async def save(request: Request) -> Response:
         display = current.model_copy(
             update={f: updates[f] for f in PLAIN_FIELDS if f in updates})
         return templates.TemplateResponse(request, "settings.html", {
-            "page": "settings", "s": display, "saved": False, "note": "",
+            "page": "settings", "s": display, "saved": False,
             "error": _validation_message(exc),
             "masks": {f: _mask(str(getattr(current, f, ""))) for f in SECRET_FIELDS},
             # display.llm_provider, not current.llm_provider -- the user may
@@ -182,30 +178,97 @@ async def save(request: Request) -> Response:
             print(f"[settings] could not reschedule sentinel job: {exc}",
                   file=sys.stderr)
 
-    if send_test:
-        # Only reachable after the save above already succeeded -- a
-        # validation failure returns from the `except ValidationError` branch
-        # long before this point, so a rejected save can never trigger a send.
-        # Notifier.send() swallows its own exceptions (a broken notifier must
-        # never crash the caller) and reports the outcome only through its
-        # return value -- that return value is what turns this from "a
-        # request happened" into "the user learns whether it worked".
-        # send_test_notification (notify/base.py) dispatches on the
-        # notifier's own type -- ConsoleNotifier / a single channel /
-        # MultiNotifier -- rather than this route re-deriving which channels
-        # are configured from Settings fields, so this stays a one-line call
-        # regardless of how many channels exist.
-        note = send_test_notification(
-            holder.get().notifier,
-            "AllPath Trade test",
-            "This is a test notification. If you are reading it, "
-            "notification delivery works.")
-        # The redirect only ever carries a fixed, known token -- never
-        # freeform text -- so a crafted `?note=...` link can't make this page
-        # render arbitrary copy. The actual message lives in one place: the
-        # template.
-        return RedirectResponse(f"/settings?saved=1&note={note}", status_code=303)
     return RedirectResponse("/settings?saved=1", status_code=303)
+
+
+_TEST_SUBJECT = "AllPath Trade test"
+_TEST_BODY = ("This is a test notification. If you are reading it, "
+              "notification delivery works.")
+
+
+def _test_result_fragment(request: Request, *, ok: bool, message: str) -> HTMLResponse:
+    # A tiny, standalone fragment -- not the full settings page -- swapped
+    # into the section's own result <div> by htmx. Jinja autoescapes both
+    # values, but `message` is always one of this module's own fixed
+    # strings below, never anything the user typed (the password especially
+    # must never round-trip back onto the page).
+    return templates.TemplateResponse(request, "_settings_test_result.html", {
+        "ok": ok, "message": message})
+
+
+@router.post("/settings/test-email", response_class=HTMLResponse)
+async def test_email(request: Request) -> HTMLResponse:
+    """Send one test email using exactly what's currently typed in the
+    Email notifications section -- nothing is read from, or written to,
+    stored Settings except the password fallback below. Never saves."""
+    form = await request.form()
+    current = request.app.state.holder.get().settings
+
+    host = str(form.get("smtp_host", "")).strip()
+    if not host:
+        return _test_result_fragment(
+            request, ok=False, message="SMTP host is required to send a test email.")
+
+    to = str(form.get("notify_to", "")).strip()
+    if not to:
+        return _test_result_fragment(
+            request, ok=False,
+            message="Add a \"Send notifications to\" address first.")
+
+    port_raw = str(form.get("smtp_port", "")).strip()
+    try:
+        port = int(port_raw) if port_raw else current.smtp_port
+    except ValueError:
+        return _test_result_fragment(
+            request, ok=False, message="SMTP port must be a number.")
+
+    user = str(form.get("smtp_user", "")).strip()
+    sender = str(form.get("smtp_from", "")).strip()
+    # Same keep-what-is-stored semantics as saving: a blank password field
+    # means "use the one already on file", not "send with no password".
+    password = _normalize_app_password(str(form.get("smtp_password", "")).strip())
+    if not password:
+        password = current.smtp_password
+
+    notifier = EmailNotifier(host, port, user, password, sender, to)
+    # EmailNotifier.send() is a blocking socket call with a 10s connect
+    # timeout (see notify/email.py) -- run it in Starlette's threadpool so a
+    # slow or unreachable SMTP host cannot freeze this process's single
+    # asyncio event loop (and with it every other request: dashboard, chat,
+    # the sentinel) for the duration of the timeout. chat.py's /chat/send
+    # gets the same effect for free by being a plain `def` route -- this
+    # route is `async def` (it awaits `request.form()`), so the blocking
+    # call has to be pushed off the loop explicitly instead.
+    ok = await run_in_threadpool(notifier.send, _TEST_SUBJECT, _TEST_BODY)
+    message = ("Test email sent — check your inbox." if ok else
+               "Test email failed to send — check your settings and server logs.")
+    return _test_result_fragment(request, ok=ok, message=message)
+
+
+@router.post("/settings/test-push", response_class=HTMLResponse)
+async def test_push(request: Request) -> HTMLResponse:
+    """Send one test push using exactly the ntfy URL currently typed in the
+    Push notifications section. Never saves."""
+    form = await request.form()
+    url = str(form.get("ntfy_url", "")).strip()
+    if not url:
+        return _test_result_fragment(
+            request, ok=False, message="Enter a ntfy topic URL first.")
+    try:
+        # Reuses Settings' own field validator rather than duplicating its
+        # http(s)-scheme regex here -- one source of truth for what counts
+        # as a valid ntfy_url.
+        Settings._ntfy_url_needs_a_scheme(url)
+    except ValueError as exc:
+        return _test_result_fragment(request, ok=False, message=str(exc))
+
+    notifier = NtfyNotifier(url)
+    # See test_email's comment above -- NtfyNotifier.send() is also a
+    # blocking HTTP call and must not run directly on the event loop.
+    ok = await run_in_threadpool(notifier.send, _TEST_SUBJECT, _TEST_BODY)
+    message = ("Test push sent — check your phone." if ok else
+               "Test push failed to send — check your settings and server logs.")
+    return _test_result_fragment(request, ok=ok, message=message)
 
 
 @router.post("/settings/reset-token")
