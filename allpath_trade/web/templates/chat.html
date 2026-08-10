@@ -70,6 +70,20 @@
       }
       var errorEl = document.getElementById("chat-error");
       if (errorEl) errorEl.hidden = true;
+      // Clear the input now, not in chatOnAfterRequest's form.reset() --
+      // otherwise the typed text sits in both the optimistic echo bubble
+      // above AND the input box for the entire 10-60s turn. This is safe
+      // (does not touch the POSTed "message" field) because htmx has
+      // already serialized the form into a FormData snapshot before this
+      // handler runs: issueAjaxRequest calls `cn(r,t)` to build that
+      // snapshot, then fires htmx:configRequest off of it, and only after
+      // that fires htmx:beforeRequest -- which is what hx-on::before-request
+      // maps to. Verified by reading allpath_trade/web/static/htmx.min.js
+      // directly (search "htmx:beforeRequest"): the FormData object is
+      // already built and handed to configRequest/beforeRequest's event
+      // detail by the time either event dispatches, so mutating the live
+      // DOM input's value here cannot change what gets sent.
+      input.value = "";
     };
 
     window.chatOnAfterRequest = function (evt) {

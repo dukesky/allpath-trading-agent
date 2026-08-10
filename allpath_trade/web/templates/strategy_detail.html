@@ -10,6 +10,7 @@
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 <h2>Rules</h2>
+<div class="table-scroll">
 <table>
   <tr><th>Rule</th><th>Type</th><th>Condition</th><th>Action</th><th>State</th><th></th></tr>
   {% for r in doc.rules %}
@@ -27,6 +28,7 @@
   </tr>
   {% endfor %}
 </table>
+</div>
 <p class="hint">Re-arming a triggered rule makes it eligible to fire and place an order again — it is not a neutral reset.</p>
 
 <h2>Notifications</h2>

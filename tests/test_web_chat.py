@@ -428,6 +428,36 @@ def test_chat_page_has_optimistic_echo_and_disable_hooks(tmp_path, monkeypatch):
     assert "textContent" in body
 
 
+def test_chat_input_clears_immediately_on_send(tmp_path, monkeypatch):
+    # Fix 1 (Phase 5.5.2): chatOnBeforeRequest must clear #chat-input itself
+    # -- form.reset() only runs in chatOnAfterRequest, which doesn't fire
+    # until the 10-60s turn completes, so without this the user's typed text
+    # sits in BOTH the optimistic echo bubble and the input box for the
+    # whole turn. This is only safe to do in chatOnBeforeRequest (not
+    # earlier) because htmx has already snapshotted the form into FormData
+    # before htmx:beforeRequest fires -- see issueAjaxRequest's `cn(r,t)`
+    # call in the vendored htmx.min.js, which runs ahead of both
+    # htmx:configRequest and htmx:beforeRequest -- so clearing the DOM
+    # input's value here cannot empty the POSTed "message" field.
+    client = make_client(tmp_path, monkeypatch, [])
+    body = client.get("/chat").text
+    before_idx = body.index("chatOnBeforeRequest = function")
+    after_idx = body.index("chatOnAfterRequest = function")
+    before_request_source = body[before_idx:after_idx]
+    assert 'input.value = ""' in before_request_source
+
+
+def test_chat_error_path_restores_typed_text_after_clearing(tmp_path, monkeypatch):
+    # The error path in chatOnAfterRequest must still restore the user's
+    # text into the (now-cleared) input from form.dataset.lastMessage, so a
+    # failed send doesn't lose what they typed.
+    client = make_client(tmp_path, monkeypatch, [])
+    body = client.get("/chat").text
+    after_idx = body.index("chatOnAfterRequest = function")
+    after_request_source = body[after_idx:]
+    assert 'input.value = form.dataset.lastMessage' in after_request_source
+
+
 def test_server_rendered_fragment_never_contains_the_thinking_indicator(
         tmp_path, monkeypatch):
     # The indicator only ever exists client-side, between request-start and

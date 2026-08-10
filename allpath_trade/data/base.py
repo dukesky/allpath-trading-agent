@@ -11,6 +11,11 @@ class Quote(BaseModel):
     ticker: str
     price: Decimal
     as_of: datetime
+    # Optional so every existing constructor call (tests, other DataSource
+    # implementations) stays valid without an update; None means "no prior
+    # close known" and callers must degrade honestly rather than fabricate a
+    # direction (see summarize_strategy in web/routes/dashboard.py).
+    previous_close: Decimal | None = None
 
 
 class Bar(BaseModel):

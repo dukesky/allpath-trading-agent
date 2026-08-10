@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,6 +14,30 @@ from allpath_trade.web.auth import install_auth
 from allpath_trade.web.deps import ComponentHolder
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def static_content_hash(path: Path) -> str:
+    """First 8 hex chars of the file's sha256 -- used as a cache-busting
+    query param (?v=<hash>) on static asset URLs. StaticFiles serves with no
+    Cache-Control header, so browsers fall back to heuristic caching and can
+    serve a stale app.css/htmx.min.js indefinitely after a deploy; a changed
+    file produces a changed URL, so a stale cache entry (keyed on the old
+    URL) is simply never reused. Takes a path rather than reading STATIC_DIR
+    itself so tests can point it at a temp copy instead of mutating the real
+    shipped asset.
+
+    A missing/unreadable file (a packaging error that dropped app.css from
+    the wheel, a permissions issue) degrades to a constant "0" rather than
+    letting a bare FileNotFoundError/OSError out of create_app -- that would
+    contradict the mkdir-tolerance of the STATIC_DIR.mkdir() call right
+    before this runs, crashing startup opaquely over what's ultimately just
+    a cache-busting nicety. The URL still works either way (StaticFiles
+    still serves the real file); only the busting query param goes stale
+    across a deploy until the packaging issue is fixed."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:8]
+    except OSError:
+        return "0"
 
 
 def _start_scheduler(app: FastAPI, scheduler_cls: type) -> None:
@@ -57,6 +82,15 @@ def create_app(settings: Settings, broker: Broker | None = None,
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     install_auth(app)
+
+    # Env globals apply to every template render regardless of the context
+    # dict a given route passes in (login.html included) -- computed once
+    # at startup, not per-request, since the shipped asset content only
+    # changes on a deploy.
+    from allpath_trade.web.templating import templates
+
+    templates.env.globals["app_css_v"] = static_content_hash(STATIC_DIR / "app.css")
+    templates.env.globals["htmx_js_v"] = static_content_hash(STATIC_DIR / "htmx.min.js")
 
     # Aliased: `settings` is already this function's own Settings parameter --
     # importing the routes module under that name would shadow it.
