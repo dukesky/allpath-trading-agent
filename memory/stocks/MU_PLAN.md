@@ -1,1 +1,0 @@
-- Wave trading with 5-10k flexible funds; strong buy zone $750-800; sell at $950-1050; stop-loss 12% below entry

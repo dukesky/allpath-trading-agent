@@ -1,1 +1,0 @@
-- MU swing-trade strategy: Satellite position (8% target, tactical). Buy <$800 ($5k), <$750 ($3k). Sell 50% at +20%, exit all at +35% or >$1000. Stop loss $685. High volatility, not long-hold—exit on target.

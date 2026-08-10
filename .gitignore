@@ -9,3 +9,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
+
+# Personal runtime data — strategies are authored per-user via chat, memory is
+# written by the agent. Anchored to repo root so allpath_trade/memory (code)
+# stays tracked. Example strategy: docs/examples/strategy-example.yaml
+/strategies/
+/memory/

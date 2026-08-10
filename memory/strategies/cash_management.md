@@ -1,1 +1,0 @@
-- Maintain 35-40% cash reserves ($35-40k) for volatility management

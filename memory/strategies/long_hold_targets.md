@@ -1,1 +1,0 @@
-- NVDA (15% target), TSM (10% target) - stable long-term holdings

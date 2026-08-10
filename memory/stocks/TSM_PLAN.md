@@ -1,1 +1,0 @@
-- Target $10k allocation; batch entry: 40% at $404 (current), 35% at $380-390, 25% at $370-375; stop-loss $350

@@ -1,1 +1,0 @@
-- Prefers balanced approach: 35-40% semiconductor allocation (long-hold core + wave trading)

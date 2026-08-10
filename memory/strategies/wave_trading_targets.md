@@ -1,1 +1,0 @@
-- MU (5-10% flexible allocation) and AMD - for tactical wave trading; MU buy signal at $750-800
