@@ -141,6 +141,13 @@ label:first-child { margin-top:0; }
   color:var(--muted); margin:14px 0 18px; }
 .check input { width:auto; }
 .row { display:flex; gap:10px; align-items:center; }
+/* Settings page section headers (h2 + help-toggle): `align-items:center`
+   from .row above would vertically center the heading against the
+   toggle's full expanded height once <details> opens, dropping the h2 to
+   the middle of the help text instead of sitting level with the `?`
+   circle. flex-start keeps both anchored to the top regardless of how
+   tall the disclosed content gets. */
+.row.section-header { align-items:flex-start; }
 
 /* Settings page: a `?` toggle next to a section heading that expands
    detailed setup instructions (Gmail app passwords, ntfy topics) without

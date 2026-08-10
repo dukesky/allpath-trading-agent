@@ -7,6 +7,7 @@ import sys
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from allpath_trade.config import Settings, describe_validation_error
 from allpath_trade.notify.email import EmailNotifier
@@ -208,6 +209,12 @@ async def test_email(request: Request) -> HTMLResponse:
         return _test_result_fragment(
             request, ok=False, message="SMTP host is required to send a test email.")
 
+    to = str(form.get("notify_to", "")).strip()
+    if not to:
+        return _test_result_fragment(
+            request, ok=False,
+            message="Add a \"Send notifications to\" address first.")
+
     port_raw = str(form.get("smtp_port", "")).strip()
     try:
         port = int(port_raw) if port_raw else current.smtp_port
@@ -217,7 +224,6 @@ async def test_email(request: Request) -> HTMLResponse:
 
     user = str(form.get("smtp_user", "")).strip()
     sender = str(form.get("smtp_from", "")).strip()
-    to = str(form.get("notify_to", "")).strip()
     # Same keep-what-is-stored semantics as saving: a blank password field
     # means "use the one already on file", not "send with no password".
     password = _normalize_app_password(str(form.get("smtp_password", "")).strip())
@@ -225,7 +231,15 @@ async def test_email(request: Request) -> HTMLResponse:
         password = current.smtp_password
 
     notifier = EmailNotifier(host, port, user, password, sender, to)
-    ok = notifier.send(_TEST_SUBJECT, _TEST_BODY)
+    # EmailNotifier.send() is a blocking socket call with a 10s connect
+    # timeout (see notify/email.py) -- run it in Starlette's threadpool so a
+    # slow or unreachable SMTP host cannot freeze this process's single
+    # asyncio event loop (and with it every other request: dashboard, chat,
+    # the sentinel) for the duration of the timeout. chat.py's /chat/send
+    # gets the same effect for free by being a plain `def` route -- this
+    # route is `async def` (it awaits `request.form()`), so the blocking
+    # call has to be pushed off the loop explicitly instead.
+    ok = await run_in_threadpool(notifier.send, _TEST_SUBJECT, _TEST_BODY)
     message = ("Test email sent — check your inbox." if ok else
                "Test email failed to send — check your settings and server logs.")
     return _test_result_fragment(request, ok=ok, message=message)
@@ -249,7 +263,9 @@ async def test_push(request: Request) -> HTMLResponse:
         return _test_result_fragment(request, ok=False, message=str(exc))
 
     notifier = NtfyNotifier(url)
-    ok = notifier.send(_TEST_SUBJECT, _TEST_BODY)
+    # See test_email's comment above -- NtfyNotifier.send() is also a
+    # blocking HTTP call and must not run directly on the event loop.
+    ok = await run_in_threadpool(notifier.send, _TEST_SUBJECT, _TEST_BODY)
     message = ("Test push sent — check your phone." if ok else
                "Test push failed to send — check your settings and server logs.")
     return _test_result_fragment(request, ok=ok, message=message)

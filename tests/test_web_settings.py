@@ -539,7 +539,8 @@ def test_test_email_sends_typed_fields_and_falls_back_to_stored_password_when_bl
 def test_test_email_reports_a_failure_line(client, monkeypatch):
     _SpyEmailNotifier.ok = False
     monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
-    r = client.post("/settings/test-email", data={"smtp_host": "smtp.example.com"})
+    r = client.post("/settings/test-email",
+                     data={"smtp_host": "smtp.example.com", "notify_to": "me@example.com"})
     assert r.status_code == 200
     assert _SpyEmailNotifier.instances  # a send was actually attempted
     assert "Test email sent" not in r.text
@@ -548,19 +549,68 @@ def test_test_email_reports_a_failure_line(client, monkeypatch):
 
 def test_test_email_missing_host_is_an_inline_error_not_a_500(client, monkeypatch):
     monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
-    r = client.post("/settings/test-email", data={"smtp_host": ""})
+    r = client.post("/settings/test-email", data={"smtp_host": "", "notify_to": "me@example.com"})
     assert r.status_code == 200
     assert not _SpyEmailNotifier.instances  # never attempted
     assert "SMTP host" in r.text
+
+
+def test_test_email_missing_notify_to_is_an_inline_error_no_send_no_500(client, monkeypatch):
+    # build_notifier() (notify/email.py) requires both smtp_host AND
+    # notify_to before ever constructing an EmailNotifier -- the test path
+    # used to only require smtp_host, so a blank "Send notifications to"
+    # sent RCPT TO:<> and produced a generic, misleadingly-pointed SMTP
+    # failure instead of naming the actual missing field.
+    monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
+    r = client.post("/settings/test-email",
+                     data={"smtp_host": "smtp.example.com", "notify_to": ""})
+    assert r.status_code == 200
+    assert not _SpyEmailNotifier.instances  # never attempted
+    assert "Send notifications to" in r.text
 
 
 def test_test_email_does_not_touch_env_or_stored_settings_even_on_success(
         client, tmp_path, monkeypatch):
     monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
     env_before = (tmp_path / ".env").read_text()
-    client.post("/settings/test-email", data={"smtp_host": "smtp.example.com"})
+    client.post("/settings/test-email",
+                 data={"smtp_host": "smtp.example.com", "notify_to": "me@example.com"})
     assert (tmp_path / ".env").read_text() == env_before
     assert client.app.state.holder.get().settings.smtp_host == ""
+
+
+def test_test_email_ignores_fields_outside_its_own_section_even_if_posted(
+        client, monkeypatch):
+    # hx-params scopes what the *browser* sends (see the template test
+    # below), but the endpoint itself is the real backstop: it must behave
+    # identically -- and never read, use, or echo anything -- from fields
+    # outside its own section, even if a full form post arrives anyway (a
+    # non-JS client, or a future hx-params regression). Posts every other
+    # settings field, including every secret, alongside the email fields.
+    monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
+    r = client.post("/settings/test-email", data={
+        "smtp_host": "smtp.example.com",
+        "smtp_port": "587",
+        "smtp_user": "user@example.com",
+        "smtp_from": "bot@example.com",
+        "notify_to": "me@example.com",
+        "smtp_password": "typed-pw",
+        "openrouter_api_key": "sk-or-untouched-secret",
+        "openai_api_key": "sk-openai-untouched-secret",
+        "anthropic_api_key": "sk-anthropic-untouched-secret",
+        "alpaca_api_key": "alpaca-key-untouched-secret",
+        "alpaca_secret_key": "alpaca-secret-untouched-secret",
+        "ntfy_url": "https://ntfy.sh/unrelated-topic",
+        "llm_provider": "anthropic",
+    })
+    assert r.status_code == 200
+    [spy] = _SpyEmailNotifier.instances
+    assert spy.host == "smtp.example.com"
+    assert spy.password == "typed-pw"  # its own section's field, used normally
+    for secret in ("sk-or-untouched-secret", "sk-openai-untouched-secret",
+                   "sk-anthropic-untouched-secret", "alpaca-key-untouched-secret",
+                   "alpaca-secret-untouched-secret", "unrelated-topic"):
+        assert secret not in r.text
 
 
 def test_test_push_sends_the_typed_url(client, monkeypatch):
@@ -622,10 +672,24 @@ def test_test_push_requires_auth(anon_client):
     assert r.headers["location"] == "/login"
 
 
+def test_test_email_unauthenticated_htmx_request_gets_hx_redirect_not_a_swapped_login_form(
+        anon_client):
+    # auth.py's guard middleware special-cases `HX-Request: true` so htmx
+    # doesn't splice login.html's form into the Test button's own result
+    # <div> -- covers the path the Test buttons actually take (an htmx
+    # POST), not just a plain-browser POST's ordinary 303.
+    r = anon_client.post("/settings/test-email", data={"smtp_host": "x"},
+                         headers={"HX-Request": "true"}, follow_redirects=False)
+    assert r.status_code == 200
+    assert r.headers["HX-Redirect"] == "/login"
+
+
 def test_help_toggles_present_with_key_setup_phrases(client):
     body = client.get("/settings").text
     assert "<details" in body
-    assert "<summary>?</summary>" in body
+    # F5: each `?` disclosure toggle needs an accessible name -- a bare "?"
+    # glyph means nothing to a screen reader.
+    assert body.count('<summary aria-label="Setup help">?</summary>') == 2
     # Email help: Gmail app-password setup, the most-common-failure hint,
     # and the grouping-space strip save() already implements.
     assert "myaccount.google.com/apppasswords" in body
@@ -635,5 +699,37 @@ def test_help_toggles_present_with_key_setup_phrases(client):
     assert "STARTTLS" in body
     # Push help: install/subscribe flow and the "topic is a password" warning.
     assert "ntfy app" in body
+
+
+def test_ntfy_topic_privacy_warning_appears_only_once_in_the_help_toggle(client):
+    # F6: the always-on field hint used to repeat the same "topic is
+    # effectively a password" warning that the help toggle already states --
+    # trim the hint to the short essential and keep the privacy detail only
+    # in the toggle, so it isn't said twice on a page that's never scrolled.
+    body = client.get("/settings").text
+    assert body.count("topic name is effectively a password") == 1
+    assert body.count("keep it unguessable") == 1
+    assert ("Install the ntfy app and subscribe to your topic, then paste "
+            "the topic URL here.") in body
+
+
+def test_email_test_button_scopes_via_hx_params_allowlist_not_hx_include(client):
+    # F1: for a non-GET request htmx always includes the closest enclosing
+    # `<form>` -- here, the entire settings form, typed API keys included --
+    # so `hx-include` adds nothing and does not scope anything. `hx-params`
+    # is the real allowlist (verified directly against the vendored
+    # allpath_trade/web/static/htmx.min.js: its filterValues step runs last
+    # and, for a plain comma list, rebuilds the request's FormData from only
+    # the named keys). Assert the button carries the real mechanism and the
+    # misleading one is gone.
+    body = client.get("/settings").text
+    assert ('hx-params="smtp_host,smtp_port,smtp_user,smtp_password,'
+            'smtp_from,notify_to"') in body
+    assert "hx-include" not in body
+
+
+def test_push_test_button_scopes_via_hx_params_allowlist(client):
+    body = client.get("/settings").text
+    assert 'hx-params="ntfy_url"' in body
     assert "topic name is effectively a password" in body
     assert "Self-hosted ntfy servers work too" in body
