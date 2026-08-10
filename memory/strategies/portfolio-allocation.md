@@ -1,0 +1,1 @@
+- 组合框架（2026-08）：核心长持 NVDA 20%、AAPL 15%、TSM 10%；卫星波段 MU 8%（机动）；TSLA 10%（先小额观察仓）。总目标约 60% 以内，保留大量现金等回调。策略文件命名：nvda-ai-growth、aapl-services、tsm-longhold、mu-swing；旧的 example（原 AAPL 模板，被 NVDA 覆盖过）已冗余待清理。所有策略均为 draft + confirm。
