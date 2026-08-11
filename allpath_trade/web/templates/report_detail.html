@@ -9,7 +9,13 @@
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if report['summary'] %}<p>{{ report['summary'] }}</p>{% endif %}
 
-<pre class="report-body">{{ report['body'] }}</pre>
+{# The daily reflection report is prompted to write plain text, but models
+   drift into Markdown anyway (headings, bold, tables) -- run the body
+   through the same escape-first renderer used for chat (see markdown.py).
+   Genuinely plain text still renders fine: it becomes a handful of plain
+   `<p>` paragraphs, so this is a strict readability upgrade, never a
+   regression for the plain-text-by-prompt case. #}
+<div class="report-body md">{{ report['body'] | md }}</div>
 
 <p><a href="/reports/{{ report['date'] }}/transcript">View reasoning</a></p>
 
