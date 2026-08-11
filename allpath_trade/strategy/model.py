@@ -30,6 +30,18 @@ class StrategyStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class StrategyHorizon(str, Enum):
+    LONG = "long"
+    MEDIUM = "medium"
+    SWING = "swing"
+
+
+class StrategyBias(str, Enum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    NEUTRAL = "neutral"
+
+
 def _to_decimal(raw: object, *, percent: bool) -> Decimal:
     """Accept 0.15 / '0.15' / '15%' (percent fields) / '$9,000' (value fields)."""
     if isinstance(raw, Decimal):
@@ -97,14 +109,21 @@ class StrategyDoc(BaseModel):
     version: int = 1
     authorization: Authorization = Authorization.CONFIRM
     thesis: str = ""
+    # Optional, presentation-only metadata for the strategies page (glance-
+    # ability chips) -- never guessed. Absent in YAML means None, which the
+    # UI renders as "no chip" rather than inventing a value; only present
+    # when a human or agent actually wrote one in.
+    horizon: StrategyHorizon | None = None
+    bias: StrategyBias | None = None
     position: PositionPlan
     rules: list[Rule] = []
     review: ReviewPolicy = ReviewPolicy()
-    # A notification preference, not a trading parameter -- this is the one
-    # field the web UI is allowed to write directly (see
-    # web/routes/strategies.py's notify-email toggle). Defaults True so a
-    # YAML written before this field existed keeps notifying exactly as it
-    # always did.
+    # A notification preference, not a trading parameter -- one of two
+    # fields the web UI is allowed to write directly (see
+    # web/routes/strategies.py's notify-email toggle; `status` is the
+    # other, via that same module's lifecycle-transition route). Defaults
+    # True so a YAML written before this field existed keeps notifying
+    # exactly as it always did.
     notify_email: bool = True
 
     @model_validator(mode="after")

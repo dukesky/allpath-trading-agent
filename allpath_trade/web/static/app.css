@@ -251,6 +251,22 @@ code { font-family:var(--mono); }
 .alert-chip { font-size:12px; padding:2px 9px; border-radius:999px; font-weight:600;
   color:var(--warn-ink); background:var(--warn-soft); border:1px solid transparent; }
 
+/* Strategies-page card: bias chip carries the same direction-coded
+   green/red vocabulary as key-level chips and P/L (--up/--down) -- the one
+   legitimate use of that vocabulary for a value judgement rather than a
+   literal price direction, since "bullish"/"bearish" *is* a stated
+   direction. Neutral gets no color coding at all, same treatment as any
+   other .chip. */
+.bias-chip { font-size:12px; padding:2px 9px; border-radius:999px; margin-left:5px;
+  border:1px solid var(--line); color:var(--muted); background:var(--surface-2); }
+.bias-chip:first-child { margin-left:0; }
+.bias-chip.bullish { border-color:var(--up); color:var(--up); background:var(--up-soft); }
+.bias-chip.bearish { border-color:var(--down); color:var(--down); background:var(--down-soft); }
+/* The thesis excerpt (strategies.html) -- a single muted line, the user's
+   own words on the outlook, deliberately not given more visual weight than
+   the chips above it. */
+.strategy-thesis { margin:10px 0 0; font-size:13.5px; }
+
 a.strategy-card { transition:border-color .15s ease, box-shadow .15s ease; }
 a.strategy-card:hover { border-color:var(--accent); }
 

@@ -108,7 +108,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
     registry.register(
         "draft_strategy",
         "Draft or revise a strategy YAML. The user must confirm before it is "
-        "saved; a version snapshot is recorded.",
+        "saved; a version snapshot is recorded. Optional fields `horizon` "
+        "(long/medium/swing) and `bias` (bullish/bearish/neutral) drive the "
+        "strategies page's at-a-glance chips -- include them when the "
+        "thesis makes the time horizon and market direction clear, but "
+        "leave them out rather than guessing when it doesn't.",
         {"type": "object", "properties": {
             "strategy_id": {"type": t}, "yaml_text": {"type": t},
             "reason": {"type": t}},

@@ -561,6 +561,23 @@ def test_dashboard_refetches_quote_after_cache_expires(client, monkeypatch):
     assert data.calls.count("AAPL") == 2
 
 
+def test_dashboard_strategy_card_shows_not_monitored_badge_for_draft(client):
+    (client.app.state.holder.get().strategies.directory / "draftstrat.yaml").write_text("""
+name: "Draft one"
+status: draft
+position: {ticker: MSFT, target_weight: 5%}
+rules: []
+""")
+    dashboard_route._quote_cache.clear()
+    body = client.get("/").text
+    assert "not monitored" in body
+
+
+def test_dashboard_strategy_card_omits_not_monitored_badge_for_active(client):
+    body = client.get("/").text
+    assert "not monitored" not in body
+
+
 def test_dashboard_pending_review_shows_alert(client):
     holder = client.app.state.holder
     c = holder.get()

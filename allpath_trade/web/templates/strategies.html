@@ -2,22 +2,38 @@
 {% block title %}Strategies · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Strategies</h1>
+<p class="hint" style="margin-top:0">draft: not yet live · active: evaluated on every sentinel pass during market hours · paused: temporarily off · archived: kept for reference</p>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
-{% for ticker, group in docs | groupby('position.ticker') %}
-<h2>{{ ticker }}</h2>
-{% for d in group %}
-<div class="card" style="margin-bottom:10px">
-  <div class="row">
-    <strong>{{ d.name }}</strong>
-    <span class="muted">· v{{ d.version }} · {{ d.authorization.value }}</span>
-    <a style="margin-left:auto" href="/strategies/{{ d.id }}">View details</a>
+{% for d in docs %}
+{% set card = cards[d.id] %}
+<a class="card strategy-card" href="/strategies/{{ d.id }}">
+  <div class="strategy-card-head">
+    <div class="strategy-card-title">
+      <span class="strategy-ticker">{{ d.position.ticker }}</span>
+      <span class="muted">{{ d.name }}</span>
+    </div>
+    <div class="strategy-card-price">
+      {# Same two-decimal-and-suppress-when-zero rule as the dashboard card
+         (dashboard.html) -- this page reuses summarize_strategy's own
+         output, so the presentation must match exactly. #}
+      {% set day_change_rounded = card.day_change_pct | round(2) if card.day_change_pct is not none else none %}
+      <span class="{{ card.price_class }}">{{ card.price | money }}{% if day_change_rounded %} {{ "%+.2f"|format(card.day_change_pct) }}%{% endif %}</span>
+    </div>
   </div>
-  <div class="row" style="margin-top:6px">
+  <div class="strategy-card-meta">
     <span class="chip">{{ d.status.value }}</span>
+    {% if d.horizon %}<span class="chip">{{ d.horizon.value | horizon_label }}</span>{% endif %}
+    {% if d.bias %}<span class="bias-chip {{ d.bias.value }}">{{ d.bias.value }}</span>{% endif %}
+    {% if d.status.value != 'active' %}<span class="badge">not monitored</span>{% endif %}
     {% for chip in chips[d.id] %}<span class="badge">{{ chip }}</span>{% endfor %}
   </div>
-</div>
-{% endfor %}
+  {% if d.thesis %}<p class="muted strategy-thesis">{{ d.thesis | thesis_excerpt }}</p>{% endif %}
+  {% if d.status.value == 'draft' %}
+  <p class="hint">Draft strategies are not evaluated by the sentinel — activate to arm its rules.</p>
+  {% elif d.status.value == 'paused' %}
+  <p class="hint">Paused strategies are not evaluated by the sentinel — resume to arm its rules.</p>
+  {% endif %}
+</a>
 {% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
 {% for e in errors %}<p class="error">{{ e }}</p>{% endfor %}
 {% endblock %}
