@@ -303,3 +303,51 @@ def test_revision_card_is_english_only(client):
     body = client.get("/reviews").text
     assert f"#{rid}" in body
     assert_english_only(body)
+
+
+def test_pending_revision_card_shows_regenerated_diff(client):
+    # Task 6: the card renders a diff regenerated at render time (against
+    # the CURRENT file) rather than trusting the stored `diff` field --
+    # here the file matches the recorded base, so the regenerated diff is
+    # the "normal" case and should still show the real +/- content.
+    queue_revision(client)
+    body = client.get("/reviews").text
+    assert 'class="diff-add"' in body
+    assert 'class="diff-del"' in body
+    assert "target_weight: 10%" in body  # proposed (added)
+    assert "target_weight: 15%" in body  # current (removed)
+
+
+def test_pending_revision_card_shows_stale_warning_when_file_changed(client):
+    rid = queue_revision(client)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    # An intervening edit after the proposal was drafted -- the file's
+    # current text no longer matches the proposal's recorded base
+    # (`old_yaml`), the exact scenario `apply_revision_factory`'s
+    # base-match gate rejects at approval time (see reflection_tools.py).
+    (strategies_dir / "s1.yaml").write_text(
+        CURRENT_S1_YAML.replace("target_weight: 15%", "target_weight: 20%"))
+    body = client.get("/reviews").text
+    assert "has changed since this proposal" in body
+    # The regenerated diff reflects the file as it is NOW, not the stale
+    # recorded base -- 20% (current), not 15% (stale base), should appear.
+    assert "target_weight: 20%" in body
+
+    # Approving still fails safely and leaves the row pending -- the card's
+    # warning isn't lying about what clicking Approve would do.
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+    assert r.status_code == 303
+    assert client.app.state.holder.get().queue.get(rid)["status"] == "pending"
+
+
+def test_resolved_revision_card_shows_recorded_diff_not_a_live_recompute(client):
+    rid = queue_revision(client)
+    client.post(f"/reviews/{rid}/reject", follow_redirects=False)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    # An unrelated edit made well after resolution -- a live recompute
+    # against this would be misleading for a row that's already closed.
+    (strategies_dir / "s1.yaml").write_text(
+        CURRENT_S1_YAML.replace("target_weight: 15%", "target_weight: 99%"))
+    body = client.get("/reviews").text
+    assert ">d</span>" in body  # the recorded snapshot diff (queue_revision's diff="d")
+    assert "target_weight: 99%" not in body

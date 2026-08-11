@@ -94,7 +94,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
 
     # Aliased: `settings` is already this function's own Settings parameter --
     # importing the routes module under that name would shadow it.
-    from allpath_trade.web.routes import chat, dashboard, memory, reviews, strategies
+    from allpath_trade.web.routes import chat, dashboard, memory, reports, reviews, strategies
     from allpath_trade.web.routes import settings as settings_routes
 
     app.include_router(dashboard.router)
@@ -102,6 +102,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app.include_router(chat.router)
     app.include_router(strategies.router)
     app.include_router(memory.router)
+    app.include_router(reports.router)
     app.include_router(settings_routes.router)
 
     @app.get("/healthz")

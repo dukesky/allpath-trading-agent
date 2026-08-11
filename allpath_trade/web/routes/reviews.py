@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 
 from fastapi import APIRouter, Form, Request
@@ -21,6 +22,73 @@ def _decorate(row) -> dict:  # row: sqlite3.Row
     return item
 
 
+def _diff_lines(diff_text: str) -> list[dict]:
+    """Splits a unified-diff string into per-line dicts carrying the CSS
+    class the template tints it with (`diff-add`/`diff-del` for `+`/`-`
+    content lines -- the `+++`/`---` file-header lines and `@@` hunk
+    headers get their own, unhighlighted classes so a real added/removed
+    line is never confused with the `+++ file`/`--- file` header lines
+    that also start with those characters)."""
+    lines = []
+    for line in diff_text.splitlines():
+        if line.startswith(("+++", "---")):
+            cls = "diff-hdr"
+        elif line.startswith("@@"):
+            cls = "diff-hunk"
+        elif line.startswith("+"):
+            cls = "diff-add"
+        elif line.startswith("-"):
+            cls = "diff-del"
+        else:
+            cls = "diff-ctx"
+        lines.append({"text": line, "cls": cls})
+    return lines
+
+
+def _revision_diff(c, item: dict) -> dict:
+    """Regenerates a strategy_revision row's diff at render time against
+    the file's CURRENT on-disk content, rather than trusting the diff
+    recorded when the proposal was drafted (`item['snapshot']['diff']`).
+
+    The stored diff is what the reflection agent SAW when it drafted the
+    proposal; the regenerated one is what clicking Approve actually MEANS
+    right now -- those diverge exactly when a sibling proposal (or a
+    manual edit) has changed the file since, which is also the scenario
+    `apply_revision_factory`'s base-match gate (allpath_trade/agent/
+    reflection_tools.py) rejects at approval time. `stale` mirrors that
+    same check (current text != the proposal's recorded base) so the card
+    can warn about the failure *before* the user clicks Approve, instead
+    of only after."""
+    snapshot = item["snapshot"]
+    strategy_id = item["strategy_id"]
+    path = c.strategies.directory / f"{strategy_id}.yaml"
+    current_yaml = path.read_text() if path.exists() else ""
+    diff_text = "\n".join(difflib.unified_diff(
+        current_yaml.splitlines(), snapshot["new_yaml"].splitlines(),
+        fromfile=f"{strategy_id} (current)", tofile=f"{strategy_id} (proposed)",
+        lineterm=""))
+    return {"lines": _diff_lines(diff_text), "stale": current_yaml != snapshot["old_yaml"]}
+
+
+def _attach_revision_diffs(c, items: list[dict]) -> None:
+    for item in items:
+        if item["kind"] != "strategy_revision":
+            continue
+        if item["status"] == "pending":
+            # Live re-check against the current file -- see _revision_diff.
+            item["revision_diff"] = _revision_diff(c, item)
+        else:
+            # A resolved row's outcome is already fixed (applied or
+            # rejected); re-reading the file at render time would either
+            # be redundant (approved: the file now matches new_yaml, so a
+            # live diff is empty) or misleading (rejected: unrelated later
+            # edits could make it look like something changed because of
+            # this proposal). The historical diff the agent actually
+            # proposed is the honest thing to show for a resolved row.
+            item["revision_diff"] = {
+                "lines": _diff_lines(item["snapshot"]["diff"]), "stale": False}
+
+
 @router.get("/reviews", response_class=HTMLResponse)
 def reviews(request: Request) -> HTMLResponse:
     c = request.app.state.holder.get()
@@ -32,6 +100,8 @@ def reviews(request: Request) -> HTMLResponse:
     all_items = [_decorate(r) for r in c.queue.list(None)]
     items = [r for r in all_items if r["status"] == "pending"]
     recent = [r for r in all_items if r["status"] != "pending"][:20]
+    _attach_revision_diffs(c, items)
+    _attach_revision_diffs(c, recent)
     return templates.TemplateResponse(request, "reviews.html", {
         "page": "reviews", "items": items, "recent": recent,
         "error": request.query_params.get("error"),

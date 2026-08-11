@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ report['date'] }} · Reports · AllPath Trade{% endblock %}
+{% block content %}
+<h1>{{ report['date'] }}</h1>
+<p class="muted">
+  {{ report['model'] }} · {{ report['created_at'] | ago }}
+  {% if report['status'] == 'failed' %}<span class="chip">failed</span>{% endif %}
+</p>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if report['summary'] %}<p>{{ report['summary'] }}</p>{% endif %}
+
+<pre class="report-body">{{ report['body'] }}</pre>
+
+<p><a href="/reports/{{ report['date'] }}/transcript">View reasoning</a></p>
+
+{% if proposals %}
+<h2>Strategy revision proposals</h2>
+{% for p in proposals %}
+<div class="card" style="margin-bottom:10px">
+  <div class="row">
+    <strong>{{ p['strategy_id'] }}</strong>
+    <span class="chip">{{ p['status'] }}</span>
+    <span style="margin-left:auto"><a href="/reviews">View in Pending</a></span>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}
