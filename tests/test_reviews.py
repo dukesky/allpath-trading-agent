@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from decimal import Decimal
 
 import pytest
@@ -97,3 +98,151 @@ def test_approve_with_corrupt_intent_raises_and_leaves_pending(queue):
     row = queue.get(rid)
     assert row["status"] == "pending"
     assert queue._executor.calls == []
+
+
+# --- Phase 6: strategy-revision kind ----------------------------------
+
+def test_add_defaults_to_order_kind(queue):
+    rid = add(queue)
+    row = queue.get(rid)
+    assert row["kind"] == "order"
+
+
+def test_add_strategy_revision_row_shape(queue):
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="id: s1\n", new_yaml="id: s1\nx: 2\n",
+        diff="- x: 1\n+ x: 2\n", rationale="price broke the stop-loss assumption")
+    row = queue.get(rid)
+    assert row["kind"] == "strategy_revision"
+    assert row["status"] == "pending"
+    assert row["strategy_id"] == "s1"
+    assert row["ticker"] == "AAPL"
+    assert row["rule_id"] == "reflection"
+    assert row["rule_type"] == "revision"
+    assert row["action"] == "revise strategy"
+    assert row["condition"] == "price broke the stop-loss assumption"
+    assert row["intent"] is None
+    assert row["source"] == "reflection"
+    assert row["conversation_id"] is None
+
+    snapshot = json.loads(row["snapshot"])
+    assert snapshot == {
+        "old_yaml": "id: s1\n", "new_yaml": "id: s1\nx: 2\n",
+        "diff": "- x: 1\n+ x: 2\n", "rationale": "price broke the stop-loss assumption"}
+
+
+def test_add_strategy_revision_condition_is_truncated_rationale(queue):
+    rationale = "x" * 500
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="a", new_yaml="b",
+        diff="d", rationale=rationale)
+    row = queue.get(rid)
+    assert row["condition"] == rationale[:200]
+
+
+def test_add_strategy_revision_records_conversation_id(queue):
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="a", new_yaml="b",
+        diff="d", rationale="r", conversation_id=42)
+    row = queue.get(rid)
+    assert row["conversation_id"] == 42
+
+
+def test_approve_revision_calls_applier_with_strategy_id_and_new_yaml(queue):
+    calls = []
+    queue.set_revision_applier(lambda strategy_id, new_yaml: calls.append((strategy_id, new_yaml)))
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+
+    result = queue.approve(rid)
+
+    assert result is None
+    assert calls == [("s1", "new")]
+    row = queue.get(rid)
+    assert row["status"] == "approved" and row["resolved_ts"]
+    # order-kind executor must never be touched by a revision approval
+    assert queue._executor.calls == []
+
+
+def test_approve_revision_without_applier_raises_and_leaves_pending(queue):
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+    with pytest.raises(ReviewError):
+        queue.approve(rid)
+    row = queue.get(rid)
+    assert row["status"] == "pending"
+
+
+def test_approve_revision_applier_exception_recorded_and_reraised(queue):
+    def boom(strategy_id, new_yaml):
+        raise ValueError("bad yaml")
+
+    queue.set_revision_applier(boom)
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+
+    with pytest.raises(ValueError, match="bad yaml"):
+        queue.approve(rid)
+
+    row = queue.get(rid)
+    # The claim is atomic and happens before the applier call (mirrors the
+    # order path's ExecutionError handling): the row is left "approved"
+    # with the failure recorded, not rolled back to pending.
+    assert row["status"] == "approved"
+    assert json.loads(row["execution_result"]) == {"error": "bad yaml"}
+
+
+def test_approve_revision_twice_raises(queue):
+    queue.set_revision_applier(lambda strategy_id, new_yaml: None)
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+    queue.approve(rid)
+    with pytest.raises(ReviewError):
+        queue.approve(rid)
+
+
+def test_reject_unchanged_for_revision_kind(queue):
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+    queue.reject(rid, note="not now")
+    row = queue.get(rid)
+    assert row["status"] == "rejected" and row["resolution_note"] == "not now"
+
+
+def test_reject_unchanged_for_order_kind(queue):
+    # Locks in that touching the revision branch didn't disturb the
+    # pre-existing order-kind reject path.
+    rid = add(queue)
+    queue.reject(rid, note="not now")
+    row = queue.get(rid)
+    assert row["status"] == "rejected" and row["resolution_note"] == "not now"
+
+
+def test_legacy_pending_reviews_row_defaults_kind_order_after_migration(tmp_path):
+    # Simulate a pre-Phase-6 database: pending_reviews exists without a
+    # `kind` column. CREATE TABLE IF NOT EXISTS won't touch it, so the
+    # ALTER TABLE migration must add + backfill the column.
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE pending_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts TEXT NOT NULL, strategy_id TEXT NOT NULL, rule_id TEXT NOT NULL,"
+        " ticker TEXT NOT NULL, rule_type TEXT NOT NULL, condition TEXT NOT NULL,"
+        " action TEXT NOT NULL, snapshot TEXT NOT NULL, intent TEXT,"
+        " status TEXT NOT NULL DEFAULT 'pending', resolved_ts TEXT,"
+        " resolution_note TEXT, execution_result TEXT)")
+    raw.execute(
+        "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker, rule_type,"
+        " condition, action, snapshot) VALUES ('t', 's1', 'r1', 'AAPL', 'soft',"
+        " 'c', 'a', '{}')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT kind FROM pending_reviews").fetchone()
+    assert row["kind"] == "order"

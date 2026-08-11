@@ -1,3 +1,5 @@
+import sqlite3
+
 from allpath_trade.agent.tools import fence_external
 from allpath_trade.memory.search import SessionSearch
 from allpath_trade.store.conversations import ConversationStore
@@ -14,6 +16,50 @@ def test_start_and_latest(tmp_path):
     c1 = s.start()
     c2 = s.start()
     assert s.latest() == c2 and c2 > c1
+
+
+def test_start_defaults_to_chat_kind(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    s = ConversationStore(conn)
+    cid = s.start()
+    row = conn.execute("SELECT kind FROM conversations WHERE id = ?", (cid,)).fetchone()
+    assert row["kind"] == "chat"
+
+
+def test_latest_filters_by_kind(tmp_path):
+    # Phase 6: reflection sessions get their own conversation kind so the
+    # web chat's `latest()` call never resumes a reflection transcript.
+    s = make(tmp_path)
+    chat_id = s.start(kind="chat")
+    reflection_id = s.start(kind="reflection")
+    assert s.latest(kind="chat") == chat_id
+    assert s.latest(kind="reflection") == reflection_id
+    assert s.latest() == chat_id  # default kind is "chat"
+
+
+def test_latest_kind_with_no_matching_rows_is_none(tmp_path):
+    s = make(tmp_path)
+    s.start(kind="chat")
+    assert s.latest(kind="reflection") is None
+
+
+def test_legacy_conversations_row_defaults_kind_chat_after_migration(tmp_path):
+    # Simulate a pre-Phase-6 database: conversations table exists but has no
+    # `kind` column. `connect()`'s CREATE TABLE IF NOT EXISTS won't touch an
+    # existing table, so the ALTER TABLE migration must add the column (and
+    # backfill existing rows) for legacy data to keep working.
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " started_ts TEXT NOT NULL, title TEXT NOT NULL DEFAULT '')")
+    raw.execute("INSERT INTO conversations (started_ts) VALUES ('2020-01-01T00:00:00+00:00')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT kind FROM conversations").fetchone()
+    assert row["kind"] == "chat"
 
 
 def test_append_and_history_roundtrip(tmp_path):

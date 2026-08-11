@@ -9,16 +9,21 @@ class ConversationStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def start(self) -> int:
+    def start(self, kind: str = "chat") -> int:
         cur = self._conn.execute(
-            "INSERT INTO conversations (started_ts) VALUES (?)",
-            (datetime.now(UTC).isoformat(),))
+            "INSERT INTO conversations (started_ts, kind) VALUES (?, ?)",
+            (datetime.now(UTC).isoformat(), kind))
         self._conn.commit()
         return cur.lastrowid
 
-    def latest(self) -> int | None:
+    def latest(self, kind: str = "chat") -> int | None:
+        # Filtered by kind so the web chat's "resume the latest conversation"
+        # call (chat_service.py) never resumes a reflection transcript
+        # (Phase 6) -- reflection sessions get their own `kind="reflection"`
+        # conversations, kept out of the user-facing chat's history.
         row = self._conn.execute(
-            "SELECT id FROM conversations ORDER BY id DESC LIMIT 1").fetchone()
+            "SELECT id FROM conversations WHERE kind = ? ORDER BY id DESC LIMIT 1",
+            (kind,)).fetchone()
         return row["id"] if row else None
 
     def append(self, conversation_id: int, message: dict) -> None:

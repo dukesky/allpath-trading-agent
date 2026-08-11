@@ -51,13 +51,15 @@ CREATE TABLE IF NOT EXISTS pending_reviews (
     status TEXT NOT NULL DEFAULT 'pending',
     resolved_ts TEXT,
     resolution_note TEXT,
-    execution_result TEXT
+    execution_result TEXT,
+    kind TEXT NOT NULL DEFAULT 'order'  -- 'order' | 'strategy_revision' (Phase 6)
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_ts TEXT NOT NULL,
-    title TEXT NOT NULL DEFAULT ''
+    title TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'chat'  -- 'chat' | 'reflection' (Phase 6)
 );
 
 CREATE TABLE IF NOT EXISTS conversation_turns (
@@ -125,6 +127,8 @@ _MIGRATIONS = [
     "ALTER TABLE pending_reviews ADD COLUMN risk_preview TEXT",
     "ALTER TABLE trades ADD COLUMN filled_qty TEXT",
     "ALTER TABLE trades ADD COLUMN filled_avg_price TEXT",
+    "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
+    "ALTER TABLE pending_reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'order'",
 ]
 
 
