@@ -77,3 +77,37 @@ class StrategyStore:
         return list(self._conn.execute(
             "SELECT * FROM strategy_versions WHERE strategy_id = ?"
             " ORDER BY version DESC, id DESC", (strategy_id,)))
+
+    def not_armed_rules(self, strategy_id: str) -> list:
+        """Rules of `strategy_id` whose persisted state is not ARMED
+        (TRIGGERED or DISABLED). Finding F2: `apply_revision_factory`
+        (agent/reflection_tools.py) writes an approved revision's YAML
+        verbatim and never touches `rule_states` -- a rule that fired
+        before the revision (state TRIGGERED, monitoring stopped for it)
+        stays TRIGGERED after the revision lands, silently, even when the
+        revision retargets that exact rule id with a tightened condition.
+        This never re-arms anything on its own -- re-arming automatically
+        could re-fire a stop against a position that's already been sold --
+        it only surfaces the fact so the approve flow (web/routes/
+        reviews.py, cli.py) can warn the user to re-arm by hand if the rule
+        should fire again. Returns `[]` (rather than raising) when the
+        strategy no longer loads -- nothing useful to warn about, and the
+        approve flow already reports its own outcome for that case."""
+        try:
+            doc = self.load(strategy_id)
+        except (FileNotFoundError, StrategyValidationError):
+            return []
+        return [r for r in doc.rules if r.state != RuleState.ARMED]
+
+    def rearm_warning(self, strategy_id: str) -> str:
+        """Empty string when every rule of `strategy_id` is armed, else a
+        human-readable suffix naming each rule that isn't -- shared wording
+        for the CLI (`allpath-trade reviews approve`) and the web approve
+        flow so a revision's aftermath reads the same on both surfaces."""
+        stuck = self.not_armed_rules(strategy_id)
+        if not stuck:
+            return ""
+        parts = ", ".join(f"{r.id} is still {r.state.value}" for r in stuck)
+        pronoun = "it" if len(stuck) == 1 else "them"
+        return (f" Note: {parts} -- re-arm {pronoun} on the strategy page "
+                f"if {'it' if len(stuck) == 1 else 'they'} should fire again.")

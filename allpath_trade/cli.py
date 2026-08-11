@@ -7,6 +7,7 @@ from functools import partial
 
 from pydantic import ValidationError
 
+from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings, SettingsStore, describe_validation_error
 from allpath_trade.llm.base import LLMClient
@@ -128,8 +129,35 @@ def cmd_rearm(store, strategy_id: str, rule_id: str) -> int:
     return 0
 
 
-def cmd_reviews(q, args) -> int:
-    from allpath_trade.store.reviews import ReviewError
+def _approve_needs_broker(settings: Settings, review_id: int) -> bool:
+    """`reviews approve` on a strategy_revision row is pure file I/O -- no
+    broker/executor is ever touched (see ReviewQueue._approve_revision:
+    strategy_revision rows never reach `_executor`). Finding 6: the old
+    blanket `needs_broker` for every `reviews approve` call demanded Alpaca
+    credentials even for those rows. Peeks the row's `kind` directly with a
+    throwaway connection -- deliberately not through ReviewQueue/
+    build_components, which is exactly the broker-requiring machinery this
+    is trying to avoid entering. Missing/unreadable rows keep the old
+    conservative default (broker required) so `cmd_reviews` still gets to
+    report its own "review not found" error rather than this silently
+    swallowing it."""
+    # F6: this throwaway connection was never closed -- every `reviews
+    # approve` invocation (the common case, not just this function's own
+    # narrow strategy_revision check) leaked one sqlite connection for the
+    # life of the process. try/finally rather than a `with` block: the
+    # LockedConnection connect() returns doesn't implement the context
+    # manager protocol (see store/db.py) -- only .close().
+    conn = connect(settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT kind FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+        return row is None or row["kind"] != "strategy_revision"
+    finally:
+        conn.close()
+
+
+def cmd_reviews(q, args, store=None) -> int:
+    from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 
     try:
         if args.reviews_command == "list":
@@ -140,9 +168,31 @@ def cmd_reviews(q, args) -> int:
                 print(f"#{r['id']} {r['ts'][:19]} {r['strategy_id']}/{r['rule_id']} "
                       f"[{r['status']}] {r['condition']} -> {r['action']}")
         elif args.reviews_command == "approve":
-            result = q.approve(args.review_id)
-            print("executed" if result.submitted
-                  else f"rejected by risk gate: {'; '.join(result.decision.reasons)}")
+            # kind-branch HARD PREREQ (Task 3): fetch the row and read its
+            # kind BEFORE calling approve() -- approve() returns None for
+            # strategy_revision rows (Task 2), so `result.submitted` below
+            # would crash on those if this branch reads `result` first.
+            row = q.get(args.review_id)
+            kind, strategy_id = row["kind"], row["strategy_id"]
+            try:
+                result = q.approve(args.review_id)
+            except RevisionValidationError as exc:
+                # ReviewQueue already rolled the row back to "pending"
+                # before raising -- say that, not just "error".
+                print(f"error: revision failed re-validation and was left "
+                      f"pending: {exc}", file=sys.stderr)
+                return 1
+            if kind == "strategy_revision":
+                # Finding F2: mirror the web approve flow's warning -- see
+                # StrategyStore.rearm_warning's docstring for why this never
+                # re-arms anything on its own. `store` is None only in
+                # cmd_reviews' own tests that construct a bare queue; every
+                # real caller (main(), below) passes the StrategyStore.
+                note = store.rearm_warning(strategy_id) if store is not None else ""
+                print(f"Revision applied to {strategy_id}.{note}")
+            else:
+                print("executed" if result.submitted
+                      else f"rejected by risk gate: {'; '.join(result.decision.reasons)}")
         else:
             q.reject(args.review_id, note=args.note or "")
             print(f"review {args.review_id} rejected")
@@ -463,9 +513,13 @@ def main(argv: list[str] | None = None,
         return 2
 
     # Only commands that actually reach the broker require credentials;
-    # read-only commands (strategies, rearm, reviews list/reject) work without.
+    # read-only commands (strategies, rearm, reviews list/reject) work
+    # without. `reviews approve` only needs one when the row being approved
+    # is order-kind -- a strategy_revision approval is pure file I/O (see
+    # `_approve_needs_broker`).
     needs_broker = args.command in {"status", "check", "run", "chat", "serve"} or (
-        args.command == "reviews" and getattr(args, "reviews_command", None) == "approve") or (
+        args.command == "reviews" and getattr(args, "reviews_command", None) == "approve"
+        and _approve_needs_broker(settings, args.review_id)) or (
         args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
     broker: Broker | None = None
@@ -499,6 +553,11 @@ def main(argv: list[str] | None = None,
         settings.strategies_dir.mkdir(parents=True, exist_ok=True)
         store = StrategyStore(settings.strategies_dir, conn)
         queue = ReviewQueue(conn, executor=None)
+        # Wired unconditionally, same as build_components does for the
+        # broker branch: approving a strategy_revision row is plain file
+        # I/O, not broker-dependent, so it must work in this no-broker path
+        # too (that's the whole point of Finding 6's fix above).
+        queue.set_revision_applier(apply_revision_factory(store))
         sentinel = None
 
     if args.command == "check":
@@ -506,18 +565,38 @@ def main(argv: list[str] | None = None,
     if args.command == "run":
         from allpath_trade.scheduler import run_daemon
 
-        daily = None
-        if components.consolidator is not None:
-            daily = lambda: print("[memory] " + components.consolidator.run_daily())
+        def daily() -> None:
+            # No daily digest here: the headless `run` daemon has never
+            # sent one (docs/TODO.md -- `_send_daily_digest` only hangs off
+            # `serve`'s build_jobs); Task 5 doesn't introduce it, only
+            # brings reflection in at the same relative position build_jobs
+            # uses (digest -> reflection -> consolidation, minus the
+            # missing digest step). Each step gets its own try/except, same
+            # isolation reasoning as build_jobs's daily(): a broken
+            # reflection must not silently prevent consolidation from
+            # running.
+            if components.reflector is not None and settings.daily_reflection:
+                try:
+                    print(components.reflector.run_daily())
+                except Exception as exc:  # noqa: BLE001 — must not stop consolidation
+                    print(f"[reflection] failed: {exc}", file=sys.stderr)
+            if components.consolidator is not None:
+                try:
+                    print("[memory] " + components.consolidator.run_daily())
+                except Exception as exc:  # noqa: BLE001 — see comment above
+                    print(f"[consolidation] failed: {exc}")
+
+        daily_job = (daily if (components.reflector is not None
+                               or components.consolidator is not None) else None)
         run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
-                   daily_job=daily, app_state=components.app_state)
+                   daily_job=daily_job, app_state=components.app_state)
         return 0
     if args.command == "strategies":
         return cmd_strategies(settings, store)
     if args.command == "rearm":
         return cmd_rearm(store, args.strategy_id, args.rule_id)
     if args.command == "reviews":
-        return cmd_reviews(queue, args)
+        return cmd_reviews(queue, args, store)
     if args.command == "chat":
         from allpath_trade.llm.factory import LLMConfigError, build_llm
 

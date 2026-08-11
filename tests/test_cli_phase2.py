@@ -89,6 +89,88 @@ def test_reviews_flow(tmp_path, capsys, monkeypatch):
     assert code == 0
 
 
+VALID_REVISION_YAML = """\
+name: "T"
+status: active
+version: 2
+authorization: notify
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 90000", action: "sell all"}
+"""
+
+
+def _queue_revision(tmp_path, new_yaml=VALID_REVISION_YAML) -> int:
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    # The applier's staleness gate (Finding 1) compares the file's CURRENT
+    # text against the proposal's recorded base, so `old_yaml` has to be
+    # the strategy file's actual on-disk content for `approve` to succeed.
+    old_yaml = (tmp_path / "strategies" / "t.yaml").read_text()
+    conn = connect(tmp_path / "allpath-trade.db")
+    rid = ReviewQueue(conn, executor=None).add_strategy_revision(
+        strategy_id="t", ticker="AAPL", old_yaml=old_yaml, new_yaml=new_yaml,
+        diff="d", rationale="reflection rationale")
+    conn.close()
+    return rid
+
+
+def test_reviews_approve_on_a_revision_row_applies_it(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    rid = _queue_revision(tmp_path)
+
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+
+    out = capsys.readouterr().out
+    assert code == 0  # not a crash from `result.submitted` on None
+    assert "Revision applied to t." in out
+    assert (tmp_path / "strategies" / "t.yaml").read_text() == VALID_REVISION_YAML
+
+
+def test_reviews_approve_warns_when_the_revised_rule_is_still_triggered(
+        tmp_path, capsys, monkeypatch):
+    # Finding F2, CLI-side mirror of the web approve flow's warning.
+    from allpath_trade.store.db import connect
+    from allpath_trade.strategy.model import RuleState
+    from allpath_trade.strategy.store import StrategyStore
+
+    setup_env(tmp_path, monkeypatch)
+    conn = connect(tmp_path / "allpath-trade.db")
+    StrategyStore(tmp_path / "strategies", conn).set_rule_state("t", "r1", RuleState.TRIGGERED)
+    conn.close()
+    rid = _queue_revision(tmp_path)
+
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Revision applied to t." in out
+    assert "r1 is still triggered" in out
+    assert "re-arm" in out
+
+
+def test_reviews_approve_on_a_stale_revision_leaves_it_pending(
+        tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    # Missing `position` -- fails re-validation in the applier.
+    rid = _queue_revision(tmp_path, new_yaml="name: Bad\nstatus: active\n")
+
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "pending" in err.lower()
+
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    conn = connect(tmp_path / "allpath-trade.db")
+    row = ReviewQueue(conn, executor=None).get(rid)
+    assert row["status"] == "pending"
+    conn.close()
+
+
 def _clear_alpaca_env(monkeypatch):
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
@@ -124,6 +206,38 @@ def test_reviews_approve_still_requires_credentials(tmp_path, capsys, monkeypatc
     _clear_alpaca_env(monkeypatch)
     assert main(["reviews", "approve", "1"]) == 2
     assert "ALPACA_API_KEY" in capsys.readouterr().err
+
+
+def test_reviews_approve_order_row_still_requires_credentials(tmp_path, capsys, monkeypatch):
+    # Regression guard for the Finding 6 fix: relaxing the credential
+    # requirement for strategy_revision rows must not relax it for
+    # order-kind rows too.
+    setup_env(tmp_path, monkeypatch)
+    (tmp_path / "strategies" / "t.yaml").write_text(
+        STRAT.replace("authorization: notify", "authorization: confirm"))
+    main(["check"], broker_factory=lambda s: FakeBroker())  # queues review #1 (order)
+    _clear_alpaca_env(monkeypatch)
+
+    code = main(["reviews", "approve", "1"])  # no broker_factory, no keys
+
+    assert code == 2
+    assert "ALPACA_API_KEY" in capsys.readouterr().err
+
+
+def test_reviews_approve_revision_works_without_credentials(tmp_path, capsys, monkeypatch):
+    # Finding 6: approving a strategy_revision row is pure file I/O (no
+    # broker call anywhere on that path -- see
+    # ReviewQueue._approve_revision) and must not demand Alpaca credentials.
+    setup_env(tmp_path, monkeypatch)
+    rid = _queue_revision(tmp_path)
+    _clear_alpaca_env(monkeypatch)
+
+    code = main(["reviews", "approve", str(rid)])  # no broker_factory, no keys
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Revision applied to t." in out
+    assert (tmp_path / "strategies" / "t.yaml").read_text() == VALID_REVISION_YAML
 
 
 def test_cli_output_is_english_only(tmp_path, capsys, monkeypatch):

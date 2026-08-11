@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Reports · AllPath Trade{% endblock %}
+{% block content %}
+<h1>Reports</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% for r in reports %}
+<a class="card report-card" href="/reports/{{ r['date'] }}">
+  <div class="row">
+    <strong>{{ r['date'] }}</strong>
+    {% if r['status'] == 'failed' %}<span class="chip">failed</span>{% endif %}
+    {% set count = proposal_counts.get(r['date'], 0) %}
+    {% if count %}<span class="badge">{{ count }} proposal{{ 's' if count != 1 }}</span>{% endif %}
+  </div>
+  {% if summaries.get(r['date']) %}
+  <p class="muted" style="margin:8px 0 0">{{ summaries[r['date']] }}</p>
+  {% endif %}
+</a>
+{% else %}
+<p class="muted">No reports yet — the daily reflection runs after market close on trading days.</p>
+{% endfor %}
+{% endblock %}

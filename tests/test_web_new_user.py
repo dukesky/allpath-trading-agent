@@ -66,7 +66,7 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-@pytest.mark.parametrize("path", ["/", "/chat", "/reviews", "/strategies", "/memory", "/settings"])
+@pytest.mark.parametrize("path", ["/", "/chat", "/reviews", "/strategies", "/memory", "/settings", "/reports"])
 def test_every_page_renders_for_a_brand_new_install(client, path):
     r = client.get(path)
     assert r.status_code == 200

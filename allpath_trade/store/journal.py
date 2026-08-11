@@ -20,8 +20,8 @@ class TradeJournal:
             status = order.status.value if (decision.approved and order) else "rejected"
         cur = self._conn.execute(
             "INSERT INTO trades (ts, ticker, side, qty, notional, status, reason,"
-            " strategy_id, risk_reasons, broker_order_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " strategy_id, risk_reasons, broker_order_id, filled_qty, filled_avg_price)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(UTC).isoformat(),
                 intent.ticker,
@@ -33,10 +33,31 @@ class TradeJournal:
                 intent.strategy_id,
                 json.dumps(decision.reasons),
                 order.id if order else None,
+                str(order.filled_qty) if order else None,
+                (str(order.filled_avg_price)
+                 if order and order.filled_avg_price is not None else None),
             ),
         )
         self._conn.commit()
         return cur.lastrowid
+
+    def refresh_fill(self, trade_id: int, order: Order) -> None:
+        """Update a trade's fill columns + status from a re-fetched Order.
+
+        Called once, right after submission, by Executor.execute -- see the
+        comment there for why a single poll (not polling to completion) is
+        the right amount of ceremony here."""
+        self._conn.execute(
+            "UPDATE trades SET filled_qty = ?, filled_avg_price = ?, status = ?"
+            " WHERE id = ?",
+            (
+                str(order.filled_qty),
+                str(order.filled_avg_price) if order.filled_avg_price is not None else None,
+                order.status.value,
+                trade_id,
+            ),
+        )
+        self._conn.commit()
 
     def trades_today(self, now: datetime | None = None) -> int:
         now = now or datetime.now(UTC)

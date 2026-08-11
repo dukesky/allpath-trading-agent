@@ -2,6 +2,36 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Phase 6 — 2026-08-10
+
+- After-close **reflection loop**: a bounded agent session (`REFLECTION_MAX_ITERS`
+  tool calls, default 12) reviews each active strategy's thesis and rules
+  against the day's trades, prices, and observations, then writes a
+  REPORT/SUMMARY response — the report for the Reports page, the summary
+  for a phone push notification.
+- Reflection is advisory only: it has no order tool and cannot write a
+  strategy file directly. Durable conclusions go through `memory_update`;
+  strategy changes go through a new `propose_strategy_revision` tool that
+  queues a diffed revision on the Pending page. Approval is gated by a
+  byte-exact staleness check against the file at proposal time and strict
+  version-monotonicity — a moving or already-applied base is refused, not
+  silently reapplied.
+- Trade journal now records fill detail (`filled_qty`, `filled_avg_price`)
+  so a reflection pass (and the Reports/transcript views) can see actual
+  execution, not just the submitted intent.
+- Scheduler runs the after-close jobs in order — daily digest → reflection
+  → memory consolidation — each isolated in its own try/except so one
+  failing step never blocks the next, and consolidation picks up the same
+  night's reflection conclusions.
+- Notifications split by channel on the reflection report: ntfy gets the
+  short summary as a push banner, email gets the full report body. A
+  failed reflection run never sends a notification.
+- New **Reports** page: one row per day the reflection job ran, a detail
+  view with the full report and that day's proposed revisions, and a
+  read-only transcript replay of every tool call the session made. Pending
+  now also renders strategy-revision cards with a regenerated diff and a
+  stale-base warning when the underlying file changed since the proposal.
+
 ## Phase 5.5.3 — 2026-08-10
 
 - Settings: per-section **Test** buttons for Email and Push — test the values as

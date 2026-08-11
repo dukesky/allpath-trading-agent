@@ -240,6 +240,15 @@ def error_redirect(target: str, message: str | None = None) -> RedirectResponse:
     return RedirectResponse(target, status_code=303)
 
 
+def notice_redirect(target: str, message: str) -> RedirectResponse:
+    """Same POST-then-redirect idiom as `error_redirect`, for a *successful*
+    outcome: a separate `notice` query param so the page can render it with
+    `.flash-ok` instead of `.error` (Finding 4 -- a successful revision
+    approval previously had nowhere to go but the `error` channel, so it
+    rendered in red error styling)."""
+    return RedirectResponse(f"{target}?notice={quote(message)}", status_code=303)
+
+
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     c = request.app.state.holder.get()

@@ -15,6 +15,7 @@
     <a href="/reviews" class="{{ 'on' if page == 'reviews' }}">Pending{% if pending_count %}<span class="badge">{{ pending_count }}</span>{% endif %}</a>
     <a href="/strategies" class="{{ 'on' if page == 'strategies' }}">Strategies</a>
     <a href="/memory" class="{{ 'on' if page == 'memory' }}">Memory</a>
+    <a href="/reports" class="{{ 'on' if page == 'reports' }}">Reports</a>
     <a href="/settings" class="{{ 'on' if page == 'settings' }}">Settings</a>
   </nav>
   <main>{% block content %}{% endblock %}</main>

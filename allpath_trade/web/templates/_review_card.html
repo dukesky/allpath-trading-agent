@@ -5,7 +5,9 @@
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
   <p class="muted" style="font-size:13px;margin:6px 0">
-    {% if item['source'] == 'chat' %}
+    {% if item['kind'] == 'strategy_revision' %}
+    Strategy revision proposed by reflection for {{ item['strategy_id'] }}
+    {% elif item['source'] == 'chat' %}
     From chat — triggered on <code>{{ item['condition'] }}</code>
     {% else %}
     {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
@@ -17,6 +19,16 @@
     {% if item['intent']['qty'] %}{{ item['intent']['qty'] }} shares{% else %}{{ item['intent']['notional'] | money }}{% endif %}
     {{ item['intent']['ticker'] }}
   </p>
+  {% endif %}
+  {% if item['kind'] == 'strategy_revision' %}
+  <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+    <p style="font-size:13px;margin:0 0 8px"><strong>Rationale:</strong> {{ item['snapshot']['rationale'] }}</p>
+    {% if item['revision_diff']['stale'] %}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">The strategy file has changed since this proposal — approving will fail safely; re-propose or reject.</p>
+    {% endif %}
+    <pre class="diff">{% for line in item['revision_diff']['lines'] %}<span class="{{ line['cls'] }}">{{ line['text'] }}</span>
+{% endfor %}</pre>
+  </div>
   {% endif %}
   {% if item['agent_analysis'] %}
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
@@ -52,6 +64,17 @@
   <p class="muted" style="font-size:13px;margin:10px 0 0">
     {% if item['status'] == 'rejected' %}
     Rejected{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
+    {% elif item['kind'] == 'strategy_revision' %}
+    {# Same minimal-honesty scope as the info line above: a revision has no
+       order/risk-gate outcome, so the order branch's copy ("order status
+       unknown") would be false here. #}
+    {% if er and er.get('applied') %}
+    Revision applied
+    {% elif er and er.get('error') %}
+    Revision failed after approval (file may not have been written) — {{ er['error'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
     {% elif er and er.get('error') %}
     Execution failed (review claimed, order status unknown) — {{ er['error'] }}
     {% elif er and er.get('submitted') %}

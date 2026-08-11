@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings
 from allpath_trade.data.base import DataSource
@@ -13,12 +14,14 @@ from allpath_trade.memory.observations import ObservationLog
 from allpath_trade.memory.store import MemoryStore
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.email import build_notifier
+from allpath_trade.reflect import Reflector
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 from allpath_trade.sentinel import Sentinel
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
+from allpath_trade.store.reports import ReportStore
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.store import StrategyStore
 
@@ -39,7 +42,9 @@ class Components:
     observations: ObservationLog
     memory: MemoryStore
     app_state: AppState
+    reports: ReportStore
     consolidator: Consolidator | None = None
+    reflector: Reflector | None = None
 
 
 def build_components(settings: Settings, broker: Broker | None = None,
@@ -58,10 +63,16 @@ def build_components(settings: Settings, broker: Broker | None = None,
     queue = ReviewQueue(conn, executor)
     settings.strategies_dir.mkdir(parents=True, exist_ok=True)
     strategies = StrategyStore(settings.strategies_dir, conn)
+    # Unconditional (unlike the LLM-backed wiring in the try/except below):
+    # applying an already-approved revision is plain file I/O, no LLM
+    # involved, so a review approved via the web/CLI must work even when no
+    # LLM is configured.
+    queue.set_revision_applier(apply_revision_factory(strategies))
     notifier = build_notifier(settings)
     observations = ObservationLog(conn)
     memory = MemoryStore(settings.memory_dir, conn)
     app_state = AppState(conn)
+    reports = ReportStore(conn)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
                        observations=observations)
     consolidator: Consolidator | None = None
@@ -83,8 +94,28 @@ def build_components(settings: Settings, broker: Broker | None = None,
                                     app_state=app_state)
     except LLMConfigError:
         pass  # no LLM configured: Phase 2 behavior
-    return Components(settings=settings, broker=broker, data=data, journal=journal,
-                      gate=gate, executor=executor, queue=queue,
-                      strategies=strategies, notifier=notifier, sentinel=sentinel,
-                      conn=conn, observations=observations, memory=memory,
-                      app_state=app_state, consolidator=consolidator)
+
+    components = Components(
+        settings=settings, broker=broker, data=data, journal=journal,
+        gate=gate, executor=executor, queue=queue,
+        strategies=strategies, notifier=notifier, sentinel=sentinel,
+        conn=conn, observations=observations, memory=memory,
+        app_state=app_state, reports=reports, consolidator=consolidator)
+
+    if consolidator is not None:
+        # Reflector needs the whole component bag (reports/conn/journal/
+        # observations/broker/data/strategies/queue/memory -- see its class
+        # docstring in reflect.py), which only exists once `components`
+        # above has been assembled -- built here, right after, rather than
+        # inside the try block above alongside the consolidator. Gated on
+        # `consolidator is not None` rather than repeating build_llm inside
+        # its own try/except: the consolidator's own
+        # `build_llm(settings, tier="memory")` call a few lines up already
+        # proved this exact (settings, tier) pair doesn't raise
+        # LLMConfigError, so a second try/except here would be dead code.
+        from allpath_trade.llm.factory import build_llm
+
+        components.reflector = Reflector(
+            llm=build_llm(settings, tier="memory"), components=components,
+            settings=settings, notifier=notifier)
+    return components

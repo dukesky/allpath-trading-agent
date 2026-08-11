@@ -40,9 +40,19 @@ class FakeBroker(Broker):
     name = "fake"
     is_paper = True
 
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, refill=None, refill_error=False,
+                fill_immediately=False):
         self.fail = fail
         self.submitted = []
+        # Controls for the post-submit refresh poll (Executor.execute):
+        # `refill` is the Order get_order() should return; `refill_error`
+        # makes get_order() raise instead; `fill_immediately` makes
+        # submit_order() itself return a FILLED order (refresh should then
+        # be skipped entirely -- get_order stays NotImplementedError).
+        self.refill = refill
+        self.refill_error = refill_error
+        self.fill_immediately = fill_immediately
+        self.get_order_calls = []
 
     def get_account(self):
         return Account(equity=Decimal(10000), cash=Decimal(8000),
@@ -55,6 +65,11 @@ class FakeBroker(Broker):
                          unrealized_pl=Decimal(100))]
 
     def get_order(self, order_id):
+        self.get_order_calls.append(order_id)
+        if self.refill_error:
+            raise RuntimeError("get_order failed")
+        if self.refill is not None:
+            return self.refill
         raise NotImplementedError
 
     def get_orders(self, open_only=True):
@@ -64,9 +79,10 @@ class FakeBroker(Broker):
         if self.fail:
             raise RuntimeError("alpaca 500")
         self.submitted.append(intent)
+        status = OrderStatus.FILLED if self.fill_immediately else OrderStatus.SUBMITTED
         return Order(id="o1", ticker=intent.ticker, side=intent.side,
                      qty=intent.qty, notional=intent.notional,
-                     status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                     status=status, filled_qty=Decimal(0),
                      filled_avg_price=None,
                      submitted_at=datetime.now(UTC))
 
@@ -146,6 +162,73 @@ def test_qty_intent_price_flows_into_gate(tmp_path):
     assert not res.submitted
     assert broker.submitted == []
     assert any("exceeds max_order_value" in r for r in res.decision.reasons)
+
+
+def test_successful_submit_refreshes_fill_when_not_filled(tmp_path):
+    ex, broker, journal = make_executor(tmp_path)
+    broker.refill = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                          notional=Decimal(500), status=OrderStatus.FILLED,
+                          filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                          submitted_at=datetime.now(UTC))
+    res = ex.execute(buy())
+    assert res.submitted
+    assert broker.get_order_calls == ["o1"]
+    [row] = journal.recent()
+    assert row["status"] == "filled"
+    assert row["filled_qty"] == "2.5"
+    assert row["filled_avg_price"] == "200"
+
+
+def test_refresh_failure_leaves_submitted_row_untouched(tmp_path):
+    ex, broker, journal = make_executor(tmp_path)
+    broker.refill_error = True
+    res = ex.execute(buy())
+    assert res.submitted  # the failed refresh poll must not fail the submit
+    [row] = journal.recent()
+    assert row["status"] == "submitted"
+    assert row["filled_qty"] == "0"  # as-submitted, not backfilled by the failed poll
+    assert row["filled_avg_price"] is None
+
+
+def test_refresh_write_failure_leaves_submitted_row_untouched(tmp_path, monkeypatch):
+    """refresh_fill DB write failure must not escape execute().
+
+    The comment at line 76 promises: "a failed poll ... leave the
+    as-submitted row alone rather than retrying or raising". That guarantee
+    extends to the write: poll + write degrade together, not separately.
+    If refresh_fill() raises, the order stays journaled as submitted."""
+    ex, broker, journal = make_executor(tmp_path)
+    refreshed_order = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                            notional=Decimal(500), status=OrderStatus.FILLED,
+                            filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                            submitted_at=datetime.now(UTC))
+    broker.refill = refreshed_order
+
+    # Monkeypatch refresh_fill to raise a DB error
+    def failing_refresh_fill(trade_id, order):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(journal, "refresh_fill", failing_refresh_fill)
+
+    # execute() must return success, not raise
+    res = ex.execute(buy())
+    assert res.submitted
+    assert res.order.id == "o1"
+
+    # Journal row must be as-submitted, not updated
+    [row] = journal.recent()
+    assert row["status"] == "submitted"
+    assert row["filled_qty"] == "0"
+    assert row["filled_avg_price"] is None
+
+
+def test_already_filled_order_skips_refresh_poll(tmp_path):
+    ex, broker, journal = make_executor(tmp_path)
+    broker.fill_immediately = True
+    res = ex.execute(buy())
+    assert res.submitted
+    assert broker.get_order_calls == []  # no round trip needed
+    [row] = journal.recent()
+    assert row["status"] == "filled"
 
 
 def test_trades_today_from_journal_feeds_daily_cap(tmp_path):

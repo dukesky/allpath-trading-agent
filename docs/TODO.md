@@ -22,7 +22,7 @@
 - [ ] Interactive Brokers 适配器（`ib_async`，配 Docker ib-gateway 文档）
 - [ ] Tradier 适配器（免费沙盒，适合 CI）
 - [ ] 限价单支持（当前仅市价单）
-- [ ] 成交明细（filled_qty/filled_avg_price）入 journal schema —— **Phase 6 复盘前设计**
+- [x] 成交明细（filled_qty/filled_avg_price）入 journal schema —— **Phase 6 已落地**（`store/journal.py` 写入/回填，`store/db.py` 迁移新增两列）
 
 ## 模型与校验
 
@@ -74,3 +74,61 @@
       `.env.example` 里已提醒使用长且随机的主题名），通知正文又带 ticker、买卖方向、拒单
       详情——值得后续给 ntfy 通道加认证头（access token / Bearer）支持，而不是只依赖主题名
       保密
+
+## Phase 6 遗留
+- [ ] `allpath_trade/llm/` 下三个客户端（`openai_compat.py` 的 `OpenAICompatClient`、
+      `anthropic_client.py` 的 `AnthropicClient`）都没有给底层 SDK 客户端或单次
+      `.create()` 调用传显式的请求超时——一次挂起但不报错的模型调用会卡住整条每日链路
+      （digest → reflection → consolidation，`scheduler.py` 的 `build_jobs`/`run_daemon`
+      都在同一个 `daily()` 闭包里同步跑），并且因为 sentinel 的 interval job 和 daily job
+      共享同一个 APScheduler 线程，还会顺带拖住后续的 sentinel tick——与上面第 60 行
+      broker 超时那条是同一类问题，根治办法也一样：在客户端构造处加 socket 级别超时
+- [ ] `propose_strategy_revision`（`agent/reflection_tools.py`）修复一个已损坏（无法解析）
+      的策略文件时，因为当前文件解析失败而拿不到 `current_doc.version` 做比较，退化为只要求
+      `doc.version` 为正整数——如果该策略在 `strategy_versions` 表里已有更高版本号的历史
+      快照，这次 v1 修复提案被接受后会排到 `StrategyStore.versions()`（`ORDER BY version
+      DESC`）历史列表的最下面，审计顺序与实际时间顺序不符。修复思路：这种"当前文件不可解析"
+      的分支应改为比较 `max(version)`（从 `strategy_versions` 表查，而不是从当前文件解析），
+      而不是只检查 `> 0`
+- [ ] `allpath-trade run`（`cli.py` 的无 web 界面守护进程）的 daily job 相比 `serve` 的
+      `build_jobs` 少两样：没有每日摘要邮件（`_send_daily_digest` 从未挂在 `run` 上，Phase 5
+      遗留项已记录），且 consolidation 分支没有 `daily_consolidation` 开关判断（`build_jobs`
+      里有 `and components.settings.daily_consolidation`，`cli.py` 里只判断
+      `components.consolidator is not None`）——两条路径的行为应该对齐
+- [ ] `reports.tokens_used` 列（`store/db.py`）目前恒为 0：`LLMClient`（`llm/base.py`）的
+      接口不暴露任何 token 用量统计，`Reflector._run`（`reflect.py`）如实记 0 而不是伪造数字。
+      等某个客户端接入用量返回后再把这列接上真实值
+- [ ] 一次失败的 reflection（LLM 报错、corrective turn 后仍解析不出 REPORT/SUMMARY）会以
+      `status="failed"` 写入 `reports` 表那一天的行，但 `Reflector.run_daily`
+      （`reflect.py`）的幂等检查只看 `reports.exists(et_date)`，不区分成功/失败——同一个 ET
+      日期不会重试，当天再触发只会返回 "already ran"。这是有意为之（spec §⑥ 只要求失败可见，
+      不要求同日自愈），记录在此供后续讨论是否要加同日重试
+- [ ] （F2 修复的遗留权衡）审批一条改写了触发规则（同一 rule id）的 reflection revision
+      后，`apply_revision_factory` 仍然逐字写入 YAML、从不碰 `rule_states`——已触发
+      （TRIGGERED）的规则在 approve 之后依然是 TRIGGERED，条件不会再被评估。本轮已经在
+      web 审批流程（`web/routes/reviews.py` 的 strategy_revision 分支）和 CLI
+      （`cli.py` 的 `cmd_reviews`）里加了提示：`StrategyStore.rearm_warning` 会在
+      flash 通知里点名"某规则仍处于 triggered/disabled 状态，需要去策略页手动 re-arm"。
+      这是刻意选择的设计——绝不自动 re-arm：如果自动重新武装，可能对一个已经卖出的仓位
+      重新触发止损单。之所以只记提示而不是自动化，是因为"该规则是否还需要盯"这件事只有
+      用户自己知道；记录在此供后续讨论是否要在 revision 卡片上加一个"顺便 re-arm"的勾选项
+- [ ] （F4 修复的遗留缺口）`Reflector._positions_with_change`（`reflect.py`）已经加了
+      `QUOTES_BUDGET_SECONDS`（10 秒）的整体截止时间，超时的持仓直接渲染 `n/a`，不再让一次
+      挂起的行情调用拖住整条每日链路——但这只是在调用方加了一层"放弃等待"的保护，
+      `data/yf.py` 底层的 `yfinance` 调用（`get_quote`/`get_bars`，`Ticker(...).history(...)`
+      等）本身仍然没有传任何 `timeout=` 参数，那次已经发起的请求依然会在后台无限挂着（同一类
+      问题见上面第 60 行 broker 超时、第 64 行 LLM 客户端超时那两条——`QUOTES_BUDGET_SECONDS`
+      只是把这类问题在 reflection 这个调用点"止血"，没有像那两条一样从源头根治）
+- [ ] `DAILY_REFLECTION`（`config.py` 的 `daily_reflection` 字段）目前只能通过 `.env`
+      配置，Settings 页面（`web/templates/settings.html`）只给 `daily_consolidation`
+      和 `consolidate_after_chat` 做了勾选框，没有对应的 reflection 开关——想要临时关掉
+      每日 reflection 得改 `.env` 再重启进程，而不能像另外两个每日任务一样在网页上直接切换
+- [ ] 每日摘要邮件（`_send_daily_digest`，`scheduler.py`）和每日 reflection 共用
+      `build_jobs`/`run_daemon` 里同一个 `_maybe_run_daily` 一天一次的门控，但这个门控只是
+      `state = {"last_daily": ...}` 的进程内变量，不落盘——同一个 ET 日期内如果进程重启
+      （比如 `serve` 被重新拉起），digest 分支没有任何持久化的去重检查，会对当天再发一封
+      重复摘要邮件；而 reflection 分支不受影响，因为 `Reflector.run_daily` 自己在
+      `reports` 表上做了 `reports.exists(et_date)` 的幂等检查，重启后重新调用只会返回
+      "already ran"，不会真的再跑一次或重复通知。两条路径共用同一个不持久的门控，行为却不
+      对称，值得后续要么给 digest 也加一张幂等记录表，要么把 `last_daily` 状态整体挪到
+      `AppState` 里持久化

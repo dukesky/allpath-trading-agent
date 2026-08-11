@@ -3,6 +3,7 @@
 {% block content %}
 <h1>Pending</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if notice %}<p class="flash-ok">{{ notice }}</p>{% endif %}
 {% for item in items %}{% include "_review_card.html" %}{% else %}
 <p class="muted">Nothing waiting on you.</p>
 {% endfor %}

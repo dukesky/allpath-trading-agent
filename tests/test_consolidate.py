@@ -212,6 +212,28 @@ def _obs_rows(c):
     return c.observations.recent()
 
 
+def test_daily_consolidation_attributes_reflection_turns_not_as_chat(tmp_path):
+    # Finding F3: a reflection session's own turns (Reflector._run starts a
+    # kind="reflection" conversation and talks to itself through the same
+    # AgentSession/ConversationStore machinery web/terminal chat uses) used
+    # to be hardcoded "[chat] ..." in the consolidator's prompt -- silently
+    # attributing a reflection hypothesis to the user. Both must appear
+    # tagged with their OWNING conversation's kind.
+    llm = ScriptedLLM([LLMResponse(text="noted")])
+    c, _memory, _obs, convo, _app_state = make(tmp_path, llm)
+    chat_cid = convo.start()
+    reflection_cid = convo.start(kind="reflection")
+    _seed_web_turn(convo, chat_cid, "user", "I want to ladder into TSM")
+    _seed_web_turn(convo, reflection_cid, "assistant",
+                   "Proposing a tightened stop based on today's volatility")
+
+    c.run_daily()
+
+    prompt = llm.seen[0][0]["content"]
+    assert "[chat] user: I want to ladder into TSM" in prompt
+    assert "[reflection] assistant: Proposing a tightened stop" in prompt
+
+
 def test_daily_consolidation_excludes_tool_messages_and_preserves_fencing(tmp_path):
     from allpath_trade.agent.tools import FENCE_NOTICE
 

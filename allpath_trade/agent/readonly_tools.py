@@ -75,9 +75,28 @@ def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
 
     def list_pending_reviews() -> str:
         rows = queue.list()
-        return "\n".join(
-            f"#{r['id']} {r['strategy_id']}/{r['rule_id']} [{r['rule_type']}] "
-            f"{r['condition']} -> {r['action']}" for r in rows) or "no pending reviews"
+        lines = []
+        for r in rows:
+            prefix = f"#{r['id']} {r['strategy_id']}/{r['rule_id']} [{r['rule_type']}]"
+            # Fence every non-order row's `condition`, not just
+            # strategy_revision: order rows' condition is a DSL expression
+            # already constrained by parse_condition (structured, not free
+            # text), so there's no injection surface there. A revision row's
+            # condition is truncated model-authored rationale from a prior,
+            # unreviewed reflection session -- exactly the kind of free text
+            # that needs fencing before it lands in a new agent's context.
+            if r["kind"] == "order":
+                lines.append(f"{prefix} {r['condition']} -> {r['action']}")
+            else:
+                # fence_external's output spans multiple lines
+                # (<external-content>\n...\n</external-content>) -- trailing
+                # it inline after the row would scramble "one row per line"
+                # the moment there's more than one pending row, since the
+                # fence's closing tag and the next row's header would land
+                # on what reads as a single garbled line. Putting it on its
+                # own line(s) under the row keeps each row scannable.
+                lines.append(f"{prefix} -> {r['action']}\n{fence_external(r['condition'])}")
+        return "\n".join(lines) or "no pending reviews"
 
     t = "string"
     registry.register("get_quote", "Get the current price of a US stock.",

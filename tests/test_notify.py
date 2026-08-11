@@ -1,7 +1,8 @@
 from typing import ClassVar
 
 from allpath_trade.config import Settings
-from allpath_trade.notify.base import ConsoleNotifier, MultiNotifier
+from allpath_trade.notify import events
+from allpath_trade.notify.base import ConsoleNotifier, MultiNotifier, send_report
 from allpath_trade.notify.email import EmailNotifier, build_notifier
 from allpath_trade.notify.ntfy import NtfyNotifier
 
@@ -147,3 +148,74 @@ def test_multi_notifier_send_is_true_if_any_child_delivered():
 def test_multi_notifier_send_each_reports_per_channel_results():
     multi = MultiNotifier([_RecordingNotifier(True), _RecordingNotifier(False)])
     assert multi.send_each("s", "b") == [True, False]
+
+
+# -- daily_report / send_report (Task 5: reflection notifications) --
+
+
+def test_daily_report_subject_and_body():
+    subject, full_body = events.daily_report(
+        date="2026-08-10", summary="Quiet day overall.", body="Day summary: ...")
+    assert subject == "[AllPath] Daily reflection 2026-08-10"
+    assert "Quiet day overall." in full_body
+    assert "Day summary: ..." in full_body
+    assert full_body.endswith(events.FOOTER)
+
+
+class _SpyNtfy(NtfyNotifier):
+    """Real NtfyNotifier subclass (so isinstance() dispatch in send_report
+    sees the real type) that records calls instead of hitting the network."""
+
+    def __init__(self):
+        super().__init__("https://ntfy.sh/x")
+        self.calls: list[tuple[str, str]] = []
+
+    def send(self, subject, body):
+        self.calls.append((subject, body))
+        return True
+
+
+class _SpyEmail(EmailNotifier):
+    """Real EmailNotifier subclass, same reasoning as _SpyNtfy."""
+
+    def __init__(self):
+        super().__init__("h", 1, "u", "p", "f@x.com", "t@x.com")
+        self.calls: list[tuple[str, str]] = []
+
+    def send(self, subject, body):
+        self.calls.append((subject, body))
+        return True
+
+
+def test_send_report_gives_ntfy_the_summary_and_email_the_full_body():
+    ntfy_child = _SpyNtfy()
+    email_child = _SpyEmail()
+    multi = MultiNotifier([ntfy_child, email_child])
+
+    result = send_report(multi, "subj", "short summary", "full report text")
+
+    assert result is True
+    assert ntfy_child.calls == [("subj", "short summary")]
+    assert email_child.calls == [("subj", "full report text")]
+
+
+def test_send_report_multinotifier_any_success_and_both_children_attempted():
+    failing = _RecordingNotifier(False)
+    working = _RecordingNotifier(True)
+    multi = MultiNotifier([failing, working])
+
+    assert send_report(multi, "s", "summary", "full") is True
+    assert failing.calls == [("s", "full")]  # unknown type -> full_body
+    assert working.calls == [("s", "full")]
+
+
+def test_send_report_unknown_notifier_type_gets_full_body():
+    notifier = _RecordingNotifier(True)
+    assert send_report(notifier, "s", "summary", "full") is True
+    assert notifier.calls == [("s", "full")]
+
+
+def test_send_report_console_and_email_get_full_body():
+    console = ConsoleNotifier()
+    result = send_report(console, "s", "short", "long report")
+    assert result is True

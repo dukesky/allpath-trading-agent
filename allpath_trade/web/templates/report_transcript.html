@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Reasoning · {{ report['date'] }} · AllPath Trade{% endblock %}
+{% block content %}
+<h1>Reasoning — {{ report['date'] }}</h1>
+<p class="muted"><a href="/reports/{{ report['date'] }}">&larr; Back to report</a></p>
+
+<div class="transcript">
+{% for t in turns %}
+  {% if t['kind'] == 'text' %}
+  <div class="turn turn-{{ t['role'] }}">
+    <span class="turn-role">{{ t['role'] }}</span>
+    <div class="turn-text">{{ t['text'] }}</div>
+  </div>
+  {% else %}
+  <div class="turn-line">{{ t['text'] }}</div>
+  {% endif %}
+{% else %}
+<p class="muted">No transcript recorded for this report.</p>
+{% endfor %}
+</div>
+{% endblock %}
