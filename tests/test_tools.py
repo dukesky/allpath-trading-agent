@@ -88,6 +88,63 @@ def test_portfolio_summary(tmp_path):
     assert "equity" in out and "AAPL" in out
 
 
+def test_portfolio_recent_trade_labels_submission_not_fill(tmp_path):
+    # Motivating bug: the agent labeled a Sunday-evening submission ts as
+    # the fill time, 17 hours off. The recent-trades line must say
+    # "submitted", never imply the ts is when the order filled.
+    from decimal import Decimal
+
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    conn = connect(tmp_path / "db2.sqlite")
+    journal = TradeJournal(conn)
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1), reason="dip")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                 notional=None, status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                 filled_avg_price=None, submitted_at="2026-08-09T20:27:00+00:00")
+    journal.record(intent, RiskDecision(approved=True), order)
+
+    (tmp_path / "strategies").mkdir()
+    reg = ToolRegistry()
+    register_readonly_tools(
+        reg, data=FakeData("200"), broker=FakeBroker(), journal=journal,
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+
+    out = call(reg, "get_portfolio")
+    assert "recent trades:\n  submitted " in out
+    assert "fill pending" in out
+    assert "filled" not in out.split("recent trades:")[1]
+
+
+def test_portfolio_recent_trade_shows_fill_time_and_price_when_present(tmp_path):
+    from decimal import Decimal
+
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    conn = connect(tmp_path / "db3.sqlite")
+    journal = TradeJournal(conn)
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1), reason="dip")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                 notional=None, status=OrderStatus.FILLED, filled_qty=Decimal(1),
+                 filled_avg_price=Decimal("332.01"),
+                 submitted_at="2026-08-09T20:27:00+00:00",
+                 filled_at="2026-08-10T13:34:00+00:00")
+    journal.record(intent, RiskDecision(approved=True), order)
+
+    (tmp_path / "strategies").mkdir()
+    reg = ToolRegistry()
+    register_readonly_tools(
+        reg, data=FakeData("200"), broker=FakeBroker(), journal=journal,
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+
+    out = call(reg, "get_portfolio")
+    assert "filled 2026-08-10T13:34:00 @ 332.01" in out
+
+
 def test_list_pending_reviews_fences_revision_condition(tmp_path):
     # A strategy_revision row's `condition` is truncated model-authored
     # rationale from a prior, unreviewed reflection session -- free text

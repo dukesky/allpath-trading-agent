@@ -129,6 +129,7 @@ _MIGRATIONS = [
     "ALTER TABLE trades ADD COLUMN filled_avg_price TEXT",
     "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
     "ALTER TABLE pending_reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'order'",
+    "ALTER TABLE trades ADD COLUMN filled_at TEXT",
 ]
 
 

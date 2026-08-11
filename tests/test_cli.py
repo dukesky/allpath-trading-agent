@@ -41,6 +41,31 @@ def test_status_prints_account_and_positions(tmp_path, capsys, monkeypatch):
     assert "10000" in out and "AAPL" in out and "paper" in out.lower()
 
 
+def test_status_recent_trade_line_labels_submission_not_fill(tmp_path, capsys, monkeypatch):
+    # I1: `status` used to print a bare, unlabeled timestamp for a recent
+    # trade -- the exact shape that caused the original 17-hour mislabel.
+    # It must reuse the same "submitted"-labeled formatter as get_portfolio
+    # and the system-prompt snapshot.
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.journal import TradeJournal
+
+    monkeypatch.chdir(tmp_path)
+    journal = TradeJournal(connect(tmp_path / "allpath-trade.db"))
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1), reason="dip")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                 notional=None, status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                 filled_avg_price=None, submitted_at="2026-08-09T20:27:00+00:00")
+    journal.record(intent, RiskDecision(approved=True), order)
+
+    code = main(["status"], broker_factory=lambda settings: FakeBroker())
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "submitted " in out
+    assert "fill pending" in out
+
+
 def test_status_without_keys_exits_2(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
@@ -228,7 +253,8 @@ class _FakeRunConsolidator:
 
 
 def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
-    def fake_run_daemon(sentinel_factory, interval, daily_job=None, app_state=None):
+    def fake_run_daemon(sentinel_factory, interval, daily_job=None, app_state=None,
+                        journal=None, broker=None):
         captured["daily_job"] = daily_job
         if daily_job is not None:
             daily_job()
@@ -245,6 +271,7 @@ def test_run_daily_job_runs_reflection_before_consolidation_isolated(
     consolidator = _FakeRunConsolidator()
     fake_components = SimpleNamespace(
         strategies=None, queue=None, sentinel=None, app_state=None,
+        journal=None, broker=None,
         reflector=reflector, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)
@@ -271,6 +298,7 @@ def test_run_daily_job_skips_reflection_when_setting_disabled(tmp_path, monkeypa
     consolidator = _FakeRunConsolidator()
     fake_components = SimpleNamespace(
         strategies=None, queue=None, sentinel=None, app_state=None,
+        journal=None, broker=None,
         reflector=reflector, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)
@@ -292,6 +320,7 @@ def test_run_daily_job_skips_reflection_cleanly_when_no_reflector_configured(
     consolidator = _FakeRunConsolidator()
     fake_components = SimpleNamespace(
         strategies=None, queue=None, sentinel=None, app_state=None,
+        journal=None, broker=None,
         reflector=None, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)

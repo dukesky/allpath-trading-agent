@@ -217,6 +217,15 @@ def _format_trade(t: dict) -> str:
         fill = "submitted, fill pending"
     else:
         fill = f"filled {t.get('filled_qty')} @ {t.get('filled_avg_price')}"
+        # Fill-honesty round: append the actual execution time when known,
+        # after the existing "filled qty @ price" text (not interleaved
+        # with it) so callers still matching that exact substring keep
+        # working. filled_at can be absent on rows journaled before this
+        # column existed, or if a refresh hasn't landed yet -- degrade to
+        # the plain fill line rather than claim a time we don't have.
+        filled_at = str(t.get("filled_at") or "")[:19]
+        if filled_at:
+            fill += f" at {filled_at}"
     line = (f"{str(t.get('ts', ''))[:19]} {t.get('side')} {t.get('ticker')} "
             f"size={size} status={t.get('status')} {fill} "
             f"strategy={t.get('strategy_id') or '-'}")

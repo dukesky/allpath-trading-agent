@@ -4,6 +4,7 @@ import sqlite3
 
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
+from allpath_trade.agent.readonly_tools import _format_recent_trade
 from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.llm.base import LLMClient
 from allpath_trade.memory.observations import ObservationLog
@@ -201,8 +202,13 @@ class Consolidator:
                 events.append(f"[{r['source']}/{r['subject'] or '-'}] {r['text']}")
             for r in self.journal.recent(limit=20):
                 if since is None or r["ts"] > since:
-                    events.append(f"[trade] {r['ts'][:19]} {r['side']} {r['ticker']}"
-                                  f" [{r['status']}] {r['reason']}")
+                    # I1: this feeds LONG-TERM MEMORY -- a mislabeled
+                    # submission timestamp baked into a durable dossier is
+                    # worse than a chat-turn mislabel, since it can outlive
+                    # the row itself. Reuse the same "submitted"-labeled,
+                    # status-driven formatter as every other trade surface
+                    # rather than a bare timestamp.
+                    events.append(f"[trade] {_format_recent_trade(r)}")
             turn_lines, max_turn_id = self._turn_lines()
             if not events and not turn_lines:
                 return "nothing to consolidate"

@@ -7,6 +7,7 @@ from functools import partial
 
 from pydantic import ValidationError
 
+from allpath_trade.agent.readonly_tools import _format_recent_trade
 from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings, SettingsStore, describe_validation_error
@@ -46,9 +47,13 @@ def cmd_status(settings: Settings, broker: Broker) -> int:
     rows = journal.recent(limit=5)
     if rows:
         print("\nrecent trades:")
+        # I1: reuse the same formatter as get_portfolio/build_system_prompt
+        # (agent/readonly_tools._format_recent_trade) so `status` prints the
+        # same "submitted"-labeled, honesty-checked line everywhere instead
+        # of a fourth independent (and previously bare, unlabeled-timestamp)
+        # copy.
         for r in rows:
-            print(f"  #{r['id']} {r['ts'][:19]} {r['side']} {r['ticker']} "
-                  f"[{r['status']}] {r['reason']}")
+            print(f"  #{r['id']} {_format_recent_trade(r)}")
     return 0
 
 
@@ -589,7 +594,8 @@ def main(argv: list[str] | None = None,
         daily_job = (daily if (components.reflector is not None
                                or components.consolidator is not None) else None)
         run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
-                   daily_job=daily_job, app_state=components.app_state)
+                   daily_job=daily_job, app_state=components.app_state,
+                   journal=components.journal, broker=components.broker)
         return 0
     if args.command == "strategies":
         return cmd_strategies(settings, store)

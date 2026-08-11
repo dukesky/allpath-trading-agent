@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from allpath_trade.broker.base import Broker
+from allpath_trade.execution import refresh_pending_fills
 from allpath_trade.notify import events
 from allpath_trade.sentinel import Sentinel, SentinelReport
 from allpath_trade.store.app_state import (
@@ -14,6 +16,7 @@ from allpath_trade.store.app_state import (
     SENTINEL_MARKET_OPEN_KEY,
     AppState,
 )
+from allpath_trade.store.journal import TradeJournal
 
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
@@ -62,7 +65,9 @@ def _is_after_close(now: datetime | None = None) -> bool:
 
 def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
                        on_report: Callable[[SentinelReport | None], None] | None = None,
-                       app_state: AppState | None = None) -> None:
+                       app_state: AppState | None = None,
+                       journal: TradeJournal | None = None,
+                       broker: Broker | None = None) -> None:
     """Run one sentinel pass, but only during market hours.
 
     `on_report` (if given) is called with the resulting `SentinelReport`, or
@@ -79,7 +84,19 @@ def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
     the timestamp -- a reader needs both together to tell "the scheduler
     ticked, and the sentinel actually ran" from "the scheduler ticked, but
     the market was closed so nothing was evaluated" (dashboard.py's
-    sentinel_heartbeat_status uses it for exactly that)."""
+    sentinel_heartbeat_status uses it for exactly that).
+
+    The pending-fill refresh (`journal`/`broker`, if both given) also runs
+    unconditionally, before the market-hours gate, same as the heartbeat and
+    for the same reason: a DAY order queued outside market hours fills at
+    the next open, and the first pass after that open must pick it up
+    without waiting on the market-hours-gated sentinel logic below (which
+    only evaluates strategies, not fills) -- see execution.refresh_pending_
+    fills and Order.filled_at. Deliberately does NOT call get_sentinel():
+    that factory is reserved for the market-hours branch below (some
+    callers assert it is never invoked while the market is closed), so the
+    refresh gets its own journal/broker instead of reaching into the
+    sentinel for them."""
     if app_state is not None:
         try:
             app_state.set(SENTINEL_HEARTBEAT_KEY, datetime.now(UTC).isoformat())
@@ -87,6 +104,11 @@ def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
                           "true" if is_market_hours() else "false")
         except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
             print(f"[heartbeat] failed: {exc}", file=sys.stderr)
+    if journal is not None and broker is not None:
+        try:
+            refresh_pending_fills(journal, broker)
+        except Exception as exc:  # noqa: BLE001 — a dead broker must not stop the pass
+            print(f"[fill-refresh] failed: {exc}", file=sys.stderr)
     if is_market_hours():
         report = get_sentinel().run_once()
     else:
@@ -116,7 +138,9 @@ def _maybe_run_daily(daily_job: Callable[[], None] | None, state: dict) -> None:
 def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
                scheduler_cls: type = BlockingScheduler,
                daily_job: Callable[[], None] | None = None,
-               app_state: AppState | None = None) -> None:
+               app_state: AppState | None = None,
+               journal: TradeJournal | None = None,
+               broker: Broker | None = None) -> None:
     state = {"last_daily": None}
 
     def report_progress(report: SentinelReport | None) -> None:
@@ -131,7 +155,8 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
             print(f"  error: {e}")
 
     def job() -> None:
-        _run_sentinel_pass(sentinel_factory, report_progress, app_state)
+        _run_sentinel_pass(sentinel_factory, report_progress, app_state,
+                           journal=journal, broker=broker)
         _maybe_run_daily(daily_job, state)
 
     scheduler = scheduler_cls()
@@ -175,7 +200,8 @@ def build_jobs(scheduler, holder) -> None:
 
     def job() -> None:
         components = holder.get()
-        _run_sentinel_pass(lambda: components.sentinel, app_state=components.app_state)
+        _run_sentinel_pass(lambda: components.sentinel, app_state=components.app_state,
+                           journal=components.journal, broker=components.broker)
 
         def daily() -> None:
             # Order: digest -> reflection -> consolidation (spec §①: the

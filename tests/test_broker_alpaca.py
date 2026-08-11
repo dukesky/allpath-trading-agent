@@ -15,6 +15,7 @@ def _raw_order(**over):
         "qty": "5", "notional": None, "status": SimpleNamespace(value="filled"),
         "filled_qty": "5", "filled_avg_price": "200.5",
         "submitted_at": datetime(2026, 7, 30, 14, 0, tzinfo=UTC),
+        "filled_at": datetime(2026, 7, 30, 14, 0, 5, tzinfo=UTC),
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -104,6 +105,22 @@ def test_get_order():
     order = b.get_order("order-123")
     assert order.id == "order-123"
     assert order.status == OrderStatus.FILLED
+
+
+def test_get_order_maps_filled_at():
+    b, _ = make_broker()
+    order = b.get_order("order-123")
+    assert order.filled_at == datetime(2026, 7, 30, 14, 0, 5, tzinfo=UTC)
+
+
+def test_get_order_maps_filled_at_none_when_unfilled():
+    b, _ = make_broker()
+    stub = b._client
+    stub.get_order_by_id = lambda order_id: _raw_order(
+        id=order_id, status=SimpleNamespace(value="submitted"),
+        filled_qty="0", filled_avg_price=None, filled_at=None)
+    order = b.get_order("order-789")
+    assert order.filled_at is None
 
 
 def test_cancel_order():

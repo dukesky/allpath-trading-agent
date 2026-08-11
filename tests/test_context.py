@@ -42,6 +42,76 @@ def test_default_identity_mentions_boundaries():
     assert "risk gate" in text and "confirm" in text
 
 
+def test_system_prompt_includes_market_mechanics_knowledge(tmp_path):
+    # Motivating bug: the agent didn't know DAY orders submitted after hours
+    # queue for the next open, and speculated instead of stating the fact.
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / "t.yaml").write_text(STRAT)
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "DAY market orders" in prompt
+    assert "09:30-16:00 ET" in prompt
+    assert "next market open" in prompt
+    assert prompt.startswith("IDENT")  # still the frozen prefix identity requires
+
+
+def test_market_mechanics_note_is_not_baked_into_identity_md_defaults(tmp_path):
+    # IDENTITY.md is user-editable content (deliverable 4): a user who
+    # replaces it entirely must still get the market-mechanics fact, since
+    # it comes from build_system_prompt, not from load_identity's fallback.
+    custom = tmp_path / "IDENTITY.md"
+    custom.write_text("# a user's own identity, no market mechanics text")
+    identity = load_identity(custom)
+    assert "DAY market orders" not in identity
+
+
+def test_system_prompt_mentions_non_trading_days(tmp_path):
+    # M4: a DAY order queued outside market hours also queues on a
+    # non-trading day (weekend/holiday), not just outside 09:30-16:00 ET on
+    # an otherwise-open day -- the note must say so.
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "non-trading day" in prompt
+
+
+def test_system_prompt_recent_trade_line_labels_submission_not_fill(tmp_path):
+    # I1: this is the system-prompt snapshot every chat/reflection session
+    # opens with -- the exact surface the original bug (a Sunday-evening
+    # submission mislabeled as the fill, 17 hours off) came from. It must
+    # reuse the same "submitted"-labeled, status-driven formatting as
+    # get_portfolio, not a bare unlabeled timestamp.
+    from decimal import Decimal
+
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    journal = TradeJournal(conn)
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1), reason="dip")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                 notional=None, status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                 filled_avg_price=None, submitted_at="2026-08-09T20:27:00+00:00")
+    journal.record(intent, RiskDecision(approved=True), order)
+
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=journal,
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "trade: submitted " in prompt
+    assert "fill pending" in prompt
+
+
 def test_system_prompt_includes_memory_sections(tmp_path):
     from allpath_trade.memory.store import MemoryStore
 

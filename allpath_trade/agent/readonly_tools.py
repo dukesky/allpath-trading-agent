@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 
 from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.broker.base import Broker
 from allpath_trade.data.base import DataSource
-from allpath_trade.store.journal import TradeJournal
+from allpath_trade.store.journal import TradeJournal, is_recent_submission
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.loader import is_valid_strategy_id
 from allpath_trade.strategy.store import StrategyStore
@@ -17,6 +18,47 @@ def _default_search(query: str, max_results: int = 5) -> list[dict]:
     from ddgs import DDGS
 
     return list(DDGS().text(query, max_results=max_results))
+
+
+def _format_recent_trade(r, *, now: datetime | None = None) -> str:
+    """Shared by every surface that renders a recent-trades line: this
+    module's get_portfolio, cli.py's `status` command, agent/context.py's
+    system-prompt snapshot, and memory/consolidate.py's daily digest feed
+    (I1) -- one formatter, one place to get the honesty rules right, instead
+    of four copies that can individually rot.
+
+    Honesty fix (fill-honesty round): the journal's `ts` is submission time,
+    not fill time -- conflating the two is exactly the bug that motivated
+    this change (the agent told the user a Sunday-evening submission was
+    the fill, 17 hours off). Label it "submitted" always.
+
+    I3 (M5): the fill/no-fill words key off `status` -- the source of
+    truth TradeJournal itself writes -- not off filled_avg_price's
+    presence. Alpaca populates filled_avg_price on a PARTIAL fill too, so
+    testing for that alone renders "filled" (and stops there) on a row
+    that's still open; using `status` distinguishes 'filled' from
+    'partially_filled' and keeps a partial row informative instead of
+    silently freezing on a premature "filled" label.
+
+    I2: a bare "fill pending" on a 'submitted' row with no fill info at all
+    is only honest while the claim is still plausible -- `is_recent_
+    submission` gates it to rows within FILL_PENDING_WINDOW_HOURS of `now`.
+    Past that window (e.g. a DAY order that expired at the broker days ago
+    and hasn't been swept yet), silence-as-"status unconfirmed" is more
+    honest than an affirmative claim this code can no longer back up."""
+    line = (f"submitted {r['ts'][:19]} {r['side']} {r['ticker']} "
+           f"[{r['status']}] {r['reason']}")
+    if r["status"] == "filled":
+        filled_at = str(r["filled_at"])[:19] if r["filled_at"] else "unknown time"
+        line += f" filled {filled_at} @ {r['filled_avg_price']}"
+    elif r["status"] == "partially_filled":
+        line += f" partially filled {r['filled_qty']} @ {r['filled_avg_price']} so far"
+    elif r["status"] == "submitted":
+        if is_recent_submission(r["ts"], now=now):
+            line += " fill pending"
+        else:
+            line += " status unconfirmed"
+    return line
 
 
 def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
@@ -55,8 +97,7 @@ def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
         recent = journal.recent(limit=5)
         if recent:
             lines.append("recent trades:")
-            lines.extend(f"  {r['ts'][:19]} {r['side']} {r['ticker']} "
-                         f"[{r['status']}] {r['reason']}" for r in recent)
+            lines.extend(f"  {_format_recent_trade(r)}" for r in recent)
         return "\n".join(lines)
 
     def list_strategies() -> str:

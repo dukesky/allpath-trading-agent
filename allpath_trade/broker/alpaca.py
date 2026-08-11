@@ -83,4 +83,5 @@ class AlpacaBroker(Broker):
             filled_qty=Decimal(o.filled_qty or "0"),
             filled_avg_price=Decimal(o.filled_avg_price) if o.filled_avg_price else None,
             submitted_at=o.submitted_at,
+            filled_at=o.filled_at,
         )

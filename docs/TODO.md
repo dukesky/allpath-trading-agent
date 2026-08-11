@@ -132,3 +132,16 @@
       "already ran"，不会真的再跑一次或重复通知。两条路径共用同一个不持久的门控，行为却不
       对称，值得后续要么给 digest 也加一张幂等记录表，要么把 `last_daily` 状态整体挪到
       `AppState` 里持久化
+
+## Fill-honesty round 遗留（M6）
+- [ ] 每日 reflection 简报和（若后续加上）digest 目前都按**提交日**给交易分桶，不是**成交
+      日**——`reflect.py` 的 `Reflector._trades_today` 用 `ts_to_et_date(r["ts"])` 过滤
+      "今天"的交易，而 `r["ts"]` 是 `TradeJournal.record` 写入时的下单时间戳，不是
+      `filled_at`；`scheduler.py` 里 `TradeJournal.trades_today()`（供风控日交易上限计数）
+      同样按 `ts`（提交时间）分桶，是同一类问题的另一处实例。DAY 单在收盘后提交、下一个开盘日
+      才成交是本轮修复的动机场景（见 `agent/context.py` 的 MARKET_MECHANICS_NOTE）——按这个
+      口径，一笔周五收盘后提交、周一开盘才成交的订单，会被算进"周五"的简报，而它真正执行、
+      产生持仓变化的那个交易日（周一）的简报里却完全不出现。修复思路：`_trades_today` 应改为
+      优先按 `filled_at`（若已回填）分桶，仅当 `filled_at` 缺失时退回 `ts`；`trades_today()`
+      是否要同步改口径需要单独判断，因为它喂给的是风控当日下单笔数上限，按"下单日"计数可能才是
+      本来就想要的语义，不能直接照搬简报那边的修法

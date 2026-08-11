@@ -53,3 +53,29 @@ def test_intent_rejects_empty_or_whitespace_ticker():
         OrderIntent(ticker="", side=OrderSide.BUY, notional=Decimal(100), reason="x")
     with pytest.raises(ValidationError):
         OrderIntent(ticker="   ", side=OrderSide.BUY, notional=Decimal(100), reason="x")
+
+
+def test_order_filled_at_defaults_to_none():
+    from datetime import UTC, datetime
+
+    from allpath_trade.broker.base import Order
+
+    order = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=Decimal(1),
+                  notional=None, status="submitted", filled_qty=Decimal(0),
+                  filled_avg_price=None,
+                  submitted_at=datetime(2026, 8, 9, 20, 27, tzinfo=UTC))
+    assert order.filled_at is None
+
+
+def test_order_filled_at_accepts_a_datetime():
+    from datetime import UTC, datetime
+
+    from allpath_trade.broker.base import Order
+
+    filled_at = datetime(2026, 8, 10, 13, 34, tzinfo=UTC)
+    order = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=Decimal(1),
+                  notional=None, status="filled", filled_qty=Decimal(1),
+                  filled_avg_price=Decimal("332.01"),
+                  submitted_at=datetime(2026, 8, 9, 20, 27, tzinfo=UTC),
+                  filled_at=filled_at)
+    assert order.filled_at == filled_at
