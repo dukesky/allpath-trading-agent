@@ -5,7 +5,7 @@ import re
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
-from allpath_trade.reflect import _ts_to_et_date
+from allpath_trade.scheduler import ts_to_et_date
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
@@ -54,7 +54,7 @@ def _proposal_counts(c) -> dict[str, int]:
     for row in c.queue.list(None):
         if row["kind"] != "strategy_revision":
             continue
-        d = _ts_to_et_date(row["ts"])
+        d = ts_to_et_date(row["ts"])
         if d:
             counts[d] = counts.get(d, 0) + 1
     return counts
@@ -93,7 +93,7 @@ def detail(request: Request, date: str) -> HTMLResponse:
     if report is None:
         return _not_found(request, c, "Report not found")
     proposals = [dict(r) for r in c.queue.list(None)
-                if r["kind"] == "strategy_revision" and _ts_to_et_date(r["ts"]) == date]
+                if r["kind"] == "strategy_revision" and ts_to_et_date(r["ts"]) == date]
     return templates.TemplateResponse(request, "report_detail.html", {
         "page": "reports", "report": report, "proposals": proposals,
         "error": request.query_params.get("error"), **nav_context(c)})

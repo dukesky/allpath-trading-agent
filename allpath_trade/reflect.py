@@ -17,7 +17,7 @@ from allpath_trade.llm.base import LLMClient
 from allpath_trade.memory.search import SessionSearch
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
-from allpath_trade.scheduler import ET
+from allpath_trade.scheduler import ET, ts_to_et_date
 from allpath_trade.store.conversations import ConversationStore
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
@@ -125,20 +125,10 @@ def _et_date(now: datetime | None) -> str:
     return now.astimezone(ET).date().isoformat()
 
 
-def _ts_to_et_date(ts_iso: str) -> str | None:
-    try:
-        dt = datetime.fromisoformat(ts_iso)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(ET).date().isoformat()
-
-
 def _et_day_bounds_utc(et_date: str) -> tuple[str, str]:
     """UTC ISO bounds of the ET calendar day `et_date`, used only as a cheap
     SQL-level pre-filter (`ObservationLog.window`'s `since_iso`/`until_iso`)
-    -- the exact per-row cut still happens with `_ts_to_et_date`."""
+    -- the exact per-row cut still happens with `ts_to_et_date`."""
     d = date.fromisoformat(et_date)
     start_et = datetime.combine(d, time.min, tzinfo=ET)
     end_et = datetime.combine(d, time.max, tzinfo=ET)
@@ -489,7 +479,7 @@ class Reflector:
             rows = self.components.journal.recent(limit=500)
         except Exception:  # noqa: BLE001 — a briefing must never raise
             return []
-        todays = [dict(r) for r in rows if _ts_to_et_date(r["ts"]) == et_date]
+        todays = [dict(r) for r in rows if ts_to_et_date(r["ts"]) == et_date]
         return todays[:MAX_TRADES]
 
     def _observations_today(self, et_date: str) -> list[dict]:
@@ -504,7 +494,7 @@ class Reflector:
             rows = self.components.observations.window(start_utc, end_utc, limit=5000)
         except Exception:  # noqa: BLE001 — a briefing must never raise
             return []
-        todays = [dict(r) for r in rows if _ts_to_et_date(r["ts"]) == et_date]
+        todays = [dict(r) for r in rows if ts_to_et_date(r["ts"]) == et_date]
         # `window` returns newest-first; reverse to chronological order for
         # display, then keep the newest MAX_OBSERVATION_LINES.
         todays.reverse()

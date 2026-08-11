@@ -19,6 +19,24 @@ ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
 CLOSE = time(16, 0)
 
+
+def ts_to_et_date(ts_iso: str) -> str | None:
+    """Convert an ISO timestamp string to its ET calendar date (`YYYY-MM-DD`),
+    or `None` if `ts_iso` doesn't parse. Naive timestamps are treated as UTC.
+
+    Lives here (rather than a standalone timeutil module) because this file
+    already owns `ET` and is already an accepted web-layer dependency
+    (dashboard.py, settings.py, app.py all import from it) -- reflect.py and
+    web/routes/reports.py both need the exact same ET-day cut for the
+    per-row date grouping in daily reflection briefings and report pages."""
+    try:
+        dt = datetime.fromisoformat(ts_iso)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(ET).date().isoformat()
+
 # Stable id for the interval job build_jobs registers, so a later settings
 # save can find and reschedule the same job instead of only being able to
 # add a second one alongside it (see reschedule_sentinel_job below).
