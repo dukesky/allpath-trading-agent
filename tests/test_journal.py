@@ -4,7 +4,7 @@ from decimal import Decimal
 from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
 from allpath_trade.risk.gate import RiskDecision
 from allpath_trade.store.db import connect
-from allpath_trade.store.journal import TradeJournal
+from allpath_trade.store.journal import TradeJournal, is_recent_submission
 
 
 def make_journal(tmp_path):
@@ -177,7 +177,13 @@ def test_unfilled_recent_returns_only_submitted_rows_with_a_broker_order_id(tmp_
     assert rows[0]["status"] == "submitted"
 
 
-def test_unfilled_recent_excludes_rows_outside_the_window(tmp_path):
+def test_unfilled_recent_includes_rows_far_outside_the_old_window(tmp_path):
+    # I2: unfilled_recent USED to have a hard age cutoff (hours=48), which
+    # meant a row old enough to fall outside it could never be selected
+    # again -- an expired DAY order from days ago stayed 'submitted'
+    # forever, with no path to ever learn its true terminal status. The
+    # selection now has no age cutoff at all; only rendering (agent/
+    # readonly_tools._format_recent_trade, dashboard.html) is age-gated.
     j = make_journal(tmp_path)
     old_ts = (datetime.now(UTC) - timedelta(hours=72)).isoformat()
     j._conn.execute(
@@ -188,4 +194,81 @@ def test_unfilled_recent_excludes_rows_outside_the_window(tmp_path):
         (old_ts,))
     j._conn.commit()
 
-    assert j.unfilled_recent(hours=48) == []
+    rows = j.unfilled_recent()
+    assert len(rows) == 1
+    assert rows[0]["broker_order_id"] == "o-old"
+
+
+def test_unfilled_recent_includes_partially_filled_rows(tmp_path):
+    # I3: a partial fill must keep getting re-polled until it reaches a
+    # terminal status, not drop out of the sweep the moment the first
+    # partial fill lands.
+    j = make_journal(tmp_path)
+    submitted = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                      notional=Decimal(500), status=OrderStatus.PARTIALLY_FILLED,
+                      filled_qty=Decimal(1), filled_avg_price=Decimal(200),
+                      submitted_at=datetime.now(UTC))
+    j.record(INTENT, RiskDecision(approved=True), submitted)
+
+    rows = j.unfilled_recent()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "partially_filled"
+
+
+def test_unfilled_recent_orders_by_id_desc_and_respects_limit(tmp_path):
+    # I2 (M3): DESC + a SQL-level LIMIT, not an ASC scan sliced in Python --
+    # the old ASC-plus-Python-slice combination meant the oldest N stuck
+    # rows were re-selected on every single pass, head-of-line-blocking
+    # every newer row behind them forever. DESC + LIMIT means a backlog
+    # drains from the front: as the newest rows resolve and leave the
+    # unresolved set, older rows rotate into the window.
+    j = make_journal(tmp_path)
+    submitted_at = datetime.now(UTC)
+    ids = []
+    for i in range(5):
+        submitted = Order(id=f"o{i}", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                          notional=Decimal(500), status=OrderStatus.SUBMITTED,
+                          filled_qty=Decimal(0), filled_avg_price=None,
+                          submitted_at=submitted_at)
+        ids.append(j.record(INTENT, RiskDecision(approved=True), submitted))
+
+    rows = j.unfilled_recent(limit=3)
+    assert [r["id"] for r in rows] == list(reversed(ids))[:3]
+
+
+def test_is_recent_submission_true_within_the_window(tmp_path):
+    now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+    ts = (now - timedelta(hours=1)).isoformat()
+    assert is_recent_submission(ts, now=now) is True
+
+
+def test_is_recent_submission_false_outside_the_window(tmp_path):
+    now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+    ts = (now - timedelta(hours=72)).isoformat()
+    assert is_recent_submission(ts, now=now) is False
+
+
+def test_refresh_fill_writes_terminal_canceled_status_with_null_fills(tmp_path):
+    # I2: a broker-reported terminal non-fill status (canceled/expired --
+    # AlpacaBroker collapses "expired" onto CANCELED, see broker/alpaca.py)
+    # must be written like any other status update, with the fill columns
+    # staying NULL rather than fabricated.
+    j = make_journal(tmp_path)
+    submitted = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                      notional=Decimal(500), status=OrderStatus.SUBMITTED,
+                      filled_qty=Decimal(0), filled_avg_price=None,
+                      submitted_at=datetime(2026, 8, 2, 14, 0, tzinfo=UTC))
+    trade_id = j.record(INTENT, RiskDecision(approved=True), submitted)
+
+    expired = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                    notional=Decimal(500), status=OrderStatus.CANCELED,
+                    filled_qty=Decimal(0), filled_avg_price=None,
+                    submitted_at=submitted.submitted_at)
+    j.refresh_fill(trade_id, expired)
+
+    [row] = j.recent()
+    assert row["status"] == "canceled"
+    assert row["filled_qty"] == "0"
+    assert row["filled_avg_price"] is None
+    # Converged: no longer in the still-unresolved set.
+    assert j.unfilled_recent() == []

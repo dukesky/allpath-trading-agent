@@ -140,6 +140,51 @@ def test_dashboard_trades_table_shows_fill_time_and_price_when_filled(client):
     assert "332.01" in body
 
 
+def test_dashboard_trades_table_shows_partial_fill_and_keeps_polling(client):
+    # I3: a partial fill must not render the bare word "filled" (which
+    # would read as done, not still-open), and status='partially_filled'
+    # rows must stay in the sweep's polling set rather than dropping out
+    # once a partial fill lands.
+    from decimal import Decimal
+
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    components = client.app.state.holder.get()
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(10), reason="dip buy")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(10),
+                 notional=None, status=OrderStatus.PARTIALLY_FILLED,
+                 filled_qty=Decimal(3), filled_avg_price=Decimal("332.01"),
+                 submitted_at=datetime.now(UTC))
+    components.journal.record(intent, RiskDecision(approved=True), order)
+
+    body = client.get("/").text
+    assert "partially filled 3 @ 332.01 so far" in body
+    assert "&middot; filled" not in body  # not the terminal "filled" label
+
+    [row] = components.journal.unfilled_recent()
+    assert row["status"] == "partially_filled"
+
+
+def test_dashboard_trades_table_shows_status_unconfirmed_for_stale_submitted_rows(client):
+    # I2: a row stuck 'submitted' well past the fill-pending window must
+    # stop affirmatively claiming "fill pending" -- that claim is no longer
+    # honest once it's been unconfirmed this long.
+    components = client.app.state.holder.get()
+    old_ts = (datetime.now(UTC) - timedelta(hours=72)).isoformat()
+    components.journal._conn.execute(
+        "INSERT INTO trades (ts, ticker, side, qty, notional, status, reason,"
+        " strategy_id, risk_reasons, broker_order_id, filled_qty, filled_avg_price)"
+        " VALUES (?, 'TSLA', 'buy', '1', NULL, 'submitted', 'old', NULL, '[]',"
+        " 'o-old', '0', NULL)",
+        (old_ts,))
+    components.journal._conn.commit()
+
+    body = client.get("/").text
+    assert "status unconfirmed" in body
+    assert "fill pending" not in body
+
+
 def test_broker_outage_does_not_break_the_page(client, monkeypatch):
     holder = client.app.state.holder
 

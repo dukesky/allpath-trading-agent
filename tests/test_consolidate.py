@@ -143,6 +143,29 @@ def test_iteration_exhaustion_does_not_advance_marker(tmp_path):
     assert not any(r["source"] == "consolidator" for r in obs.recent())
 
 
+def test_journal_event_line_labels_submission_not_fill(tmp_path):
+    # I1: `[trade] {ts} ...` events feed LONG-TERM MEMORY -- a mislabeled
+    # submission date baked into a durable dossier is worse than a one-off
+    # chat mislabel, since it can outlive the row itself. The event line
+    # must reuse the same "submitted"-labeled formatter as every other
+    # trade surface, not a bare unlabeled timestamp.
+    llm = ScriptedLLM([LLMResponse(text="noted")])
+    c, _memory, _obs, _convo, _app_state = make(tmp_path, llm)
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.BUY, notional=Decimal(500),
+                         reason="dip buy", strategy_id="aapl-long")
+    order = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                  notional=Decimal(500), status=OrderStatus.SUBMITTED,
+                  filled_qty=Decimal(0), filled_avg_price=None,
+                  submitted_at=datetime.now(UTC))
+    c.journal.record(intent, RiskDecision(approved=True), order)
+
+    c.run_daily()
+
+    prompt = llm.seen[0][0]["content"]
+    assert "[trade] submitted " in prompt
+    assert "fill pending" in prompt
+
+
 def test_journal_events_are_marker_scoped(tmp_path):
     llm = ScriptedLLM([LLMResponse(text="noted trade")])
     c, _memory, obs, _convo, _app_state = make(tmp_path, llm)

@@ -1,8 +1,11 @@
+import threading
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
+from allpath_trade import execution as execution_module
 from allpath_trade.broker.base import (
     Account,
     Broker,
@@ -308,6 +311,192 @@ def test_refresh_pending_fills_caps_at_twenty_rows(tmp_path):
     refresh_pending_fills(journal, broker)
 
     assert len(broker.get_order_calls) == 20
+
+
+def test_refresh_pending_fills_reports_one_line_of_failures_to_stderr(tmp_path, capsys):
+    # M1: per-row failures are silent otherwise -- one summary line per
+    # sweep (not one per row, which would spam the log during a broker
+    # outage) is the only signal an operator gets.
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted_at = datetime(2026, 8, 9, 20, 27, tzinfo=UTC)
+    journal.record(buy(), RiskDecision(approved=True), Order(
+        id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+        notional=Decimal(500), status=OrderStatus.SUBMITTED,
+        filled_qty=Decimal(0), filled_avg_price=None, submitted_at=submitted_at))
+
+    broker = FakeBroker(refill_error=True)
+    refresh_pending_fills(journal, broker)
+
+    err = capsys.readouterr().err
+    assert "[fill-refresh] 1 of 1 refreshes failed" in err
+
+
+def test_refresh_pending_fills_no_failures_prints_nothing(tmp_path, capsys):
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted_at = datetime(2026, 8, 9, 20, 27, tzinfo=UTC)
+    trade_id = journal.record(buy(), RiskDecision(approved=True), Order(
+        id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+        notional=Decimal(500), status=OrderStatus.SUBMITTED,
+        filled_qty=Decimal(0), filled_avg_price=None, submitted_at=submitted_at))
+    filled = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                   notional=Decimal(500), status=OrderStatus.FILLED,
+                   filled_qty=Decimal(1), filled_avg_price=Decimal("332.01"),
+                   submitted_at=submitted_at, filled_at=submitted_at)
+    broker = FakeBroker(refill_map={"o1": filled})
+
+    refresh_pending_fills(journal, broker)
+
+    assert capsys.readouterr().err == ""
+    assert journal.recent()[0]["id"] == trade_id  # sanity: it did run
+
+
+def test_refresh_pending_fills_converges_an_expired_row_to_canceled(tmp_path):
+    # I2: a DAY order that expired at the broker long ago must stop
+    # affirmatively claiming "fill pending" forever. AlpacaBroker already
+    # collapses the broker's "expired" onto OrderStatus.CANCELED (see
+    # broker/alpaca.py's _STATUS_MAP), so the row this sweep writes back is
+    # CANCELED with its fill columns left NULL -- not fabricated as a fill.
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    old_submitted_at = datetime(2026, 8, 2, 14, 0, tzinfo=UTC)  # days before "now"
+    trade_id = journal.record(buy(), RiskDecision(approved=True), Order(
+        id="stale-nvda", ticker="AAPL", side=OrderSide.BUY, qty=None,
+        notional=Decimal(500), status=OrderStatus.SUBMITTED,
+        filled_qty=Decimal(0), filled_avg_price=None, submitted_at=old_submitted_at))
+
+    expired = Order(id="stale-nvda", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                    notional=Decimal(500), status=OrderStatus.CANCELED,
+                    filled_qty=Decimal(0), filled_avg_price=None,
+                    submitted_at=old_submitted_at)
+    broker = FakeBroker(refill_map={"stale-nvda": expired})
+
+    refresh_pending_fills(journal, broker)
+
+    [row] = journal.recent()
+    assert row["id"] == trade_id
+    assert row["status"] == "canceled"
+    assert row["filled_qty"] == "0"
+    assert row["filled_avg_price"] is None
+    # A row this old used to be permanently excluded from unfilled_recent's
+    # window and could never converge -- proving it's gone from the still-
+    # unresolved set now is the real regression guard.
+    assert journal.unfilled_recent() == []
+
+
+def test_refresh_pending_fills_still_never_regresses_a_filled_row(tmp_path):
+    # The FILLED guard (TradeJournal.refresh_fill) must survive both this
+    # round's transaction() wrap and the bounded-poll changes.
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted_at = datetime(2026, 8, 9, 20, 27, tzinfo=UTC)
+    filled_order = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                         notional=Decimal(500), status=OrderStatus.FILLED,
+                         filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                         submitted_at=submitted_at, filled_at=submitted_at)
+    trade_id = journal.record(buy(), RiskDecision(approved=True), filled_order)  # already filled
+
+    # unfilled_recent won't even select this row (status != submitted/
+    # partially_filled), so refresh_fill's guard is exercised directly here,
+    # same as test_journal.py's own coverage of the guard.
+    stale = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                  notional=Decimal(500), status=OrderStatus.SUBMITTED,
+                  filled_qty=Decimal(0), filled_avg_price=None,
+                  submitted_at=submitted_at)
+    journal.refresh_fill(trade_id, stale)
+
+    [row] = journal.recent()
+    assert row["status"] == "filled"
+    assert row["filled_avg_price"] == "200"
+
+
+def test_refresh_pending_fills_bounds_each_row_by_a_wall_clock_timeout(tmp_path, monkeypatch, capsys):
+    # I4: alpaca-py passes no timeout to its underlying requests call and
+    # retries 429/504 three times with 3s sleeps -- a single get_order()
+    # can hang well past what's acceptable on the scheduler thread, which
+    # runs this sweep unconditionally on every sentinel tick (market open
+    # or closed). A short, injected per-row timeout (not the real 10s
+    # production one) keeps this test fast; mirrors test_models_catalog.py's
+    # identical pattern for the same underlying problem.
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted_at = datetime(2026, 8, 9, 20, 27, tzinfo=UTC)
+    trade_id = journal.record(buy(), RiskDecision(approved=True), Order(
+        id="stuck", ticker="AAPL", side=OrderSide.BUY, qty=None,
+        notional=Decimal(500), status=OrderStatus.SUBMITTED,
+        filled_qty=Decimal(0), filled_avg_price=None, submitted_at=submitted_at))
+
+    deadline = 0.2
+    monkeypatch.setattr(execution_module, "_ORDER_POLL_TIMEOUT_SECONDS", deadline)
+
+    finished = threading.Event()
+
+    class HangingBroker(FakeBroker):
+        def get_order(self, order_id):
+            self.get_order_calls.append(order_id)
+            time.sleep(deadline * 5)
+            finished.set()
+            return Order(id=order_id, ticker="AAPL", side=OrderSide.BUY, qty=None,
+                        notional=Decimal(500), status=OrderStatus.FILLED,
+                        filled_qty=Decimal(1), filled_avg_price=Decimal(200),
+                        submitted_at=submitted_at)
+
+    broker = HangingBroker()
+
+    started = time.monotonic()
+    refresh_pending_fills(journal, broker)
+    elapsed = time.monotonic() - started
+
+    # Generous bound (2x the deadline) to avoid flakiness under CI
+    # scheduling jitter, while still proving the wait is bounded rather
+    # than open-ended -- the hanging broker sleeps 5x the deadline, so this
+    # can only pass if .result(timeout=...) actually cut the wait short.
+    assert elapsed < deadline * 2
+    [row] = journal.recent()
+    assert row["id"] == trade_id
+    assert row["status"] == "submitted"  # untouched: the poll never returned in time
+
+    err = capsys.readouterr().err
+    assert "[fill-refresh] 1 of 1 refreshes failed" in err
+
+    # Let the abandoned background poll actually finish before this test
+    # returns: _poll_pool is a module-level singleton, so a still-running
+    # thread here could still be executing when the next test submits its
+    # own work to the same single-worker pool.
+    assert finished.wait(timeout=deadline * 20)
+
+
+def test_refresh_pending_fills_respects_a_whole_sweep_deadline(tmp_path, monkeypatch):
+    # I4: bounding each row individually still leaves a worst case of
+    # row_count x per_row_timeout for one sweep if the broker is merely
+    # slow rather than hung -- too long for something running
+    # unconditionally on every sentinel tick. A whole-sweep deadline caps
+    # that: once it passes, remaining rows wait for the next pass instead
+    # of being processed now.
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted_at = datetime(2026, 8, 9, 20, 27, tzinfo=UTC)
+    ids = [f"o{i}" for i in range(3)]
+    for order_id in ids:
+        journal.record(buy(), RiskDecision(approved=True), Order(
+            id=order_id, ticker="AAPL", side=OrderSide.BUY, qty=None,
+            notional=Decimal(500), status=OrderStatus.SUBMITTED,
+            filled_qty=Decimal(0), filled_avg_price=None, submitted_at=submitted_at))
+    refill_map = {
+        order_id: Order(id=order_id, ticker="AAPL", side=OrderSide.BUY, qty=None,
+                        notional=Decimal(500), status=OrderStatus.FILLED,
+                        filled_qty=Decimal(1), filled_avg_price=Decimal(200),
+                        submitted_at=submitted_at)
+        for order_id in ids
+    }
+    broker = FakeBroker(refill_map=refill_map)
+
+    monkeypatch.setattr(execution_module, "_SWEEP_DEADLINE_SECONDS", 20)
+    # A deterministic fake clock, not a real sleep: first call sets the
+    # deadline (0 + 20 = 20); the second call (the first per-row check)
+    # reads 15 (< 20, one row processed); the third call reads 30 (>= 20,
+    # loop breaks before a second row).
+    fake_times = iter([0, 15, 30])
+    monkeypatch.setattr(execution_module.time, "monotonic", lambda: next(fake_times))
+
+    refresh_pending_fills(journal, broker)
+
+    assert len(broker.get_order_calls) == 1  # the other two waited for the next pass
 
 
 def test_trades_today_from_journal_feeds_daily_cap(tmp_path):

@@ -4,6 +4,14 @@ import re
 from datetime import UTC, datetime
 from decimal import Decimal
 
+# Re-exported for the `is_recent_submission` Jinja filter (see templating.py)
+# -- dashboard.html's recent-trades row needs the same "is this row still
+# within the honest fill-pending window" check that agent/readonly_tools.py's
+# _format_recent_trade uses (I2), and store/journal.py is the shared home for
+# it (see that module's docstring on FILL_PENDING_WINDOW_HOURS) since both
+# `web` and `agent` already depend on it for TradeJournal.
+from allpath_trade.store.journal import is_recent_submission  # noqa: F401
+
 
 def money(value) -> str:
     try:

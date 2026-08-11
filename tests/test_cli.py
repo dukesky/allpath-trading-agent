@@ -41,6 +41,31 @@ def test_status_prints_account_and_positions(tmp_path, capsys, monkeypatch):
     assert "10000" in out and "AAPL" in out and "paper" in out.lower()
 
 
+def test_status_recent_trade_line_labels_submission_not_fill(tmp_path, capsys, monkeypatch):
+    # I1: `status` used to print a bare, unlabeled timestamp for a recent
+    # trade -- the exact shape that caused the original 17-hour mislabel.
+    # It must reuse the same "submitted"-labeled formatter as get_portfolio
+    # and the system-prompt snapshot.
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.journal import TradeJournal
+
+    monkeypatch.chdir(tmp_path)
+    journal = TradeJournal(connect(tmp_path / "allpath-trade.db"))
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1), reason="dip")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                 notional=None, status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                 filled_avg_price=None, submitted_at="2026-08-09T20:27:00+00:00")
+    journal.record(intent, RiskDecision(approved=True), order)
+
+    code = main(["status"], broker_factory=lambda settings: FakeBroker())
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "submitted " in out
+    assert "fill pending" in out
+
+
 def test_status_without_keys_exits_2(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)

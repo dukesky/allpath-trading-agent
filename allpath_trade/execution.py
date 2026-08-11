@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import concurrent.futures
+import sys
+import time
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -14,6 +17,47 @@ class ExecutionError(Exception):
     pass
 
 
+# Per-order-poll bound (I4). alpaca-py's TradingClient passes no timeout to
+# the underlying `requests` call (verified against the SDK) and retries
+# 429/504 responses 3x with 3s sleeps between attempts -- a single
+# get_order() can legitimately block for tens of seconds. refresh_pending_
+# fills runs on the scheduler thread, on every sentinel pass,
+# unconditionally (market open or closed -- see scheduler._run_sentinel_
+# pass), so an unbounded call here stalls the heartbeat and every strategy
+# evaluation behind it, 24/7.
+#
+# Mirrors web/models_catalog.py's `_fetch_pool` / `future.result(timeout=
+# ...)` pattern exactly: run the blocking call on a worker thread and
+# enforce a true wall-clock deadline with `.result(timeout=...)`, since the
+# call itself has no reliable timeout of its own. Not the dashboard's
+# `_broker_pool` (allpath_trade.web.routes.dashboard) -- that pool is sized
+# and owned by an unrelated route module, and reusing it here would couple
+# two independently-owned modules together for one poll call.
+#
+# Caveat inherited from models_catalog.py: Python cannot cancel a running
+# thread. A poll that times out keeps running in this pool's single worker
+# until it eventually returns (or the process exits); anything queued
+# behind it waits. That's an accepted tradeoff here too -- the caller (this
+# sweep, and in turn the scheduler thread) is unblocked either way, which is
+# the actual goal; a stuck poll degrading its own row via the per-row
+# try/except below is preferable to it stalling the whole pass.
+_ORDER_POLL_TIMEOUT_SECONDS = 10
+
+_poll_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="fill-refresh-poll")
+
+# Whole-sweep wall-clock bound (I4). Capping each individual poll at
+# _ORDER_POLL_TIMEOUT_SECONDS still allows a worst case of
+# unfilled_recent's row count (20) x 10s = 200s for one sweep if the broker
+# is merely slow rather than fully hung -- far too long for something
+# running unconditionally on every sentinel tick. This deadline, checked
+# with time.monotonic() before each row, cuts a slow-but-not-hung sweep off
+# after ~20s: whatever rows didn't get polled this pass simply wait for the
+# next one, same as rows that never made it into this pass's LIMIT-20
+# selection (see TradeJournal.unfilled_recent).
+_SWEEP_DEADLINE_SECONDS = 20
+
+
 # Home: here rather than store/journal.py, because this is a broker-polling
 # concern (Broker.get_order round trips), not a storage concern -- journal.py
 # stays pure persistence, matching how Executor.execute already keeps its own
@@ -23,19 +67,38 @@ class ExecutionError(Exception):
 # gets its fill recorded within one sentinel interval of actually filling,
 # instead of staying "submitted" forever.
 def refresh_pending_fills(journal: TradeJournal, broker: Broker) -> None:
-    """Re-poll still-submitted trades and write back any fill Alpaca reports.
+    """Re-poll still-unresolved trades and write back whatever Alpaca
+    reports -- a fill, a partial fill, or a terminal non-fill status
+    (canceled/expired/rejected; see TradeJournal.refresh_fill).
 
-    Capped at 20 rows per pass: this runs on every sentinel tick, so an
-    unbounded backlog would turn one slow tick into an ever-growing one.
-    Each row polls in its own try/except -- a broker outage (or one bad
-    order id) must degrade that single row, not the rest of the batch or
-    the sentinel pass calling this."""
-    for row in journal.unfilled_recent()[:20]:
+    Row selection and its cap live in TradeJournal.unfilled_recent (20 most
+    recent unresolved rows per pass, no age cutoff -- see its docstring for
+    why). Each row's get_order round trip is individually bounded by
+    _ORDER_POLL_TIMEOUT_SECONDS (via _poll_pool), and the whole sweep is
+    bounded by _SWEEP_DEADLINE_SECONDS: once the deadline passes, remaining
+    rows are left for the next sentinel pass rather than processed now.
+
+    Each row polls in its own try/except -- a broker outage, a timed-out
+    poll, or one bad order id must degrade that single row, not the rest of
+    the batch or the sentinel pass calling this. Failures are counted and
+    reported as a single stderr line per sweep (M1) rather than per row, so
+    a broker outage doesn't spam the log once per stuck order."""
+    rows = journal.unfilled_recent()
+    deadline = time.monotonic() + _SWEEP_DEADLINE_SECONDS
+    attempted = 0
+    failures = 0
+    for row in rows:
+        if time.monotonic() >= deadline:
+            break
+        attempted += 1
         try:
-            order = broker.get_order(row["broker_order_id"])
+            order = _poll_pool.submit(broker.get_order, row["broker_order_id"]).result(
+                timeout=_ORDER_POLL_TIMEOUT_SECONDS)
             journal.refresh_fill(row["id"], order)
-        except Exception:  # noqa: BLE001, S110 — one bad row must not break the sweep
-            pass
+        except Exception:  # noqa: BLE001 — one bad/slow row must not break the sweep
+            failures += 1
+    if failures:
+        print(f"[fill-refresh] {failures} of {attempted} refreshes failed", file=sys.stderr)
 
 
 class ExecutionResult(BaseModel):
