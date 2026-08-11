@@ -60,6 +60,17 @@ Explicitly NOT supported:
     input -- every tag this module emits is a bare tag from the fixed set
     below. Styling is applied by the template's wrapper element, not by
     anything this module writes.
+
+Known limitations (accepted, not bugs):
+
+  * There is no way to escape a literal `|` inside a table cell (e.g.
+    a backslash-escaped pipe) -- it is always read as a cell separator.
+    Rare in LLM output and not worth the added parsing complexity.
+  * Overlapping/crossed emphasis markers (e.g. `**bold *crossed** italic*`)
+    are not resolved the way a full CommonMark parser would; `_BOLD_RE`
+    simply consumes the first `**...**` pair it finds greedily-minimal,
+    which can produce a different (but still safe, still escaped) split
+    than a spec-compliant parser.
 """
 
 from __future__ import annotations
@@ -97,6 +108,11 @@ _ITALIC_RE = re.compile(r"(?<!\*)\*([^\n*]+?)\*(?!\*)")
 
 _HEADING_TAG_BY_LEVEL = {1: "h2", 2: "h3", 3: "h4"}
 _HEADING_TAG_DEFAULT = "h5"
+# Strips a CommonMark-style closing ATX sequence -- "## Heading ##" should
+# read as "Heading", not "Heading ##". Requires at least one space before
+# the trailing hashes so a heading whose text genuinely ends in "#" (rare,
+# but not impossible) isn't mangled by a hash with no separating space.
+_HEADING_TRAILING_HASHES_RE = re.compile(r"\s+#+\s*$")
 
 
 def _inline(text: str) -> str:
@@ -109,20 +125,44 @@ def _inline(text: str) -> str:
 
     def _stash(match: re.Match[str]) -> str:
         codes.append(match.group(1))
-        # NUL is never produced by markupsafe.escape and never appears in
-        # ordinary chat/report text, so it's a safe, simple placeholder --
-        # restored below before this function returns.
+        # NUL is stripped from all escaped input in render_markdown before
+        # _inline ever runs (see the `.replace("\x00", "")` there), so this
+        # placeholder can never collide with literal input text -- a chat
+        # message containing a raw NUL byte (e.g. from a JSON string)
+        # used to produce e.g. `\x0099\x00`, which collided with a
+        # legitimately-stashed index 99 and either raised IndexError (a
+        # PERSISTED message that then 500'd on every future page load) or
+        # silently swapped in an unrelated code span's content.
         return f"\x00{len(codes) - 1}\x00"
 
     text = _CODE_SPAN_RE.sub(_stash, text)
     text = _BOLD_RE.sub(lambda m: f"<strong>{m.group(1)}</strong>", text)
     text = _ITALIC_RE.sub(lambda m: f"<em>{m.group(1)}</em>", text)
-    text = re.sub(r"\x00(\d+)\x00", lambda m: f"<code>{codes[int(m.group(1))]}</code>", text)
+
+    def _restore(match: re.Match[str]) -> str:
+        # Belt-and-braces: the NUL-stripping above should already make this
+        # index always valid, but never let a malformed/out-of-range
+        # placeholder turn into an unhandled 500 on a persisted message --
+        # fall back to the literal matched text instead of raising.
+        idx = int(match.group(1))
+        if idx >= len(codes):
+            return match.group(0)
+        return f"<code>{codes[idx]}</code>"
+
+    text = re.sub(r"\x00(\d+)\x00", _restore, text)
     return text
 
 
 def _is_table_separator(line: str) -> bool:
-    s = line.strip().strip("|")
+    s = line.strip()
+    # A separator row must contain a pipe. Without this, a bare "---" line
+    # (already meaningful on its own as an <hr>, see _HR_RE) would make the
+    # *previous* prose line -- if it happened to contain any "|" character,
+    # e.g. "Compare A | B below" -- look like a table header, silently
+    # dropping the rest of that sentence into a fabricated 1-column table.
+    if "|" not in s:
+        return False
+    s = s.strip("|")
     if not s:
         return False
     cells = [c.strip() for c in s.split("|")]
@@ -155,7 +195,24 @@ def render_markdown(text: str) -> str:
     caller (the `md` Jinja filter in templating.py) is the ONLY place that
     wraps this in `Markup` to opt it out of Jinja's autoescaping. Never call
     `Markup(...)` on this function's output anywhere else."""
-    escaped = str(markupsafe.escape(text or ""))
+    # str(text or "") first: markupsafe.escape() is a no-op on any object
+    # implementing __html__ (e.g. a Markup instance) -- it trusts the object
+    # to already be safe and returns it unchanged. Coercing to a plain str
+    # before escaping means even a Markup(input) is HTML-escaped like any
+    # other string, so the escape-first invariant holds regardless of what
+    # type a caller passes in. Not reachable today (every caller passes a
+    # plain str), but closing it structurally costs nothing.
+    escaped = str(markupsafe.escape(str(text or "")))
+    # NUL is never legitimate text and markupsafe.escape never produces one,
+    # so stripping it here closes off the whole placeholder-collision class
+    # in _inline() below: a chat message containing a literal NUL byte can
+    # no longer forge/collide with a `\x00{n}\x00` code-span placeholder.
+    escaped = escaped.replace("\x00", "")
+    # Collapse CRLF/CR to a plain LF right after escaping, before any line
+    # splitting happens. Left alone, a stray `\r` survives into a paragraph,
+    # and `.msg.assistant`'s (formerly pre-wrap) rendering turned it into a
+    # second, blank-looking line break stacked on top of the real `<br>`.
+    escaped = re.sub(r"\r\n?", "\n", escaped)
     if not escaped.strip():
         return ""
 
@@ -201,14 +258,21 @@ def render_markdown(text: str) -> str:
             flush_paragraph()
             level = len(heading_match.group(1))
             tag = _HEADING_TAG_BY_LEVEL.get(level, _HEADING_TAG_DEFAULT)
-            out.append(f"<{tag}>{_inline(heading_match.group(2).strip())}</{tag}>")
+            # Strip a CommonMark-style closing sequence -- "## a ##" is
+            # heading text "a", not "a ##".
+            content = _HEADING_TRAILING_HASHES_RE.sub("", heading_match.group(2).strip()).strip()
+            out.append(f"<{tag}>{_inline(content)}</{tag}>")
             i += 1
             continue
 
         if "|" in line and i + 1 < n and _is_table_separator(lines[i + 1]):
             flush_paragraph()
             header_cells = _split_row(line)
-            ncols = len(_split_row(lines[i + 1])) or len(header_cells)
+            # The separator row's cell count is the source of truth (see the
+            # module docstring); `_split_row` on a non-empty stripped string
+            # always yields at least one element (str.split never returns
+            # []), so there is no zero-cell case here to fall back from.
+            ncols = len(_split_row(lines[i + 1]))
             i += 2
             body_rows: list[list[str]] = []
             while i < n and lines[i].strip() and "|" in lines[i]:

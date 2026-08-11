@@ -179,14 +179,20 @@ label:first-child { margin-top:0; }
   border-radius:14px 14px 3px 14px; padding:10px 14px; max-width:78%; line-height:1.5; }
 /* Assistant text is escape-first rendered through the narrow Markdown
    subset in markdown.py (see templating.py's `md` filter and
-   _chat_messages.html) -- headings/bold/tables/etc. become real elements
-   instead of literal `##`/`**`/`|` characters. white-space:pre-wrap is
-   still needed for the rare content that falls through to plain
-   paragraphs unchanged. A max-width keeps prose from stretching
-   edge-to-edge on wide desktops (widened from 680px so a pipe table has
-   room to breathe before its own overflow-x:auto kicks in -- see the .md
-   table rule below). */
-.msg.assistant { white-space:pre-wrap; word-wrap:break-word; max-width:760px; line-height:1.65; }
+   _chat_messages.html) -- headings/bold/tables/etc. become real elements,
+   and even plain unformatted text becomes a real `<p>` with explicit
+   `<br>` line breaks (see render_markdown's flush_paragraph), so there is
+   never a literal newline left in a text node for white-space:pre-wrap to
+   act on. This was previously kept "for the rare content that falls
+   through to plain paragraphs unchanged", but that claim was wrong --
+   nothing skips the `<p>` wrapping -- and it was actively harmful: before
+   markdown.py normalized `\r\n`/`\r` to `\n`, pre-wrap rendered a
+   surviving `\r` as its own visible line break, doubling up right next to
+   the real `<br>`. A max-width keeps prose from stretching edge-to-edge on
+   wide desktops (widened from 680px so a pipe table has room to breathe
+   before its own overflow-x:auto kicks in -- see the .md table rule
+   below). */
+.msg.assistant { word-wrap:break-word; max-width:760px; line-height:1.65; }
 /* --- Markdown-rendered content (chat replies, report bodies) -----------
    `.md` is the wrapper class applied wherever markdown.py's `render_markdown`
    output lands (see templating.py's `md` filter). Every tag styled here is
@@ -218,7 +224,27 @@ label:first-child { margin-top:0; }
 .md table { display:block; overflow-x:auto; width:100%; max-width:100%;
   border-collapse:collapse; margin:8px 0 10px; font-size:13px; }
 .md th, .md td { border:1px solid var(--line); padding:6px 10px; text-align:left; }
-.md th { font-weight:600; background:var(--surface-2); }
+/* `td, th { font-size:14px }` near the top of this file targets <td>/<th>
+   directly, so it wins over the *inherited* `.md table { font-size:13px }`
+   above regardless of selector specificity -- inheritance always loses to
+   any rule that targets the element itself. Set it here explicitly instead
+   of relying on inheritance. */
+.md td { font-size:13px; }
+/* The page's global `th` rule (muted colour, 11.5px, uppercase,
+   letter-spacing) is written for data-grid tables (positions, trades) --
+   this is a content table inside prose, so override every one of those
+   back to plain text styling: normal case, body text colour, and the same
+   13px as `.md td` above (the bare `th { font-size:11.5px }` rule also
+   targets <th> directly, same inheritance trap as the td case above). */
+.md th { font-weight:600; background:var(--surface-2); font-size:13px;
+  color:var(--text); text-transform:none; letter-spacing:normal; }
+/* The global `tr:first-child > th { border-top:none }` (specificity 0,1,2)
+   is written for data-grid tables where the header row's top border would
+   double up with the card/section border above it -- it out-specifies
+   `.md th`'s border declaration (0,1,1) and silently deletes the header's
+   top border here too, where there's no such card edge to avoid doubling.
+   Restore it explicitly at higher specificity. */
+.md tr:first-child > th { border-top:1px solid var(--line); }
 /* An approve/reject outcome echoed back by ChatService.note_resolution --
    deliberately not styled like .msg.user's right-aligned bubble, so it never
    reads as something the human typed (see _chat_messages.html). */

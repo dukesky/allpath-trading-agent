@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 
+import markupsafe
 import pytest
 from fastapi.testclient import TestClient
 
@@ -305,3 +306,73 @@ def test_report_body_plain_text_stays_plain_paragraphs(reports_client):
     # (which would false-positive on <html>/<head> from base.html).
     for tag in ("h2", "h3", "h4", "h5"):
         assert f"<{tag}>" not in r.text and f"<{tag} " not in r.text
+
+
+# ---------------------------------------------------------------------------
+# 6. Regression coverage for review findings I1/I2/I3/M3/M5.
+# ---------------------------------------------------------------------------
+
+def test_nul_byte_input_does_not_collide_with_a_code_span_placeholder():
+    # A literal NUL byte (e.g. from a JSON string) used to be
+    # indistinguishable from _inline's `\x00{n}\x00` code-span placeholder --
+    # `\x0099\x00` looked like a reference to stash index 99, which either
+    # raised IndexError (unhandled 500) or, for a small enough number,
+    # silently substituted an unrelated code span's content.
+    out = render_markdown("\x0099\x00")
+    assert "99" in out
+    assert "<code>" not in out  # no real code span was ever stashed
+
+
+def test_nul_byte_that_collides_with_a_real_stash_index_does_not_substitute():
+    # One legitimate code span (stash index 0) plus a forged `\x000\x00` --
+    # the forged placeholder must not be swapped for the real span's content.
+    out = render_markdown("`abc` \x000\x00")
+    assert "<code>abc</code>" in out
+    assert out.count("<code>") == 1
+
+
+def test_prose_line_with_pipe_followed_by_hr_does_not_become_a_table():
+    out = render_markdown("Compare A | B below\n---\nnext")
+    assert "<table>" not in out
+    assert "Compare A | B below" in out
+    assert "<hr>" in out
+    assert "next" in out
+
+
+def test_markup_input_is_still_escaped_not_passed_through_live():
+    # markupsafe.escape() is a no-op on anything implementing __html__, so a
+    # Markup(...) argument would otherwise bypass the escape-first pass
+    # entirely. Not reachable from any caller today, but render_markdown
+    # coerces to str first so the invariant holds structurally either way.
+    out = render_markdown(markupsafe.Markup("<script>alert(1)</script>"))
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_crlf_and_bare_cr_are_normalized_before_br_conversion():
+    out_crlf = render_markdown("line one\r\nline two")
+    out_cr = render_markdown("line one\rline two")
+    assert out_crlf == "<p>line one<br>line two</p>"
+    assert out_cr == "<p>line one<br>line two</p>"
+    assert "\r" not in out_crlf
+    assert "\r" not in out_cr
+
+
+def test_heading_trailing_hashes_are_stripped():
+    out = render_markdown("## a ##")
+    assert out == "<h3>a</h3>"
+
+
+def test_nul_bearing_assistant_message_does_not_500_the_chat_page(tmp_path, monkeypatch):
+    # Route-level version of the NUL-collision regression above: the
+    # assistant's reply is PERSISTED, so if render_markdown ever raises on
+    # it, every subsequent GET /chat -- not just this POST -- would 500.
+    payload = "\x0099\x00"
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text=payload)])
+
+    post_resp = client.post("/chat/send", data={"message": "hi"})
+    assert post_resp.status_code == 200
+
+    get_resp = client.get("/chat")
+    assert get_resp.status_code == 200
+    assert "99" in get_resp.text
