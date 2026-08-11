@@ -12,9 +12,9 @@ from allpath_trade.strategy.loader import (
     parse_strategy_text,
 )
 from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
+from allpath_trade.web.routes import dashboard as dashboard_route
 from allpath_trade.web.routes.dashboard import (
-    QUOTES_BUDGET_SECONDS,
-    _cached_quote,
+    cached_quote,
     error_redirect,
     nav_context,
     summarize_strategy,
@@ -65,7 +65,7 @@ def _chips_by_id(c, docs: list[StrategyDoc]) -> dict[str, list[str]]:
 def _cards_by_id(c, docs: list[StrategyDoc]) -> dict[str, dict]:
     """Price + signed day-change per card, reusing the dashboard's own
     cached-quote lookup and summarize_strategy shape rather than
-    duplicating either (see dashboard.py's _cached_quote/summarize_strategy
+    duplicating either (see dashboard.py's cached_quote/summarize_strategy
     docstrings) -- this page only ever reads `price`/`day_change_pct`/
     `price_class` out of the result, but summarize_strategy is a single
     pure function with no partial-field variant, so it's simpler to call it
@@ -73,10 +73,15 @@ def _cards_by_id(c, docs: list[StrategyDoc]) -> dict[str, dict]:
     dashboard card does. No position/equity here: this page has no broker
     call of its own, and weight-vs-target isn't part of this card's design
     (see strategies.html)."""
-    quote_deadline = time.monotonic() + QUOTES_BUDGET_SECONDS
+    # Read at call time, not bound at import -- dashboard_route.py documents
+    # QUOTES_BUDGET_SECONDS as a module attribute tests monkeypatch to a
+    # tiny value (see its own docstring), which only works if callers look
+    # it up through the module each time rather than capturing a copy of
+    # today's value at import.
+    quote_deadline = time.monotonic() + dashboard_route.QUOTES_BUDGET_SECONDS
     cards = {}
     for doc in docs:
-        quote = (_cached_quote(c.data, doc.position.ticker)
+        quote = (cached_quote(c.data, doc.position.ticker)
                  if time.monotonic() < quote_deadline else None)
         cards[doc.id] = summarize_strategy(doc, None, quote)
     return cards
@@ -171,7 +176,7 @@ def toggle_notify_email(request: Request, strategy_id: str) -> Response:
 
 
 @router.post("/strategies/{strategy_id}/status")
-def change_status(request: Request, strategy_id: str, to: str = Form(...)) -> Response:
+def change_status(request: Request, strategy_id: str, to: str = Form("")) -> Response:
     c = request.app.state.holder.get()
     if not is_valid_strategy_id(strategy_id):
         return _not_found(request, c, "Strategy not found")
@@ -183,6 +188,15 @@ def change_status(request: Request, strategy_id: str, to: str = Form(...)) -> Re
     doc = _find_doc(c, strategy_id)
     if doc is None:
         return _not_found(request, c, "Strategy not found")
+    # `to` defaults to "" rather than being a required Form field -- a
+    # missing field is a malformed request from this page's own form, not a
+    # different failure mode than an invalid status value, so it goes
+    # through the exact same error_redirect path below (a bare 422 JSON
+    # body, like every other unhandled-validation-error page on this app,
+    # would strand the user with no nav and no way back).
+    if not to:
+        return error_redirect(f"/strategies/{strategy_id}",
+                              "Not processed: no target status given")
     try:
         target = StrategyStatus(to)
     except ValueError:

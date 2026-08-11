@@ -81,6 +81,12 @@ def _cached_quote(data: DataSource, ticker: str) -> Quote | None:
     return found
 
 
+# Public alias -- other route modules (web/routes/strategies.py's card quote
+# lookup) need this same cached lookup and must not reach across module
+# boundaries into a name prefixed `_private`.
+cached_quote = _cached_quote
+
+
 # Deliberately shallow: matches the first "price <op> number" it finds in a
 # rule's condition text. Conditions like "rsi < 30" or compound boolean
 # expressions ("price < 205 and position_weight < target_weight" -- the

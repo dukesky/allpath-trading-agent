@@ -2,7 +2,7 @@
 {% block title %}Strategies · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Strategies</h1>
-<p class="hint" style="margin-top:0">draft: not yet live · active: monitored hourly · paused: temporarily off · archived: kept for reference</p>
+<p class="hint" style="margin-top:0">draft: not yet live · active: evaluated on every sentinel pass during market hours · paused: temporarily off · archived: kept for reference</p>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% for d in docs %}
 {% set card = cards[d.id] %}

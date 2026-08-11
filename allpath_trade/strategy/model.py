@@ -118,11 +118,12 @@ class StrategyDoc(BaseModel):
     position: PositionPlan
     rules: list[Rule] = []
     review: ReviewPolicy = ReviewPolicy()
-    # A notification preference, not a trading parameter -- this is the one
-    # field the web UI is allowed to write directly (see
-    # web/routes/strategies.py's notify-email toggle). Defaults True so a
-    # YAML written before this field existed keeps notifying exactly as it
-    # always did.
+    # A notification preference, not a trading parameter -- one of two
+    # fields the web UI is allowed to write directly (see
+    # web/routes/strategies.py's notify-email toggle; `status` is the
+    # other, via that same module's lifecycle-transition route). Defaults
+    # True so a YAML written before this field existed keeps notifying
+    # exactly as it always did.
     notify_email: bool = True
 
     @model_validator(mode="after")

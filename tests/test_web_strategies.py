@@ -1,9 +1,13 @@
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings
 from allpath_trade.strategy.model import RuleState
 from allpath_trade.web.app import create_app
+from allpath_trade.web.routes import dashboard as dashboard_route
 from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 
@@ -395,6 +399,45 @@ def test_detail_page_activate_button_has_confirmation(client):
     assert "onsubmit=" in body
     assert "confirm(" in body
     assert "sentinel will evaluate" in body.lower()
+    # M5: the interval is user-editable (sentinel_interval_minutes) -- the
+    # dialog must not hardcode "hourly"/"every hour".
+    assert "every hour" not in body.lower()
+    assert "hourly" not in body.lower()
+
+
+def test_detail_page_activate_button_confirmation_warns_about_pending_revisions(client):
+    # M7: activating/resuming/pausing rewrites the strategy YAML, so any
+    # pending revision proposal for it (diffed against the pre-change file)
+    # would no longer apply cleanly -- the confirm dialog must say so.
+    _write_strategy_with_status(client, "draftstrat", "draft")
+    body = client.get("/strategies/draftstrat").text
+    assert "pending revision proposal for this strategy will need re-proposing" in body
+
+
+def test_detail_page_pause_button_confirmation_warns_about_pending_revisions(client):
+    body = client.get("/strategies/semis").text
+    assert "pending revision proposal for this strategy will need re-proposing" in body
+
+
+def test_detail_page_resume_button_confirmation_warns_about_pending_revisions(client):
+    _write_strategy_with_status(client, "pausedstrat", "paused")
+    body = client.get("/strategies/pausedstrat").text
+    assert "pending revision proposal for this strategy will need re-proposing" in body
+
+
+def test_status_route_missing_to_field_is_not_processed_not_a_bare_422(client):
+    # M8: `to` used to be a required Form field -- posting without it hit
+    # FastAPI's own validation and returned a bare 422 JSON body, dropping
+    # the user out of the app chrome entirely. It must now behave like any
+    # other bad input to this route: a 200 back on the strategy's own page
+    # with a "not processed" message.
+    r = client.post("/strategies/semis/status", data={})
+    assert r.status_code == 200
+    assert "not processed" in r.text.lower()
+    assert '{"detail"' not in r.text
+    doc = next(d for d in client.app.state.holder.get().strategies
+               .load_all(status=None, errors=[]) if d.id == "semis")
+    assert doc.status.value == "active"  # unchanged
 
 
 # --- draft/paused not-monitored warnings ------------------------------------
@@ -444,7 +487,7 @@ def test_detail_omits_not_monitored_badge_for_active(client):
 def test_strategies_page_shows_status_legend(client):
     body = client.get("/strategies").text
     assert "draft: not yet live" in body
-    assert "active: monitored hourly" in body
+    assert "active: evaluated on every sentinel pass during market hours" in body
     assert "paused: temporarily off" in body
     assert "archived: kept for reference" in body
 
@@ -527,3 +570,49 @@ def test_strategies_page_is_english_only_with_new_content(client):
     assert_english_only(client.get("/strategies").text)
     assert_english_only(client.get("/strategies/draftstrat").text)
     assert_english_only(client.get("/strategies/bullstrat").text)
+
+
+# --- M2/M3: /strategies shares dashboard's quote budget & cache -------------
+
+def test_strategies_page_renders_within_quote_budget_when_source_hangs(client, monkeypatch):
+    # M2: strategies.py used to import QUOTES_BUDGET_SECONDS by value at
+    # import time, so shrinking dashboard_route.QUOTES_BUDGET_SECONDS in a
+    # test had no effect on this page's own quote loop. This proves the
+    # budget is read from the module at call time and is actually enforced
+    # here too, not just on the dashboard: N strategies against a hanging
+    # data source cost N * BROKER_TIMEOUT_SECONDS without the shared budget;
+    # with it, total time stays close to one BROKER_TIMEOUT_SECONDS, and the
+    # strategies whose quote lookup never started in time degrade to "—"
+    # instead of hanging the page.
+    store = client.app.state.holder.get().strategies
+    for i in range(4):
+        (store.directory / f"extra{i}.yaml").write_text(f"""
+name: "Extra {i}"
+status: active
+position: {{ticker: TICK{i}, target_weight: 5%}}
+rules: []
+""")
+    monkeypatch.setattr(dashboard_route, "BROKER_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(dashboard_route, "QUOTES_BUDGET_SECONDS", 0.05)
+    data = client.app.state.holder.get().data
+    release = threading.Event()
+
+    def hang(ticker):
+        release.wait(timeout=5)
+        raise RuntimeError("never resolves in time")
+
+    monkeypatch.setattr(data, "get_quote", hang)
+    dashboard_route._quote_cache.clear()
+
+    start = time.monotonic()
+    r = client.get("/strategies")
+    elapsed = time.monotonic() - start
+
+    assert r.status_code == 200
+    # 5 strategies total * 0.3s BROKER_TIMEOUT_SECONDS would be 1.5s without
+    # the shared budget; the budget bounds this to roughly one timeout.
+    assert elapsed < 1.0
+    # A quote that never came back renders as "—" (format.money's failure
+    # copy), never as a stuck page or a raised error.
+    assert "—" in r.text
+    release.set()  # let the background call finish so it doesn't linger
