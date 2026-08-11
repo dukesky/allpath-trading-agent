@@ -174,9 +174,20 @@ def approve(request: Request, review_id: int) -> Response:
         # the failure paths above, this is a genuine success, so it goes
         # through the `notice` channel (Finding 4) instead of `error` --
         # the page renders it with `.flash-ok`, not red error styling.
+        #
+        # Finding F2: the applier writes the revision's YAML verbatim and
+        # never touches rule_states -- a rule that was already TRIGGERED
+        # (fired, then the reflection agent proposed a tightened version of
+        # that same rule id) stays TRIGGERED after this approval, silently,
+        # unless surfaced here. `rearm_warning` never re-arms anything on
+        # its own (re-arming could re-fire a stop against an already-sold
+        # position) -- it only appends a note telling the user to do it by
+        # hand if the rule should fire again.
+        message = (f"Revision applied to {row['strategy_id']}."
+                  + c.strategies.rearm_warning(row['strategy_id']))
         _echo_resolution(request, review_id, row_source,
                          f"revision applied to {row['strategy_id']}")
-        return _back_to_reviews_ok(f"Revision applied to {row['strategy_id']}.")
+        return _back_to_reviews_ok(message)
 
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)

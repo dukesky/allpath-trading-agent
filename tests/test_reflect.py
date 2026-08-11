@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from allpath_trade import reflect as reflect_module
 from allpath_trade.agent.action_tools import register_action_tools
 from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
@@ -480,6 +482,55 @@ def test_run_daily_wires_fake_broker_failure_to_positions_unavailable(tmp_path):
     reflector.run_daily(now=NOW)
     briefing = next(m for m in llm.seen[0] if m["role"] == "user")["content"]
     assert "positions unavailable: broker down" in briefing
+
+
+class SlowFakeData(DataSource):
+    """Records every ticker it's actually asked to quote, sleeping past a
+    (monkeypatched, tiny) QUOTES_BUDGET_SECONDS on the first call -- Finding
+    F4's slow-Yahoo reproduction, without a real 10-second sleep in the test
+    suite."""
+
+    def __init__(self, sleep_seconds: float) -> None:
+        self.sleep_seconds = sleep_seconds
+        self.calls: list[str] = []
+
+    def get_quote(self, ticker):
+        self.calls.append(ticker)
+        time.sleep(self.sleep_seconds)
+        return Quote(ticker=ticker, price=Decimal(110), previous_close=Decimal(100),
+                    as_of=NOW)
+
+    def get_bars(self, ticker, days=365):
+        return []
+
+
+def test_positions_with_change_stops_quoting_once_the_deadline_is_spent(
+        tmp_path, monkeypatch):
+    """Finding F4: _positions_with_change must not let one hung
+    `data.get_quote` call stall every position behind it. A single shared
+    deadline (QUOTES_BUDGET_SECONDS) is checked before EACH call -- a
+    position whose turn comes up after the budget is already spent must
+    render "n/a" without even attempting a call, not just eventually time
+    out on its own."""
+    monkeypatch.setattr(reflect_module, "QUOTES_BUDGET_SECONDS", 0.05)
+    slow_data = SlowFakeData(sleep_seconds=0.2)
+    positions = [
+        Position(ticker=t, qty=Decimal(1), avg_entry_price=Decimal(100),
+                 market_value=Decimal(100), unrealized_pl=Decimal(0))
+        for t in ("AAPL", "MSFT", "GOOG")]
+    components = make_components(
+        tmp_path, broker=FakeBroker(positions=positions), data=slow_data)
+    reflector = Reflector(llm=None, components=components, settings=make_settings())
+
+    result = reflector._positions_with_change()
+
+    # Only the first position's call actually ran -- the deadline (0.05s)
+    # was already blown by its 0.2s sleep before the second position's turn.
+    assert slow_data.calls == ["AAPL"]
+    by_ticker = {r["ticker"]: r["day_change"] for r in result}
+    assert by_ticker["AAPL"] == "+10.00%"  # completed before the check fired
+    assert by_ticker["MSFT"] == "n/a"
+    assert by_ticker["GOOG"] == "n/a"
 
 
 def test_trades_today_swallows_journal_failure(tmp_path):

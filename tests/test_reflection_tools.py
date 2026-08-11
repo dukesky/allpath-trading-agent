@@ -294,3 +294,158 @@ def test_proposal_identical_to_current_file_is_rejected(tmp_path):
     out = call(reg, strategy_id="s1", new_yaml=CURRENT, rationale="no real change")
     assert out.startswith("error:")
     assert queue.list() == []
+
+
+# --- Finding F1: authorization/status must not move via a revision -----
+
+def test_propose_flipping_authorization_to_auto_is_rejected(tmp_path):
+    reg, _, queue = make(tmp_path)
+    auto_flip = PROPOSED.replace("name: \"S1\"", "name: \"S1\"\nauthorization: auto")
+    out = call(reg, strategy_id="s1", new_yaml=auto_flip, rationale="tighten and automate")
+    assert out.startswith("error:")
+    assert "authorization" in out
+    assert queue.list() == []
+
+
+def test_propose_dropping_status_active_is_rejected(tmp_path):
+    reg, _, queue = make(tmp_path)
+    # PROPOSED sets `status: active` explicitly (same as CURRENT); dropping
+    # the line lets StrategyDoc silently default to DRAFT.
+    no_status = PROPOSED.replace("status: active\n", "")
+    out = call(reg, strategy_id="s1", new_yaml=no_status, rationale="tighten stop")
+    assert out.startswith("error:")
+    assert "status" in out
+    assert queue.list() == []
+
+
+def test_propose_with_unchanged_authorization_and_status_passes(tmp_path):
+    reg, _, queue = make(tmp_path)
+    # CURRENT has no `authorization:` line -> defaults to `confirm`. Setting
+    # it explicitly to the SAME value the default already resolves to must
+    # still pass -- the gate compares resolved values, not raw YAML text.
+    explicit_confirm = PROPOSED.replace(
+        "name: \"S1\"", "name: \"S1\"\nauthorization: confirm")
+    out = call(reg, strategy_id="s1", new_yaml=explicit_confirm, rationale="tighten stop")
+    assert not out.startswith("error:"), out
+    assert queue.list()[0]["strategy_id"] == "s1"
+
+
+def test_propose_against_unparseable_current_file_rejects_auto(tmp_path):
+    reg, store, queue = make(tmp_path)
+    (store.directory / "s1.yaml").write_text("name: Bad\nstatus: active\n")  # missing position
+    auto_flip = PROPOSED.replace("name: \"S1\"", "name: \"S1\"\nauthorization: auto")
+    out = call(reg, strategy_id="s1", new_yaml=auto_flip, rationale="repair and automate")
+    assert out.startswith("error:")
+    assert "auto" in out
+    assert queue.list() == []
+
+
+def test_propose_against_unparseable_current_file_requires_explicit_status(tmp_path):
+    reg, store, queue = make(tmp_path)
+    (store.directory / "s1.yaml").write_text("name: Bad\nstatus: active\n")  # missing position
+    no_status = PROPOSED.replace("status: active\n", "")
+    out = call(reg, strategy_id="s1", new_yaml=no_status, rationale="repair attempt")
+    assert out.startswith("error:")
+    assert "status" in out
+    assert queue.list() == []
+
+
+def test_propose_against_unparseable_current_file_with_explicit_non_auto_status_passes(
+        tmp_path):
+    reg, store, queue = make(tmp_path)
+    (store.directory / "s1.yaml").write_text("name: Bad\nstatus: active\n")  # missing position
+    out = call(reg, strategy_id="s1", new_yaml=PROPOSED, rationale="repair attempt")
+    assert not out.startswith("error:"), out
+    assert queue.list()[0]["strategy_id"] == "s1"
+
+
+def test_applier_rejects_authorization_flip_to_auto(tmp_path):
+    _, store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    auto_flip = PROPOSED.replace("name: \"S1\"", "name: \"S1\"\nauthorization: auto")
+    with pytest.raises(RevisionValidationError, match="authorization"):
+        apply_fn("s1", auto_flip, CURRENT)
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == CURRENT
+
+
+def test_applier_rejects_status_drop(tmp_path):
+    _, store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    no_status = PROPOSED.replace("status: active\n", "")
+    with pytest.raises(RevisionValidationError, match="status"):
+        apply_fn("s1", no_status, CURRENT)
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == CURRENT
+
+
+def test_applier_allows_unchanged_authorization_and_status(tmp_path):
+    _, store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    explicit_confirm = PROPOSED.replace(
+        "name: \"S1\"", "name: \"S1\"\nauthorization: confirm")
+    apply_fn("s1", explicit_confirm, CURRENT)
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == explicit_confirm
+
+
+def test_applier_rejects_authorization_auto_against_unparseable_base(tmp_path):
+    _, store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    unparseable_base = "name: Bad\nstatus: active\n"  # missing position
+    # Gate 3 (exact-text match) checks the FILE's current text against
+    # `expected_base_yaml` before this check ever runs -- so the on-disk
+    # file has to actually be the unparseable text, not just the argument.
+    (store.directory / "s1.yaml").write_text(unparseable_base)
+    auto_flip = PROPOSED.replace("name: \"S1\"", "name: \"S1\"\nauthorization: auto")
+    with pytest.raises(RevisionValidationError, match="auto"):
+        apply_fn("s1", auto_flip, unparseable_base)
+
+
+def test_applier_rejects_missing_status_against_unparseable_base(tmp_path):
+    _, store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    unparseable_base = "name: Bad\nstatus: active\n"  # missing position
+    (store.directory / "s1.yaml").write_text(unparseable_base)
+    no_status = PROPOSED.replace("status: active\n", "")
+    with pytest.raises(RevisionValidationError, match="status"):
+        apply_fn("s1", no_status, unparseable_base)
+
+
+def test_applier_allows_explicit_non_auto_status_against_unparseable_base(tmp_path):
+    _, store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    unparseable_base = "name: Bad\nstatus: active\n"  # missing position
+    (store.directory / "s1.yaml").write_text(unparseable_base)
+    apply_fn("s1", PROPOSED, unparseable_base)
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == PROPOSED
+
+
+# --- Finding F2: an approved revision must not silently re-arm a burned
+# trigger state (StrategyStore.rearm_warning / not_armed_rules) -----------
+
+def test_not_armed_rules_reports_rules_whose_state_is_not_armed(tmp_path):
+    from allpath_trade.strategy.model import RuleState
+
+    _, store, _ = make(tmp_path)
+    store.set_rule_state("s1", "r1", RuleState.TRIGGERED)
+    stuck = store.not_armed_rules("s1")
+    assert [r.id for r in stuck] == ["r1"]
+    assert stuck[0].state == RuleState.TRIGGERED
+
+
+def test_rearm_warning_is_empty_when_every_rule_is_armed(tmp_path):
+    _, store, _ = make(tmp_path)
+    assert store.rearm_warning("s1") == ""
+
+
+def test_rearm_warning_names_the_triggered_rule_and_never_re_arms_it(tmp_path):
+    from allpath_trade.strategy.model import RuleState
+
+    _, store, _ = make(tmp_path)
+    store.set_rule_state("s1", "r1", RuleState.TRIGGERED)
+
+    warning = store.rearm_warning("s1")
+
+    assert "r1" in warning and "triggered" in warning
+    assert "re-arm" in warning
+    # The warning is purely informational -- it must never itself flip the
+    # rule back to armed.
+    assert store.load("s1").rules[0].state == RuleState.TRIGGERED

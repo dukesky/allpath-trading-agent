@@ -141,13 +141,22 @@ def _approve_needs_broker(settings: Settings, review_id: int) -> bool:
     conservative default (broker required) so `cmd_reviews` still gets to
     report its own "review not found" error rather than this silently
     swallowing it."""
+    # F6: this throwaway connection was never closed -- every `reviews
+    # approve` invocation (the common case, not just this function's own
+    # narrow strategy_revision check) leaked one sqlite connection for the
+    # life of the process. try/finally rather than a `with` block: the
+    # LockedConnection connect() returns doesn't implement the context
+    # manager protocol (see store/db.py) -- only .close().
     conn = connect(settings.db_path)
-    row = conn.execute(
-        "SELECT kind FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
-    return row is None or row["kind"] != "strategy_revision"
+    try:
+        row = conn.execute(
+            "SELECT kind FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+        return row is None or row["kind"] != "strategy_revision"
+    finally:
+        conn.close()
 
 
-def cmd_reviews(q, args) -> int:
+def cmd_reviews(q, args, store=None) -> int:
     from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 
     try:
@@ -174,7 +183,13 @@ def cmd_reviews(q, args) -> int:
                       f"pending: {exc}", file=sys.stderr)
                 return 1
             if kind == "strategy_revision":
-                print(f"Revision applied to {strategy_id}.")
+                # Finding F2: mirror the web approve flow's warning -- see
+                # StrategyStore.rearm_warning's docstring for why this never
+                # re-arms anything on its own. `store` is None only in
+                # cmd_reviews' own tests that construct a bare queue; every
+                # real caller (main(), below) passes the StrategyStore.
+                note = store.rearm_warning(strategy_id) if store is not None else ""
+                print(f"Revision applied to {strategy_id}.{note}")
             else:
                 print("executed" if result.submitted
                       else f"rejected by risk gate: {'; '.join(result.decision.reasons)}")
@@ -581,7 +596,7 @@ def main(argv: list[str] | None = None,
     if args.command == "rearm":
         return cmd_rearm(store, args.strategy_id, args.rule_id)
     if args.command == "reviews":
-        return cmd_reviews(queue, args)
+        return cmd_reviews(queue, args, store)
     if args.command == "chat":
         from allpath_trade.llm.factory import LLMConfigError, build_llm
 

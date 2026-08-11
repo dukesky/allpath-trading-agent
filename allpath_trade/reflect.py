@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time as time_module
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from typing import Any
@@ -42,6 +43,18 @@ MAX_BLOCK_CHARS = 2000
 MAX_STRATEGY_CHARS = 3000
 MAX_THESIS_CHARS = 300
 MAX_SUMMARY_CHARS = 600
+
+# Finding F4: one shared deadline for the whole day-change quote loop below
+# (Reflector._positions_with_change), not a per-ticker timeout -- same
+# precedent as web/routes/dashboard.py's QUOTES_BUDGET_SECONDS. Without it, a
+# single hung `data.get_quote` call at 16:05 (Yahoo down, DNS wedged, ...)
+# stalls not just this one position's day-change but the entire daily chain
+# behind it: run_daily blocks, the sentinel's next tick can't start behind
+# the same broker/data pool, and the reflection report itself is never
+# written. Positions whose quote isn't fetched before the deadline lands
+# render "n/a" (the same fallback an individual quote failure already used)
+# rather than block indefinitely.
+QUOTES_BUDGET_SECONDS = 10
 
 _TRUNCATION_NOTE = "\n... (truncated)"
 _FRONT_TRUNCATION_NOTE = "... (older observations truncated)\n"
@@ -507,15 +520,22 @@ class Reflector:
             return [{"ticker": "n/a", "qty": "n/a", "avg_entry_price": "n/a",
                     "day_change": "n/a", "note": f"positions unavailable: {exc}"}]
         result = []
+        # F4: one shared deadline for this whole loop -- see
+        # QUOTES_BUDGET_SECONDS' module comment. Checked before each
+        # get_quote call, not just once up front: a position already past
+        # the deadline never starts a new call at all, it renders "n/a"
+        # immediately, same as an individual quote failure.
+        deadline = time_module.monotonic() + QUOTES_BUDGET_SECONDS
         for p in positions:
             day_change = "n/a"
-            try:
-                q = self.components.data.get_quote(p.ticker)
-                if q.previous_close:
-                    pct = (q.price - q.previous_close) / q.previous_close * 100
-                    day_change = f"{pct:+.2f}%"
-            except Exception:  # noqa: BLE001 — one bad quote must not fail the briefing
-                day_change = "n/a"
+            if time_module.monotonic() < deadline:
+                try:
+                    q = self.components.data.get_quote(p.ticker)
+                    if q.previous_close:
+                        pct = (q.price - q.previous_close) / q.previous_close * 100
+                        day_change = f"{pct:+.2f}%"
+                except Exception:  # noqa: BLE001 — one bad quote must not fail the briefing
+                    day_change = "n/a"
             result.append({
                 "ticker": p.ticker, "qty": str(p.qty),
                 "avg_entry_price": str(p.avg_entry_price), "day_change": day_change})

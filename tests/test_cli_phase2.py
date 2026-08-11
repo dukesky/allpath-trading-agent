@@ -128,6 +128,28 @@ def test_reviews_approve_on_a_revision_row_applies_it(tmp_path, capsys, monkeypa
     assert (tmp_path / "strategies" / "t.yaml").read_text() == VALID_REVISION_YAML
 
 
+def test_reviews_approve_warns_when_the_revised_rule_is_still_triggered(
+        tmp_path, capsys, monkeypatch):
+    # Finding F2, CLI-side mirror of the web approve flow's warning.
+    from allpath_trade.store.db import connect
+    from allpath_trade.strategy.model import RuleState
+    from allpath_trade.strategy.store import StrategyStore
+
+    setup_env(tmp_path, monkeypatch)
+    conn = connect(tmp_path / "allpath-trade.db")
+    StrategyStore(tmp_path / "strategies", conn).set_rule_state("t", "r1", RuleState.TRIGGERED)
+    conn.close()
+    rid = _queue_revision(tmp_path)
+
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Revision applied to t." in out
+    assert "r1 is still triggered" in out
+    assert "re-arm" in out
+
+
 def test_reviews_approve_on_a_stale_revision_leaves_it_pending(
         tmp_path, capsys, monkeypatch):
     setup_env(tmp_path, monkeypatch)

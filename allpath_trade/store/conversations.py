@@ -63,7 +63,7 @@ class ConversationStore:
         return [(r["id"], json.loads(r["message"])) for r in rows]
 
     def turns_since(self, after_turn_id: int = 0,
-                    limit: int | None = None) -> list[tuple[int, dict]]:
+                    limit: int | None = None) -> list[tuple[int, str, dict]]:
         """All turns across every conversation with id > after_turn_id,
         oldest first. Unlike `history`/`history_with_ids`, which are scoped
         to one conversation (a single chat session), this spans the whole
@@ -80,14 +80,28 @@ class ConversationStore:
         not just doing extra work. Defaults to `None` (unbounded) to keep
         existing direct callers/tests working; production consolidation
         always passes an explicit bound (see `TURN_FETCH_LIMIT` in
-        `memory/consolidate.py`)."""
-        query = "SELECT id, message FROM conversation_turns WHERE id > ? ORDER BY id"
+        `memory/consolidate.py`).
+
+        Finding F3: each row now carries its owning conversation's `kind`
+        (JOINed from `conversations` -- "chat" for web/terminal,
+        "reflection" for the daily reflection pass, see
+        `ConversationStore.start`) alongside the turn id and message,
+        instead of just `(id, message)`. Without it, the consolidator's
+        `_turn_lines` had no way to tell a reflection session's turns apart
+        from the user's own conversation, and prefixed every one of them
+        `[chat]` -- misattributing a reflection hypothesis to the user
+        while also telling the summarizing LLM (CONSOLIDATE_PROMPT) it was
+        reading actual user/assistant conversation."""
+        query = ("SELECT t.id AS id, c.kind AS kind, t.message AS message"
+                 " FROM conversation_turns t"
+                 " JOIN conversations c ON c.id = t.conversation_id"
+                 " WHERE t.id > ? ORDER BY t.id")
         params: tuple = (after_turn_id,)
         if limit is not None:
             query += " LIMIT ?"
             params = (after_turn_id, limit)
         rows = self._conn.execute(query, params)
-        return [(r["id"], json.loads(r["message"])) for r in rows]
+        return [(r["id"], r["kind"], json.loads(r["message"])) for r in rows]
 
     def summary(self, conversation_id: int) -> tuple[str, int]:
         row = self._conn.execute(

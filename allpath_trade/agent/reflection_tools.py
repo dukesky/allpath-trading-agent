@@ -13,6 +13,7 @@ from allpath_trade.strategy.loader import (
     is_valid_strategy_id,
     parse_strategy_text,
 )
+from allpath_trade.strategy.model import Authorization
 from allpath_trade.strategy.store import StrategyStore
 
 # Tool-arg hygiene: a reflection session's rationale is model-generated free
@@ -101,6 +102,47 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
             return (f"error: invalid strategy revision for '{strategy_id}': "
                     "version must be a positive integer")
 
+        # Finding 1: a reflection proposal must never move `authorization`
+        # or `status` -- this tool's whole premise (spec §④: "无下单、无确认类
+        # 工具") is that the reflection agent can change thesis/rules but
+        # every resulting order still goes through a human. `authorization:
+        # auto` on a soft-rule strategy erases that human -- the review
+        # agent that reads the reflection's own proposal would be approving
+        # its own orders. Dropping `status: active` is quieter but just as
+        # real: StrategyDoc defaults `status` to DRAFT, so an omitted field
+        # silently takes the strategy out of sentinel monitoring, stop-losses
+        # included, with no error anywhere. Checked against `current_doc`
+        # (already parsed above for the version check) so a same-value
+        # proposal -- the overwhelmingly common case -- passes untouched.
+        if current_doc is not None:
+            if (doc.authorization != current_doc.authorization
+                    or doc.status != current_doc.status):
+                return (f"error: invalid strategy revision for '{strategy_id}': "
+                        "reflection proposals cannot change authorization or "
+                        "status -- thesis and rules only")
+        else:
+            # Repair case: the current file doesn't parse, so there is no
+            # base authorization/status to diff against. Fail conservative
+            # rather than skip the gate: reject `auto` outright (no base
+            # means no way to know this wasn't a flip), and require the
+            # repair proposal to state `status:` explicitly rather than
+            # silently accepting StrategyDoc's DRAFT default -- the same
+            # silent-monitoring-stop risk the normal-case check above
+            # exists to catch, just without a base to compare it to. `raw`
+            # is guaranteed a dict here: parse_strategy_text (used to build
+            # `doc` above) would have raised on anything else, and that
+            # error already returned before this point.
+            if doc.authorization == Authorization.AUTO:
+                return (f"error: invalid strategy revision for '{strategy_id}': "
+                        "reflection proposals against an unparseable current "
+                        "file cannot set authorization: auto -- no base to "
+                        "compare, failing conservative")
+            if "status" not in raw:
+                return (f"error: invalid strategy revision for '{strategy_id}': "
+                        "reflection proposals against an unparseable current "
+                        "file must set status: explicitly -- no base to "
+                        "compare, failing conservative")
+
         diff = "\n".join(difflib.unified_diff(
             old_yaml.splitlines(), new_yaml.splitlines(),
             fromfile=f"{strategy_id} (current)", tofile=f"{strategy_id} (proposed)",
@@ -180,6 +222,41 @@ def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str], No
             doc = parse_strategy_text(strategy_id, new_yaml)
         except StrategyValidationError as exc:
             raise RevisionValidationError(str(exc)) from exc
+        # 4. Finding 1: authorization/status must not move via a revision --
+        #    mirrors propose_strategy_revision's own gate (above, same file)
+        #    so an approval reached around that tool (a corrupt/hand-edited
+        #    queue row, or a future second caller of this applier) can't
+        #    still flip a strategy to `auto` or silently drop `status:
+        #    active`. Gate 3 above already proved `expected_base_yaml` is
+        #    byte-for-byte the file's current text, so it doubles as the
+        #    comparison base here. When it doesn't itself parse (a repair
+        #    proposal against an already-broken file) there's no base value
+        #    to diff against -- fail conservative the same way the propose-
+        #    time gate does: reject `auto` outright, and require the
+        #    proposal to set `status:` explicitly. All before the write
+        #    below, per this function's pre-flight ordering contract.
+        try:
+            base_doc = parse_strategy_text(strategy_id, expected_base_yaml)
+        except StrategyValidationError:
+            base_doc = None
+        if base_doc is not None:
+            if (doc.authorization != base_doc.authorization
+                    or doc.status != base_doc.status):
+                raise RevisionValidationError(
+                    "reflection proposals cannot change authorization or "
+                    "status -- thesis and rules only")
+        else:
+            if doc.authorization == Authorization.AUTO:
+                raise RevisionValidationError(
+                    "reflection proposals against an unparseable base "
+                    "strategy cannot set authorization: auto -- no base to "
+                    "compare, failing conservative")
+            raw = yaml.safe_load(new_yaml)
+            if not (isinstance(raw, dict) and "status" in raw):
+                raise RevisionValidationError(
+                    "reflection proposals against an unparseable base "
+                    "strategy must set status: explicitly -- no base to "
+                    "compare, failing conservative")
         # No version bump here: `new_yaml` is written verbatim. Gate 3 above
         # already guarantees the base didn't move underneath this proposal,
         # and propose_strategy_revision's version check already guaranteed

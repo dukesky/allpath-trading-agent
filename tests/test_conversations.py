@@ -100,14 +100,32 @@ def test_turns_since_respects_limit_and_stays_oldest_first(tmp_path):
         s.append(cid, {"role": "user", "content": f"turn {i}"})
 
     first_page = s.turns_since(0, limit=3)
-    assert [m["content"] for _tid, m in first_page] == ["turn 0", "turn 1", "turn 2"]
+    assert [m["content"] for _tid, _kind, m in first_page] == ["turn 0", "turn 1", "turn 2"]
 
     last_id = first_page[-1][0]
     second_page = s.turns_since(last_id, limit=3)
-    assert [m["content"] for _tid, m in second_page] == ["turn 3", "turn 4"]
+    assert [m["content"] for _tid, _kind, m in second_page] == ["turn 3", "turn 4"]
 
     # limit=None (the default) keeps the old unbounded behavior
     assert len(s.turns_since(0)) == 5
+
+
+def test_turns_since_carries_the_owning_conversations_kind(tmp_path):
+    # Finding F3: turns_since now returns (id, kind, message) instead of
+    # (id, message) -- the consolidator needs the OWNING conversation's kind
+    # (chat vs. reflection) to attribute each line correctly instead of
+    # hardcoding "[chat]" for everything it reads (see memory/consolidate.py
+    # Consolidator._turn_lines).
+    s = make(tmp_path)
+    chat_cid = s.start()  # kind="chat" default
+    reflection_cid = s.start(kind="reflection")
+    s.append(chat_cid, {"role": "user", "content": "chat turn"})
+    s.append(reflection_cid, {"role": "assistant", "content": "reflection turn"})
+
+    turns = s.turns_since(0)
+
+    kinds_by_content = {m["content"]: kind for _tid, kind, m in turns}
+    assert kinds_by_content == {"chat turn": "chat", "reflection turn": "reflection"}
 
 
 def test_a_system_note_is_indexed_by_its_readable_display_text(tmp_path):

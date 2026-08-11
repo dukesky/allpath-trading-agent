@@ -340,6 +340,38 @@ def test_pending_revision_card_shows_stale_warning_when_file_changed(client):
     assert client.app.state.holder.get().queue.get(rid)["status"] == "pending"
 
 
+def test_approve_revision_warns_when_the_revised_rule_is_still_triggered(client):
+    # Finding F2: the applier writes the revision's YAML verbatim and never
+    # touches rule_states -- a rule that fired (state TRIGGERED) before the
+    # reflection agent proposed a tightened version of that SAME rule id
+    # stays TRIGGERED after this approval, silently, unless the flash notice
+    # says so. Never auto re-arms (re-arming could re-fire a stop against an
+    # already-sold position) -- purely informational.
+    from allpath_trade.strategy.model import RuleState
+
+    rid = queue_revision(client)
+    strategies = client.app.state.holder.get().strategies
+    strategies.set_rule_state("s1", "r1", RuleState.TRIGGERED)
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+    assert r.status_code == 303
+    body = client.get(r.headers["location"]).text
+
+    assert "Revision applied to s1." in body
+    assert "r1 is still triggered" in body
+    assert "re-arm" in body
+    # Never silently re-armed.
+    assert strategies.load("s1").rules[0].state == RuleState.TRIGGERED
+
+
+def test_approve_revision_omits_the_note_when_the_rule_is_armed(client):
+    rid = queue_revision(client)
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+    body = client.get(r.headers["location"]).text
+    assert "Revision applied to s1." in body
+    assert "re-arm" not in body
+
+
 def test_resolved_revision_card_shows_recorded_diff_not_a_live_recompute(client):
     rid = queue_revision(client)
     client.post(f"/reviews/{rid}/reject", follow_redirects=False)

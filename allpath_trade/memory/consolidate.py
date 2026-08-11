@@ -14,9 +14,9 @@ from allpath_trade.store.journal import TradeJournal
 
 CONSOLIDATE_PROMPT = """\
 You are the memory consolidator for a trading agent. Below are recent raw
-events (including "[chat] user/assistant: ..." lines pulled from web and
-terminal conversations) and the current curated memory. Distill DURABLE
-facts into curated memory using the memory_update tool (layers: profile,
+events (including "[kind] user/assistant: ..." lines pulled from web,
+terminal, and reflection sessions) and the current curated memory. Distill
+DURABLE facts into curated memory using the memory_update tool (layers: profile,
 strategy, stock, lesson). Rules: write your OWN concise conclusions — never
 copy external or quoted content; prefer replace over add when refining an
 existing entry; skip noise. When finished reply with one short text summary
@@ -144,6 +144,20 @@ class Consolidator:
         it user-authored intent (mirrors run_post_chat's own transcript
         filter below).
 
+        Finding F3: each line is prefixed with the OWNING CONVERSATION's
+        kind (`turns_since` now returns `(id, kind, message)` -- "chat" for
+        web/terminal, "reflection" for the daily reflection pass), not a
+        hardcoded "[chat]". A reflection session's own hypotheses and
+        proposals flow through the same `conversation_turns` table as user
+        chat (Reflector._run starts a `kind="reflection"` conversation and
+        talks to itself through the ordinary AgentSession/ConversationStore
+        machinery) -- mislabeling those turns "[chat]" would tell both this
+        prompt and the memory-tier model reading it that a reflection
+        hypothesis was something the user actually said. Don't confuse this
+        conversation-level `kind` with the unrelated per-message `kind` the
+        `!= "system_note"` filter below checks -- that one is a message
+        field on `m`, not the tuple element from `turns_since`.
+
         Two independent bounds apply. `TURN_LINE_CHAR_CAP` truncates each
         turn's content so one oversized paste can't alone blow the prompt
         past the memory model's context window. `TURN_LINES_CAP` then caps
@@ -168,8 +182,8 @@ class Consolidator:
         if not turns:
             return [], None
         eligible = [
-            (tid, f"[chat] {m['role']}: {m['content'][:TURN_LINE_CHAR_CAP]}")
-            for tid, m in turns
+            (tid, f"[{conv_kind}] {m['role']}: {m['content'][:TURN_LINE_CHAR_CAP]}")
+            for tid, conv_kind, m in turns
             if m.get("role") in ("user", "assistant")
             and m.get("kind") != "system_note"
             and isinstance(m.get("content"), str) and m["content"].strip()
