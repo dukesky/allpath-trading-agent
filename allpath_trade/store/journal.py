@@ -34,7 +34,8 @@ class TradeJournal:
                 json.dumps(decision.reasons),
                 order.id if order else None,
                 str(order.filled_qty) if order else None,
-                str(order.filled_avg_price) if order and order.filled_avg_price is not None else None,
+                (str(order.filled_avg_price)
+                 if order and order.filled_avg_price is not None else None),
             ),
         )
         self._conn.commit()

@@ -190,6 +190,37 @@ def test_refresh_failure_leaves_submitted_row_untouched(tmp_path):
     assert row["filled_avg_price"] is None
 
 
+def test_refresh_write_failure_leaves_submitted_row_untouched(tmp_path, monkeypatch):
+    """refresh_fill DB write failure must not escape execute().
+
+    The comment at line 76 promises: "a failed poll ... leave the
+    as-submitted row alone rather than retrying or raising". That guarantee
+    extends to the write: poll + write degrade together, not separately.
+    If refresh_fill() raises, the order stays journaled as submitted."""
+    ex, broker, journal = make_executor(tmp_path)
+    refreshed_order = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                            notional=Decimal(500), status=OrderStatus.FILLED,
+                            filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                            submitted_at=datetime.now(UTC))
+    broker.refill = refreshed_order
+
+    # Monkeypatch refresh_fill to raise a DB error
+    def failing_refresh_fill(trade_id, order):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(journal, "refresh_fill", failing_refresh_fill)
+
+    # execute() must return success, not raise
+    res = ex.execute(buy())
+    assert res.submitted
+    assert res.order.id == "o1"
+
+    # Journal row must be as-submitted, not updated
+    [row] = journal.recent()
+    assert row["status"] == "submitted"
+    assert row["filled_qty"] == "0"
+    assert row["filled_avg_price"] is None
+
+
 def test_already_filled_order_skips_refresh_poll(tmp_path):
     ex, broker, journal = make_executor(tmp_path)
     broker.fill_immediately = True

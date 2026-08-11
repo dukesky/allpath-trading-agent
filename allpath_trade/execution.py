@@ -79,8 +79,8 @@ class Executor:
             # in, but this is not the place to build a polling loop.
             try:
                 refreshed = self.broker.get_order(order.id)
-            except Exception:  # noqa: BLE001 — a failed poll must not fail the submit
-                refreshed = None
-            if refreshed is not None:
-                self.journal.refresh_fill(trade_id, refreshed)
+                if refreshed is not None:
+                    self.journal.refresh_fill(trade_id, refreshed)
+            except Exception:  # noqa: BLE001, S110 — poll + write degrade together
+                pass
         return ExecutionResult(submitted=True, order=order, decision=decision)
