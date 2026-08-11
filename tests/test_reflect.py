@@ -199,6 +199,33 @@ def test_build_briefing_reports_a_real_fill():
     assert "filled 10 @ 150.25" in briefing
 
 
+def test_build_briefing_fill_line_includes_the_actual_fill_time_when_known():
+    # Motivating bug: the agent once conflated submission ts with fill time,
+    # 17 hours off. When filled_at is known, the briefing must show it
+    # distinctly from the submission ts already at the start of the line.
+    briefing = build_briefing(
+        et_date=ET_DATE,
+        trades=[{"ts": "2024-01-10T09:00:00+00:00", "side": "buy", "ticker": "AAPL",
+                "qty": "10", "status": "filled", "filled_qty": "10",
+                "filled_avg_price": "150.25", "filled_at": "2024-01-10T15:00:00+00:00",
+                "strategy_id": "t"}],
+        observations=[], positions=[], pending_counts={})
+    assert "filled 10 @ 150.25 at 2024-01-10T15:00:00" in briefing
+
+
+def test_build_briefing_fill_line_degrades_gracefully_without_filled_at():
+    # Rows journaled before this column existed (or not yet refreshed) have
+    # no filled_at -- the line must still read cleanly, no "at None".
+    briefing = build_briefing(
+        et_date=ET_DATE,
+        trades=[{"ts": "2024-01-10T09:00:00+00:00", "side": "buy", "ticker": "AAPL",
+                "qty": "10", "status": "filled", "filled_qty": "10",
+                "filled_avg_price": "150.25", "strategy_id": "t"}],
+        observations=[], positions=[], pending_counts={})
+    assert "filled 10 @ 150.25" in briefing
+    assert " at None" not in briefing
+
+
 def test_build_briefing_caps_trades_and_observations():
     # Deliberately short field values: MAX_TRADES/MAX_OBSERVATION_LINES are
     # meant to bind before the 2000-char-per-block backstop does (that

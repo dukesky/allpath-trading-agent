@@ -19,6 +19,23 @@ def _default_search(query: str, max_results: int = 5) -> list[dict]:
     return list(DDGS().text(query, max_results=max_results))
 
 
+def _format_recent_trade(r) -> str:
+    # Honesty fix (fill-honesty round): the journal's `ts` is submission
+    # time, not fill time -- conflating the two is exactly the bug that
+    # motivated this change (the agent told the user a Sunday-evening
+    # submission was the fill, 17 hours off). Label it "submitted" and only
+    # claim a fill when filled_avg_price is actually populated (mirrors
+    # reflect._format_trade's own filled_avg_price-not-filled_qty reasoning).
+    line = (f"  submitted {r['ts'][:19]} {r['side']} {r['ticker']} "
+           f"[{r['status']}] {r['reason']}")
+    if r["filled_avg_price"] is not None:
+        filled_at = str(r["filled_at"])[:19] if r["filled_at"] else "unknown time"
+        line += f" filled {filled_at} @ {r['filled_avg_price']}"
+    elif r["status"] == "submitted":
+        line += " fill pending"
+    return line
+
+
 def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
                             broker: Broker, journal: TradeJournal,
                             strategies: StrategyStore, queue: ReviewQueue,
@@ -55,8 +72,7 @@ def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
         recent = journal.recent(limit=5)
         if recent:
             lines.append("recent trades:")
-            lines.extend(f"  {r['ts'][:19]} {r['side']} {r['ticker']} "
-                         f"[{r['status']}] {r['reason']}" for r in recent)
+            lines.extend(_format_recent_trade(r) for r in recent)
         return "\n".join(lines)
 
     def list_strategies() -> str:

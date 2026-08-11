@@ -589,7 +589,8 @@ def main(argv: list[str] | None = None,
         daily_job = (daily if (components.reflector is not None
                                or components.consolidator is not None) else None)
         run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
-                   daily_job=daily_job, app_state=components.app_state)
+                   daily_job=daily_job, app_state=components.app_state,
+                   journal=components.journal, broker=components.broker)
         return 0
     if args.command == "strategies":
         return cmd_strategies(settings, store)

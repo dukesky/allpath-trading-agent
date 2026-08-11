@@ -228,7 +228,8 @@ class _FakeRunConsolidator:
 
 
 def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
-    def fake_run_daemon(sentinel_factory, interval, daily_job=None, app_state=None):
+    def fake_run_daemon(sentinel_factory, interval, daily_job=None, app_state=None,
+                        journal=None, broker=None):
         captured["daily_job"] = daily_job
         if daily_job is not None:
             daily_job()
@@ -245,6 +246,7 @@ def test_run_daily_job_runs_reflection_before_consolidation_isolated(
     consolidator = _FakeRunConsolidator()
     fake_components = SimpleNamespace(
         strategies=None, queue=None, sentinel=None, app_state=None,
+        journal=None, broker=None,
         reflector=reflector, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)
@@ -271,6 +273,7 @@ def test_run_daily_job_skips_reflection_when_setting_disabled(tmp_path, monkeypa
     consolidator = _FakeRunConsolidator()
     fake_components = SimpleNamespace(
         strategies=None, queue=None, sentinel=None, app_state=None,
+        journal=None, broker=None,
         reflector=reflector, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)
@@ -292,6 +295,7 @@ def test_run_daily_job_skips_reflection_cleanly_when_no_reflector_configured(
     consolidator = _FakeRunConsolidator()
     fake_components = SimpleNamespace(
         strategies=None, queue=None, sentinel=None, app_state=None,
+        journal=None, broker=None,
         reflector=None, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)

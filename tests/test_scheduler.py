@@ -170,11 +170,34 @@ class FakeHolder:
 
 
 class FakeJournal:
-    def __init__(self, trades=0):
+    def __init__(self, trades=0, unfilled=None):
         self._trades = trades
+        self._unfilled = unfilled if unfilled is not None else []
+        self.refreshed = []
 
     def trades_today(self):
         return self._trades
+
+    def unfilled_recent(self, hours=48):
+        return self._unfilled
+
+    def refresh_fill(self, trade_id, order):
+        self.refreshed.append((trade_id, order))
+
+
+class FakeSchedulerBroker:
+    """Minimal Broker stand-in for the fill-refresh sweep (deliverable 2) --
+    build_jobs/run_daemon only need something to pass through to
+    refresh_pending_fills; the sweep's own behavior is covered by
+    test_execution.py, so this just records get_order calls."""
+
+    def __init__(self, orders=None):
+        self._orders = orders or {}
+        self.get_order_calls = []
+
+    def get_order(self, order_id):
+        self.get_order_calls.append(order_id)
+        return self._orders[order_id]
 
 
 class FakeQueue:
@@ -220,12 +243,13 @@ class DigestNotifier:
 
 def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5,
                 journal=None, queue=None, notifier=None, observations=None,
-                app_state=None, reflector=None, daily_reflection=True):
+                app_state=None, reflector=None, daily_reflection=True, broker=None):
     return SimpleNamespace(
         sentinel=sentinel,
         consolidator=consolidator,
         reflector=reflector,
         journal=journal if journal is not None else FakeJournal(),
+        broker=broker if broker is not None else FakeSchedulerBroker(),
         queue=queue if queue is not None else FakeQueue(),
         notifier=notifier if notifier is not None else DigestNotifier(),
         observations=observations if observations is not None else FakeObservations(),
@@ -603,6 +627,76 @@ def test_build_jobs_sentinel_runs_even_if_heartbeat_write_fails(monkeypatch, cap
 
 
 # -- build_jobs: daily reflection (Task 5) --
+
+
+# -- build_jobs / run_daemon: fill-refresh sweep (fill-honesty round) --
+
+
+def test_build_jobs_refreshes_pending_fills_even_when_market_closed(monkeypatch):
+    # The whole point: an order queued outside market hours fills at the
+    # next open, and the first pass after that open must pick it up. It
+    # must also run on a closed-market tick so nothing waits an extra
+    # interval once the market does open.
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    order = SimpleNamespace(status=SimpleNamespace(value="filled"))
+    journal = FakeJournal(unfilled=[{"id": 1, "broker_order_id": "o1"}])
+    broker = FakeSchedulerBroker(orders={"o1": order})
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=FakeSentinel(), journal=journal, broker=broker)))
+
+    scheduler.job()
+
+    assert broker.get_order_calls == ["o1"]
+    assert journal.refreshed == [(1, order)]
+
+
+def test_build_jobs_refreshes_pending_fills_when_market_open(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    order = SimpleNamespace(status=SimpleNamespace(value="filled"))
+    journal = FakeJournal(unfilled=[{"id": 1, "broker_order_id": "o1"}])
+    broker = FakeSchedulerBroker(orders={"o1": order})
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=FakeSentinel(), journal=journal, broker=broker)))
+
+    scheduler.job()
+
+    assert journal.refreshed == [(1, order)]
+
+
+def test_build_jobs_fill_refresh_failure_does_not_stop_the_sentinel_pass(
+        monkeypatch, capsys):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+
+    class RaisingJournal:
+        def unfilled_recent(self, hours=48):
+            raise RuntimeError("db locked")
+
+    sentinel = FakeSentinel()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=sentinel, journal=RaisingJournal(), broker=FakeSchedulerBroker())))
+
+    scheduler.job()  # must not raise
+
+    assert sentinel.calls == 1
+    stderr = capsys.readouterr().err
+    assert "fill-refresh" in stderr and "failed" in stderr
+
+
+def test_run_daemon_refreshes_pending_fills(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    order = SimpleNamespace(status=SimpleNamespace(value="filled"))
+    journal = FakeJournal(unfilled=[{"id": 7, "broker_order_id": "o7"}])
+    broker = FakeSchedulerBroker(orders={"o7": order})
+
+    run_daemon(lambda: None, 5, scheduler_cls=ImmediateScheduler,
+              journal=journal, broker=broker)
+
+    assert journal.refreshed == [(7, order)]
 
 
 def test_build_jobs_daily_steps_run_in_digest_reflection_consolidation_order(

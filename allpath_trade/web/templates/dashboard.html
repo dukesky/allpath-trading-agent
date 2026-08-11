@@ -83,9 +83,9 @@
 <h2>Recent trades</h2>
 {% if trades %}
 <table>
-  <tr><th>When</th><th>Side</th><th>Ticker</th><th>Status</th><th>Reason</th></tr>
+  <tr><th>Submitted</th><th>Side</th><th>Ticker</th><th>Status</th><th>Reason</th></tr>
   {% for t in trades %}
-  <tr><td class="muted">{{ t['ts'] | ago }}</td><td>{{ t['side'] }}</td><td>{{ t['ticker'] }}</td><td>{{ t['status'] }}</td><td class="muted">{{ t['reason'] }}</td></tr>
+  <tr><td class="muted">{{ t['ts'] | ago }}</td><td>{{ t['side'] }}</td><td>{{ t['ticker'] }}</td><td>{{ t['status'] }}{% if t['filled_avg_price'] %} &middot; filled{% if t['filled_at'] %} {{ t['filled_at'] | ago }}{% endif %} @ {{ t['filled_avg_price'] }}{% elif t['status'] == 'submitted' %} &middot; fill pending{% endif %}</td><td class="muted">{{ t['reason'] }}</td></tr>
   {% endfor %}
 </table>
 {% else %}<p class="muted">No trades recorded yet.</p>{% endif %}

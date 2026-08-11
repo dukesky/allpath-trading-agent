@@ -42,6 +42,33 @@ def test_default_identity_mentions_boundaries():
     assert "risk gate" in text and "confirm" in text
 
 
+def test_system_prompt_includes_market_mechanics_knowledge(tmp_path):
+    # Motivating bug: the agent didn't know DAY orders submitted after hours
+    # queue for the next open, and speculated instead of stating the fact.
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / "t.yaml").write_text(STRAT)
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "DAY market orders" in prompt
+    assert "09:30-16:00 ET" in prompt
+    assert "next market open" in prompt
+    assert prompt.startswith("IDENT")  # still the frozen prefix identity requires
+
+
+def test_market_mechanics_note_is_not_baked_into_identity_md_defaults(tmp_path):
+    # IDENTITY.md is user-editable content (deliverable 4): a user who
+    # replaces it entirely must still get the market-mechanics fact, since
+    # it comes from build_system_prompt, not from load_identity's fallback.
+    custom = tmp_path / "IDENTITY.md"
+    custom.write_text("# a user's own identity, no market mechanics text")
+    identity = load_identity(custom)
+    assert "DAY market orders" not in identity
+
+
 def test_system_prompt_includes_memory_sections(tmp_path):
     from allpath_trade.memory.store import MemoryStore
 

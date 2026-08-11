@@ -14,6 +14,30 @@ class ExecutionError(Exception):
     pass
 
 
+# Home: here rather than store/journal.py, because this is a broker-polling
+# concern (Broker.get_order round trips), not a storage concern -- journal.py
+# stays pure persistence, matching how Executor.execute already keeps its own
+# post-submit poll (see the comment there) in this module rather than in the
+# journal. Called from scheduler._run_sentinel_pass at the start of every
+# sentinel pass so a DAY order queued outside market hours (see Order.filled_at)
+# gets its fill recorded within one sentinel interval of actually filling,
+# instead of staying "submitted" forever.
+def refresh_pending_fills(journal: TradeJournal, broker: Broker) -> None:
+    """Re-poll still-submitted trades and write back any fill Alpaca reports.
+
+    Capped at 20 rows per pass: this runs on every sentinel tick, so an
+    unbounded backlog would turn one slow tick into an ever-growing one.
+    Each row polls in its own try/except -- a broker outage (or one bad
+    order id) must degrade that single row, not the rest of the batch or
+    the sentinel pass calling this."""
+    for row in journal.unfilled_recent()[:20]:
+        try:
+            order = broker.get_order(row["broker_order_id"])
+            journal.refresh_fill(row["id"], order)
+        except Exception:  # noqa: BLE001, S110 — one bad row must not break the sweep
+            pass
+
+
 class ExecutionResult(BaseModel):
     submitted: bool
     order: Order | None

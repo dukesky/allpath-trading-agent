@@ -74,6 +74,7 @@ class Order(BaseModel):
     filled_qty: Decimal
     filled_avg_price: Decimal | None
     submitted_at: datetime
+    filled_at: datetime | None = None
 
 
 class Broker(ABC):

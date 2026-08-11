@@ -99,6 +99,47 @@ def test_dashboard_is_english_only(client):
     assert_english_only(client.get("/").text)
 
 
+def test_dashboard_trades_table_labels_submitted_column_and_shows_fill_pending(client):
+    # Fill-honesty round: the "When" column used to show submission time
+    # under an ambiguous header. It's the submission time, always -- label
+    # it as such, and never claim a fill happened when the row is still
+    # unfilled.
+    from decimal import Decimal
+
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    components = client.app.state.holder.get()
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1), reason="dip buy")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                 notional=None, status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                 filled_avg_price=None, submitted_at=datetime.now(UTC))
+    components.journal.record(intent, RiskDecision(approved=True), order)
+
+    body = client.get("/").text
+    assert "Submitted" in body
+    assert "fill pending" in body
+
+
+def test_dashboard_trades_table_shows_fill_time_and_price_when_filled(client):
+    from decimal import Decimal
+
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    components = client.app.state.holder.get()
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1), reason="dip buy")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                 notional=None, status=OrderStatus.FILLED, filled_qty=Decimal(1),
+                 filled_avg_price=Decimal("332.01"),
+                 submitted_at=datetime.now(UTC), filled_at=datetime.now(UTC))
+    components.journal.record(intent, RiskDecision(approved=True), order)
+
+    body = client.get("/").text
+    assert "filled" in body
+    assert "332.01" in body
+
+
 def test_broker_outage_does_not_break_the_page(client, monkeypatch):
     holder = client.app.state.holder
 

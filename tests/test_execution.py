@@ -13,7 +13,7 @@ from allpath_trade.broker.base import (
     Position,
 )
 from allpath_trade.data.base import DataSource, Quote
-from allpath_trade.execution import ExecutionError, Executor
+from allpath_trade.execution import ExecutionError, Executor, refresh_pending_fills
 from allpath_trade.risk.gate import RiskDecision, RiskGate, RiskLimits
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
@@ -41,7 +41,7 @@ class FakeBroker(Broker):
     is_paper = True
 
     def __init__(self, fail=False, refill=None, refill_error=False,
-                fill_immediately=False):
+                fill_immediately=False, refill_map=None):
         self.fail = fail
         self.submitted = []
         # Controls for the post-submit refresh poll (Executor.execute):
@@ -49,9 +49,14 @@ class FakeBroker(Broker):
         # makes get_order() raise instead; `fill_immediately` makes
         # submit_order() itself return a FILLED order (refresh should then
         # be skipped entirely -- get_order stays NotImplementedError).
+        # `refill_map` is {order_id: Order | Exception}, for tests that need
+        # per-order-id behavior (the ongoing refresh_pending_fills sweep,
+        # which polls several rows in one pass) rather than the single
+        # blanket `refill`/`refill_error` the post-submit poll needed.
         self.refill = refill
         self.refill_error = refill_error
         self.fill_immediately = fill_immediately
+        self.refill_map = refill_map or {}
         self.get_order_calls = []
 
     def get_account(self):
@@ -66,6 +71,11 @@ class FakeBroker(Broker):
 
     def get_order(self, order_id):
         self.get_order_calls.append(order_id)
+        if order_id in self.refill_map:
+            result = self.refill_map[order_id]
+            if isinstance(result, Exception):
+                raise result
+            return result
         if self.refill_error:
             raise RuntimeError("get_order failed")
         if self.refill is not None:
@@ -229,6 +239,75 @@ def test_already_filled_order_skips_refresh_poll(tmp_path):
     assert broker.get_order_calls == []  # no round trip needed
     [row] = journal.recent()
     assert row["status"] == "filled"
+
+
+def test_refresh_pending_fills_updates_a_stale_submitted_row(tmp_path):
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                      notional=Decimal(500), status=OrderStatus.SUBMITTED,
+                      filled_qty=Decimal(0), filled_avg_price=None,
+                      submitted_at=datetime(2026, 8, 9, 20, 27, tzinfo=UTC))
+    trade_id = journal.record(buy(), RiskDecision(approved=True), submitted)
+
+    filled = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                   notional=Decimal(500), status=OrderStatus.FILLED,
+                   filled_qty=Decimal(1), filled_avg_price=Decimal("332.01"),
+                   submitted_at=submitted.submitted_at,
+                   filled_at=datetime(2026, 8, 10, 13, 34, tzinfo=UTC))
+    broker = FakeBroker(refill_map={"o1": filled})
+
+    refresh_pending_fills(journal, broker)
+
+    [row] = journal.recent()
+    assert row["id"] == trade_id
+    assert row["status"] == "filled"
+    assert row["filled_avg_price"] == "332.01"
+    assert row["filled_at"] == "2026-08-10T13:34:00+00:00"
+
+
+def test_refresh_pending_fills_one_bad_row_does_not_break_the_others(tmp_path):
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted_at = datetime(2026, 8, 9, 20, 27, tzinfo=UTC)
+
+    def make_submitted(order_id):
+        return Order(id=order_id, ticker="AAPL", side=OrderSide.BUY, qty=None,
+                    notional=Decimal(500), status=OrderStatus.SUBMITTED,
+                    filled_qty=Decimal(0), filled_avg_price=None,
+                    submitted_at=submitted_at)
+
+    bad_id = journal.record(buy(), RiskDecision(approved=True), make_submitted("bad"))
+    good_id = journal.record(buy(), RiskDecision(approved=True), make_submitted("good"))
+
+    filled_good = Order(id="good", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                        notional=Decimal(500), status=OrderStatus.FILLED,
+                        filled_qty=Decimal(1), filled_avg_price=Decimal("332.01"),
+                        submitted_at=submitted_at,
+                        filled_at=datetime(2026, 8, 10, 13, 34, tzinfo=UTC))
+    broker = FakeBroker(refill_map={
+        "bad": RuntimeError("dead broker"),
+        "good": filled_good,
+    })
+
+    refresh_pending_fills(journal, broker)  # must not raise
+
+    rows = {r["id"]: r for r in journal.recent()}
+    assert rows[bad_id]["status"] == "submitted"  # untouched, not crashed
+    assert rows[good_id]["status"] == "filled"
+
+
+def test_refresh_pending_fills_caps_at_twenty_rows(tmp_path):
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    submitted_at = datetime(2026, 8, 9, 20, 27, tzinfo=UTC)
+    for i in range(25):
+        journal.record(buy(), RiskDecision(approved=True), Order(
+            id=f"o{i}", ticker="AAPL", side=OrderSide.BUY, qty=None,
+            notional=Decimal(500), status=OrderStatus.SUBMITTED,
+            filled_qty=Decimal(0), filled_avg_price=None, submitted_at=submitted_at))
+
+    broker = FakeBroker(refill_error=True)  # would raise for every id polled
+    refresh_pending_fills(journal, broker)
+
+    assert len(broker.get_order_calls) == 20
 
 
 def test_trades_today_from_journal_feeds_daily_cap(tmp_path):
