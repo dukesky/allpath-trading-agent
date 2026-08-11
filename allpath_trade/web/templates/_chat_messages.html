@@ -18,7 +18,13 @@
   {% elif m['role'] == 'user' %}
     <div class="msg user"><span>{{ m['content'] }}</span></div>
   {% elif m['role'] == 'assistant' and m['content'] %}
-    <div class="msg assistant">{{ m['content'] }}</div>
+    {# Only assistant replies go through the Markdown renderer -- the
+       user's own bubble above and the system_note echo stay plain
+       `{{ content }}` (auto-escaped, no `md` filter) so nothing the human
+       typed is ever interpreted as Markdown/HTML. See markdown.py and
+       templating.py's `_md` for why this is safe: the renderer escapes
+       first and only adds tags from its own fixed literal set. #}
+    <div class="msg assistant md">{{ m['content'] | md }}</div>
   {% endif %}
 {% endfor %}
 {# Activity (tool names) appears only after a turn completes, not as it
