@@ -14,6 +14,7 @@ from allpath_trade.memory.observations import ObservationLog
 from allpath_trade.memory.store import MemoryStore
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.email import build_notifier
+from allpath_trade.reflect import Reflector
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 from allpath_trade.sentinel import Sentinel
 from allpath_trade.store.app_state import AppState
@@ -43,6 +44,7 @@ class Components:
     app_state: AppState
     reports: ReportStore
     consolidator: Consolidator | None = None
+    reflector: Reflector | None = None
 
 
 def build_components(settings: Settings, broker: Broker | None = None,
@@ -92,8 +94,28 @@ def build_components(settings: Settings, broker: Broker | None = None,
                                     app_state=app_state)
     except LLMConfigError:
         pass  # no LLM configured: Phase 2 behavior
-    return Components(settings=settings, broker=broker, data=data, journal=journal,
-                      gate=gate, executor=executor, queue=queue,
-                      strategies=strategies, notifier=notifier, sentinel=sentinel,
-                      conn=conn, observations=observations, memory=memory,
-                      app_state=app_state, reports=reports, consolidator=consolidator)
+
+    components = Components(
+        settings=settings, broker=broker, data=data, journal=journal,
+        gate=gate, executor=executor, queue=queue,
+        strategies=strategies, notifier=notifier, sentinel=sentinel,
+        conn=conn, observations=observations, memory=memory,
+        app_state=app_state, reports=reports, consolidator=consolidator)
+
+    if consolidator is not None:
+        # Reflector needs the whole component bag (reports/conn/journal/
+        # observations/broker/data/strategies/queue/memory -- see its class
+        # docstring in reflect.py), which only exists once `components`
+        # above has been assembled -- built here, right after, rather than
+        # inside the try block above alongside the consolidator. Gated on
+        # `consolidator is not None` rather than repeating build_llm inside
+        # its own try/except: the consolidator's own
+        # `build_llm(settings, tier="memory")` call a few lines up already
+        # proved this exact (settings, tier) pair doesn't raise
+        # LLMConfigError, so a second try/except here would be dead code.
+        from allpath_trade.llm.factory import build_llm
+
+        components.reflector = Reflector(
+            llm=build_llm(settings, tier="memory"), components=components,
+            settings=settings, notifier=notifier)
+    return components

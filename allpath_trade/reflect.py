@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from typing import Any
@@ -14,6 +15,8 @@ from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient
 from allpath_trade.memory.search import SessionSearch
+from allpath_trade.notify import events
+from allpath_trade.notify.base import Notifier, send_report
 from allpath_trade.scheduler import ET
 from allpath_trade.store.conversations import ConversationStore
 
@@ -331,6 +334,12 @@ class Reflector:
     # .queue .memory` are ever read.
     components: Any
     settings: Settings
+    # Optional, defaulting to None, so Task 4's tests (which construct a
+    # Reflector with no notifier at all) keep passing unchanged. None means
+    # "don't push" -- app.py only ever wires a real one in once an LLM is
+    # actually configured, but a dead notification channel must never be
+    # able to break the reflection run itself (see _run's use of it below).
+    notifier: Notifier | None = None
 
     def run_daily(self, now: datetime | None = None) -> str:
         et_date = _et_date(now)
@@ -421,6 +430,23 @@ class Reflector:
             # llm/base.py) -- recording 0 rather than fabricating a number.
             # TODO(Task 7): wire real usage once a client surfaces it.
             tokens_used=0, status="ok")
+        if self.notifier is not None:
+            # Only a stored "ok" report notifies -- a "failed" one (LLM
+            # down, or unparseable output twice, see _fail) does NOT push:
+            # the Reports page already shows it as failed, there is nothing
+            # actionable for the user to act on at 4am, and paging them for
+            # a broken-LLM night would just be noise they'd learn to ignore.
+            subject, full_body = events.daily_report(
+                date=et_date, summary=summary, body=body)
+            # Push failure must never fail the *run* -- the report is
+            # already durably stored above; a dead notification channel is
+            # a notify-layer problem, not a reflection-layer one. The bool
+            # is intentionally ignored beyond this one stderr line, same
+            # convention as every other notifier caller in this codebase
+            # (e.g. notify/email.py, notify/ntfy.py).
+            if not send_report(self.notifier, subject, summary, full_body):
+                print(f"[reflection] notification failed ({et_date})",
+                     file=sys.stderr)
         return f"ok: report #{report_id} ({et_date})"
 
     def _fail(self, et_date: str, conversation_id: int, reason: str) -> str:

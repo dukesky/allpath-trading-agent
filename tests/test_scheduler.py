@@ -146,6 +146,18 @@ class FakeConsolidator:
         return "ok"
 
 
+class FakeReflector:
+    def __init__(self, fail=False):
+        self.calls = 0
+        self.fail = fail
+
+    def run_daily(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("boom")
+        return "ok"
+
+
 class FakeHolder:
     def __init__(self, components):
         self._components = components
@@ -208,16 +220,18 @@ class DigestNotifier:
 
 def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5,
                 journal=None, queue=None, notifier=None, observations=None,
-                app_state=None):
+                app_state=None, reflector=None, daily_reflection=True):
     return SimpleNamespace(
         sentinel=sentinel,
         consolidator=consolidator,
+        reflector=reflector,
         journal=journal if journal is not None else FakeJournal(),
         queue=queue if queue is not None else FakeQueue(),
         notifier=notifier if notifier is not None else DigestNotifier(),
         observations=observations if observations is not None else FakeObservations(),
         app_state=app_state if app_state is not None else FakeAppState(),
         settings=SimpleNamespace(daily_consolidation=daily_consolidation,
+                                 daily_reflection=daily_reflection,
                                  sentinel_interval_minutes=interval),
     )
 
@@ -586,3 +600,130 @@ def test_build_jobs_sentinel_runs_even_if_heartbeat_write_fails(monkeypatch, cap
     stderr = capsys.readouterr().err
     assert "heartbeat" in stderr
     assert "failed" in stderr
+
+
+# -- build_jobs: daily reflection (Task 5) --
+
+
+def test_build_jobs_daily_steps_run_in_digest_reflection_consolidation_order(
+        monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    order: list[str] = []
+
+    class OrderNotifier(DigestNotifier):
+        def send(self, subject, body):
+            order.append("digest")
+            return super().send(subject, body)
+
+    class OrderReflector(FakeReflector):
+        def run_daily(self):
+            order.append("reflection")
+            return super().run_daily()
+
+    class OrderConsolidator(FakeConsolidator):
+        def run_daily(self):
+            order.append("consolidation")
+            return super().run_daily()
+
+    components = _components(
+        sentinel=FakeSentinel(), consolidator=OrderConsolidator(),
+        reflector=OrderReflector(), notifier=OrderNotifier())
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    assert order == ["digest", "reflection", "consolidation"]
+
+
+def test_build_jobs_runs_reflection_once_per_day_after_close(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    reflector = FakeReflector()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(
+        _components(sentinel=FakeSentinel(), reflector=reflector)))
+
+    scheduler.job()
+    scheduler.job()  # second tick, same day: must not run again
+
+    assert reflector.calls == 1
+
+
+def test_build_jobs_skips_reflection_when_setting_disabled(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    reflector = FakeReflector()
+    consolidator = FakeConsolidator()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=FakeSentinel(), reflector=reflector, consolidator=consolidator,
+        daily_reflection=False)))
+
+    scheduler.job()
+
+    assert reflector.calls == 0
+    assert consolidator.calls == 1  # not skipped just because reflection is off
+
+
+def test_build_jobs_skips_reflection_cleanly_when_no_reflector_configured(
+        monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    consolidator = FakeConsolidator()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=FakeSentinel(), consolidator=consolidator, reflector=None)))
+
+    scheduler.job()  # must not raise
+
+    assert consolidator.calls == 1
+
+
+def test_build_jobs_reflection_failure_does_not_stop_consolidation(
+        monkeypatch, capsys):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    consolidator = FakeConsolidator()
+    reflector = FakeReflector(fail=True)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=FakeSentinel(), consolidator=consolidator, reflector=reflector)))
+
+    scheduler.job()  # must not raise
+
+    assert reflector.calls == 1
+    assert consolidator.calls == 1
+    assert "[reflection] failed" in capsys.readouterr().err
+
+
+def test_build_jobs_digest_failure_does_not_stop_reflection(monkeypatch, capsys):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    reflector = FakeReflector()
+
+    class RaisingNotifier:
+        def send(self, subject, body):
+            raise RuntimeError("boom-notify")
+
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(
+        sentinel=FakeSentinel(), reflector=reflector, notifier=RaisingNotifier())))
+
+    scheduler.job()  # must not raise
+
+    assert reflector.calls == 1
+    assert "[digest] failed" in capsys.readouterr().out

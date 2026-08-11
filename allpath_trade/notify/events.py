@@ -40,3 +40,14 @@ def daily_digest(*, triggers: int, trades: int, pending: int) -> tuple[str, str]
     body = (f"Today: {triggers} rule trigger(s), {trades} trade(s), "
             f"{pending} item(s) still waiting for your approval." + FOOTER)
     return subject, body
+
+
+def daily_report(*, date: str, summary: str, body: str) -> tuple[str, str]:
+    """The end-of-day reflection notification (Phase 6). `summary` (the
+    short push-friendly text the reflection itself produced) leads the full
+    body so an email/console reader gets the punchy version before the full
+    report; `send_report` (notify/base.py) is what routes `summary` alone
+    to a push channel and this whole `full_body` to email/console."""
+    subject = f"[AllPath] Daily reflection {date}"
+    full_body = f"{summary}\n\n{body}" + FOOTER
+    return subject, full_body

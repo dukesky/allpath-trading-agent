@@ -340,6 +340,89 @@ def test_run_daily_happy_path_stores_ok_report_and_conversation(tmp_path):
     assert kind_row["kind"] == "reflection"
 
 
+# ---------------------------------------------------------------------------
+# notifier wiring (Task 5): send_report fires once on a successful ("ok")
+# report, never on a failed one, and a notifier=None Reflector never crashes.
+# ---------------------------------------------------------------------------
+
+class _SpyNotifier:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls: list[tuple[str, str]] = []
+
+    def send(self, subject, body):
+        self.calls.append((subject, body))
+        return self.ok
+
+
+def test_run_daily_success_sends_notification_via_send_report(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_send_report(notifier, subject, summary_body, full_body):
+        calls.append((notifier, subject, summary_body, full_body))
+        return True
+
+    monkeypatch.setattr("allpath_trade.reflect.send_report", fake_send_report)
+    components = make_components(tmp_path)
+    insert_trade(components, ts="2024-01-10T15:00:00+00:00")
+    notifier = _SpyNotifier()
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings(),
+                          notifier=notifier)
+
+    status = reflector.run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(calls) == 1
+    sent_notifier, subject, summary_body, full_body = calls[0]
+    assert sent_notifier is notifier
+    row = components.reports.get(ET_DATE)
+    assert subject == f"[AllPath] Daily reflection {ET_DATE}"
+    assert summary_body == row["summary"]
+    assert row["body"] in full_body
+
+
+def test_run_daily_failed_report_does_not_notify(tmp_path):
+    components = make_components(tmp_path)
+    notifier = _SpyNotifier()
+    llm = ScriptedLLM([
+        LLMResponse(text="no structure here"),
+        LLMResponse(text="still no structure"),
+    ])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings(),
+                          notifier=notifier)
+
+    status = reflector.run_daily(now=NOW)
+
+    assert "failed" in status
+    assert notifier.calls == []
+
+
+def test_run_daily_notifier_none_does_not_crash(tmp_path):
+    components = make_components(tmp_path)
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings(),
+                          notifier=None)
+
+    status = reflector.run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+
+
+def test_run_daily_notification_push_failure_does_not_fail_the_run(tmp_path, capsys):
+    components = make_components(tmp_path)
+    notifier = _SpyNotifier(ok=False)
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings(),
+                          notifier=notifier)
+
+    status = reflector.run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(notifier.calls) == 1
+    assert "reflection" in capsys.readouterr().err.lower()
+
+
 def test_run_daily_seed_briefing_is_first_user_message(tmp_path):
     components = make_components(tmp_path)
     insert_trade(components, ts="2024-01-10T15:00:00+00:00")

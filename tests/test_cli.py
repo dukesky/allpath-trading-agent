@@ -203,6 +203,107 @@ def test_serve_ensures_token_before_constructing_the_app(tmp_path, monkeypatch):
     assert seen["web_token"] != ""
 
 
+# -- run: headless daemon's daily job (Task 5 parity with build_jobs) --
+
+
+class _FakeRunReflector:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls = 0
+
+    def run_daily(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("boom")
+        return "ok: report #1 (2026-08-10)"
+
+
+class _FakeRunConsolidator:
+    def __init__(self):
+        self.calls = 0
+
+    def run_daily(self):
+        self.calls += 1
+        return "ok"
+
+
+def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
+    def fake_run_daemon(sentinel_factory, interval, daily_job=None, app_state=None):
+        captured["daily_job"] = daily_job
+        if daily_job is not None:
+            daily_job()
+
+    monkeypatch.setattr("allpath_trade.scheduler.run_daemon", fake_run_daemon)
+
+
+def test_run_daily_job_runs_reflection_before_consolidation_isolated(
+        tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    monkeypatch.chdir(tmp_path)
+    reflector = _FakeRunReflector(fail=True)
+    consolidator = _FakeRunConsolidator()
+    fake_components = SimpleNamespace(
+        strategies=None, queue=None, sentinel=None, app_state=None,
+        reflector=reflector, consolidator=consolidator)
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    code = main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    assert captured["daily_job"] is not None
+    # reflection ran (and raised) but consolidation still ran after it --
+    # a broken reflection must not silently swallow consolidation.
+    assert reflector.calls == 1
+    assert consolidator.calls == 1
+    assert "[reflection] failed" in capsys.readouterr().err
+
+
+def test_run_daily_job_skips_reflection_when_setting_disabled(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text('DAILY_REFLECTION="false"\n')
+    reflector = _FakeRunReflector()
+    consolidator = _FakeRunConsolidator()
+    fake_components = SimpleNamespace(
+        strategies=None, queue=None, sentinel=None, app_state=None,
+        reflector=reflector, consolidator=consolidator)
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    code = main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    assert reflector.calls == 0
+    assert consolidator.calls == 1  # not skipped just because reflection is off
+
+
+def test_run_daily_job_skips_reflection_cleanly_when_no_reflector_configured(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.chdir(tmp_path)
+    consolidator = _FakeRunConsolidator()
+    fake_components = SimpleNamespace(
+        strategies=None, queue=None, sentinel=None, app_state=None,
+        reflector=None, consolidator=consolidator)
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    code = main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0  # must not raise
+    assert consolidator.calls == 1
+
+
 class SpyCompactor:
     """Stands in for allpath_trade.agent.compact.Compactor so a test can
     inspect what cmd_chat constructed it with, without needing a real LLM
