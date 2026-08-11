@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values, set_key
 from pydantic import Field, ValidationError, field_validator
@@ -76,6 +77,37 @@ class Settings(BaseSettings):
     web_host: str = "127.0.0.1"
     web_port: int = 8791
     web_token: str = ""
+    # Approve-by-link (Part A): opt-in. Empty (the default) means
+    # notifications carry no links at all -- the sentinel only builds a
+    # `/a/<id>?k=<token>` URL when this is set, since a link is only useful
+    # if it points somewhere the user's phone can actually reach (not
+    # 127.0.0.1, which is what web_host defaults to and is meaningless off
+    # the machine the server runs on).
+    web_base_url: str = ""
+
+    @field_validator("web_base_url")
+    @classmethod
+    def _web_base_url_needs_a_scheme(cls, v: str) -> str:
+        # Same shape as `_ntfy_url_needs_a_scheme` below: fail loudly on the
+        # settings page (before writing to .env) rather than silently
+        # building a broken link later. Trailing slash stripped once here so
+        # every URL-builder downstream can just do f"{base}/a/{id}?k=..."
+        # without checking for a double slash.
+        #
+        # M4: the scheme check is case-insensitive (a pasted "HTTPS://..."
+        # is a perfectly valid URL that a case-sensitive `.startswith`
+        # rejected) and requires a host beyond the scheme -- `urlsplit`
+        # rather than `.startswith`, since "http://" alone previously
+        # passed the old check and would have built a link to nowhere
+        # (f"{base}/a/{id}?k=..." -> "http:///a/1?k=...").
+        if not v:
+            return v
+        stripped = v.rstrip("/")
+        parsed = urlsplit(stripped)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise ValueError(
+                "must be empty or a URL with http:// or https:// and a host")
+        return stripped
     daily_consolidation: bool = True
     consolidate_after_chat: bool = True
     # Phase 6: the after-close reflection session's own tool-call budget,

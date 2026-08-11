@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ 'Done' if ok else 'Not completed' }} · AllPath Trade</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ app_css_v }}">
+</head>
+<body class="centered">
+  <div class="card" style="max-width:420px">
+    <h1>{{ 'Done' if ok else 'Not completed' }}</h1>
+    <p class="{{ 'flash-ok' if ok else 'error' }}">{{ message }}</p>
+    {% if burned %}
+    <p class="hint">This link has now been used and won't work again. Open the
+    AllPath Trade dashboard for more detail.</p>
+    {% else %}
+    <p class="hint">Nothing was done, so this link is still active. Open the
+    AllPath Trade dashboard to resolve it.</p>
+    {% endif %}
+  </div>
+</body>
+</html>

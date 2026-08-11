@@ -156,6 +156,15 @@
   <h2>Access</h2>
   <div class="card">
     <p class="muted">Listening on {{ s.web_host }}:{{ s.web_port }}</p>
+    <label>Base URL for approval links</label>
+    <input name="web_base_url" value="{{ s.web_base_url }}" placeholder="http://192.168.1.20:8791">
+    <p class="hint">Optional. When set, notifications about items waiting for
+    your approval include a one-time link you can tap to approve or reject
+    without opening the app. For links to work from your phone, this needs
+    to be an address your phone can actually reach on your network --
+    usually the machine's LAN IP and the port above (WEB_HOST must be
+    listening on that address too, not just 127.0.0.1). Leave this blank
+    and notifications never include a link, which is the default.</p>
   </div>
 
   <div class="row" style="margin-top:18px">

@@ -68,6 +68,53 @@ def test_http_and_https_ntfy_url_are_allowed():
             == "https://ntfy.sh/t")
 
 
+# -- Approve-by-link (Part A): web_base_url is opt-in and gates whether
+# notifications ever carry an approval link -- same scheme-validation shape
+# as ntfy_url above, since both feed a URL a notifier builds later.
+
+
+def test_scheme_less_web_base_url_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, web_base_url="192.168.1.20:8791")
+
+
+def test_empty_web_base_url_is_allowed_and_is_the_default():
+    assert Settings(_env_file=None).web_base_url == ""
+    assert Settings(_env_file=None, web_base_url="").web_base_url == ""
+
+
+def test_http_and_https_web_base_url_are_allowed():
+    assert (Settings(_env_file=None, web_base_url="http://192.168.1.20:8791").web_base_url
+            == "http://192.168.1.20:8791")
+    assert (Settings(_env_file=None, web_base_url="https://example.com").web_base_url
+            == "https://example.com")
+
+
+def test_web_base_url_trailing_slash_is_stripped():
+    assert (Settings(_env_file=None, web_base_url="http://192.168.1.20:8791/").web_base_url
+            == "http://192.168.1.20:8791")
+
+
+# -- M4: the scheme check is case-insensitive, and "scheme, but no host" is
+# rejected -- the old `.startswith(("http://", "https://"))` check let
+# "http://" alone straight through, which would have built a dead link
+# (f"{base}/a/{id}?k=..." -> "http:///a/1?k=...").
+
+
+def test_web_base_url_scheme_check_is_case_insensitive():
+    assert (Settings(_env_file=None, web_base_url="HTTPS://Example.com").web_base_url
+            == "HTTPS://Example.com")
+    assert (Settings(_env_file=None, web_base_url="Http://192.168.1.20:8791").web_base_url
+            == "Http://192.168.1.20:8791")
+
+
+def test_web_base_url_scheme_with_no_host_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, web_base_url="http://")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, web_base_url="https://")
+
+
 def test_store_set_creates_and_updates_env_file(tmp_path: Path):
     env = tmp_path / ".env"
     store = SettingsStore(env)

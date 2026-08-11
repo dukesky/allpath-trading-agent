@@ -49,7 +49,17 @@ def install_auth(app: FastAPI) -> None:
         # still count as the public path -- otherwise it fails closed into
         # a login redirect instead of the health check it asked for.
         normalized = path.rstrip("/") or "/"
-        if normalized in PUBLIC_PATHS or path.startswith("/static/"):
+        # "/a/" (approve-by-link, web/routes/approve.py) is deliberately
+        # exempt from the session-cookie gate below it, same as /login and
+        # /healthz: the whole point of a tap-from-notification link is that
+        # it works without an existing browser session. It is NOT an
+        # authentication bypass -- every route under it does its own
+        # separate, per-request check (ReviewQueue.validate_token/
+        # consume_token: a constant-time hash match against a single-use,
+        # 24h-lived token minted for exactly one review row) before it acts
+        # on anything, so this exemption only ever grants access to that one
+        # item's approve/reject action, never to the rest of the app.
+        if (normalized in PUBLIC_PATHS or path.startswith(("/static/", "/a/"))):
             return await call_next(request)
 
         token = request.app.state.holder.settings().web_token

@@ -390,6 +390,49 @@ def test_confirm_auth_queued_notification_uses_review_queued_event(tmp_path):
     assert f"#{review_id}" in body and "sell all" in body and "t" in body
 
 
+def test_confirm_auth_queued_notification_includes_trigger_price(tmp_path):
+    # Part B: the price the rule actually triggered on (FakeData's price
+    # default, "200") shows up in the notification body, honestly labeled
+    # as the price at trigger time -- not a second, separately fetched
+    # "current" quote.
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"), price="200")
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "Price at trigger: $200.00" in body
+
+
+def test_confirm_auth_queued_notification_includes_est_shares_for_notional_intent(tmp_path):
+    s, _store, _ex, _q, n = make(
+        tmp_path, strategy_yaml(auth="confirm", condition="price > 0", action="buy $500"),
+        price="200")
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "Est. size: ~2.50 shares at that price" in body
+
+
+def test_queued_notification_carries_no_link_when_web_base_url_unset(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    assert s.web_base_url == ""
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "Review & approve" not in body
+    assert "http" not in body.lower()
+
+
+def test_queued_notification_carries_an_approve_link_when_web_base_url_set(tmp_path):
+    s, _store, _ex, q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.web_base_url = "http://192.168.1.20:8791"
+    s.run_once()
+    [(_subject, body)] = n.sent
+    review_id = q.list()[0]["id"]
+    assert f"Review & approve: http://192.168.1.20:8791/a/{review_id}?k=" in body
+    # the token in the link must be the review's real (single-use) token --
+    # not logged/echoed anywhere else, but it must validate.
+    url_line = next(line for line in body.splitlines() if line.startswith("Review & approve:"))
+    token = url_line.rsplit("k=", 1)[1]
+    assert q.validate_token(review_id, token) is not None
+
+
 def test_confirm_with_agent_queued_notification_includes_recommendation(tmp_path):
     s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
     s.review_agent = StubReviewAgent("execute")
