@@ -95,6 +95,26 @@ def test_web_base_url_trailing_slash_is_stripped():
             == "http://192.168.1.20:8791")
 
 
+# -- M4: the scheme check is case-insensitive, and "scheme, but no host" is
+# rejected -- the old `.startswith(("http://", "https://"))` check let
+# "http://" alone straight through, which would have built a dead link
+# (f"{base}/a/{id}?k=..." -> "http:///a/1?k=...").
+
+
+def test_web_base_url_scheme_check_is_case_insensitive():
+    assert (Settings(_env_file=None, web_base_url="HTTPS://Example.com").web_base_url
+            == "HTTPS://Example.com")
+    assert (Settings(_env_file=None, web_base_url="Http://192.168.1.20:8791").web_base_url
+            == "Http://192.168.1.20:8791")
+
+
+def test_web_base_url_scheme_with_no_host_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, web_base_url="http://")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, web_base_url="https://")
+
+
 def test_store_set_creates_and_updates_env_file(tmp_path: Path):
     env = tmp_path / ".env"
     store = SettingsStore(env)

@@ -12,6 +12,7 @@
     <p><strong>{{ side }} {{ ticker }}</strong>{% if amount_label %} · {{ amount_label }}{% endif %}</p>
     {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}
 
+    {% if kind == "order" %}
     <div class="review-price-context" style="margin:10px 0">
       {% if trigger_price is not none %}<span class="muted">Triggered at {{ trigger_price | money }}</span>{% endif %}
       {% if current_price is not none %}
@@ -21,6 +22,14 @@
       {% if est_shares is not none %}<span class="muted">&asymp; {{ "%.2f"|format(est_shares) }} shares at current price</span>{% endif %}
       <span class="muted review-market-note">{{ 'Market open — fills near current price' if market_open else 'Market closed — fills at next open' }}</span>
     </div>
+    {% endif %}
+    {% if kind == "strategy_revision" %}
+    <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+      <p style="font-size:13px;margin:0 0 8px"><strong>Rationale:</strong> {{ rationale }}</p>
+      <pre class="diff">{% for line in diff_lines %}<span class="{{ line['cls'] }}">{{ line['text'] }}</span>
+{% endfor %}</pre>
+    </div>
+    {% endif %}
 
     <div class="row" style="margin-top:16px">
       <form method="post" action="/a/{{ review_id }}/approve">

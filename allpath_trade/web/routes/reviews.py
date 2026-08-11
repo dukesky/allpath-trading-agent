@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import difflib
 import json
+import time
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
+from allpath_trade.web.routes import dashboard as dashboard_route
 from allpath_trade.web.routes.dashboard import (
     error_redirect,
     nav_context,
@@ -37,9 +39,21 @@ def _attach_price_context(c, items: list[dict]) -> None:
     # Part B: only pending order-kind rows get a price-context block -- a
     # strategy_revision has no trigger price to speak of, and a resolved
     # order's context is stale/moot by definition (the outcome is already
-    # fixed; re-fetching a quote for it would only be misleading).
+    # fixed; re-fetching a quote for it would only be misleading). Callers
+    # only ever pass the pending `items` list now (M7: a resolved-only
+    # `recent` list is a guaranteed no-op through this same branch, so that
+    # call was dropped from the route below).
+    #
+    # I1: one shared QUOTES_BUDGET_SECONDS deadline for the whole loop --
+    # the same pattern dashboard.py's `quote_deadline` uses -- rather than
+    # a fresh BROKER_TIMEOUT_SECONDS allowance per row. Measured: 7 pending
+    # rows against a stalled data source cost 22.3s serially (7 *
+    # BROKER_TIMEOUT_SECONDS) without this; rows past the deadline omit
+    # price context gracefully instead of each paying their own timeout.
+    deadline = time.monotonic() + dashboard_route.QUOTES_BUDGET_SECONDS
     for item in items:
-        if item["kind"] == "order" and item["status"] == "pending":
+        if (item["kind"] == "order" and item["status"] == "pending"
+                and time.monotonic() < deadline):
             item["price_context"] = order_price_context(
                 c.data, item["ticker"], item["snapshot"], item["intent"])
         else:
@@ -127,7 +141,6 @@ def reviews(request: Request) -> HTMLResponse:
     _attach_revision_diffs(c, items)
     _attach_revision_diffs(c, recent)
     _attach_price_context(c, items)
-    _attach_price_context(c, recent)
     return templates.TemplateResponse(request, "reviews.html", {
         "page": "reviews", "items": items, "recent": recent,
         "error": request.query_params.get("error"),

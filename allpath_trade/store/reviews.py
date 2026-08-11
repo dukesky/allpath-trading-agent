@@ -37,7 +37,7 @@ class ReviewHandle(int):
     that wants the token opts in explicitly via `.token`; everything else
     is unaffected by this class existing at all."""
 
-    def __new__(cls, review_id: int, token: str | None) -> Self:
+    def __new__(cls, review_id: int, token: str | None = None) -> Self:
         obj = super().__new__(cls, review_id)
         obj.token = token
         return obj
@@ -261,10 +261,17 @@ class ReviewQueue:
             raise ReviewError(
                 f"review {review_id} has corrupt intent: {exc}") from exc
 
-        # Atomically claim the review to prevent concurrent execution
+        # Atomically claim the review to prevent concurrent execution.
+        # M5: also clears the approval-link token here -- this is the
+        # in-app approve path (web/routes/reviews.py), which never goes
+        # through consume_token, so without this the row's link would stay
+        # live (and usable) after an in-app approval already resolved it.
+        # Two independent kill switches (status != pending, and no token)
+        # instead of relying on status alone.
         resolved_ts = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
-            "UPDATE pending_reviews SET status=?, resolved_ts=? "
+            "UPDATE pending_reviews SET status=?, resolved_ts=?,"
+            " approval_token_hash=NULL, token_expires_ts=NULL "
             "WHERE id=? AND status=?",
             ("approved", resolved_ts, review_id, "pending"))
         self._conn.commit()
@@ -317,10 +324,12 @@ class ReviewQueue:
             raise ReviewError(
                 f"review {review_id} has corrupt snapshot: {exc}") from exc
 
-        # Atomically claim the review, same pattern as the order path.
+        # Atomically claim the review, same pattern as the order path
+        # (including the M5 token-clearing -- see the comment there).
         resolved_ts = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
-            "UPDATE pending_reviews SET status=?, resolved_ts=? "
+            "UPDATE pending_reviews SET status=?, resolved_ts=?,"
+            " approval_token_hash=NULL, token_expires_ts=NULL "
             "WHERE id=? AND status=?",
             ("approved", resolved_ts, review_id, "pending"))
         self._conn.commit()
@@ -381,10 +390,12 @@ class ReviewQueue:
         if row["status"] != "pending":
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
 
-        # Atomically claim the review to prevent concurrent execution
+        # Atomically claim the review to prevent concurrent execution (M5:
+        # clears the approval-link token too -- see _approve_order's comment).
         resolved_ts = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
-            "UPDATE pending_reviews SET status=?, resolved_ts=?, resolution_note=? "
+            "UPDATE pending_reviews SET status=?, resolved_ts=?, resolution_note=?,"
+            " approval_token_hash=NULL, token_expires_ts=NULL "
             "WHERE id=? AND status=?",
             ("rejected", resolved_ts, note, review_id, "pending"))
         self._conn.commit()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values, set_key
 from pydantic import Field, ValidationError, field_validator
@@ -92,9 +93,21 @@ class Settings(BaseSettings):
         # building a broken link later. Trailing slash stripped once here so
         # every URL-builder downstream can just do f"{base}/a/{id}?k=..."
         # without checking for a double slash.
-        if v and not v.startswith(("http://", "https://")):
-            raise ValueError("must be empty or start with http:// or https://")
-        return v.rstrip("/")
+        #
+        # M4: the scheme check is case-insensitive (a pasted "HTTPS://..."
+        # is a perfectly valid URL that a case-sensitive `.startswith`
+        # rejected) and requires a host beyond the scheme -- `urlsplit`
+        # rather than `.startswith`, since "http://" alone previously
+        # passed the old check and would have built a link to nowhere
+        # (f"{base}/a/{id}?k=..." -> "http:///a/1?k=...").
+        if not v:
+            return v
+        stripped = v.rstrip("/")
+        parsed = urlsplit(stripped)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise ValueError(
+                "must be empty or a URL with http:// or https:// and a host")
+        return stripped
     daily_consolidation: bool = True
     consolidate_after_chat: bool = True
     # Phase 6: the after-close reflection session's own tool-call budget,

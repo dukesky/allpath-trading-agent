@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -549,3 +552,62 @@ def test_resolved_revision_card_shows_recorded_diff_not_a_live_recompute(client)
     body = client.get("/reviews").text
     assert ">d</span>" in body  # the recorded snapshot diff (queue_revision's diff="d")
     assert "target_weight: 99%" not in body
+
+
+# --- I1: /reviews' price-context loop pays one shared budget, not N *
+# BROKER_TIMEOUT_SECONDS -------------------------------------------------
+
+def test_reviews_page_renders_within_budget_when_every_quote_hangs(client, monkeypatch):
+    # Measured before the fix: 7 pending rows against a stalled data source
+    # cost 22.3s serially (each row paying its own BROKER_TIMEOUT_SECONDS).
+    # _attach_price_context now shares one QUOTES_BUDGET_SECONDS deadline
+    # across the whole loop (dashboard.py's own pattern), so rows past the
+    # deadline omit price context instead of each queuing another call.
+    monkeypatch.setattr(dashboard_route, "BROKER_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(dashboard_route, "QUOTES_BUDGET_SECONDS", 0.05)
+    data = client.app.state.holder.get().data
+    release = threading.Event()
+
+    def hang(ticker):
+        release.wait(timeout=5)
+        raise RuntimeError("never resolves in time")
+
+    monkeypatch.setattr(data, "get_quote", hang)
+    dashboard_route._quote_cache.clear()
+
+    for _ in range(7):
+        queue_one(client)
+
+    start = time.monotonic()
+    r = client.get("/reviews")
+    elapsed = time.monotonic() - start
+
+    assert r.status_code == 200
+    # 7 rows * 0.3s BROKER_TIMEOUT_SECONDS would be 2.1s without the shared
+    # budget; the budget bounds total time to roughly one timeout.
+    assert elapsed < 1.0
+    release.set()  # let the background call finish so it doesn't linger
+
+
+def test_resolved_rows_are_never_passed_through_attach_price_context(client, monkeypatch):
+    # M7: the no-op `_attach_price_context(c, recent)` call was dropped --
+    # resolved rows simply never get a `price_context` key now, and the
+    # card template already treats a missing key as "omit gracefully"
+    # (same as an explicit None), so the section renders exactly as before.
+    from allpath_trade.web.routes import reviews as reviews_route
+
+    calls: list[list] = []
+    original = reviews_route._attach_price_context
+
+    def spy(c, items):
+        calls.append(list(items))
+        original(c, items)
+
+    rid = queue_one(client)
+    client.post(f"/reviews/{rid}/reject", follow_redirects=False)
+
+    monkeypatch.setattr(reviews_route, "_attach_price_context", spy)
+    body = client.get("/reviews").text
+
+    assert len(calls) == 1  # called once (pending items), not twice for recent
+    assert "review-price-context" not in body

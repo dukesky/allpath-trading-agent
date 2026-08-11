@@ -463,3 +463,29 @@ def test_approve_order_does_not_call_revision_applier(queue):
 
     assert result.submitted
     assert calls == []
+
+
+# -- M2: `token` defaulting to None on ReviewHandle.__new__ ------------------
+
+
+def test_review_handle_token_defaults_to_none():
+    # Makes the sentinel's own `getattr(review_id, "token", None)` comment
+    # (allpath_trade/sentinel.py) literally true for a handle built with no
+    # token arg at all, not just for a bare `int`.
+    handle = ReviewHandle(7)
+    assert handle == 7
+    assert handle.token is None
+
+
+def test_review_handle_survives_deepcopy(queue):
+    # `int.__new__`-based subclasses round-trip through pickle/deepcopy by
+    # calling `__new__` again -- without a default, `token` (a
+    # keyword-less positional) being required broke that round-trip with a
+    # bare TypeError. A required `copy.deepcopy` use (e.g. handing a review
+    # handle to another thread/context) must not blow up on this detail.
+    import copy
+
+    rid = add(queue)
+    cloned = copy.deepcopy(rid)
+    assert cloned == rid
+    assert isinstance(cloned, ReviewHandle)
