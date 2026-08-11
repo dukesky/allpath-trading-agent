@@ -142,9 +142,13 @@ label:first-child { margin-top:0; }
 .login { width:340px; padding:28px 26px; }
 .login h1 { margin-bottom:4px; }
 .login .muted { margin:0 0 20px; }
-.hint, .error { font-size:12.5px; }
+.hint, .error, .flash-ok { font-size:12.5px; }
 .hint { color:var(--muted); margin-top:14px; line-height:1.55; }
 .error { color:var(--down); }
+/* Successful flash (e.g. a revision approve), distinct from `.error` --
+   Finding 4: the reviews page previously had only one flash channel, red,
+   so a successful approve rendered as if it had failed. */
+.flash-ok { color:var(--up); }
 .check { display:flex; gap:8px; align-items:center; font-size:13px;
   color:var(--muted); margin:14px 0 18px; }
 .check input { width:auto; }

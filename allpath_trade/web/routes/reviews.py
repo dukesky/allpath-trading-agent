@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
-from allpath_trade.web.routes.dashboard import error_redirect, nav_context
+from allpath_trade.web.routes.dashboard import error_redirect, nav_context, notice_redirect
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -35,6 +35,7 @@ def reviews(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "reviews.html", {
         "page": "reviews", "items": items, "recent": recent,
         "error": request.query_params.get("error"),
+        "notice": request.query_params.get("notice"),
         **nav_context(c)})
 
 
@@ -42,6 +43,10 @@ def _back_to_reviews(error: str | None = None) -> RedirectResponse:
     # Shared idiom -- see dashboard.py's error_redirect docstring for why
     # this redirects instead of returning a fragment directly.
     return error_redirect("/reviews", error)
+
+
+def _back_to_reviews_ok(message: str) -> RedirectResponse:
+    return notice_redirect("/reviews", message)
 
 
 def _echo_resolution(request: Request, review_id: int, row_source: str, summary: str) -> None:
@@ -95,14 +100,13 @@ def approve(request: Request, review_id: int) -> Response:
 
     if kind == "strategy_revision":
         # approve() returns None for revision rows (Task 2) -- there is no
-        # ExecutionResult to inspect, unlike the order branch below.
-        # `_back_to_reviews`'s `message` param is really "flash banner", not
-        # specifically an error -- there is no dedicated success channel yet
-        # (Task 6 owns the Pending-page revision UI); reusing it here is the
-        # minimum honest way to surface the outcome for now.
+        # ExecutionResult to inspect, unlike the order branch below. Unlike
+        # the failure paths above, this is a genuine success, so it goes
+        # through the `notice` channel (Finding 4) instead of `error` --
+        # the page renders it with `.flash-ok`, not red error styling.
         _echo_resolution(request, review_id, row_source,
                          f"revision applied to {row['strategy_id']}")
-        return _back_to_reviews(f"Revision applied to {row['strategy_id']}.")
+        return _back_to_reviews_ok(f"Revision applied to {row['strategy_id']}.")
 
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)

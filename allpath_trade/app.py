@@ -65,7 +65,7 @@ def build_components(settings: Settings, broker: Broker | None = None,
     # applying an already-approved revision is plain file I/O, no LLM
     # involved, so a review approved via the web/CLI must work even when no
     # LLM is configured.
-    queue.set_revision_applier(apply_revision_factory(settings.strategies_dir, strategies))
+    queue.set_revision_applier(apply_revision_factory(strategies))
     notifier = build_notifier(settings)
     observations = ObservationLog(conn)
     memory = MemoryStore(settings.memory_dir, conn)

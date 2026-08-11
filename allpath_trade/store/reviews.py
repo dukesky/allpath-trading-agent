@@ -17,11 +17,14 @@ class ReviewError(Exception):
 
 
 class RevisionValidationError(ReviewError):
-    """Raised by the revision applier (Task 3) when a same-strategy
-    proposal fails re-validation against the file's current-on-disk
-    content -- e.g. a second same-day proposal for the same strategy,
-    approved after an earlier one already changed the file (spec §④:
-    "校验不过则批准动作报错并保持 pending(用户可拒绝)"). The applier MUST
+    """Raised by the revision applier (allpath_trade/agent/reflection_tools.py
+    -- see `apply_revision_factory`) when an approved strategy_revision row
+    fails one of its pre-write gates: an invalid strategy id, a
+    since-deleted strategy file, the file's CURRENT text no longer matching
+    the proposal's recorded base (spec §④: a second proposal drafted from
+    the same base, approved after a sibling proposal already changed the
+    file -- "校验不过则批准动作报错并保持 pending(用户可拒绝)"), or the
+    proposed yaml itself failing strategy validation. The applier MUST
     raise this (and only this) before it writes anything to disk; see the
     loud comment in `_approve_revision` for why that ordering matters."""
 
@@ -47,12 +50,16 @@ class ReviewQueue:
         # (mirrors how `_executor` itself is threaded through app.py), so a
         # setter is needed too. None until set: revision approvals fail
         # loudly (see `approve`) rather than silently no-op-ing.
-        self._revision_applier: Callable[[str, str], None] | None = None
+        self._revision_applier: Callable[[str, str, str], None] | None = None
 
-    def set_revision_applier(self, fn: Callable[[str, str], None]) -> None:
+    def set_revision_applier(self, fn: Callable[[str, str, str], None]) -> None:
         """Wire up the function that actually applies an approved strategy
-        revision: `fn(strategy_id, new_yaml)`. Task 3 calls this once at
-        startup with the real strategy-file writer."""
+        revision: `fn(strategy_id, new_yaml, expected_base_yaml)` --
+        `expected_base_yaml` is the file text the proposal was drafted
+        against (snapshot["old_yaml"]), which the applier compares to the
+        file's current-on-disk text to catch staleness (see
+        `apply_revision_factory`). Task 3 calls this once at startup with
+        the real strategy-file writer."""
         self._revision_applier = fn
 
     def add(self, *, strategy_id: str, rule_id: str, ticker: str, rule_type: str,
@@ -188,9 +195,15 @@ class ReviewQueue:
         # pre-claim intent parse (see the comment there). A malformed
         # snapshot must leave the review pending -- not stuck "approved"
         # with a NULL execution_result and no audit trail of what went
-        # wrong.
+        # wrong. `old_yaml` is the base this proposal was drafted against --
+        # threaded through to the applier so it can compare it to the
+        # file's CURRENT text (Finding 1: the applier's own re-validation
+        # is a pure function of already-validated args and can never
+        # observe a file that changed underneath a stale sibling proposal).
         try:
-            new_yaml = json.loads(row["snapshot"])["new_yaml"]
+            snapshot = json.loads(row["snapshot"])
+            new_yaml = snapshot["new_yaml"]
+            old_yaml = snapshot["old_yaml"]
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
             raise ReviewError(
                 f"review {review_id} has corrupt snapshot: {exc}") from exc
@@ -207,7 +220,7 @@ class ReviewQueue:
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
 
         try:
-            self._revision_applier(row["strategy_id"], new_yaml)
+            self._revision_applier(row["strategy_id"], new_yaml, old_yaml)
         except RevisionValidationError:
             # Spec §④: a same-strategy proposal approved after an earlier
             # one already changed the file must fail revalidation without

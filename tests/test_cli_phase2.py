@@ -104,9 +104,13 @@ def _queue_revision(tmp_path, new_yaml=VALID_REVISION_YAML) -> int:
     from allpath_trade.store.db import connect
     from allpath_trade.store.reviews import ReviewQueue
 
+    # The applier's staleness gate (Finding 1) compares the file's CURRENT
+    # text against the proposal's recorded base, so `old_yaml` has to be
+    # the strategy file's actual on-disk content for `approve` to succeed.
+    old_yaml = (tmp_path / "strategies" / "t.yaml").read_text()
     conn = connect(tmp_path / "allpath-trade.db")
     rid = ReviewQueue(conn, executor=None).add_strategy_revision(
-        strategy_id="t", ticker="AAPL", old_yaml="old", new_yaml=new_yaml,
+        strategy_id="t", ticker="AAPL", old_yaml=old_yaml, new_yaml=new_yaml,
         diff="d", rationale="reflection rationale")
     conn.close()
     return rid
@@ -180,6 +184,38 @@ def test_reviews_approve_still_requires_credentials(tmp_path, capsys, monkeypatc
     _clear_alpaca_env(monkeypatch)
     assert main(["reviews", "approve", "1"]) == 2
     assert "ALPACA_API_KEY" in capsys.readouterr().err
+
+
+def test_reviews_approve_order_row_still_requires_credentials(tmp_path, capsys, monkeypatch):
+    # Regression guard for the Finding 6 fix: relaxing the credential
+    # requirement for strategy_revision rows must not relax it for
+    # order-kind rows too.
+    setup_env(tmp_path, monkeypatch)
+    (tmp_path / "strategies" / "t.yaml").write_text(
+        STRAT.replace("authorization: notify", "authorization: confirm"))
+    main(["check"], broker_factory=lambda s: FakeBroker())  # queues review #1 (order)
+    _clear_alpaca_env(monkeypatch)
+
+    code = main(["reviews", "approve", "1"])  # no broker_factory, no keys
+
+    assert code == 2
+    assert "ALPACA_API_KEY" in capsys.readouterr().err
+
+
+def test_reviews_approve_revision_works_without_credentials(tmp_path, capsys, monkeypatch):
+    # Finding 6: approving a strategy_revision row is pure file I/O (no
+    # broker call anywhere on that path -- see
+    # ReviewQueue._approve_revision) and must not demand Alpaca credentials.
+    setup_env(tmp_path, monkeypatch)
+    rid = _queue_revision(tmp_path)
+    _clear_alpaca_env(monkeypatch)
+
+    code = main(["reviews", "approve", str(rid)])  # no broker_factory, no keys
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Revision applied to t." in out
+    assert (tmp_path / "strategies" / "t.yaml").read_text() == VALID_REVISION_YAML
 
 
 def test_cli_output_is_english_only(tmp_path, capsys, monkeypatch):

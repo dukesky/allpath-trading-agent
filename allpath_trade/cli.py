@@ -7,6 +7,7 @@ from functools import partial
 
 from pydantic import ValidationError
 
+from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings, SettingsStore, describe_validation_error
 from allpath_trade.llm.base import LLMClient
@@ -126,6 +127,24 @@ def cmd_rearm(store, strategy_id: str, rule_id: str) -> int:
     store.rearm(strategy_id, rule_id)
     print(f"{strategy_id}/{rule_id} re-armed")
     return 0
+
+
+def _approve_needs_broker(settings: Settings, review_id: int) -> bool:
+    """`reviews approve` on a strategy_revision row is pure file I/O -- no
+    broker/executor is ever touched (see ReviewQueue._approve_revision:
+    strategy_revision rows never reach `_executor`). Finding 6: the old
+    blanket `needs_broker` for every `reviews approve` call demanded Alpaca
+    credentials even for those rows. Peeks the row's `kind` directly with a
+    throwaway connection -- deliberately not through ReviewQueue/
+    build_components, which is exactly the broker-requiring machinery this
+    is trying to avoid entering. Missing/unreadable rows keep the old
+    conservative default (broker required) so `cmd_reviews` still gets to
+    report its own "review not found" error rather than this silently
+    swallowing it."""
+    conn = connect(settings.db_path)
+    row = conn.execute(
+        "SELECT kind FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+    return row is None or row["kind"] != "strategy_revision"
 
 
 def cmd_reviews(q, args) -> int:
@@ -479,9 +498,13 @@ def main(argv: list[str] | None = None,
         return 2
 
     # Only commands that actually reach the broker require credentials;
-    # read-only commands (strategies, rearm, reviews list/reject) work without.
+    # read-only commands (strategies, rearm, reviews list/reject) work
+    # without. `reviews approve` only needs one when the row being approved
+    # is order-kind -- a strategy_revision approval is pure file I/O (see
+    # `_approve_needs_broker`).
     needs_broker = args.command in {"status", "check", "run", "chat", "serve"} or (
-        args.command == "reviews" and getattr(args, "reviews_command", None) == "approve") or (
+        args.command == "reviews" and getattr(args, "reviews_command", None) == "approve"
+        and _approve_needs_broker(settings, args.review_id)) or (
         args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
     broker: Broker | None = None
@@ -515,6 +538,11 @@ def main(argv: list[str] | None = None,
         settings.strategies_dir.mkdir(parents=True, exist_ok=True)
         store = StrategyStore(settings.strategies_dir, conn)
         queue = ReviewQueue(conn, executor=None)
+        # Wired unconditionally, same as build_components does for the
+        # broker branch: approving a strategy_revision row is plain file
+        # I/O, not broker-dependent, so it must work in this no-broker path
+        # too (that's the whole point of Finding 6's fix above).
+        queue.set_revision_applier(apply_revision_factory(store))
         sentinel = None
 
     if args.command == "check":

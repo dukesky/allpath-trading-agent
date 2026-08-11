@@ -148,9 +148,10 @@ def test_add_strategy_revision_records_conversation_id(queue):
     assert row["conversation_id"] == 42
 
 
-def test_approve_revision_calls_applier_with_strategy_id_and_new_yaml(queue):
+def test_approve_revision_calls_applier_with_strategy_id_new_yaml_and_old_yaml(queue):
     calls = []
-    queue.set_revision_applier(lambda strategy_id, new_yaml: calls.append((strategy_id, new_yaml)))
+    queue.set_revision_applier(
+        lambda strategy_id, new_yaml, old_yaml: calls.append((strategy_id, new_yaml, old_yaml)))
     rid = queue.add_strategy_revision(
         strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
         diff="d", rationale="r")
@@ -158,7 +159,9 @@ def test_approve_revision_calls_applier_with_strategy_id_and_new_yaml(queue):
     result = queue.approve(rid)
 
     assert result is None
-    assert calls == [("s1", "new")]
+    # `old_yaml` (the proposal's recorded base) must be threaded through too
+    # -- Finding 1: the applier needs it to detect staleness.
+    assert calls == [("s1", "new", "old")]
     row = queue.get(rid)
     assert row["status"] == "approved" and row["resolved_ts"]
     # order-kind executor must never be touched by a revision approval
@@ -176,7 +179,7 @@ def test_approve_revision_without_applier_raises_and_leaves_pending(queue):
 
 
 def test_approve_revision_applier_exception_recorded_and_reraised(queue):
-    def boom(strategy_id, new_yaml):
+    def boom(strategy_id, new_yaml, old_yaml):
         raise ValueError("bad yaml")
 
     queue.set_revision_applier(boom)
@@ -197,7 +200,7 @@ def test_approve_revision_applier_exception_recorded_and_reraised(queue):
 
 def test_approve_revision_twice_raises(queue):
     calls = []
-    queue.set_revision_applier(lambda strategy_id, new_yaml: calls.append(1))
+    queue.set_revision_applier(lambda strategy_id, new_yaml, old_yaml: calls.append(1))
     rid = queue.add_strategy_revision(
         strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
         diff="d", rationale="r")
@@ -259,7 +262,7 @@ def test_approve_revision_validation_error_leaves_row_pending_and_rejectable(que
     # already changed the file must fail revalidation without getting
     # stuck "approved" -- the row must go back to "pending" so the user
     # can still reject it.
-    def boom(strategy_id, new_yaml):
+    def boom(strategy_id, new_yaml, old_yaml):
         raise RevisionValidationError("file changed underneath this proposal")
 
     queue.set_revision_applier(boom)
@@ -284,7 +287,7 @@ def test_approve_revision_runtime_error_recorded_and_reraised(queue):
     # Non-validation applier failures (e.g. a failed disk write AFTER
     # validation already passed) are NOT safely retryable, so the existing
     # approved+error behavior is pinned here.
-    def boom(strategy_id, new_yaml):
+    def boom(strategy_id, new_yaml, old_yaml):
         raise RuntimeError("os.replace failed")
 
     queue.set_revision_applier(boom)
@@ -334,7 +337,7 @@ def test_approve_order_does_not_call_revision_applier(queue):
     # Converse of the contamination test above `test_approve_revision_...`:
     # an order-kind row must never reach a configured revision applier.
     calls = []
-    queue.set_revision_applier(lambda strategy_id, new_yaml: calls.append(1))
+    queue.set_revision_applier(lambda strategy_id, new_yaml, old_yaml: calls.append(1))
     rid = add(queue)
 
     result = queue.approve(rid)

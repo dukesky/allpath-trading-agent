@@ -192,6 +192,15 @@ def test_chat_sourced_review_does_not_render_a_bare_strategy_slash_rule(client):
     assert "from chat" in body.lower()
 
 
+CURRENT_S1_YAML = """\
+name: "S1"
+status: active
+version: 1
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+
 VALID_REVISION_YAML = """\
 name: "S1"
 status: active
@@ -202,11 +211,20 @@ rules:
 """
 
 
-def queue_revision(client, strategy_id="s1", new_yaml=VALID_REVISION_YAML,
-                   rationale="reflection rationale") -> int:
+def queue_revision(client, strategy_id="s1", old_yaml=CURRENT_S1_YAML,
+                   new_yaml=VALID_REVISION_YAML, rationale="reflection rationale") -> int:
+    # The applier's staleness gate (Finding 1) compares the file's CURRENT
+    # text against the proposal's recorded base -- so a test that wants
+    # `approve` to actually succeed has to make sure a real file with
+    # exactly `old_yaml` exists on disk, not just a queue row that claims it
+    # did.
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    path = strategies_dir / f"{strategy_id}.yaml"
+    if not path.exists():
+        path.write_text(old_yaml)
     q = client.app.state.holder.get().queue
     return q.add_strategy_revision(
-        strategy_id=strategy_id, ticker="AAPL", old_yaml="old", new_yaml=new_yaml,
+        strategy_id=strategy_id, ticker="AAPL", old_yaml=old_yaml, new_yaml=new_yaml,
         diff="d", rationale=rationale)
 
 
@@ -219,8 +237,37 @@ def test_approve_revision_applies_it_and_shows_success_note(client):
     strategies_dir = client.app.state.holder.get().strategies.directory
     assert (strategies_dir / "s1.yaml").read_text() == VALID_REVISION_YAML
 
+    # Finding 4: a successful approve goes through the `notice` channel, not
+    # `error` -- the page renders it with `.flash-ok`, not red error styling.
+    assert "notice=" in r.headers["location"]
+    assert "error=" not in r.headers["location"]
     body = client.get(r.headers["location"]).text
     assert "Revision applied to s1." in body
+    assert 'class="flash-ok"' in body
+
+
+def test_stale_sibling_proposal_approve_does_not_revert_the_first_approval(client):
+    # Route-level reproduce of Finding 1: two proposals drafted from the
+    # same base. Approving the first must succeed; approving the second
+    # afterward must fail re-validation and leave the file exactly as the
+    # first approval left it.
+    tightened = VALID_REVISION_YAML
+    rid_a = queue_revision(client, new_yaml=tightened)
+    sibling = CURRENT_S1_YAML.replace("version: 1", "version: 2").replace(
+        "target_weight: 15%", "target_weight: 20%")
+    rid_b = queue_revision(client, new_yaml=sibling)
+
+    client.post(f"/reviews/{rid_a}/approve", follow_redirects=False)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    assert (strategies_dir / "s1.yaml").read_text() == tightened
+
+    r = client.post(f"/reviews/{rid_b}/approve", follow_redirects=False)
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
+
+    row_b = client.app.state.holder.get().queue.get(rid_b)
+    assert row_b["status"] == "pending"
+    assert (strategies_dir / "s1.yaml").read_text() == tightened
 
 
 def test_approve_stale_revision_leaves_it_pending_with_a_message(client):
@@ -246,3 +293,13 @@ def test_pending_revision_card_does_not_say_triggered_on(client):
     assert f"#{rid}" in body
     assert "revision" in body.lower()
     assert "triggered on" not in body.lower()
+
+
+def test_revision_card_is_english_only(client):
+    # Finding 7: the shared English-only invariant (see helpers.py) had
+    # never actually been exercised against a rendered strategy_revision
+    # card specifically -- only against order-review cards.
+    rid = queue_revision(client)
+    body = client.get("/reviews").text
+    assert f"#{rid}" in body
+    assert_english_only(body)
