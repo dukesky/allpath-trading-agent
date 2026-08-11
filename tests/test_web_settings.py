@@ -135,6 +135,27 @@ def test_ntfy_url_field_renders_and_round_trips(client, tmp_path):
     assert "https://ntfy.sh/my-topic" in client.get("/settings").text
 
 
+def test_web_base_url_field_renders_and_round_trips(client, tmp_path):
+    body = client.get("/settings").text
+    assert 'name="web_base_url"' in body
+    assert "LAN" in body or "reach" in body  # the phone-reachability hint
+
+    r = client.post("/settings", data={"web_base_url": "http://192.168.1.20:8791"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "192.168.1.20:8791" in (tmp_path / ".env").read_text()
+    assert client.app.state.holder.get().settings.web_base_url == "http://192.168.1.20:8791"
+    assert "192.168.1.20:8791" in client.get("/settings").text
+
+
+def test_scheme_less_web_base_url_is_rejected_with_env_unchanged(client, tmp_path):
+    before = (tmp_path / ".env").read_text() if (tmp_path / ".env").exists() else ""
+    r = client.post("/settings", data={"web_base_url": "192.168.1.20:8791"})
+    assert r.status_code == 400
+    assert "web_base_url" in r.text
+    assert (tmp_path / ".env").read_text() == before
+
+
 def test_model_fields_render_as_selects_with_the_stored_value_selected(client):
     body = client.get("/settings").text
     assert '<select name="chat_model"' in body

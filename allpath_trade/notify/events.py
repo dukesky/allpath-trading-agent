@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+# Approve-by-link (Part A) is opt-in via Settings -> Access (web_base_url):
+# unset (the default), a notification never carries a link at all, same as
+# before that feature existed. When it IS set, `review_queued` below may
+# add one -- but even then it is never your dashboard access token: it's a
+# single-use, 24-hour token scoped to approving/rejecting this one item,
+# dead the moment it's used or expires. This footer has to stay true in
+# both cases, since it's appended to every notification regardless of
+# whether that particular one carries a link.
 FOOTER = ("\n\nOpen the AllPath Trade dashboard to act on this. "
-          "This message contains no links by design — an emailed link that "
-          "carries your access token would turn a leaked inbox into a leaked "
-          "account.")
+          "This message never carries your dashboard access token. If "
+          "you've opted into approval links under Settings, an item "
+          "waiting for you may also include a one-time link scoped to "
+          "just that item, valid for 24 hours and dead as soon as it's used.")
 
 
 def rule_triggered(*, strategy_id: str, rule_id: str, ticker: str,
@@ -24,15 +33,32 @@ def order_result(*, ticker: str, side: str, submitted: bool,
 
 
 def review_queued(*, review_id: int, ticker: str, action: str,
-                  strategy_id: str, recommendation: str = "") -> tuple[str, str]:
+                  strategy_id: str, recommendation: str = "",
+                  trigger_price: str = "", est_shares: str = "",
+                  approve_url: str = "") -> tuple[str, str]:
+    """`trigger_price`/`est_shares` are the price context available at the
+    instant this item was queued (Part B) -- the same sample the rule
+    triggered on, not a second, separately-fetched "live" quote (the
+    sentinel has no cheap way to requote here, and a second number this
+    close in time to the first would only look like independent
+    confirmation it isn't). `approve_url`, when non-empty, is the one place
+    a notification body ever carries a link -- see FOOTER's docstring for
+    why that's still opt-in and safe to describe truthfully there."""
     subject = f"[AllPath] {ticker}: waiting for your approval"
     lines = [f"Item #{review_id} is waiting for you.",
              f"Proposed: {action} on {ticker}"]
     if strategy_id:
         lines.append(f"Strategy: {strategy_id}")
+    if trigger_price:
+        lines.append(f"Price at trigger: {trigger_price}")
+    if est_shares:
+        lines.append(f"Est. size: ~{est_shares} shares at that price")
     if recommendation:
         lines.append(f"The agent recommends: {recommendation}")
-    return subject, "\n".join(lines) + FOOTER
+    body = "\n".join(lines)
+    if approve_url:
+        body += f"\nReview & approve: {approve_url}"
+    return subject, body + FOOTER
 
 
 def daily_digest(*, triggers: int, trades: int, pending: int) -> tuple[str, str]:

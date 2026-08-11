@@ -21,3 +21,54 @@ def test_bodies_are_english_only():
     ]:
         for text in (subject, body):
             assert_english_only(text)
+
+
+# -- Approve-by-link (Part A): the footer must stay truthful either way --
+# it's appended to every notification, whether or not that particular one
+# ends up carrying a link.
+
+
+def test_footer_no_longer_claims_no_links_by_design():
+    _, body = events.rule_triggered(strategy_id="s", rule_id="r", ticker="AAPL",
+                                    condition="price < 100", disposition="queued")
+    assert "no links by design" not in body
+    assert "never carries your dashboard access token" in body
+
+
+def test_review_queued_without_approve_url_carries_no_link():
+    _subject, body = events.review_queued(
+        review_id=12, ticker="AAPL", action="sell 50%", strategy_id="s1")
+    assert "http" not in body.lower()
+    assert "Review & approve" not in body
+
+
+def test_review_queued_with_approve_url_includes_it_once():
+    _subject, body = events.review_queued(
+        review_id=12, ticker="AAPL", action="sell 50%", strategy_id="s1",
+        approve_url="http://192.168.1.20:8791/a/12?k=abc123")
+    assert "Review & approve: http://192.168.1.20:8791/a/12?k=abc123" in body
+    assert body.count("http://192.168.1.20:8791/a/12?k=abc123") == 1
+
+
+def test_review_queued_price_context_is_included_when_present():
+    _subject, body = events.review_queued(
+        review_id=12, ticker="AAPL", action="sell 50%", strategy_id="s1",
+        trigger_price="$204.50", est_shares="2.44")
+    assert "Price at trigger: $204.50" in body
+    assert "Est. size: ~2.44 shares at that price" in body
+
+
+def test_review_queued_price_context_is_omitted_when_absent():
+    _subject, body = events.review_queued(
+        review_id=12, ticker="AAPL", action="sell 50%", strategy_id="s1")
+    assert "Price at trigger" not in body
+    assert "Est. size" not in body
+
+
+def test_review_queued_with_approve_url_is_english_only():
+    subject, body = events.review_queued(
+        review_id=12, ticker="AAPL", action="sell 50%", strategy_id="s1",
+        trigger_price="$204.50", est_shares="2.44",
+        approve_url="http://192.168.1.20:8791/a/12?k=abc123")
+    for text in (subject, body):
+        assert_english_only(text)

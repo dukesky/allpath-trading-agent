@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from decimal import Decimal
+import contextlib
+from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel
 
@@ -40,7 +41,8 @@ class Sentinel:
 
     def __init__(self, strategies: StrategyStore, data: DataSource,
                  broker: Broker, executor: Executor, queue: ReviewQueue,
-                 notifier: Notifier, review_agent=None, observations=None) -> None:
+                 notifier: Notifier, review_agent=None, observations=None,
+                 web_base_url: str = "") -> None:
         self.strategies = strategies
         self.data = data
         self.broker = broker
@@ -49,6 +51,10 @@ class Sentinel:
         self.notifier = notifier
         self.review_agent = review_agent
         self.observations = observations
+        # Approve-by-link (Part A): empty (the default) means every
+        # `_notify_queued` call below builds no link at all, same behavior
+        # as before this feature existed. See config.py's Settings.web_base_url.
+        self.web_base_url = web_base_url
 
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
@@ -167,15 +173,15 @@ class Sentinel:
                              condition=condition, action=action,
                              snapshot=snapshot, intent=intent)
         if self.review_agent is None:
-            self._notify_queued(doc, rid, ticker, action, "")
+            self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent)
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="queued")
         return self._agent_review(rid, doc, rule_id, rule_type, condition,
-                                  action, intent)
+                                  action, intent, price=price)
 
     def _agent_review(self, rid: int, doc: StrategyDoc, rule_id: str,
                       rule_type: RuleType, condition: str, action: str,
-                      intent: OrderIntent) -> TriggerOutcome:
+                      intent: OrderIntent, *, price: Decimal | None = None) -> TriggerOutcome:
         base = {"strategy_id": doc.id, "rule_id": rule_id}
         ticker = doc.position.ticker
         # Analysis phase: the review row is still pending here, so any
@@ -184,7 +190,7 @@ class Sentinel:
             analysis = self.review_agent.analyze(dict(self.queue.get(rid)))
             self.queue.attach_analysis(rid, analysis.model_dump_json())
         except Exception as exc:  # noqa: BLE001 — a failed review must never lose the trigger
-            self._notify_queued(doc, rid, ticker, action, "")
+            self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent)
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
 
@@ -192,7 +198,7 @@ class Sentinel:
             # The LLM's output couldn't be parsed as a recommendation at all —
             # this is not a genuine "skip" decision, so don't act on it.
             # Leave the trigger pending for human review.
-            self._notify_queued(doc, rid, ticker, action, "")
+            self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent)
             return TriggerOutcome(
                 **base, disposition="queued",
                 detail="analysis unparseable — left for human review")
@@ -201,7 +207,8 @@ class Sentinel:
                       and rule_type == RuleType.SOFT)
         if not autonomous:
             recommendation = f"{analysis.recommendation} — {analysis.reasoning[:300]}"
-            self._notify_queued(doc, rid, ticker, action, recommendation)
+            self._notify_queued(doc, rid, ticker, action, recommendation,
+                                price=price, intent=intent)
             return TriggerOutcome(**base, disposition="queued",
                                   detail="analysis attached: " + recommendation)
 
@@ -253,10 +260,33 @@ class Sentinel:
         self._send(doc, subject, body)
 
     def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
-                       recommendation: str) -> None:
+                       recommendation: str, *, price: Decimal | None = None,
+                       intent: OrderIntent | None = None) -> None:
+        # Part B: the price context available at the instant this item was
+        # queued -- the exact sample the rule triggered on, not a second,
+        # separately re-fetched "live" quote (see review_queued's
+        # docstring for why). `est_shares` only makes sense for a
+        # notional-sized intent -- a qty-sized one already says its share
+        # count plainly in `action`.
+        trigger_price = f"${price:,.2f}" if price is not None else ""
+        est_shares = ""
+        if intent is not None and intent.qty is None and intent.notional and price:
+            with contextlib.suppress(ArithmeticError, InvalidOperation):
+                est_shares = f"{intent.notional / price:.2f}"
+        # Part A: only when the operator opted in (Settings -> Access) AND
+        # this review actually has a live token -- `review_id.token` is
+        # None for the (today theoretical) case of a `ReviewHandle` built
+        # without one; `getattr` rather than a bare attribute access keeps
+        # this safe even if `review_id` were ever a plain int.
+        approve_url = ""
+        token = getattr(review_id, "token", None)
+        if self.web_base_url and token:
+            approve_url = f"{self.web_base_url}/a/{int(review_id)}?k={token}"
         subject, body = events.review_queued(
             review_id=review_id, ticker=ticker, action=action,
-            strategy_id=doc.id, recommendation=recommendation)
+            strategy_id=doc.id, recommendation=recommendation,
+            trigger_price=trigger_price, est_shares=est_shares,
+            approve_url=approve_url)
         self._send(doc, subject, body)
 
     def _send(self, doc: StrategyDoc, subject: str, body: str) -> None:

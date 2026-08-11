@@ -23,7 +23,8 @@ router = APIRouter()
 # Plain values: rendered, editable, rewritten on every save.
 PLAIN_FIELDS = ["llm_provider", "chat_model", "review_model", "memory_model",
                 "smtp_host", "smtp_port", "smtp_user", "smtp_from", "notify_to",
-                "ntfy_url", "sentinel_interval_minutes", "context_budget_tokens"]
+                "ntfy_url", "sentinel_interval_minutes", "context_budget_tokens",
+                "web_base_url"]
 
 # Checkbox values: a browser omits an unchecked box from the form body
 # entirely, so these need explicit "present -> true, absent -> false"

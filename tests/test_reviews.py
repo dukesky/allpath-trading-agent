@@ -1,12 +1,19 @@
+import hashlib
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.store.db import connect
-from allpath_trade.store.reviews import ReviewError, ReviewQueue, RevisionValidationError
+from allpath_trade.store.reviews import (
+    ReviewError,
+    ReviewHandle,
+    ReviewQueue,
+    RevisionValidationError,
+)
 
 
 class StubExecutor:
@@ -255,6 +262,35 @@ def test_legacy_pending_reviews_row_defaults_kind_order_after_migration(tmp_path
     assert row["kind"] == "order"
 
 
+def test_legacy_row_with_no_token_hash_has_no_link_ever(tmp_path):
+    # Same pre-migration simulation as above, but the point here is Part A's
+    # invariant: a row that predates the approve-token migration has NULL
+    # approval_token_hash/token_expires_ts and must never validate a link,
+    # since no plaintext token was ever issued for it to check against.
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE pending_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts TEXT NOT NULL, strategy_id TEXT NOT NULL, rule_id TEXT NOT NULL,"
+        " ticker TEXT NOT NULL, rule_type TEXT NOT NULL, condition TEXT NOT NULL,"
+        " action TEXT NOT NULL, snapshot TEXT NOT NULL, intent TEXT,"
+        " status TEXT NOT NULL DEFAULT 'pending', resolved_ts TEXT,"
+        " resolution_note TEXT, execution_result TEXT)")
+    raw.execute(
+        "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker, rule_type,"
+        " condition, action, snapshot) VALUES ('t', 's1', 'r1', 'AAPL', 'soft',"
+        " 'c', 'a', '{}')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    queue = ReviewQueue(conn, executor=None)
+    row = queue.get(1)
+    assert row["approval_token_hash"] is None
+    assert row["token_expires_ts"] is None
+    assert queue.validate_token(1, "anything") is None
+
+
 # --- Review findings fixes ---------------------------------------------
 
 def test_approve_revision_validation_error_leaves_row_pending_and_rejectable(queue):
@@ -331,6 +367,89 @@ def test_approve_unknown_kind_raises(queue):
     row = queue.get(rid)
     assert row["status"] == "pending"
     assert queue._executor.calls == []
+
+
+# --- Approve-by-link tokens ---------------------------------------------
+
+def test_add_returns_a_review_handle_carrying_a_plaintext_token(queue):
+    rid = add(queue)
+    assert isinstance(rid, ReviewHandle)
+    assert isinstance(rid, int)
+    assert rid.token and len(rid.token) > 20
+    row = queue.get(rid)
+    assert row["id"] == rid  # still a plain int for every existing comparison
+    # only the hash is ever persisted, never the plaintext
+    assert row["approval_token_hash"] == hashlib.sha256(rid.token.encode()).hexdigest()
+    assert row["approval_token_hash"] != rid.token
+
+
+def test_add_strategy_revision_also_returns_a_token(queue):
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+    assert isinstance(rid, ReviewHandle)
+    assert rid.token
+    row = queue.get(rid)
+    assert row["approval_token_hash"] == hashlib.sha256(rid.token.encode()).hexdigest()
+
+
+def test_validate_token_accepts_the_right_token(queue):
+    rid = add(queue)
+    row = queue.validate_token(rid, rid.token)
+    assert row is not None and row["id"] == rid
+
+
+def test_validate_token_rejects_the_wrong_token(queue):
+    rid = add(queue)
+    assert queue.validate_token(rid, "not-the-real-token") is None
+
+
+def test_validate_token_rejects_empty_token(queue):
+    rid = add(queue)
+    assert queue.validate_token(rid, "") is None
+
+
+def test_validate_token_rejects_missing_review(queue):
+    assert queue.validate_token(999, "whatever") is None
+
+
+def test_validate_token_rejects_already_resolved_review(queue):
+    rid = add(queue)
+    queue.reject(rid)
+    assert queue.validate_token(rid, rid.token) is None
+
+
+def test_validate_token_rejects_expired_token(queue):
+    rid = add(queue)
+    queue._conn.execute(
+        "UPDATE pending_reviews SET token_expires_ts=? WHERE id=?",
+        ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), rid))
+    queue._conn.commit()
+    assert queue.validate_token(rid, rid.token) is None
+
+
+def test_validate_token_rejects_a_legacy_row_with_no_hash(queue):
+    rid = add(queue)
+    queue._conn.execute(
+        "UPDATE pending_reviews SET approval_token_hash=NULL WHERE id=?", (rid,))
+    queue._conn.commit()
+    assert queue.validate_token(rid, rid.token) is None
+
+
+def test_consume_token_burns_it_and_a_second_use_fails(queue):
+    rid = add(queue)
+    row = queue.consume_token(rid, rid.token)
+    assert row is not None and row["id"] == rid
+    # single-use: the same token no longer validates
+    assert queue.validate_token(rid, rid.token) is None
+    assert queue.consume_token(rid, rid.token) is None
+
+
+def test_consume_token_rejects_wrong_token_without_burning_the_real_one(queue):
+    rid = add(queue)
+    assert queue.consume_token(rid, "wrong") is None
+    # the real token must still work -- a failed guess must not burn it
+    assert queue.validate_token(rid, rid.token) is not None
 
 
 def test_approve_order_does_not_call_revision_applier(queue):

@@ -1,6 +1,12 @@
 <div class="card" id="review-{{ item['id'] }}" style="margin-bottom:12px">
   <div class="row">
-    <strong>{{ item['action'] }} · {{ item['ticker'] }}</strong>
+    {# A chat-sourced row's `action` is the LLM's free-text reason (see
+       web/order_sink.py's QueueingOrderSink.propose), not a short label --
+       rendering it here as this bold headline is what produced the
+       oversized-bold-text card the "reason" text was meant to be quiet
+       context, not a title (Part C, item 8). The full text still renders,
+       just below at body size -- see the .review-reason block. #}
+    <strong>{% if item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}</strong>
     <span class="muted">#{{ item['id'] }}</span>
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
@@ -13,12 +19,27 @@
     {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
     {% endif %}
   </p>
+  {% if item['source'] == 'chat' and item['action'] %}
+  <p class="review-reason">{{ item['action'] }}</p>
+  {% endif %}
   {% if item['intent'] %}
   <p style="font-family:var(--mono);font-size:14px;margin:6px 0">
     {{ item['intent']['side'] }}
     {% if item['intent']['qty'] %}{{ item['intent']['qty'] }} shares{% else %}{{ item['intent']['notional'] | money }}{% endif %}
     {{ item['intent']['ticker'] }}
   </p>
+  {% endif %}
+  {% if item['price_context'] %}
+  {% set pc = item['price_context'] %}
+  <div class="review-price-context">
+    {% if pc.trigger_price is not none %}<span class="muted">Triggered at {{ pc.trigger_price | money }}</span>{% endif %}
+    {% if pc.current_price is not none %}
+    <span class="{{ pc.price_class }}">Now {{ pc.current_price | money }}{% if pc.day_change_pct is not none %} ({{ "%+.1f"|format(pc.day_change_pct) }}% today){% endif %}</span>
+    {% endif %}
+    {% if pc.deviation_pct is not none %}<span class="muted">{{ "%+.1f"|format(pc.deviation_pct) }}% since trigger</span>{% endif %}
+    {% if pc.est_shares is not none %}<span class="muted">&asymp; {{ "%.2f"|format(pc.est_shares) }} shares at current price</span>{% endif %}
+    <span class="muted review-market-note">{{ 'Market open — fills near current price' if pc.market_open else 'Market closed — fills at next open' }}</span>
+  </div>
   {% endif %}
   {% if item['kind'] == 'strategy_revision' %}
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
@@ -32,8 +53,16 @@
   {% endif %}
   {% if item['agent_analysis'] %}
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
-    <p style="font-size:13px;margin:0 0 4px"><strong>Agent recommends:</strong> {{ item['agent_analysis'].get('recommendation', 'no recommendation') }}</p>
-    <p class="muted" style="font-size:13px;margin:0">{{ item['agent_analysis'].get('reasoning', '') }}</p>
+    {# Full reasoning, never hard-truncated (agent/review.py no longer cuts
+       an unparseable LLM response at 300 chars) -- collapsed by default
+       behind <details> so a long analysis doesn't dominate the card; the
+       summary alone (the recommendation) is always visible. Reasoning is
+       LLM output, so it goes through the sanctioned |md filter, same as
+       chat replies -- never raw/unescaped text. #}
+    <details class="agent-analysis">
+      <summary style="font-size:13px"><strong>Agent recommends:</strong> {{ item['agent_analysis'].get('recommendation', 'no recommendation') }}</summary>
+      <div class="muted" style="font-size:13px;margin-top:8px">{{ item['agent_analysis'].get('reasoning', '') | md }}</div>
+    </details>
     {% for src in item['agent_analysis'].get('sources', []) %}
     <p class="muted" style="font-size:12px;margin:2px 0">
       {% if src.startswith('http://') or src.startswith('https://') %}

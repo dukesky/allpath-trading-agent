@@ -1,15 +1,46 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Self
 
 from pydantic import ValidationError
 
 from allpath_trade.broker.base import OrderIntent
 from allpath_trade.execution import ExecutionError, ExecutionResult, Executor
+
+# Approve-by-link token lifetime (Part A): 24h from issue, per row.
+TOKEN_TTL_SECONDS = 24 * 3600
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+class ReviewHandle(int):
+    """The review id `add()`/`add_strategy_revision()` hand back, extended
+    with the plaintext single-use approval-link token minted for this row
+    (`.token`) -- the ONLY place that plaintext ever exists; only its
+    sha256 hash is persisted (see `_hash_token`/`consume_token`).
+
+    Subclasses `int` rather than becoming a dataclass/tuple so this is a
+    drop-in replacement for the bare `int` review id every existing caller
+    (sentinel.py, order_sink.py, the whole test suite) already treats the
+    return value as -- equality, dict/row `id` comparisons, sqlite3
+    parameter binding, f-string interpolation, all still just work. Code
+    that wants the token opts in explicitly via `.token`; everything else
+    is unaffected by this class existing at all."""
+
+    def __new__(cls, review_id: int, token: str | None) -> Self:
+        obj = super().__new__(cls, review_id)
+        obj.token = token
+        return obj
 
 
 class ReviewError(Exception):
@@ -62,27 +93,38 @@ class ReviewQueue:
         the real strategy-file writer."""
         self._revision_applier = fn
 
+    def _issue_token(self) -> tuple[str, str, str]:
+        """Mint a fresh single-use approval-link token for a row about to
+        be inserted. Returns (plaintext, hash, expires_iso) -- the caller
+        persists only the hash and expiry; the plaintext is handed back to
+        `add`/`add_strategy_revision`'s own caller (via `ReviewHandle`) and
+        never stored anywhere."""
+        token = secrets.token_urlsafe(32)
+        expires = (datetime.now(UTC) + timedelta(seconds=TOKEN_TTL_SECONDS)).isoformat()
+        return token, _hash_token(token), expires
+
     def add(self, *, strategy_id: str, rule_id: str, ticker: str, rule_type: str,
             condition: str, action: str, snapshot: dict,
             intent: OrderIntent | None, source: str = "sentinel",
             conversation_id: int | None = None,
-            risk_preview: str | None = None) -> int:
+            risk_preview: str | None = None) -> ReviewHandle:
+        token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
             "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
             " rule_type, condition, action, snapshot, intent, source,"
-            " conversation_id, risk_preview)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " conversation_id, risk_preview, approval_token_hash, token_expires_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (datetime.now(UTC).isoformat(), strategy_id, rule_id, ticker,
              rule_type, condition, action,
              json.dumps(snapshot, default=_json_default),
              intent.model_dump_json() if intent else None, source,
-             conversation_id, risk_preview))
+             conversation_id, risk_preview, token_hash, expires))
         self._conn.commit()
-        return cur.lastrowid
+        return ReviewHandle(cur.lastrowid, token)
 
     def add_strategy_revision(self, *, strategy_id: str, ticker: str, old_yaml: str,
                               new_yaml: str, diff: str, rationale: str,
-                              conversation_id: int | None = None) -> int:
+                              conversation_id: int | None = None) -> ReviewHandle:
         """Queue a reflection-proposed strategy revision for human approval.
         Shares `pending_reviews` with order reviews (a unified inbox, see
         Phase 6 design §④) rather than a separate table -- so it has to
@@ -92,18 +134,20 @@ class ReviewQueue:
         trigger", `condition` carries a truncated rationale (there's no
         other free-text summary column to put it in), and `intent` is None
         since there is no order to execute."""
+        token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
             "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
             " rule_type, condition, action, snapshot, intent, source,"
-            " conversation_id, kind)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " conversation_id, kind, approval_token_hash, token_expires_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (datetime.now(UTC).isoformat(), strategy_id, "reflection", ticker,
              "revision", rationale[:200], "revise strategy",
              json.dumps({"old_yaml": old_yaml, "new_yaml": new_yaml,
                         "diff": diff, "rationale": rationale}),
-             None, "reflection", conversation_id, "strategy_revision"))
+             None, "reflection", conversation_id, "strategy_revision",
+             token_hash, expires))
         self._conn.commit()
-        return cur.lastrowid
+        return ReviewHandle(cur.lastrowid, token)
 
     def list(self, status: str | None = "pending") -> list[sqlite3.Row]:
         if status is None:
@@ -118,6 +162,71 @@ class ReviewQueue:
             "SELECT * FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
         if row is None:
             raise ReviewError(f"review {review_id} not found")
+        return row
+
+    def _token_ok(self, row: sqlite3.Row, token: str) -> bool:
+        """No-oracle check: every failure mode (missing row handled by the
+        caller, wrong status, no hash on the row -- legacy pre-migration
+        rows, a wrong/garbled token, an expired one) returns the same
+        `False` with no distinguishing signal. `hmac.compare_digest`
+        against the hex digests (not the raw tokens) keeps the comparison
+        constant-time without needing the attacker-controlled `token` to be
+        a fixed length first."""
+        if row["status"] != "pending":
+            return False
+        stored_hash = row["approval_token_hash"]
+        if not stored_hash:
+            return False
+        if not hmac.compare_digest(stored_hash, _hash_token(token)):
+            return False
+        expires_raw = row["token_expires_ts"]
+        if not expires_raw:
+            return False
+        try:
+            expires = datetime.fromisoformat(expires_raw)
+        except (TypeError, ValueError):
+            return False
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        return datetime.now(UTC) < expires
+
+    def validate_token(self, review_id: int, token: str) -> sqlite3.Row | None:
+        """Read-only check for the GET confirmation page: does this
+        (review_id, token) pair currently resolve to a live, pending,
+        unexpired review? Returns the row when it does, else None -- never
+        raises, so a missing/garbled review_id is indistinguishable from a
+        wrong token to the caller (see `_token_ok`'s docstring)."""
+        if not token:
+            return None
+        try:
+            row = self.get(review_id)
+        except ReviewError:
+            return None
+        return row if self._token_ok(row, token) else None
+
+    def consume_token(self, review_id: int, token: str) -> sqlite3.Row | None:
+        """Validate-and-burn for the POST approve/reject routes: the token
+        is atomically cleared (single-use) in the same statement that
+        re-checks it is still the row's live token and the row is still
+        pending, so two concurrent submits of the same link can't both
+        pass. Returns the pre-consumption row on success, else None.
+
+        Clearing happens here -- before `approve()`/`reject()` ever runs --
+        specifically so a `RevisionValidationError` (which rolls the row's
+        `status` back to "pending", see `_approve_revision`) can't leave the
+        link usable again: by the time that rollback happens, the hash is
+        already gone, so the link is dead regardless of what `status`
+        recovers to."""
+        row = self.validate_token(review_id, token)
+        if row is None:
+            return None
+        cur = self._conn.execute(
+            "UPDATE pending_reviews SET approval_token_hash=NULL"
+            " WHERE id=? AND approval_token_hash=? AND status='pending'",
+            (review_id, row["approval_token_hash"]))
+        self._conn.commit()
+        if cur.rowcount == 0:
+            return None
         return row
 
     def approve(self, review_id: int) -> ExecutionResult | None:

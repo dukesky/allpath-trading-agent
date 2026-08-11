@@ -366,6 +366,33 @@ a.strategy-card:hover { border-color:var(--accent); }
 .diff .diff-hdr { color:var(--muted); font-weight:600; }
 .diff .diff-ctx { color:var(--muted); }
 
+/* Pending-review card additions (approve-link + price-context round).
+   .review-reason: a chat-sourced review's `action` field is the LLM's own
+   free-text reason -- context to skim, not the card's headline (that used
+   to be the bold <strong> title itself, which is what produced an
+   oversized-bold block of prose). Body-size, muted, and capped so a long
+   reason never dominates the card the way the title used to. */
+.review-reason { font-size:14px; font-weight:400; color:var(--muted);
+  max-height:4.6em; overflow-y:auto; line-height:1.5; margin:6px 0;
+  padding:8px 10px; background:var(--surface-2); border-radius:var(--radius-sm); }
+
+/* .review-price-context: trigger/current price, deviation, est. shares, and
+   the market-open note on a pending order card -- a flex row with wrapping
+   so each piece reads as a distinct, separated fact on any width rather
+   than running together as one sentence. */
+.review-price-context { display:flex; flex-wrap:wrap; gap:4px 14px;
+  align-items:baseline; font-size:13px; margin:6px 0; }
+.review-price-context .review-market-note { flex-basis:100%; }
+
+/* Agent-analysis disclosure on a review card: only the recommendation is
+   visible by default (the <summary>), the full |md-rendered reasoning
+   expands on demand -- no hard truncation, but also no dominating the
+   card unless the user asks to see it. */
+details.agent-analysis summary { cursor:pointer; color:var(--text); }
+details.agent-analysis summary::-webkit-details-marker { display:none; }
+details.agent-analysis summary::before { content:"▸ "; color:var(--muted-2); }
+details.agent-analysis[open] summary::before { content:"▾ "; }
+
 /* Read-only reflection-transcript replay (reports/{date}/transcript). Text
    turns get a labelled block like the chat page's bubbles, minus the
    right-aligned "this is what the human typed" treatment (.msg.user) --

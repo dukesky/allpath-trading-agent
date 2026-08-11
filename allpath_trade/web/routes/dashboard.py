@@ -4,7 +4,7 @@ import concurrent.futures
 import re
 import time
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
@@ -85,6 +85,58 @@ def _cached_quote(data: DataSource, ticker: str) -> Quote | None:
 # lookup) need this same cached lookup and must not reach across module
 # boundaries into a name prefixed `_private`.
 cached_quote = _cached_quote
+
+
+def order_price_context(data: DataSource, ticker: str, snapshot: dict | None,
+                        intent: dict | None) -> dict:
+    """Price context for a pending order-kind review: the trigger price
+    (the sentinel's own snapshot, when this row has one -- chat-sourced
+    rows don't), a freshly (cached) current price with day-change
+    direction, the deviation between the two, and an estimated share count
+    for a notional-sized intent. Shared by the reviews page's pending
+    cards (web/routes/reviews.py) and the standalone approve-link
+    confirmation page (web/routes/approve.py) so both surfaces agree on
+    exactly the same numbers -- same shape as `summarize_strategy` above:
+    a quote failure degrades every current-price-derived field to `None`
+    rather than raising, so callers can render "omit gracefully" cards
+    either way."""
+    trigger_price = None
+    if snapshot and snapshot.get("price"):
+        try:
+            trigger_price = Decimal(str(snapshot["price"]))
+        except (InvalidOperation, TypeError, ValueError):
+            trigger_price = None
+
+    quote = _cached_quote(data, ticker) if ticker else None
+    current_price = quote.price if quote is not None else None
+
+    day_change_pct = None
+    price_class = ""
+    if quote is not None and quote.price is not None and quote.previous_close:
+        day_change_pct = float((quote.price - quote.previous_close) / quote.previous_close * 100)
+        if day_change_pct > 0:
+            price_class = "up"
+        elif day_change_pct < 0:
+            price_class = "down"
+
+    deviation_pct = None
+    if trigger_price and current_price and trigger_price != 0:
+        deviation_pct = float((current_price - trigger_price) / trigger_price * 100)
+
+    est_shares = None
+    if (intent and not intent.get("qty") and intent.get("notional")
+            and current_price):
+        try:
+            est_shares = Decimal(str(intent["notional"])) / current_price
+        except (InvalidOperation, ZeroDivisionError, TypeError, ValueError):
+            est_shares = None
+
+    return {
+        "trigger_price": trigger_price, "current_price": current_price,
+        "day_change_pct": day_change_pct, "price_class": price_class,
+        "deviation_pct": deviation_pct, "est_shares": est_shares,
+        "market_open": is_market_hours(),
+    }
 
 
 # Deliberately shallow: matches the first "price <op> number" it finds in a

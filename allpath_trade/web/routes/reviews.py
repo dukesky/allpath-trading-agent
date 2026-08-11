@@ -8,7 +8,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
-from allpath_trade.web.routes.dashboard import error_redirect, nav_context, notice_redirect
+from allpath_trade.web.routes.dashboard import (
+    error_redirect,
+    nav_context,
+    notice_redirect,
+    order_price_context,
+)
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -19,7 +24,26 @@ def _decorate(row) -> dict:  # row: sqlite3.Row
     for field in ("snapshot", "intent", "agent_analysis", "execution_result"):
         raw = item.get(field)
         item[field] = json.loads(raw) if raw else None
+    # Never let the approval-link token hash (or expiry) ride along into a
+    # template context -- nothing renders them today, but excluding them
+    # here means a future template change can't accidentally start to,
+    # matching Part A's "no token ever echoed back into HTML" constraint.
+    item.pop("approval_token_hash", None)
+    item.pop("token_expires_ts", None)
     return item
+
+
+def _attach_price_context(c, items: list[dict]) -> None:
+    # Part B: only pending order-kind rows get a price-context block -- a
+    # strategy_revision has no trigger price to speak of, and a resolved
+    # order's context is stale/moot by definition (the outcome is already
+    # fixed; re-fetching a quote for it would only be misleading).
+    for item in items:
+        if item["kind"] == "order" and item["status"] == "pending":
+            item["price_context"] = order_price_context(
+                c.data, item["ticker"], item["snapshot"], item["intent"])
+        else:
+            item["price_context"] = None
 
 
 def _diff_lines(diff_text: str) -> list[dict]:
@@ -102,6 +126,8 @@ def reviews(request: Request) -> HTMLResponse:
     recent = [r for r in all_items if r["status"] != "pending"][:20]
     _attach_revision_diffs(c, items)
     _attach_revision_diffs(c, recent)
+    _attach_price_context(c, items)
+    _attach_price_context(c, recent)
     return templates.TemplateResponse(request, "reviews.html", {
         "page": "reviews", "items": items, "recent": recent,
         "error": request.query_params.get("error"),

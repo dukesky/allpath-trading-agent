@@ -130,6 +130,13 @@ _MIGRATIONS = [
     "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
     "ALTER TABLE pending_reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'order'",
     "ALTER TABLE trades ADD COLUMN filled_at TEXT",
+    # Approve-by-link (see ReviewQueue.add/consume_token): only a sha256
+    # hash of the single-use token is ever persisted, never the plaintext.
+    # NULL on both columns means "no link was ever issued for this row" --
+    # true for every row inserted before this migration, and the only state
+    # that must always fail closed in ReviewQueue._token_ok.
+    "ALTER TABLE pending_reviews ADD COLUMN approval_token_hash TEXT",
+    "ALTER TABLE pending_reviews ADD COLUMN token_expires_ts TEXT",
 ]
 
 

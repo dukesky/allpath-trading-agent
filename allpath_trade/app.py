@@ -74,7 +74,7 @@ def build_components(settings: Settings, broker: Broker | None = None,
     app_state = AppState(conn)
     reports = ReportStore(conn)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
-                       observations=observations)
+                       observations=observations, web_base_url=settings.web_base_url)
     consolidator: Consolidator | None = None
     try:
         from allpath_trade.agent.readonly_tools import register_readonly_tools

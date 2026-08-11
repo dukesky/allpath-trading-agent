@@ -97,5 +97,10 @@ class ReviewAgent:
                 raise ValueError(analysis.recommendation)
             return analysis
         except (json.JSONDecodeError, ValidationError, ValueError):
+            # No hard character cut: the raw text is kept in full (the
+            # review card renders it inside a <details> disclosure through
+            # the `|md` filter, not inline plain text -- see
+            # web/templates/_review_card.html) rather than being truncated
+            # here where it could never be recovered again.
             return ReviewAnalysis(recommendation="skip",
-                                  reasoning=f"unparseable analysis: {text[:300]}")
+                                  reasoning=f"unparseable analysis: {text}")

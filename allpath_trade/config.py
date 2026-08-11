@@ -76,6 +76,25 @@ class Settings(BaseSettings):
     web_host: str = "127.0.0.1"
     web_port: int = 8791
     web_token: str = ""
+    # Approve-by-link (Part A): opt-in. Empty (the default) means
+    # notifications carry no links at all -- the sentinel only builds a
+    # `/a/<id>?k=<token>` URL when this is set, since a link is only useful
+    # if it points somewhere the user's phone can actually reach (not
+    # 127.0.0.1, which is what web_host defaults to and is meaningless off
+    # the machine the server runs on).
+    web_base_url: str = ""
+
+    @field_validator("web_base_url")
+    @classmethod
+    def _web_base_url_needs_a_scheme(cls, v: str) -> str:
+        # Same shape as `_ntfy_url_needs_a_scheme` below: fail loudly on the
+        # settings page (before writing to .env) rather than silently
+        # building a broken link later. Trailing slash stripped once here so
+        # every URL-builder downstream can just do f"{base}/a/{id}?k=..."
+        # without checking for a double slash.
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("must be empty or start with http:// or https://")
+        return v.rstrip("/")
     daily_consolidation: bool = True
     consolidate_after_chat: bool = True
     # Phase 6: the after-close reflection session's own tool-call budget,

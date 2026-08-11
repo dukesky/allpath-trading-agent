@@ -5,8 +5,21 @@ from allpath_trade.agent.review import ReviewAnalysis
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
+from allpath_trade.web.routes import dashboard as dashboard_route
 from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
+from tests.test_web_dashboard import FakeDataSource
+
+
+@pytest.fixture(autouse=True)
+def _clear_quote_cache():
+    # Same reasoning as test_web_dashboard.py's fixture of the same name:
+    # the cache is module-level (survives across requests on purpose), so
+    # it must be cleared between tests sharing a ticker (AAPL) or one
+    # test's quote leaks into the next's assertions.
+    dashboard_route._quote_cache.clear()
+    yield
+    dashboard_route._quote_cache.clear()
 
 
 @pytest.fixture
@@ -17,6 +30,12 @@ def client(tmp_path, monkeypatch):
                         strategies_dir=tmp_path / "strategies",
                         memory_dir=tmp_path / "memory", web_token="secret")
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
+        # Must be set before the first request -- otherwise the reviews
+        # page's price-context lookup (Part B) hits the real, network-backed
+        # YFinanceSource. Default price/previous_close deliberately unset
+        # (both None) so existing tests that don't care about price context
+        # see it degrade to "omitted" rather than asserting on a number.
+        monkeypatch.setattr(c.app.state.holder.get(), "data", FakeDataSource())
         c.post("/login", data={"token": "secret"})
         yield c
 
@@ -190,6 +209,153 @@ def test_chat_sourced_review_does_not_render_a_bare_strategy_slash_rule(client):
     body = client.get("/reviews").text
     assert "/ — triggered" not in body
     assert "from chat" in body.lower()
+
+
+# --- Part C: card readability -------------------------------------------
+
+def test_chat_sourced_card_reason_is_not_the_bold_header(client):
+    # Screenshot feedback: a chat proposal's `action` is the LLM's free-text
+    # reason (order_sink.py sets action=intent.reason), which used to render
+    # as the card's bold <strong> headline. It must now show up only in the
+    # muted, capped .review-reason block -- not inside <strong>.
+    long_reason = "The RSI dropped below 30 and price broke the 50-day moving average, " * 3
+    queue_one(client, source="chat", strategy_id="", rule_id="",
+             condition="proposed in conversation", action=long_reason)
+    body = client.get("/reviews").text
+    assert long_reason in body
+    assert f"<strong>{long_reason}" not in body
+    assert 'class="review-reason"' in body
+    assert "Proposed trade · AAPL" in body
+
+
+def test_non_chat_card_header_is_unaffected(client):
+    queue_one(client)  # default source="sentinel", action="sell all"
+    body = client.get("/reviews").text
+    assert "<strong>sell all · AAPL</strong>" in body
+    assert 'class="review-reason"' not in body
+
+
+def test_agent_analysis_full_text_is_not_truncated(client):
+    # agent/review.py no longer hard-cuts an unparseable analysis at 300
+    # chars -- the full text must survive all the way to the rendered page.
+    long_text = "x" * 500
+    rid = queue_one(client)
+    analysis = ReviewAnalysis(recommendation="skip",
+                              reasoning=f"unparseable analysis: {long_text}")
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
+    body = client.get("/reviews").text
+    assert long_text in body
+
+
+def test_agent_analysis_renders_inside_a_details_disclosure(client):
+    rid = queue_one(client)
+    analysis = ReviewAnalysis(recommendation="execute", reasoning="price broke support")
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
+    body = client.get("/reviews").text
+    assert "<details" in body
+    assert "<summary" in body
+    assert "price broke support" in body
+
+
+# --- Part B: price context on pending order cards ------------------------
+
+def test_pending_order_card_shows_trigger_and_current_price(client, monkeypatch):
+    from tests.test_web_dashboard import FakeDataSource
+
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="210.00", previous_close="200.00"))
+    queue_one(client)  # snapshot price "99"
+    body = client.get("/reviews").text
+    assert "Triggered at $99.00" in body
+    assert "Now $210.00" in body
+    assert "+5.0% today" in body
+
+
+def test_pending_order_card_shows_deviation_since_trigger(client, monkeypatch):
+    from tests.test_web_dashboard import FakeDataSource
+
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="110.00"))
+    queue_one(client)  # snapshot price "99" -> +11.1% deviation
+    body = client.get("/reviews").text
+    assert "since trigger" in body
+
+
+def test_pending_order_card_shows_est_shares_for_notional_intent(client, monkeypatch):
+    from tests.test_web_dashboard import FakeDataSource
+
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="200.00"))
+    queue_one(client, intent=OrderIntent(ticker="AAPL", side=OrderSide.BUY,
+                                         notional="500", reason="r"))
+    body = client.get("/reviews").text
+    assert "2.50 shares at current price" in body
+
+
+def test_pending_order_card_qty_intent_shows_no_est_shares_line(client, monkeypatch):
+    from tests.test_web_dashboard import FakeDataSource
+
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="200.00"))
+    queue_one(client)  # default intent is qty-based
+    body = client.get("/reviews").text
+    assert "shares at current price" not in body
+
+
+def test_pending_order_card_market_note_reflects_is_market_hours(client, monkeypatch):
+    from allpath_trade.web.routes import reviews as reviews_route
+
+    monkeypatch.setattr(reviews_route, "order_price_context",
+                        lambda *a, **k: {
+                            "trigger_price": None, "current_price": None,
+                            "day_change_pct": None, "price_class": "",
+                            "deviation_pct": None, "est_shares": None,
+                            "market_open": True})
+    queue_one(client)
+    body = client.get("/reviews").text
+    assert "Market open — fills near current price" in body
+
+
+def test_pending_order_card_quote_failure_omits_price_context_gracefully(client, monkeypatch):
+    class FailingData:
+        def get_quote(self, ticker):
+            raise RuntimeError("no network")
+
+        def get_bars(self, ticker, days=365):
+            raise NotImplementedError
+
+    monkeypatch.setattr(client.app.state.holder.get(), "data", FailingData())
+    queue_one(client)  # has a trigger price in its snapshot
+    r = client.get("/reviews")
+    assert r.status_code == 200
+    body = r.text
+    assert "Triggered at $99.00" in body  # trigger price still shown
+    assert "Now $" not in body  # current price gracefully omitted
+    assert "shares at current price" not in body
+
+
+def test_chat_sourced_review_card_has_no_trigger_price_but_has_current_price(client, monkeypatch):
+    from tests.test_web_dashboard import FakeDataSource
+
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="210.00"))
+    queue_one(client, source="chat", strategy_id="", rule_id="",
+             condition="proposed in conversation",
+             snapshot={"proposed_ts": "2024-01-01T00:00:00+00:00"})
+    body = client.get("/reviews").text
+    assert "Triggered at" not in body
+    assert "Now $210.00" in body
+
+
+def test_resolved_order_card_has_no_price_context(client, monkeypatch):
+    from tests.test_web_dashboard import FakeDataSource
+
+    monkeypatch.setattr(client.app.state.holder.get(), "data",
+                        FakeDataSource(price="210.00"))
+    rid = queue_one(client)
+    client.post(f"/reviews/{rid}/reject")
+    body = client.get("/reviews").text
+    assert "review-price-context" not in body
 
 
 CURRENT_S1_YAML = """\

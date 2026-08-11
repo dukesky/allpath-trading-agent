@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review #{{ review_id }} · AllPath Trade</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ app_css_v }}">
+</head>
+<body class="centered">
+  <div class="card" style="max-width:420px;width:100%">
+    <h1>Review #{{ review_id }}</h1>
+    <p><strong>{{ side }} {{ ticker }}</strong>{% if amount_label %} · {{ amount_label }}{% endif %}</p>
+    {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}
+
+    <div class="review-price-context" style="margin:10px 0">
+      {% if trigger_price is not none %}<span class="muted">Triggered at {{ trigger_price | money }}</span>{% endif %}
+      {% if current_price is not none %}
+      <span class="{{ price_class }}">Now {{ current_price | money }}{% if day_change_pct is not none %} ({{ "%+.1f"|format(day_change_pct) }}% today){% endif %}</span>
+      {% endif %}
+      {% if deviation_pct is not none %}<span class="muted">{{ "%+.1f"|format(deviation_pct) }}% since trigger</span>{% endif %}
+      {% if est_shares is not none %}<span class="muted">&asymp; {{ "%.2f"|format(est_shares) }} shares at current price</span>{% endif %}
+      <span class="muted review-market-note">{{ 'Market open — fills near current price' if market_open else 'Market closed — fills at next open' }}</span>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <form method="post" action="/a/{{ review_id }}/approve">
+        <input type="hidden" name="k" value="{{ token }}" autocomplete="off">
+        <button class="primary" type="submit">Confirm approve</button>
+      </form>
+      <form method="post" action="/a/{{ review_id }}/reject">
+        <input type="hidden" name="k" value="{{ token }}" autocomplete="off">
+        <button class="danger" type="submit">Reject</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

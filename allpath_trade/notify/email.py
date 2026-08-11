@@ -14,8 +14,10 @@ _SMTP_TIMEOUT_SECONDS = 10
 
 
 class EmailNotifier(Notifier):
-    """Email is a notification-only channel: bodies never contain action
-    links, and a send failure must never break the caller."""
+    """A send failure must never break the caller. Bodies may include a
+    one-time approval link (see notify/events.py's `review_queued` and
+    FOOTER) when the operator has opted in via Settings -> Access
+    (Settings.web_base_url) -- by default (unset) they never do."""
 
     def __init__(self, host: str, port: int, user: str, password: str,
                  sender: str, to: str,
