@@ -5,7 +5,12 @@
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
   <p class="muted" style="font-size:13px;margin:6px 0">
-    {% if item['source'] == 'chat' %}
+    {% if item['kind'] == 'strategy_revision' %}
+    {# Task 6 owns the real revision card (diff view, rationale, etc.) --
+       this is only enough to avoid the "triggered on" order-review copy
+       lying about what a revision proposal actually is. #}
+    Strategy revision proposed by reflection for {{ item['strategy_id'] }} — {{ item['condition'] }}
+    {% elif item['source'] == 'chat' %}
     From chat — triggered on <code>{{ item['condition'] }}</code>
     {% else %}
     {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
@@ -52,6 +57,17 @@
   <p class="muted" style="font-size:13px;margin:10px 0 0">
     {% if item['status'] == 'rejected' %}
     Rejected{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
+    {% elif item['kind'] == 'strategy_revision' %}
+    {# Same minimal-honesty scope as the info line above: a revision has no
+       order/risk-gate outcome, so the order branch's copy ("order status
+       unknown") would be false here. #}
+    {% if er and er.get('applied') %}
+    Revision applied
+    {% elif er and er.get('error') %}
+    Revision failed after approval (file may not have been written) — {{ er['error'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
     {% elif er and er.get('error') %}
     Execution failed (review claimed, order status unknown) — {{ er['error'] }}
     {% elif er and er.get('submitted') %}

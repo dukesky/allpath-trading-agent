@@ -190,3 +190,59 @@ def test_chat_sourced_review_does_not_render_a_bare_strategy_slash_rule(client):
     body = client.get("/reviews").text
     assert "/ — triggered" not in body
     assert "from chat" in body.lower()
+
+
+VALID_REVISION_YAML = """\
+name: "S1"
+status: active
+version: 2
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 90", action: "sell all"}
+"""
+
+
+def queue_revision(client, strategy_id="s1", new_yaml=VALID_REVISION_YAML,
+                   rationale="reflection rationale") -> int:
+    q = client.app.state.holder.get().queue
+    return q.add_strategy_revision(
+        strategy_id=strategy_id, ticker="AAPL", old_yaml="old", new_yaml=new_yaml,
+        diff="d", rationale=rationale)
+
+
+def test_approve_revision_applies_it_and_shows_success_note(client):
+    rid = queue_revision(client)
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+    assert r.status_code == 303  # not a 500 from `result.submitted` on None
+    row = client.app.state.holder.get().queue.get(rid)
+    assert row["status"] == "approved"
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    assert (strategies_dir / "s1.yaml").read_text() == VALID_REVISION_YAML
+
+    body = client.get(r.headers["location"]).text
+    assert "Revision applied to s1." in body
+
+
+def test_approve_stale_revision_leaves_it_pending_with_a_message(client):
+    # Missing `position` -- fails re-validation in the applier.
+    rid = queue_revision(client, new_yaml="name: Bad\nstatus: active\n")
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+    assert r.status_code == 303  # not a 500
+
+    row = client.app.state.holder.get().queue.get(rid)
+    assert row["status"] == "pending"
+
+    body = client.get(r.headers["location"]).text
+    assert "pending" in body.lower()
+
+    # still resolvable -- the whole point of leaving it pending
+    client.post(f"/reviews/{rid}/reject", follow_redirects=False)
+    assert client.app.state.holder.get().queue.get(rid)["status"] == "rejected"
+
+
+def test_pending_revision_card_does_not_say_triggered_on(client):
+    rid = queue_revision(client)
+    body = client.get("/reviews").text
+    assert f"#{rid}" in body
+    assert "revision" in body.lower()
+    assert "triggered on" not in body.lower()

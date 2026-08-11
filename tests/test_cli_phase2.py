@@ -89,6 +89,62 @@ def test_reviews_flow(tmp_path, capsys, monkeypatch):
     assert code == 0
 
 
+VALID_REVISION_YAML = """\
+name: "T"
+status: active
+version: 2
+authorization: notify
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 90000", action: "sell all"}
+"""
+
+
+def _queue_revision(tmp_path, new_yaml=VALID_REVISION_YAML) -> int:
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    conn = connect(tmp_path / "allpath-trade.db")
+    rid = ReviewQueue(conn, executor=None).add_strategy_revision(
+        strategy_id="t", ticker="AAPL", old_yaml="old", new_yaml=new_yaml,
+        diff="d", rationale="reflection rationale")
+    conn.close()
+    return rid
+
+
+def test_reviews_approve_on_a_revision_row_applies_it(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    rid = _queue_revision(tmp_path)
+
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+
+    out = capsys.readouterr().out
+    assert code == 0  # not a crash from `result.submitted` on None
+    assert "Revision applied to t." in out
+    assert (tmp_path / "strategies" / "t.yaml").read_text() == VALID_REVISION_YAML
+
+
+def test_reviews_approve_on_a_stale_revision_leaves_it_pending(
+        tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    # Missing `position` -- fails re-validation in the applier.
+    rid = _queue_revision(tmp_path, new_yaml="name: Bad\nstatus: active\n")
+
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "pending" in err.lower()
+
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    conn = connect(tmp_path / "allpath-trade.db")
+    row = ReviewQueue(conn, executor=None).get(rid)
+    assert row["status"] == "pending"
+    conn.close()
+
+
 def _clear_alpaca_env(monkeypatch):
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)

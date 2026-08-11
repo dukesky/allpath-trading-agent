@@ -75,9 +75,21 @@ def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
 
     def list_pending_reviews() -> str:
         rows = queue.list()
-        return "\n".join(
-            f"#{r['id']} {r['strategy_id']}/{r['rule_id']} [{r['rule_type']}] "
-            f"{r['condition']} -> {r['action']}" for r in rows) or "no pending reviews"
+        lines = []
+        for r in rows:
+            condition = r["condition"]
+            # Fence every non-order row's `condition`, not just
+            # strategy_revision: order rows' condition is a DSL expression
+            # already constrained by parse_condition (structured, not free
+            # text), so there's no injection surface there. A revision row's
+            # condition is truncated model-authored rationale from a prior,
+            # unreviewed reflection session -- exactly the kind of free text
+            # that needs fencing before it lands in a new agent's context.
+            if r["kind"] != "order":
+                condition = fence_external(condition)
+            lines.append(f"#{r['id']} {r['strategy_id']}/{r['rule_id']} "
+                        f"[{r['rule_type']}] {condition} -> {r['action']}")
+        return "\n".join(lines) or "no pending reviews"
 
     t = "string"
     registry.register("get_quote", "Get the current price of a US stock.",

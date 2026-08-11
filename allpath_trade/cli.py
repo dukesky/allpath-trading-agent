@@ -129,7 +129,7 @@ def cmd_rearm(store, strategy_id: str, rule_id: str) -> int:
 
 
 def cmd_reviews(q, args) -> int:
-    from allpath_trade.store.reviews import ReviewError
+    from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 
     try:
         if args.reviews_command == "list":
@@ -140,9 +140,25 @@ def cmd_reviews(q, args) -> int:
                 print(f"#{r['id']} {r['ts'][:19]} {r['strategy_id']}/{r['rule_id']} "
                       f"[{r['status']}] {r['condition']} -> {r['action']}")
         elif args.reviews_command == "approve":
-            result = q.approve(args.review_id)
-            print("executed" if result.submitted
-                  else f"rejected by risk gate: {'; '.join(result.decision.reasons)}")
+            # kind-branch HARD PREREQ (Task 3): fetch the row and read its
+            # kind BEFORE calling approve() -- approve() returns None for
+            # strategy_revision rows (Task 2), so `result.submitted` below
+            # would crash on those if this branch reads `result` first.
+            row = q.get(args.review_id)
+            kind, strategy_id = row["kind"], row["strategy_id"]
+            try:
+                result = q.approve(args.review_id)
+            except RevisionValidationError as exc:
+                # ReviewQueue already rolled the row back to "pending"
+                # before raising -- say that, not just "error".
+                print(f"error: revision failed re-validation and was left "
+                      f"pending: {exc}", file=sys.stderr)
+                return 1
+            if kind == "strategy_revision":
+                print(f"Revision applied to {strategy_id}.")
+            else:
+                print("executed" if result.submitted
+                      else f"rejected by risk gate: {'; '.join(result.decision.reasons)}")
         else:
             q.reject(args.review_id, note=args.note or "")
             print(f"review {args.review_id} rejected")

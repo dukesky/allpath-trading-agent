@@ -6,7 +6,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.execution import ExecutionError
-from allpath_trade.store.reviews import ReviewError
+from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.web.routes.dashboard import error_redirect, nav_context
 from allpath_trade.web.templating import templates
 
@@ -63,8 +63,24 @@ def _echo_resolution(request: Request, review_id: int, row_source: str, summary:
 def approve(request: Request, review_id: int) -> Response:
     c = request.app.state.holder.get()
     try:
-        row_source = c.queue.get(review_id)["source"]
+        row = c.queue.get(review_id)
+    except ReviewError as exc:
+        return _back_to_reviews(f"Not processed: {exc}")
+    row_source, kind = row["source"], row["kind"]
+    try:
         result = c.queue.approve(review_id)
+    except RevisionValidationError as exc:
+        # kind-branch HARD PREREQ (Task 3): approve() returns None for
+        # strategy_revision rows -- ReviewError below would catch this too
+        # (RevisionValidationError subclasses it), but this must be caught
+        # first: ReviewQueue._approve_revision already rolled the row back
+        # to "pending" before raising (see the loud comment there), so the
+        # message here has to say that, not the generic "not processed".
+        _echo_resolution(request, review_id, row_source,
+                         f"revision left pending: re-validation failed ({exc})")
+        return _back_to_reviews(
+            f"Revision failed re-validation and was left pending -- "
+            f"you can retry or reject it: {exc}")
     except ReviewError as exc:
         # Nothing was claimed: the atomic UPDATE never matched a pending
         # row (already resolved, missing, corrupt intent). The review's
@@ -76,6 +92,18 @@ def approve(request: Request, review_id: int) -> Response:
         # about a claimed-but-unknown-outcome order, not a no-op.
         _echo_resolution(request, review_id, row_source, f"execution failed: {exc}")
         return _back_to_reviews(f"Review claimed, but execution failed: {exc}")
+
+    if kind == "strategy_revision":
+        # approve() returns None for revision rows (Task 2) -- there is no
+        # ExecutionResult to inspect, unlike the order branch below.
+        # `_back_to_reviews`'s `message` param is really "flash banner", not
+        # specifically an error -- there is no dedicated success channel yet
+        # (Task 6 owns the Pending-page revision UI); reusing it here is the
+        # minimum honest way to surface the outcome for now.
+        _echo_resolution(request, review_id, row_source,
+                         f"revision applied to {row['strategy_id']}")
+        return _back_to_reviews(f"Revision applied to {row['strategy_id']}.")
+
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
         _echo_resolution(request, review_id, row_source,

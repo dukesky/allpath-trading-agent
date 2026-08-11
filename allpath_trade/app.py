@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings
 from allpath_trade.data.base import DataSource
@@ -60,6 +61,11 @@ def build_components(settings: Settings, broker: Broker | None = None,
     queue = ReviewQueue(conn, executor)
     settings.strategies_dir.mkdir(parents=True, exist_ok=True)
     strategies = StrategyStore(settings.strategies_dir, conn)
+    # Unconditional (unlike the LLM-backed wiring in the try/except below):
+    # applying an already-approved revision is plain file I/O, no LLM
+    # involved, so a review approved via the web/CLI must work even when no
+    # LLM is configured.
+    queue.set_revision_applier(apply_revision_factory(settings.strategies_dir, strategies))
     notifier = build_notifier(settings)
     observations = ObservationLog(conn)
     memory = MemoryStore(settings.memory_dir, conn)
