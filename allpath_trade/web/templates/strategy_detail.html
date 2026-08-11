@@ -5,7 +5,27 @@
 <p class="muted">{{ doc.id }} · v{{ doc.version }} · {{ doc.authorization.value }}</p>
 <div class="row" style="margin-top:6px;margin-bottom:16px">
   <span class="chip">{{ doc.status.value }}</span>
+  {% if doc.status.value != 'active' %}<span class="badge">not monitored</span>{% endif %}
   {% for chip in chips %}<span class="badge">{{ chip }}</span>{% endfor %}
+  {% if doc.status.value == 'draft' %}
+  <form method="post" action="/strategies/{{ doc.id }}/status" style="margin-left:auto"
+        onsubmit="return confirm('Activate: the sentinel will evaluate this strategy\'s rules every hour during market hours. Hard rules can place orders automatically. Continue?')">
+    <input type="hidden" name="to" value="active">
+    <button type="submit">Activate</button>
+  </form>
+  {% elif doc.status.value == 'active' %}
+  <form method="post" action="/strategies/{{ doc.id }}/status" style="margin-left:auto"
+        onsubmit="return confirm('Pause: the sentinel will stop evaluating this strategy\'s rules -- its stop-loss and other rules will not fire until it is resumed. Continue?')">
+    <input type="hidden" name="to" value="paused">
+    <button type="submit">Pause</button>
+  </form>
+  {% elif doc.status.value == 'paused' %}
+  <form method="post" action="/strategies/{{ doc.id }}/status" style="margin-left:auto"
+        onsubmit="return confirm('Resume: the sentinel will evaluate this strategy\'s rules every hour during market hours. Hard rules can place orders automatically. Continue?')">
+    <input type="hidden" name="to" value="active">
+    <button type="submit">Resume</button>
+  </form>
+  {% endif %}
 </div>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 

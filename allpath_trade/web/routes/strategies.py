@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
+
 import yaml
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.strategy.loader import (
@@ -9,8 +11,14 @@ from allpath_trade.strategy.loader import (
     is_valid_strategy_id,
     parse_strategy_text,
 )
-from allpath_trade.strategy.model import RuleState, StrategyDoc
-from allpath_trade.web.routes.dashboard import error_redirect, nav_context
+from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
+from allpath_trade.web.routes.dashboard import (
+    QUOTES_BUDGET_SECONDS,
+    _cached_quote,
+    error_redirect,
+    nav_context,
+    summarize_strategy,
+)
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -19,6 +27,18 @@ router = APIRouter()
 # table on every detail-page load; the store keeps every row (other
 # callers, e.g. action-tool tests, rely on that), so the cap lives here.
 _MAX_VERSIONS_SHOWN = 20
+
+# The only lifecycle moves the web UI is allowed to make. Anything else
+# (draft->paused, active->draft, archived->anything, ...) is out of scope
+# for a single-click page control -- the sentinel-monitoring implication of
+# each of these three is exactly the "activate arms it / pause disarms it /
+# resume re-arms it" story the confirm dialog tells the user, and no other
+# transition has an equally simple story to confirm.
+_ALLOWED_STATUS_TRANSITIONS = {
+    (StrategyStatus.DRAFT, StrategyStatus.ACTIVE),
+    (StrategyStatus.ACTIVE, StrategyStatus.PAUSED),
+    (StrategyStatus.PAUSED, StrategyStatus.ACTIVE),
+}
 
 
 def _lifecycle_chips(doc: StrategyDoc, has_pending: bool) -> list[str]:
@@ -40,6 +60,26 @@ def _lifecycle_chips(doc: StrategyDoc, has_pending: bool) -> list[str]:
 def _chips_by_id(c, docs: list[StrategyDoc]) -> dict[str, list[str]]:
     pending_strategy_ids = {row["strategy_id"] for row in c.queue.list("pending")}
     return {doc.id: _lifecycle_chips(doc, doc.id in pending_strategy_ids) for doc in docs}
+
+
+def _cards_by_id(c, docs: list[StrategyDoc]) -> dict[str, dict]:
+    """Price + signed day-change per card, reusing the dashboard's own
+    cached-quote lookup and summarize_strategy shape rather than
+    duplicating either (see dashboard.py's _cached_quote/summarize_strategy
+    docstrings) -- this page only ever reads `price`/`day_change_pct`/
+    `price_class` out of the result, but summarize_strategy is a single
+    pure function with no partial-field variant, so it's simpler to call it
+    whole and let the template pick the fields it needs, same as the
+    dashboard card does. No position/equity here: this page has no broker
+    call of its own, and weight-vs-target isn't part of this card's design
+    (see strategies.html)."""
+    quote_deadline = time.monotonic() + QUOTES_BUDGET_SECONDS
+    cards = {}
+    for doc in docs:
+        quote = (_cached_quote(c.data, doc.position.ticker)
+                 if time.monotonic() < quote_deadline else None)
+        cards[doc.id] = summarize_strategy(doc, None, quote)
+    return cards
 
 
 def _find_doc(c, strategy_id: str) -> StrategyDoc | None:
@@ -67,7 +107,7 @@ def _not_found(request: Request, c, message: str) -> HTMLResponse:
     docs = c.strategies.load_all(status=None, errors=errors)
     return templates.TemplateResponse(request, "strategies.html", {
         "page": "strategies", "docs": docs, "errors": errors,
-        "chips": _chips_by_id(c, docs),
+        "chips": _chips_by_id(c, docs), "cards": _cards_by_id(c, docs),
         "error": message, **nav_context(c)}, status_code=404)
 
 
@@ -78,7 +118,7 @@ def index(request: Request) -> HTMLResponse:
     docs = c.strategies.load_all(status=None, errors=errors)
     return templates.TemplateResponse(request, "strategies.html", {
         "page": "strategies", "docs": docs, "errors": errors,
-        "chips": _chips_by_id(c, docs),
+        "chips": _chips_by_id(c, docs), "cards": _cards_by_id(c, docs),
         "error": request.query_params.get("error"), **nav_context(c)})
 
 
@@ -127,6 +167,45 @@ def toggle_notify_email(request: Request, strategy_id: str) -> Response:
                               allow_unicode=True)
     atomic_write_text(path, new_text)
     c.strategies.snapshot_version(updated, "notify_email toggled via web")
+    return RedirectResponse(f"/strategies/{strategy_id}", status_code=303)
+
+
+@router.post("/strategies/{strategy_id}/status")
+def change_status(request: Request, strategy_id: str, to: str = Form(...)) -> Response:
+    c = request.app.state.holder.get()
+    if not is_valid_strategy_id(strategy_id):
+        return _not_found(request, c, "Strategy not found")
+    # Same id-gate -> find-doc -> 404 shape as notify_email's toggle above,
+    # mirrored exactly per this route's design brief -- an id that is
+    # well-formed but doesn't correspond to a real, loadable strategy 404s
+    # rather than bouncing to the index the way rearm's own "well-formed but
+    # nonexistent" case does.
+    doc = _find_doc(c, strategy_id)
+    if doc is None:
+        return _not_found(request, c, "Strategy not found")
+    try:
+        target = StrategyStatus(to)
+    except ValueError:
+        return error_redirect(f"/strategies/{strategy_id}",
+                              f"Not processed: {to!r} is not a valid status")
+    # A real, well-formed strategy exists -- unlike the 404s above, it has
+    # its own detail page to bounce back to with an error, the same pattern
+    # rearm uses for "a real strategy, but a bogus rule_id".
+    if (doc.status, target) not in _ALLOWED_STATUS_TRANSITIONS:
+        return error_redirect(
+            f"/strategies/{strategy_id}",
+            f"Not processed: cannot change status from {doc.status.value} "
+            f"to {target.value}")
+    path = c.strategies.directory / f"{strategy_id}.yaml"
+    # Same raw-file re-parse as notify_email's toggle above, for the same
+    # reason: writing the SQLite-merged doc back would bake a triggered
+    # rule's runtime state into the YAML.
+    current = parse_strategy_text(strategy_id, path.read_text())
+    updated = current.model_copy(update={"status": target})
+    new_text = yaml.safe_dump(updated.model_dump(mode="json"), sort_keys=False,
+                              allow_unicode=True)
+    atomic_write_text(path, new_text)
+    c.strategies.snapshot_version(updated, f"status changed to {target.value} via web")
     return RedirectResponse(f"/strategies/{strategy_id}", status_code=303)
 
 

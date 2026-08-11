@@ -50,6 +50,7 @@
   </div>
   <div class="strategy-card-meta">
     <span class="chip">{{ s.status }}</span>
+    {% if s.status != 'active' %}<span class="badge">not monitored</span>{% endif %}
     <span class="muted" style="font-size:12px">{{ s.auth }}</span>
     <span class="strategy-weight">
       {% if s.current_weight_pct is not none %}{{ "%.1f"|format(s.current_weight_pct) }}%{% else %}—{% endif %}

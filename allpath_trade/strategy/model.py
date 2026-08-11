@@ -30,6 +30,18 @@ class StrategyStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class StrategyHorizon(str, Enum):
+    LONG = "long"
+    MEDIUM = "medium"
+    SWING = "swing"
+
+
+class StrategyBias(str, Enum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    NEUTRAL = "neutral"
+
+
 def _to_decimal(raw: object, *, percent: bool) -> Decimal:
     """Accept 0.15 / '0.15' / '15%' (percent fields) / '$9,000' (value fields)."""
     if isinstance(raw, Decimal):
@@ -97,6 +109,12 @@ class StrategyDoc(BaseModel):
     version: int = 1
     authorization: Authorization = Authorization.CONFIRM
     thesis: str = ""
+    # Optional, presentation-only metadata for the strategies page (glance-
+    # ability chips) -- never guessed. Absent in YAML means None, which the
+    # UI renders as "no chip" rather than inventing a value; only present
+    # when a human or agent actually wrote one in.
+    horizon: StrategyHorizon | None = None
+    bias: StrategyBias | None = None
     position: PositionPlan
     rules: list[Rule] = []
     review: ReviewPolicy = ReviewPolicy()

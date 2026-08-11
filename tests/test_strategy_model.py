@@ -16,7 +16,9 @@ from allpath_trade.strategy.model import (
     Rule,
     RuleState,
     RuleType,
+    StrategyBias,
     StrategyDoc,
+    StrategyHorizon,
     StrategyStatus,
 )
 
@@ -136,3 +138,37 @@ def test_notify_email_false_round_trips_through_parse_and_dump(tmp_path):
                             allow_unicode=True)
     reparsed = parse_strategy_text("aapl-long", dumped)
     assert reparsed.notify_email is False
+
+
+# --- horizon / bias: optional, absent-in-YAML-means-None ------------------
+
+def test_horizon_and_bias_default_to_none_when_absent():
+    # GOOD_YAML has no horizon/bias keys -- must come back None, never
+    # guessed, so the strategies-page chips simply don't render.
+    doc = parse_strategy_text("aapl-long", GOOD_YAML)
+    assert doc.horizon is None
+    assert doc.bias is None
+
+
+def test_horizon_and_bias_round_trip_through_parse_and_dump():
+    text = GOOD_YAML + "\nhorizon: long\nbias: bullish\n"
+    doc = parse_strategy_text("aapl-long", text)
+    assert doc.horizon == StrategyHorizon.LONG
+    assert doc.bias == StrategyBias.BULLISH
+    dumped = yaml.safe_dump(doc.model_dump(mode="json"), sort_keys=False,
+                            allow_unicode=True)
+    reparsed = parse_strategy_text("aapl-long", dumped)
+    assert reparsed.horizon == StrategyHorizon.LONG
+    assert reparsed.bias == StrategyBias.BULLISH
+
+
+def test_invalid_horizon_value_is_rejected():
+    text = GOOD_YAML + "\nhorizon: eternal\n"
+    with pytest.raises(StrategyValidationError):
+        parse_strategy_text("aapl-long", text)
+
+
+def test_invalid_bias_value_is_rejected():
+    text = GOOD_YAML + "\nbias: sideways\n"
+    with pytest.raises(StrategyValidationError):
+        parse_strategy_text("aapl-long", text)
