@@ -22,7 +22,7 @@
 - [ ] Interactive Brokers 适配器（`ib_async`，配 Docker ib-gateway 文档）
 - [ ] Tradier 适配器（免费沙盒，适合 CI）
 - [ ] 限价单支持（当前仅市价单）
-- [ ] 成交明细（filled_qty/filled_avg_price）入 journal schema —— **Phase 6 复盘前设计**
+- [x] 成交明细（filled_qty/filled_avg_price）入 journal schema —— **Phase 6 已落地**（`store/journal.py` 写入/回填，`store/db.py` 迁移新增两列）
 
 ## 模型与校验
 
@@ -74,3 +74,32 @@
       `.env.example` 里已提醒使用长且随机的主题名），通知正文又带 ticker、买卖方向、拒单
       详情——值得后续给 ntfy 通道加认证头（access token / Bearer）支持，而不是只依赖主题名
       保密
+
+## Phase 6 遗留
+- [ ] `allpath_trade/llm/` 下三个客户端（`openai_compat.py` 的 `OpenAICompatClient`、
+      `anthropic_client.py` 的 `AnthropicClient`）都没有给底层 SDK 客户端或单次
+      `.create()` 调用传显式的请求超时——一次挂起但不报错的模型调用会卡住整条每日链路
+      （digest → reflection → consolidation，`scheduler.py` 的 `build_jobs`/`run_daemon`
+      都在同一个 `daily()` 闭包里同步跑），并且因为 sentinel 的 interval job 和 daily job
+      共享同一个 APScheduler 线程，还会顺带拖住后续的 sentinel tick——与上面第 60 行
+      broker 超时那条是同一类问题，根治办法也一样：在客户端构造处加 socket 级别超时
+- [ ] `propose_strategy_revision`（`agent/reflection_tools.py`）修复一个已损坏（无法解析）
+      的策略文件时，因为当前文件解析失败而拿不到 `current_doc.version` 做比较，退化为只要求
+      `doc.version` 为正整数——如果该策略在 `strategy_versions` 表里已有更高版本号的历史
+      快照，这次 v1 修复提案被接受后会排到 `StrategyStore.versions()`（`ORDER BY version
+      DESC`）历史列表的最下面，审计顺序与实际时间顺序不符。修复思路：这种"当前文件不可解析"
+      的分支应改为比较 `max(version)`（从 `strategy_versions` 表查，而不是从当前文件解析），
+      而不是只检查 `> 0`
+- [ ] `allpath-trade run`（`cli.py` 的无 web 界面守护进程）的 daily job 相比 `serve` 的
+      `build_jobs` 少两样：没有每日摘要邮件（`_send_daily_digest` 从未挂在 `run` 上，Phase 5
+      遗留项已记录），且 consolidation 分支没有 `daily_consolidation` 开关判断（`build_jobs`
+      里有 `and components.settings.daily_consolidation`，`cli.py` 里只判断
+      `components.consolidator is not None`）——两条路径的行为应该对齐
+- [ ] `reports.tokens_used` 列（`store/db.py`）目前恒为 0：`LLMClient`（`llm/base.py`）的
+      接口不暴露任何 token 用量统计，`Reflector._run`（`reflect.py`）如实记 0 而不是伪造数字。
+      等某个客户端接入用量返回后再把这列接上真实值
+- [ ] 一次失败的 reflection（LLM 报错、corrective turn 后仍解析不出 REPORT/SUMMARY）会以
+      `status="failed"` 写入 `reports` 表那一天的行，但 `Reflector.run_daily`
+      （`reflect.py`）的幂等检查只看 `reports.exists(et_date)`，不区分成功/失败——同一个 ET
+      日期不会重试，当天再触发只会返回 "already ran"。这是有意为之（spec §⑥ 只要求失败可见，
+      不要求同日自愈），记录在此供后续讨论是否要加同日重试

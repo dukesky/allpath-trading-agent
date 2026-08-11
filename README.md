@@ -23,7 +23,7 @@
 
 ---
 
-> **Project status:** Phases 1-5 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Reflection loops are next; see the [Roadmap](#roadmap). **Paper trading only by default.**
+> **Project status:** Phases 1-6 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Phase 6 closed the third loop: an after-close **reflection** pass that re-checks each strategy against the day's trades and prices, writes durable lessons to memory, and proposes strategy revisions for your approval — see [Reflection](#reflection). **Paper trading only by default.**
 
 ## Table of Contents
 
@@ -31,6 +31,7 @@
 - [Key Features](#key-features)
 - [Architecture](#architecture)
 - [How It Works](#how-it-works)
+- [Reflection](#reflection)
 - [Safety Model](#safety-model)
 - [Getting Started](#getting-started)
 - [Web Interface](#web-interface)
@@ -112,6 +113,44 @@ Design documents are maintained in [`docs/superpowers/specs/`](docs/superpowers/
 **Sentinel loop** — runs on its own while you're away. Deterministic rule checks cost nothing; hard rules (stop-losses) execute without any LLM in the path, soft rules wake the agent to research before queuing for your approval. Every outcome is journaled, and after the close it's distilled into the same memory that makes the next review sharper.
 
 ![Sentinel loop](docs/images/sentinel-loop.svg)
+
+## Reflection
+
+Once a trading day closes, a scheduled job runs a bounded agent session
+(up to `REFLECTION_MAX_ITERS` tool calls, default 12) that reviews the day
+against every active strategy's stated thesis and rules. It runs after the
+daily email digest and before nightly memory consolidation, so any
+conclusions it reaches are available to that same night's consolidation
+pass. Toggle it with `DAILY_REFLECTION` in `.env` (on by default).
+
+What it produces, every day it runs:
+
+- **A written report** — day summary, per-strategy check, lessons, and any
+  proposals — plus a short plain-language summary sized for a phone push
+  notification.
+- **Durable memory updates**, when the agent reaches a real conclusion (a
+  confirmed pattern, a broken assumption) — the same curated memory the
+  conversation and sentinel loops read from.
+- **Strategy revision proposals**, when a strategy's real-world behavior
+  measurably diverges from what it assumes — a full diff against the
+  current file plus the agent's rationale.
+
+Where to see it:
+
+| Surface | What's there |
+|---|---|
+| **Reports page** (web UI) | One row per day, a summary teaser, and a detail view with the full report and a replay of the session's tool calls |
+| **Push / email** | ntfy gets the short summary as a phone banner; email gets the full report body |
+| **Pending page** | Any proposed strategy revision waits here, diffed against the current file, until you approve or reject it |
+
+Reflection **never applies anything on its own.** It has no order tool and
+no way to write a strategy file directly — every conclusion it acts on goes
+through `memory_update` (curated memory, not the money path) or
+`propose_strategy_revision` (queued on Pending, gated by the same
+byte-exact staleness check as every other approval). If the file changes
+underneath a pending proposal before you approve it, approval is refused
+and the diff is regenerated for review rather than silently applied against
+a moving target.
 
 ## Safety Model
 
@@ -196,7 +235,8 @@ is no built-in HTTPS, so only bind `--host 0.0.0.0` on a network you trust.
 |---|---|
 | Dashboard | Account equity, positions, active strategies (compact cards), recent trades, and a sentinel heartbeat so you can see at a glance that scheduled monitoring is actually running |
 | Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes; your message appears instantly with a "thinking" indicator while the agent works |
-| Pending | The confirmation queue — approve or reject agent-proposed orders, each with a risk pre-check |
+| Pending | The confirmation queue — approve or reject agent-proposed orders and strategy revisions, each with a risk pre-check (orders) or a byte-exact staleness check (revisions) |
+| Reports | One row per day the reflection job ran, with a summary teaser; the detail view shows the full report and proposed revisions raised that day, and a transcript replay shows every tool call the session made |
 | Strategies | Strategy documents, lifecycle badges, and version history, read-only except for a per-strategy notification toggle; saving a rule change still requires `allpath-trade chat` in a terminal (see [Roadmap](#roadmap)) |
 | Memory | The four memory layers, tabbed, plus their change history — read-only |
 | Settings | LLM/broker keys (write-only, never redisplayed); model dropdowns fed by a cached OpenRouter catalog; email and ntfy push notification settings with a save-and-test button that reports each channel's outcome; sentinel interval and consolidation toggles |
@@ -235,7 +275,7 @@ allpath_trade/          # import package (PyPI/CLI name: allpath-trade)
 | 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | ✅ Complete |
 | 5 | **Web UI + notifications** — `allpath-trade serve`, token auth, chat, dashboard, pending-confirmation queue, settings, email | ✅ Complete |
 | 5.5 | **UI polish + notification completion** — sticky nav, compact strategy cards, chat instant feedback, strategy lifecycle badges, tabbed memory page, model dropdowns from a cached catalog, save-and-test notifications, sentinel heartbeat, ntfy push, daily consolidation reads web chat | ✅ Complete |
-| 6 | **Reflection loops** — daily deep review, post-trade retrospectives | 🔜 Next |
+| 6 | **Reflection loop** — after-close daily deep review, memory updates, strategy revision proposals, Reports page | ✅ Complete |
 
 ## Development
 
