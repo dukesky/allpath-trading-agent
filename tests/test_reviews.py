@@ -6,7 +6,7 @@ import pytest
 
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.store.db import connect
-from allpath_trade.store.reviews import ReviewError, ReviewQueue
+from allpath_trade.store.reviews import ReviewError, ReviewQueue, RevisionValidationError
 
 
 class StubExecutor:
@@ -196,13 +196,17 @@ def test_approve_revision_applier_exception_recorded_and_reraised(queue):
 
 
 def test_approve_revision_twice_raises(queue):
-    queue.set_revision_applier(lambda strategy_id, new_yaml: None)
+    calls = []
+    queue.set_revision_applier(lambda strategy_id, new_yaml: calls.append(1))
     rid = queue.add_strategy_revision(
         strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
         diff="d", rationale="r")
     queue.approve(rid)
     with pytest.raises(ReviewError):
         queue.approve(rid)
+    # the second approve must be rejected by the atomic claim before ever
+    # reaching the applier again
+    assert calls == [1]
 
 
 def test_reject_unchanged_for_revision_kind(queue):
@@ -246,3 +250,94 @@ def test_legacy_pending_reviews_row_defaults_kind_order_after_migration(tmp_path
     conn = connect(path)
     row = conn.execute("SELECT kind FROM pending_reviews").fetchone()
     assert row["kind"] == "order"
+
+
+# --- Review findings fixes ---------------------------------------------
+
+def test_approve_revision_validation_error_leaves_row_pending_and_rejectable(queue):
+    # Spec §④: a same-strategy proposal approved after an earlier one
+    # already changed the file must fail revalidation without getting
+    # stuck "approved" -- the row must go back to "pending" so the user
+    # can still reject it.
+    def boom(strategy_id, new_yaml):
+        raise RevisionValidationError("file changed underneath this proposal")
+
+    queue.set_revision_applier(boom)
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+
+    with pytest.raises(RevisionValidationError):
+        queue.approve(rid)
+
+    row = queue.get(rid)
+    assert row["status"] == "pending"
+    assert row["resolved_ts"] is None
+
+    # still rejectable -- the whole point of leaving it pending
+    queue.reject(rid, note="stale, will re-propose")
+    row = queue.get(rid)
+    assert row["status"] == "rejected" and row["resolution_note"] == "stale, will re-propose"
+
+
+def test_approve_revision_runtime_error_recorded_and_reraised(queue):
+    # Non-validation applier failures (e.g. a failed disk write AFTER
+    # validation already passed) are NOT safely retryable, so the existing
+    # approved+error behavior is pinned here.
+    def boom(strategy_id, new_yaml):
+        raise RuntimeError("os.replace failed")
+
+    queue.set_revision_applier(boom)
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+
+    with pytest.raises(RuntimeError, match="os.replace failed"):
+        queue.approve(rid)
+
+    row = queue.get(rid)
+    assert row["status"] == "approved"
+    assert json.loads(row["execution_result"]) == {"error": "os.replace failed"}
+
+
+def test_approve_revision_with_corrupt_snapshot_raises_and_leaves_pending(queue):
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r")
+    queue._conn.execute("UPDATE pending_reviews SET snapshot=? WHERE id=?",
+                        ("not json", rid))
+    queue._conn.commit()
+
+    with pytest.raises(ReviewError):
+        queue.approve(rid)
+
+    row = queue.get(rid)
+    assert row["status"] == "pending"
+    assert row["execution_result"] is None
+
+
+def test_approve_unknown_kind_raises(queue):
+    rid = add(queue)
+    queue._conn.execute("UPDATE pending_reviews SET kind=? WHERE id=?",
+                        ("mystery", rid))
+    queue._conn.commit()
+
+    with pytest.raises(ReviewError, match="unknown review kind"):
+        queue.approve(rid)
+
+    row = queue.get(rid)
+    assert row["status"] == "pending"
+    assert queue._executor.calls == []
+
+
+def test_approve_order_does_not_call_revision_applier(queue):
+    # Converse of the contamination test above `test_approve_revision_...`:
+    # an order-kind row must never reach a configured revision applier.
+    calls = []
+    queue.set_revision_applier(lambda strategy_id, new_yaml: calls.append(1))
+    rid = add(queue)
+
+    result = queue.approve(rid)
+
+    assert result.submitted
+    assert calls == []
