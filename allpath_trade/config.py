@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     web_token: str = ""
     daily_consolidation: bool = True
     consolidate_after_chat: bool = True
+    # Phase 6: the after-close reflection session's own tool-call budget,
+    # separate from a live chat's max_iters -- a reflection session runs
+    # unattended (no user to say "keep going" past LIMIT_NOTICE), so it gets
+    # its own cap rather than sharing whatever a chat session happens to use.
+    reflection_max_iters: int = Field(default=12, ge=1)
+    # Gates the after-close reflection job the same way daily_consolidation
+    # gates the consolidator -- not on the settings page yet, .env-only.
+    daily_reflection: bool = True
 
 
 def describe_validation_error(exc: ValidationError) -> str:
