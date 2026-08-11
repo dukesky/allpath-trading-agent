@@ -13,25 +13,55 @@ from allpath_trade.agent.reflection_tools import register_reflection_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient
+from allpath_trade.memory.search import SessionSearch
 from allpath_trade.scheduler import ET
 from allpath_trade.store.conversations import ConversationStore
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
-# block, and vice versa -- and the per-block char cap is the last-resort
-# backstop against any one block (e.g. a very long trade reason string)
-# blowing past a sane prompt size on its own.
+# block, and vice versa. The per-block char cap is the last-resort backstop
+# against any one block blowing past a sane prompt size; for the trades
+# block it's the cap that actually *binds* in practice, not MAX_TRADES=30 --
+# a 30-trade day with a rendered `reason` (up to 80 chars each, see
+# _format_trade) plus the rest of a formatted line comfortably clears 2000
+# chars. MAX_TRADE_CHARS is sized (3000) for the realistic 30-trade case;
+# trades are already newest-first (TradeJournal.recent is `ORDER BY id
+# DESC`), so tail-truncation still drops the oldest trades first, same as
+# the plain char cap. The observations block gets its own truncation
+# function (_cap_observation_chars) instead, because it's chronologically
+# ordered oldest->newest and tail-truncation there would cut the newest
+# (most relevant) rows.
 MAX_TRADES = 30
+MAX_TRADE_CHARS = 3000
+MAX_TRADE_REASON_CHARS = 80
 MAX_OBSERVATION_LINES = 50
 MAX_BLOCK_CHARS = 2000
+MAX_STRATEGY_CHARS = 3000
+MAX_THESIS_CHARS = 300
+MAX_SUMMARY_CHARS = 600
 
 _TRUNCATION_NOTE = "\n... (truncated)"
+_FRONT_TRUNCATION_NOTE = "... (older observations truncated)\n"
 
-# Exact corrective-retry text from the Task 4 brief -- the one nudge a
-# reflection session gets to reproduce the REPORT/SUMMARY structure before
-# the run is recorded as failed.
-CORRECTIVE_PROMPT = ("Your last message must end with the REPORT/SUMMARY "
-                     "structure. Reproduce it now, nothing else.")
+# Reproduces the literal REPORT/SUMMARY template from REFLECTION_INSTRUCTIONS
+# and names the one failure mode that actually recurs: a bare `SUMMARY` line
+# is required -- not "## SUMMARY", not "SUMMARY:". This is the one nudge a
+# reflection session gets before the run is recorded as failed.
+CORRECTIVE_PROMPT = (
+    "Your last message did not end with the exact REPORT/SUMMARY structure "
+    "this pass requires. Reproduce it now, exactly, nothing else:\n\n"
+    "REPORT\n"
+    "<Day summary>\n"
+    "<Per-strategy check>\n"
+    "<Lessons>\n"
+    "<Proposals>\n"
+    "SUMMARY\n"
+    "<3-5 plain sentences suitable for a phone push notification>\n\n"
+    "The line containing only the word SUMMARY -- a bare line, not "
+    "\"## SUMMARY\" or \"SUMMARY:\" -- marks where the report ends and the "
+    "notification text begins. Both sections are required and must be "
+    "non-empty."
+)
 
 REFLECTION_INSTRUCTIONS = """\
 ## Daily reflection
@@ -44,11 +74,12 @@ every conclusion you act on goes through memory_update (curated memory) or
 propose_strategy_revision (queued for the user's approval on the Pending
 page) -- you are advisory only.
 
-A deterministic seed briefing appears in the first user message below:
-today's trades, today's observations, today's position day-changes, and the
-pending queue, each fenced as external content. Start from those known
-facts; spend your tool calls investigating what looks off, not
-re-deriving what the briefing already told you.
+A deterministic seed briefing appears in the first user message below: every
+active strategy's thesis and rules, today's trades, today's observations,
+today's position day-changes, and the pending queue, each fenced as
+external content. Start from those known facts; spend your tool calls
+investigating what looks off, not re-deriving what the briefing already
+told you.
 
 Your job for today:
 1. Review the day against each active strategy's stated thesis and rules
@@ -103,8 +134,8 @@ def _ts_to_et_date(ts_iso: str) -> str | None:
 
 def _et_day_bounds_utc(et_date: str) -> tuple[str, str]:
     """UTC ISO bounds of the ET calendar day `et_date`, used only as a cheap
-    SQL-level pre-filter (`ObservationLog.recent`'s `since_iso`) -- the exact
-    per-row cut still happens with `_ts_to_et_date`."""
+    SQL-level pre-filter (`ObservationLog.window`'s `since_iso`/`until_iso`)
+    -- the exact per-row cut still happens with `_ts_to_et_date`."""
     d = date.fromisoformat(et_date)
     start_et = datetime.combine(d, time.min, tzinfo=ET)
     end_et = datetime.combine(d, time.max, tzinfo=ET)
@@ -114,7 +145,15 @@ def _et_day_bounds_utc(et_date: str) -> tuple[str, str]:
 def _parse_report(text: str) -> tuple[str, str] | None:
     """Split on the LAST line that is exactly "SUMMARY" (spec §②). Both the
     report body and the summary must be non-empty, or the transcript doesn't
-    actually carry the required structure and this is a parse failure."""
+    actually carry the required structure and this is a parse failure.
+
+    The stored body also has the leading `REPORT` marker line -- and any
+    preamble before it (e.g. a stray "Sure, here you go.") -- stripped, so
+    `reports.body` starts at the actual report content. This keys off the
+    LAST bare `REPORT` line, symmetric with the SUMMARY split. When no
+    `REPORT` line is present at all, parsing stays lenient: a message that
+    goes straight into report content with a valid SUMMARY split still
+    stores -- the parse contract only strictly requires the SUMMARY line."""
     lines = text.splitlines()
     idx = None
     for i, line in enumerate(lines):
@@ -122,7 +161,14 @@ def _parse_report(text: str) -> tuple[str, str] | None:
             idx = i
     if idx is None:
         return None
-    body = "\n".join(lines[:idx]).strip()
+    report_lines = lines[:idx]
+    report_idx = None
+    for i, line in enumerate(report_lines):
+        if line.strip() == "REPORT":
+            report_idx = i
+    if report_idx is not None:
+        report_lines = report_lines[report_idx + 1:]
+    body = "\n".join(report_lines).strip()
     summary = "\n".join(lines[idx + 1:]).strip()
     if not body or not summary:
         return None
@@ -130,9 +176,28 @@ def _parse_report(text: str) -> tuple[str, str] | None:
 
 
 def _cap_chars(text: str, limit: int = MAX_BLOCK_CHARS) -> str:
+    """Tail-truncate: keeps the FRONT of `text`, drops the end. Correct for
+    every block except observations -- trades are newest-first, strategies
+    aren't recency-ordered at all, so preserving the front is the right
+    default in both cases."""
     if len(text) <= limit:
         return text
     return text[: max(limit - len(_TRUNCATION_NOTE), 0)] + _TRUNCATION_NOTE
+
+
+def _cap_observation_chars(text: str, limit: int = MAX_BLOCK_CHARS) -> str:
+    """Front-truncate whole lines: keeps the END of `text`, drops the start.
+    Observations are chronologically ordered oldest->newest (see
+    Reflector._observations_today); on overflow the newest rows -- the
+    afternoon and close, exactly what the reflection exists to review --
+    must survive, not the stale morning tail that `_cap_chars` would keep."""
+    if len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    budget = limit - len(_FRONT_TRUNCATION_NOTE)
+    while lines and len("\n".join(lines)) > budget:
+        lines.pop(0)
+    return _FRONT_TRUNCATION_NOTE + "\n".join(lines)
 
 
 def _format_trade(t: dict) -> str:
@@ -146,9 +211,13 @@ def _format_trade(t: dict) -> str:
         fill = "submitted, fill pending"
     else:
         fill = f"filled {t.get('filled_qty')} @ {t.get('filled_avg_price')}"
-    return (f"{str(t.get('ts', ''))[:19]} {t.get('side')} {t.get('ticker')} "
+    line = (f"{str(t.get('ts', ''))[:19]} {t.get('side')} {t.get('ticker')} "
             f"size={size} status={t.get('status')} {fill} "
             f"strategy={t.get('strategy_id') or '-'}")
+    reason = str(t.get("reason") or "")[:MAX_TRADE_REASON_CHARS]
+    if reason:
+        line += f" reason={reason}"
+    return line
 
 
 def _format_observation(o: dict) -> str:
@@ -163,15 +232,54 @@ def _format_position(p: dict) -> str:
             f"day_change={p.get('day_change', 'n/a')}{note}")
 
 
+def _format_strategy(s: dict) -> str:
+    """One strategy's thesis and rules -- the fields build_system_prompt's
+    own per-strategy line omits (id/status/rule-states only, see
+    agent/context.py:45-49). Without this block the model can only learn a
+    strategy's actual thesis/conditions/actions/target via a read_strategy
+    tool call, spending part of the 12-call session budget per strategy."""
+    thesis = (s.get("thesis") or "").strip()
+    if len(thesis) > MAX_THESIS_CHARS:
+        thesis = thesis[:MAX_THESIS_CHARS] + "..."
+    lines = [(f"{s.get('id')} [{s.get('status')}] {s.get('name')} "
+              f"target={s.get('target', 'n/a')}")]
+    if thesis:
+        lines.append(f"  thesis: {thesis}")
+    rules = s.get("rules") or []
+    if rules:
+        for r in rules:
+            lines.append(f"  {r.get('condition')} -> {r.get('action')} "
+                         f"[{r.get('state')}]")
+    else:
+        lines.append("  no rules")
+    return "\n".join(lines)
+
+
+def _format_target(position: Any) -> str:
+    """Renders a `strategy.model.PositionPlan`'s target as a display string.
+    `_has_target`'s model validator (strategy/model.py) guarantees exactly
+    one of `target_weight`/`target_value` is set."""
+    if position.target_weight is not None:
+        return f"{position.target_weight * 100:.1f}%"
+    if position.target_value is not None:
+        return f"${position.target_value}"
+    return "n/a"
+
+
 def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict],
-                   positions: list[dict], pending_counts: dict[str, int]) -> str:
+                   positions: list[dict], pending_counts: dict[str, int],
+                   strategies: list[dict] | None = None) -> str:
     """Pure, deterministic seed briefing -- no LLM, no I/O. `trades` /
-    `observations` / `positions` are already-fetched plain dicts (the
-    Reflector does the DB/broker/data-source reads); this function only
-    formats and caps them. Each block is `fence_external`-wrapped
-    independently (spec §②: "全部 fence_external 围栏") since every value
-    inside ultimately traces back to model-authored strings (trade `reason`,
-    observation `text`) or a remote price feed -- data, not instructions."""
+    `observations` / `positions` / `strategies` are already-fetched plain
+    dicts (the Reflector does the DB/broker/data-source/YAML reads); this
+    function only formats and caps them. Each block is
+    `fence_external`-wrapped independently (spec §②: "全部 fence_external
+    围栏") since every value inside ultimately traces back to model-authored
+    strings (trade `reason`, observation `text`, strategy `thesis`) or a
+    remote price feed -- data, not instructions."""
+    strategies_block = "\n".join(_format_strategy(s) for s in (strategies or []))
+    strategies_block = strategies_block or "no active strategies"
+
     trades_block = "\n".join(_format_trade(t) for t in trades[:MAX_TRADES])
     trades_block = trades_block or "no trades today"
 
@@ -188,10 +296,12 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
 
     return "\n".join([
         f"# Daily reflection seed briefing -- {et_date}",
+        "\n## Strategies (thesis & rules)",
+        fence_external(_cap_chars(strategies_block, MAX_STRATEGY_CHARS)),
         "\n## Today's trades",
-        fence_external(_cap_chars(trades_block)),
+        fence_external(_cap_chars(trades_block, MAX_TRADE_CHARS)),
         "\n## Today's observations",
-        fence_external(_cap_chars(obs_block)),
+        fence_external(_cap_observation_chars(obs_block)),
         "\n## Positions (day change)",
         fence_external(_cap_chars(pos_block)),
         "\n## Pending queue (by kind)",
@@ -243,7 +353,12 @@ class Reflector:
         register_readonly_tools(registry, data=c.data, broker=c.broker,
                                 journal=c.journal, strategies=c.strategies,
                                 queue=c.queue)
-        register_memory_tools(registry, memory=c.memory)
+        # search=SessionSearch(c.conn) so session_search -- advertised right
+        # in REFLECTION_INSTRUCTIONS's tool list -- actually exists in the
+        # registry (mirrors web/chat_service.py's wiring). Without it the
+        # first call the model makes to it burns an iteration on
+        # "error: unknown tool" out of the 12-call session budget.
+        register_memory_tools(registry, memory=c.memory, search=SessionSearch(c.conn))
         register_reflection_tools(registry, strategies=c.strategies, queue=c.queue)
 
         identity = load_identity()
@@ -275,13 +390,30 @@ class Reflector:
             # corrective turn -- the transcript already holds the analysis,
             # the corrective turn just asks for it to be reproduced in the
             # required shape).
+            #
+            # max_iters is per-run_turn on AgentSession, but the tool-call
+            # budget the spec describes is per-SESSION -- without capping it
+            # here, a cap-hit on the first turn would hand the corrective
+            # retry a second fresh `reflection_max_iters`, silently doubling
+            # the session's real budget. The corrective turn's only job is
+            # to extract/reformat what the transcript already holds, not to
+            # do more research, so one iteration is always enough.
+            session.max_iters = 1
             text = session.run_turn(CORRECTIVE_PROMPT)
+            if text.startswith("(llm error:"):
+                return self._fail(
+                    et_date, conversation_id,
+                    f"reflection failed: llm error on corrective turn: {text}")
             parsed = _parse_report(text)
         if parsed is None:
             return self._fail(et_date, conversation_id,
                               "reflection failed: unparseable report")
 
         body, summary = parsed
+        # ntfy payload insurance: reports.add's summary becomes the push
+        # notification body (Task 5/7 wiring) -- cap it defensively here so
+        # a verbose model response can never blow past a sane push size.
+        summary = summary[:MAX_SUMMARY_CHARS]
         report_id = c.reports.add(
             date=et_date, body=body, summary=summary,
             conversation_id=conversation_id, model=getattr(self.llm, "model", ""),
@@ -301,10 +433,26 @@ class Reflector:
     def _build_briefing(self, et_date: str) -> str:
         return build_briefing(
             et_date=et_date,
+            strategies=self._strategies_today(),
             trades=self._trades_today(et_date),
             observations=self._observations_today(et_date),
             positions=self._positions_with_change(),
             pending_counts=self._pending_counts())
+
+    def _strategies_today(self) -> list[dict]:
+        try:
+            errors: list[str] = []
+            docs = self.components.strategies.load_all(status=None, errors=errors)
+        except Exception:  # noqa: BLE001 — a briefing must never raise
+            return []
+        result = []
+        for d in docs:
+            result.append({
+                "id": d.id, "name": d.name, "status": d.status.value,
+                "target": _format_target(d.position), "thesis": d.thesis,
+                "rules": [{"condition": r.condition, "action": r.action,
+                          "state": r.state.value} for r in d.rules]})
+        return result
 
     def _trades_today(self, et_date: str) -> list[dict]:
         try:
@@ -321,13 +469,19 @@ class Reflector:
     def _observations_today(self, et_date: str) -> list[dict]:
         try:
             start_utc, end_utc = _et_day_bounds_utc(et_date)
-            rows = self.components.observations.recent(since_iso=start_utc, limit=5000)
+            # `window` fetches newest-first and pushes both bounds into SQL
+            # (Task 4 review finding #2) -- `observations.recent`'s
+            # oldest-first `ORDER BY id ASC LIMIT` would silently drop the
+            # newest rows on a day with more than `limit` observations,
+            # losing exactly the afternoon/close window the reflection
+            # exists to review.
+            rows = self.components.observations.window(start_utc, end_utc, limit=5000)
         except Exception:  # noqa: BLE001 — a briefing must never raise
             return []
-        todays = [dict(r) for r in rows if r["ts"] <= end_utc]
-        # observations.recent (with since_iso) returns oldest-first; keep
-        # the most recent MAX_OBSERVATION_LINES rather than the earliest,
-        # preserving their chronological order.
+        todays = [dict(r) for r in rows if _ts_to_et_date(r["ts"]) == et_date]
+        # `window` returns newest-first; reverse to chronological order for
+        # display, then keep the newest MAX_OBSERVATION_LINES.
+        todays.reverse()
         return todays[-MAX_OBSERVATION_LINES:]
 
     def _positions_with_change(self) -> list[dict]:
