@@ -66,3 +66,42 @@ def test_schema_is_idempotent(tmp_path):
     path = tmp_path / "t.db"
     connect(path)
     connect(path)  # second connect must not fail
+
+
+def test_record_persists_fill_details_from_order(tmp_path):
+    j = make_journal(tmp_path)
+    j.record(INTENT, RiskDecision(approved=True), ORDER)
+    [row] = j.recent()
+    assert row["filled_qty"] == "2.5"
+    assert row["filled_avg_price"] == "200"
+
+
+def test_record_fill_details_are_null_without_order(tmp_path):
+    j = make_journal(tmp_path)
+    j.record(INTENT, RiskDecision(approved=False, reasons=["x"]), None)
+    [row] = j.recent()
+    assert row["filled_qty"] is None
+    assert row["filled_avg_price"] is None
+
+
+def test_refresh_fill_updates_row(tmp_path):
+    j = make_journal(tmp_path)
+    submitted = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                      notional=Decimal(500), status=OrderStatus.SUBMITTED,
+                      filled_qty=Decimal(0), filled_avg_price=None,
+                      submitted_at=datetime(2026, 7, 30, 15, 0, tzinfo=UTC))
+    trade_id = j.record(INTENT, RiskDecision(approved=True), submitted)
+    [row] = j.recent()
+    assert row["status"] == "submitted"
+    assert row["filled_qty"] == "0"
+    assert row["filled_avg_price"] is None
+
+    filled = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                   notional=Decimal(500), status=OrderStatus.FILLED,
+                   filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                   submitted_at=submitted.submitted_at)
+    j.refresh_fill(trade_id, filled)
+    [row] = j.recent()
+    assert row["status"] == "filled"
+    assert row["filled_qty"] == "2.5"
+    assert row["filled_avg_price"] == "200"

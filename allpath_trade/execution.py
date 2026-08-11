@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from allpath_trade.broker.base import Broker, Order, OrderIntent
+from allpath_trade.broker.base import Broker, Order, OrderIntent, OrderStatus
 from allpath_trade.data.base import DataSource
 from allpath_trade.risk.gate import RiskDecision, RiskGate
 from allpath_trade.store.journal import TradeJournal
@@ -67,5 +67,20 @@ class Executor:
             self.journal.record(intent, failed, None, status_override="error")
             raise ExecutionError(str(exc)) from exc
 
-        self.journal.record(intent, decision, order)
+        trade_id = self.journal.record(intent, decision, order)
+        if order.status != OrderStatus.FILLED:
+            # Market orders often finish filling within the same round trip
+            # that submitted them, so one extra poll right here catches the
+            # common case and gives the journal (and later, the reflection
+            # briefing) a real fill price instead of "submitted". If the
+            # poll itself fails, leave the as-submitted row alone rather
+            # than retrying or raising: NULL fill columns honestly say "we
+            # don't know yet" and a later reconciliation pass can fill them
+            # in, but this is not the place to build a polling loop.
+            try:
+                refreshed = self.broker.get_order(order.id)
+            except Exception:  # noqa: BLE001 — a failed poll must not fail the submit
+                refreshed = None
+            if refreshed is not None:
+                self.journal.refresh_fill(trade_id, refreshed)
         return ExecutionResult(submitted=True, order=order, decision=decision)

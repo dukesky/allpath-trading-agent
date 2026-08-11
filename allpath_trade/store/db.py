@@ -98,6 +98,21 @@ CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Daily reflection reports (Phase 6). One row per ET trading day; the
+-- `date` UNIQUE constraint is also how the reflection scheduler stays
+-- idempotent across process restarts -- see ReportStore.
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL UNIQUE,
+    body TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    conversation_id INTEGER,
+    model TEXT NOT NULL DEFAULT '',
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ok',
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -108,6 +123,8 @@ _MIGRATIONS = [
     "ALTER TABLE pending_reviews ADD COLUMN source TEXT NOT NULL DEFAULT 'sentinel'",
     "ALTER TABLE pending_reviews ADD COLUMN conversation_id INTEGER",
     "ALTER TABLE pending_reviews ADD COLUMN risk_preview TEXT",
+    "ALTER TABLE trades ADD COLUMN filled_qty TEXT",
+    "ALTER TABLE trades ADD COLUMN filled_avg_price TEXT",
 ]
 
 

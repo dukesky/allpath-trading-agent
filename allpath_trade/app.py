@@ -19,6 +19,7 @@ from allpath_trade.store.app_state import AppState
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
+from allpath_trade.store.reports import ReportStore
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.store import StrategyStore
 
@@ -39,6 +40,7 @@ class Components:
     observations: ObservationLog
     memory: MemoryStore
     app_state: AppState
+    reports: ReportStore
     consolidator: Consolidator | None = None
 
 
@@ -62,6 +64,7 @@ def build_components(settings: Settings, broker: Broker | None = None,
     observations = ObservationLog(conn)
     memory = MemoryStore(settings.memory_dir, conn)
     app_state = AppState(conn)
+    reports = ReportStore(conn)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
                        observations=observations)
     consolidator: Consolidator | None = None
@@ -87,4 +90,4 @@ def build_components(settings: Settings, broker: Broker | None = None,
                       gate=gate, executor=executor, queue=queue,
                       strategies=strategies, notifier=notifier, sentinel=sentinel,
                       conn=conn, observations=observations, memory=memory,
-                      app_state=app_state, consolidator=consolidator)
+                      app_state=app_state, reports=reports, consolidator=consolidator)
