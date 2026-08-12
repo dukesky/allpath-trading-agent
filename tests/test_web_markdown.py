@@ -21,7 +21,13 @@ from fastapi.testclient import TestClient
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMResponse
 from allpath_trade.web.app import create_app
-from allpath_trade.web.markdown import ALLOWED_TAGS, render_markdown
+from allpath_trade.web.markdown import (
+    ALLOWED_TAGS,
+    TELEGRAM_ALLOWED_TAGS,
+    render_markdown,
+    split_for_telegram,
+    to_telegram_html,
+)
 from tests.test_sentinel import FakeBroker
 from tests.test_web_chat import make_client
 from tests.test_web_reports import add_report
@@ -376,3 +382,249 @@ def test_nul_bearing_assistant_message_does_not_500_the_chat_page(tmp_path, monk
     get_resp = client.get("/chat")
     assert get_resp.status_code == 200
     assert "99" in get_resp.text
+
+
+# ---------------------------------------------------------------------------
+# 7. to_telegram_html -- Task 2 of the Telegram chat plan (spec §③). Same
+#    three-layer approach as the render_markdown sections above: hostile
+#    corpus, tag whitelist, then feature shapes -- but against Telegram's
+#    much smaller allowed-tag set (`{b, code, pre}`, no block-level tags at
+#    all since Telegram HTML mode has none).
+# ---------------------------------------------------------------------------
+
+TG_HOSTILE_CASES = {
+    "bare_script": "<script>alert(1)</script>",
+    "script_in_bold": "**<script>alert(1)</script>**",
+    "raw_b_tag_in_text": "<b>injected</b>",
+    "bold_wrapped_forged_b": "**<b>**",
+    "script_in_code_span": "`<script>alert(1)</script>`",
+    "script_in_fence": "```\n<script>alert(1)</script>\n```",
+    "script_in_table_cell": "| a | b |\n|---|---|\n| 1 | <script>alert(1)</script> |",
+    "script_in_heading": "# <script>alert(1)</script>",
+    "script_in_list_item": "- <script>alert(1)</script>",
+    "pre_tag_forgery": "<pre>evil</pre>",
+    "img_onerror": '<img src=x onerror="alert(1)">',
+}
+
+
+def test_to_telegram_html_hostile_script_payloads_only_ever_appear_escaped():
+    for name, payload in TG_HOSTILE_CASES.items():
+        out = to_telegram_html(payload)
+        assert "<script>" not in out, f"{name}: raw <script> leaked: {out!r}"
+        assert "</script>" not in out, f"{name}: raw </script> leaked: {out!r}"
+        if "<script>" in payload:
+            assert "&lt;script&gt;" in out, f"{name}: escaped form missing: {out!r}"
+
+
+def test_to_telegram_html_forged_b_tag_in_input_is_escaped_not_a_real_tag():
+    out = to_telegram_html(TG_HOSTILE_CASES["raw_b_tag_in_text"])
+    assert out == "&lt;b&gt;injected&lt;/b&gt;"
+
+
+def test_to_telegram_html_bold_wrapping_a_forged_tag_stays_escaped_inside_b():
+    out = to_telegram_html(TG_HOSTILE_CASES["bold_wrapped_forged_b"])
+    assert out == "<b>&lt;b&gt;</b>"
+
+
+def test_to_telegram_html_pre_forgery_never_becomes_a_real_pre_tag():
+    out = to_telegram_html(TG_HOSTILE_CASES["pre_tag_forgery"])
+    assert out == "&lt;pre&gt;evil&lt;/pre&gt;"
+
+
+def test_to_telegram_html_fence_containing_a_script_tag_is_verbatim_escaped():
+    out = to_telegram_html(TG_HOSTILE_CASES["script_in_fence"])
+    assert out == "<pre>&lt;script&gt;alert(1)&lt;/script&gt;</pre>"
+
+
+def test_to_telegram_html_img_onerror_is_inert_text_not_an_element():
+    out = to_telegram_html(TG_HOSTILE_CASES["img_onerror"])
+    assert "<img" not in out
+    assert "&lt;img" in out
+    assert "onerror=" in out  # present only as visible escaped text
+
+
+TG_FEATURE_CASES = {
+    "bold": "This is **bold** text.",
+    "code": "Use `pip install x` to install.",
+    "fence": "```python\nprint('hi')\n```",
+    "heading": "## Section Title",
+    "table": "| a | bb |\n|---|---|\n| 1 | 22 |",
+    "list_bullet": "- one\n- two",
+    "list_ordered": "1. first\n2. second",
+    "paragraphs": "First paragraph.\n\nSecond paragraph.",
+    "italic_stays_literal": "This is *italic* text.",
+    "hr_stays_literal": "above\n\n---\n\nbelow",
+    "code_inside_bold_not_reparsed": "**`not **bold**`**",
+}
+
+
+def test_to_telegram_html_output_never_contains_a_tag_outside_the_allowed_set():
+    for corpus in (TG_HOSTILE_CASES, TG_FEATURE_CASES):
+        for name, payload in corpus.items():
+            out = to_telegram_html(payload)
+            found = _tags_in(out)
+            assert found <= TELEGRAM_ALLOWED_TAGS, (
+                f"{name}: disallowed tag(s) {found - TELEGRAM_ALLOWED_TAGS} in {out!r}")
+
+
+def test_telegram_allowed_tags_is_exactly_b_code_pre():
+    assert TELEGRAM_ALLOWED_TAGS == {"b", "code", "pre"}
+
+
+def test_to_telegram_html_bold_becomes_b_tag():
+    assert to_telegram_html(TG_FEATURE_CASES["bold"]) == "This is <b>bold</b> text."
+
+
+def test_to_telegram_html_inline_code_becomes_code_tag():
+    out = to_telegram_html(TG_FEATURE_CASES["code"])
+    assert out == "Use <code>pip install x</code> to install."
+
+
+def test_to_telegram_html_fenced_block_becomes_pre_verbatim_language_tag_discarded():
+    out = to_telegram_html(TG_FEATURE_CASES["fence"])
+    assert out == "<pre>print(&#39;hi&#39;)</pre>"
+
+
+def test_to_telegram_html_heading_becomes_a_bold_line():
+    assert to_telegram_html(TG_FEATURE_CASES["heading"]) == "<b>Section Title</b>"
+
+
+def test_to_telegram_html_table_becomes_an_aligned_pre_block():
+    out = to_telegram_html(TG_FEATURE_CASES["table"])
+    assert out.startswith("<pre>") and out.endswith("</pre>")
+    assert "<table>" not in out
+    inner_lines = out[len("<pre>"):-len("</pre>")].splitlines()
+    assert len(inner_lines) == 3  # header, separator, one data row
+    assert "a" in inner_lines[0] and "bb" in inner_lines[0]
+    assert "1" in inner_lines[2] and "22" in inner_lines[2]
+    # Columns are padded to a fixed width -- "a"/"1" line up with "bb"/"22".
+    assert inner_lines[0].index("bb") == inner_lines[2].index("22")
+
+
+def test_to_telegram_html_bullet_list_becomes_a_pre_block():
+    out = to_telegram_html(TG_FEATURE_CASES["list_bullet"])
+    assert out == "<pre>- one\n- two</pre>"
+
+
+def test_to_telegram_html_ordered_list_becomes_a_pre_block():
+    out = to_telegram_html(TG_FEATURE_CASES["list_ordered"])
+    assert out == "<pre>1. first\n2. second</pre>"
+
+
+def test_to_telegram_html_paragraphs_joined_by_a_blank_line():
+    out = to_telegram_html(TG_FEATURE_CASES["paragraphs"])
+    assert out == "First paragraph.\n\nSecond paragraph."
+
+
+def test_to_telegram_html_italic_marker_has_no_telegram_equivalent_stays_literal():
+    out = to_telegram_html(TG_FEATURE_CASES["italic_stays_literal"])
+    assert out == "This is *italic* text."
+    assert "<i>" not in out
+    assert "<em>" not in out
+
+
+def test_to_telegram_html_hr_divider_has_no_telegram_equivalent_stays_literal():
+    out = to_telegram_html(TG_FEATURE_CASES["hr_stays_literal"])
+    assert out == "above\n\n---\n\nbelow"
+
+
+def test_to_telegram_html_code_span_content_is_not_reparsed_for_bold():
+    # The `**` markers inside a `` `code span` `` must render literally, not
+    # be re-read as bold -- exact mirror of render_markdown's own
+    # test_markdown_chars_inside_a_code_span_are_not_parsed.
+    out = to_telegram_html(TG_FEATURE_CASES["code_inside_bold_not_reparsed"])
+    assert out == "<b><code>not **bold**</code></b>"
+
+
+def test_to_telegram_html_blank_input_returns_empty_string():
+    assert to_telegram_html("") == ""
+    assert to_telegram_html("   \n  \n") == ""
+
+
+def test_to_telegram_html_reuses_the_shared_escape_pass_crlf_normalized():
+    # Guards that to_telegram_html didn't re-derive its own escaping --
+    # CRLF normalization (a render_markdown behavior living in the shared
+    # _escape_and_normalize helper) must apply here too.
+    out = to_telegram_html("line one\r\nline two")
+    assert "\r" not in out
+    assert out == "line one\nline two"
+
+
+# ---------------------------------------------------------------------------
+# 8. split_for_telegram -- blank-line-boundary splitting with a 4096-char
+#    default limit, never slicing inside a <pre> block unless that block
+#    alone exceeds the limit.
+# ---------------------------------------------------------------------------
+
+def test_split_for_telegram_returns_empty_list_for_empty_input():
+    assert split_for_telegram("") == []
+
+
+def test_split_for_telegram_returns_single_chunk_when_comfortably_under_limit():
+    html = "<b>hello</b> world"
+    assert split_for_telegram(html) == [html]
+
+
+def test_split_for_telegram_returns_single_chunk_at_exactly_the_limit():
+    html = "a" * 4096
+    result = split_for_telegram(html)
+    assert result == [html]
+    assert len(result[0]) == 4096
+
+
+def test_split_for_telegram_one_char_over_limit_splits_into_two_and_loses_nothing():
+    html = "a" * 4097
+    result = split_for_telegram(html)
+    assert len(result) == 2
+    assert all(len(c) <= 4096 for c in result)
+    assert "".join(result) == html
+
+
+def test_split_for_telegram_multi_paragraph_packs_greedily_and_reconstructs_exactly():
+    paragraphs = [f"Paragraph {i}: " + ("x" * 60) for i in range(100)]
+    html = "\n\n".join(paragraphs)
+    assert len(html) > 4096
+    result = split_for_telegram(html)
+    assert len(result) > 1
+    assert all(len(c) <= 4096 for c in result)
+    # Greedy packing at blank-line boundaries only -- rejoining every chunk
+    # with the same separator recovers the exact original string.
+    assert "\n\n".join(result) == html
+
+
+def test_split_for_telegram_never_splits_inside_a_pre_block_that_fits_the_limit():
+    pre_content = "line with a blank line below\n\nstill inside the pre block"
+    full_pre = f"<pre>{pre_content}</pre>"
+    html = "intro paragraph\n\n" + full_pre + "\n\n" + ("filler " * 700)
+    assert len(html) > 4096
+    result = split_for_telegram(html)
+    assert all(len(c) <= 4096 for c in result)
+    # The pre block -- including its own internal blank line -- appears
+    # intact in exactly one chunk, never fragmented across two.
+    assert sum(full_pre in c for c in result) == 1
+    for c in result:
+        if full_pre not in c:
+            assert "<pre>" not in c and "</pre>" not in c
+
+
+def test_split_for_telegram_hard_splits_a_single_pre_block_that_alone_exceeds_the_limit():
+    inner = "x" * 5000
+    html = f"<pre>{inner}</pre>"
+    assert len(html) > 4096
+    result = split_for_telegram(html)
+    assert len(result) > 1
+    for chunk in result:
+        assert len(chunk) <= 4096
+        assert chunk.startswith("<pre>")
+        assert chunk.endswith("</pre>")
+    reassembled = "".join(c[len("<pre>"):-len("</pre>")] for c in result)
+    assert reassembled == inner
+
+
+def test_split_for_telegram_hard_split_of_a_huge_non_pre_block_has_no_tags_to_reopen():
+    html = "a" * 9000
+    result = split_for_telegram(html)
+    assert len(result) == 3
+    assert "".join(result) == html
+    for chunk in result:
+        assert len(chunk) <= 4096
