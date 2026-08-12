@@ -3,13 +3,13 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from allpath_trade.scheduler import (
-    run_daily_jobs,
     SENTINEL_JOB_ID,
     SENTINEL_MARKET_OPEN_KEY,
     build_jobs,
     is_market_hours,
     reschedule_sentinel_job,
     run_daemon,
+    run_daily_jobs,
 )
 from tests.test_sentinel import make, strategy_yaml
 
