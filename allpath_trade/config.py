@@ -118,6 +118,20 @@ class Settings(BaseSettings):
     # Gates the after-close reflection job the same way daily_consolidation
     # gates the consolidator -- not on the settings page yet, .env-only.
     daily_reflection: bool = True
+    # Ops-hardening: both LLM SDK clients (anthropic_client.py,
+    # openai_compat.py) are constructed with no explicit timeout, so a
+    # genuinely hung HTTP call (not erroring -- hanging) falls back to each
+    # SDK's own default (anthropic ~10min with retries; openai similar).
+    # That's long enough to block the entire after-close chain (digest ->
+    # reflection -> consolidation, all synchronous in one job) and every
+    # sentinel tick behind it, since APScheduler's max_instances=1 means a
+    # stuck job silently swallows every tick queued behind it -- the
+    # heartbeat going stale becomes the only symptom. 180s is generous for
+    # reflection's memory-tier calls (Opus, large prompts) while still being
+    # finite; not on the settings page yet, same .env-only policy as
+    # REFLECTION_MAX_ITERS. Floor of 10s guards against a value so low every
+    # call would time out immediately.
+    llm_timeout_seconds: int = Field(default=180, ge=10)
 
 
 def describe_validation_error(exc: ValidationError) -> str:

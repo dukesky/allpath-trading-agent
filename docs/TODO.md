@@ -55,7 +55,8 @@
 - [ ] 策略 YAML 在线编辑（当前只读，修改走聊天让 agent 起草）
 - [ ] SSE 实时推送工具活动（当前为回合结束后整体刷新，见 `_chat_messages.html` 里的说明）
 - [ ] `serve` 的 HTTPS / 反向代理部署文档
-- [ ] 独立守护进程 `allpath-trade run` 不发送每日摘要邮件——`_send_daily_digest` 只挂在 `serve` 的 `build_jobs` 里，`cli.py` 的 `run` 分支的 `daily_job` 只跑 consolidation
+- [x] 独立守护进程 `allpath-trade run` 不发送每日摘要邮件——**ops-hardening round 已落地**，
+      详见下面 Phase 6 遗留区块里同一条目的落地说明（两条重复记录了同一个问题，一并解决）
 - [ ] 通知正文里插值的文本（规则 condition、执行 detail、agent 的 recommendation）未做 URL 清理——其中若混入裸链接，邮件客户端可能自动转成可点击链接，与"通知不含链接"的设计承诺相悖
 - [ ] 一个永久挂起的 broker 会耗尽 `_broker_pool`（`dashboard.py` 的 4-worker 专用线程池）——耗尽之后仪表盘会一直显示"unavailable"，即使 broker 后来恢复也不会自愈，直到进程重启；且因为 `ThreadPoolExecutor` 的 worker 是非 daemon 线程，一次挂起的调用还会拖慢 `serve` 的干净关闭。根治办法是给 broker 的 HTTP 客户端加 socket 级别的超时，而不是只在应用层 `.result(timeout=...)`
 - [ ] compaction 的 flush 钩子（`on_before_compact` 绑定到 `Consolidator.run_post_chat`）是在触发它的那个回合的 turn lock 内、同步跑一次记忆层 LLM 调用——长对话里某一回合会出现明显的延迟尖峰，理想情况应该异步/后台执行，不阻塞当前回合的响应
@@ -76,13 +77,17 @@
       保密
 
 ## Phase 6 遗留
-- [ ] `allpath_trade/llm/` 下三个客户端（`openai_compat.py` 的 `OpenAICompatClient`、
-      `anthropic_client.py` 的 `AnthropicClient`）都没有给底层 SDK 客户端或单次
-      `.create()` 调用传显式的请求超时——一次挂起但不报错的模型调用会卡住整条每日链路
-      （digest → reflection → consolidation，`scheduler.py` 的 `build_jobs`/`run_daemon`
-      都在同一个 `daily()` 闭包里同步跑），并且因为 sentinel 的 interval job 和 daily job
-      共享同一个 APScheduler 线程，还会顺带拖住后续的 sentinel tick——与上面第 60 行
-      broker 超时那条是同一类问题，根治办法也一样：在客户端构造处加 socket 级别超时
+- [x] `allpath_trade/llm/` 下两个客户端（`openai_compat.py` 的 `OpenAICompatClient`、
+      `anthropic_client.py` 的 `AnthropicClient`）没有给底层 SDK 客户端传显式的请求超时——
+      **ops-hardening round 已落地**：新增 `Settings.llm_timeout_seconds`（默认 180 秒，
+      `.env` only，同 `REFLECTION_MAX_ITERS` 的策略），两个客户端构造函数都接收 `timeout=`
+      参数并透传给底层 SDK 构造（`anthropic.Anthropic(..., timeout=...)` /
+      `OpenAI(..., timeout=...)`），`llm/factory.py` 的 `build_llm` 对三档模型统一传入。
+      SDK 超时异常（`anthropic.APITimeoutError` / `openai.APITimeoutError`）本身就是
+      `Exception` 子类，`complete()` 已有的 `except Exception` 会照常把它包成 `LLMError`，
+      `agent/loop.py` 的 `except LLMError` 继续按原有 `(llm error: ...)` 路径处理，
+      未额外改动。broker 超时（本文件下面另一条）与 yfinance 超时仍待后续处理，是同一类
+      问题的另外两处实例。
 - [ ] `propose_strategy_revision`（`agent/reflection_tools.py`）修复一个已损坏（无法解析）
       的策略文件时，因为当前文件解析失败而拿不到 `current_doc.version` 做比较，退化为只要求
       `doc.version` 为正整数——如果该策略在 `strategy_versions` 表里已有更高版本号的历史
@@ -90,11 +95,12 @@
       DESC`）历史列表的最下面，审计顺序与实际时间顺序不符。修复思路：这种"当前文件不可解析"
       的分支应改为比较 `max(version)`（从 `strategy_versions` 表查，而不是从当前文件解析），
       而不是只检查 `> 0`
-- [ ] `allpath-trade run`（`cli.py` 的无 web 界面守护进程）的 daily job 相比 `serve` 的
-      `build_jobs` 少两样：没有每日摘要邮件（`_send_daily_digest` 从未挂在 `run` 上，Phase 5
-      遗留项已记录），且 consolidation 分支没有 `daily_consolidation` 开关判断（`build_jobs`
-      里有 `and components.settings.daily_consolidation`，`cli.py` 里只判断
-      `components.consolidator is not None`）——两条路径的行为应该对齐
+- [x] `allpath-trade run`（`cli.py` 的无 web 界面守护进程）的 daily job 相比 `serve` 的
+      `build_jobs` 少两样：没有每日摘要邮件，且 consolidation 分支没有 `daily_consolidation`
+      开关判断——**ops-hardening round 已落地**：把两条路径共用的每日序列（digest ->
+      reflection -> consolidation，逐步独立 try/except）抽成 `scheduler.run_daily_jobs
+      (components)` 一个函数，`build_jobs` 和 `cli.py` 的 `run` 分支现在都调用它，不会再
+      各自维护一份、逐渐漂移。`cli.py` 不再有单独的 `daily()` 闭包。
 - [ ] `reports.tokens_used` 列（`store/db.py`）目前恒为 0：`LLMClient`（`llm/base.py`）的
       接口不暴露任何 token 用量统计，`Reflector._run`（`reflect.py`）如实记 0 而不是伪造数字。
       等某个客户端接入用量返回后再把这列接上真实值
@@ -123,15 +129,13 @@
       配置，Settings 页面（`web/templates/settings.html`）只给 `daily_consolidation`
       和 `consolidate_after_chat` 做了勾选框，没有对应的 reflection 开关——想要临时关掉
       每日 reflection 得改 `.env` 再重启进程，而不能像另外两个每日任务一样在网页上直接切换
-- [ ] 每日摘要邮件（`_send_daily_digest`，`scheduler.py`）和每日 reflection 共用
+- [x] 每日摘要邮件（`_send_daily_digest`，`scheduler.py`）和每日 reflection 共用
       `build_jobs`/`run_daemon` 里同一个 `_maybe_run_daily` 一天一次的门控，但这个门控只是
       `state = {"last_daily": ...}` 的进程内变量，不落盘——同一个 ET 日期内如果进程重启
-      （比如 `serve` 被重新拉起），digest 分支没有任何持久化的去重检查，会对当天再发一封
-      重复摘要邮件；而 reflection 分支不受影响，因为 `Reflector.run_daily` 自己在
-      `reports` 表上做了 `reports.exists(et_date)` 的幂等检查，重启后重新调用只会返回
-      "already ran"，不会真的再跑一次或重复通知。两条路径共用同一个不持久的门控，行为却不
-      对称，值得后续要么给 digest 也加一张幂等记录表，要么把 `last_daily` 状态整体挪到
-      `AppState` 里持久化
+      会对当天再发一封重复摘要邮件——**ops-hardening round 已落地**：`_send_daily_digest`
+      现在自己在 `app_state`（key `digest_last_date`）上做 ET 日期级别的幂等检查，与
+      reflection 的 `reports.exists(et_date)`、consolidation 自己的 turn marker 是同一类
+      持久化 seam，不改动 `_maybe_run_daily` 本身。
 
 ## Fill-honesty round 遗留（M6）
 - [ ] 每日 reflection 简报和（若后续加上）digest 目前都按**提交日**给交易分桶，不是**成交

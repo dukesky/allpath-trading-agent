@@ -167,8 +167,17 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
     scheduler.start()
 
 
+# app_state key for the digest's own once-per-ET-day dedup (see
+# _send_daily_digest below) -- distinct from TURN_MARKER_KEY
+# (memory/consolidate.py) and the reports table's per-ET-date row
+# (reflect.py), which are the equivalent persisted markers for
+# consolidation and reflection respectively.
+DIGEST_LAST_DATE_KEY = "digest_last_date"
+
+
 def _send_daily_digest(components) -> None:
-    """Count today's activity and email a summary.
+    """Count today's activity and email a summary, at most once per ET
+    calendar day.
 
     `trades` comes from `TradeJournal.trades_today()` — the journal's real
     accessor (there is no `journal.today()`). `triggers` counts today's
@@ -179,7 +188,19 @@ def _send_daily_digest(components) -> None:
     source instead, so they can never inflate this count. `since_iso`
     is a UTC calendar-day boundary, matching `TradeJournal.trades_today`'s
     own day convention; `limit` is set high because `recent()`'s 200-row
-    default would silently undercount on a very active day."""
+    default would silently undercount on a very active day.
+
+    The `digest_last_date` guard exists because `_maybe_run_daily`'s
+    once-per-day gate (`state["last_daily"]`) is in-memory only: a `serve`
+    restart after 16:05 forgets today's digest already went out and would
+    otherwise re-send it on the next tick. Reflection doesn't have this
+    problem — `Reflector.run_daily` (reflect.py) checks `reports.exists
+    (et_date)`, a persisted table row — and consolidation tracks its own
+    turn marker the same way; this mirrors that pattern for the digest
+    specifically, without touching `_maybe_run_daily` itself."""
+    today = datetime.now(UTC).astimezone(ET).date().isoformat()
+    if components.app_state.get(DIGEST_LAST_DATE_KEY) == today:
+        return
     since_iso = datetime.now(UTC).date().isoformat()
     triggers = sum(1 for row in components.observations.recent(
         since_iso=since_iso, limit=10_000) if row["source"] == "sentinel")
@@ -187,6 +208,44 @@ def _send_daily_digest(components) -> None:
         triggers=triggers, trades=components.journal.trades_today(),
         pending=len(components.queue.list()))
     components.notifier.send(subject, body)
+    components.app_state.set(DIGEST_LAST_DATE_KEY, today)
+
+
+def run_daily_jobs(components) -> None:
+    """The after-close daily sequence, shared by `build_jobs` (`serve`) and
+    `cli.py`'s `run` daemon so the two entry points can't drift out of sync
+    again (docs/TODO.md's Phase 5 leftover: `run` used to skip the digest
+    entirely and never gated consolidation on `daily_consolidation`).
+
+    Order: digest -> reflection -> consolidation (spec §①: reflection's
+    memory_update conclusions need to land before consolidation runs, so
+    the same night's consolidation pass can pick them up). Each step gets
+    its OWN try/except so one broken task can never silently prevent the
+    other two from running. The digest fires unconditionally (it doesn't
+    depend on daily_consolidation or daily_reflection, though it dedupes
+    itself against a same-day restart -- see _send_daily_digest); reflection
+    and consolidation each stay gated by their own setting.
+
+    Callers are expected to wrap this in their own once-per-day gate (see
+    `_maybe_run_daily`) -- this function itself is state-free."""
+    try:
+        _send_daily_digest(components)
+    except Exception as exc:  # noqa: BLE001 — a failed digest must not stop the rest
+        print(f"[digest] failed: {exc}")
+
+    reflector = components.reflector
+    if reflector is not None and components.settings.daily_reflection:
+        try:
+            reflector.run_daily()
+        except Exception as exc:  # noqa: BLE001 — must not stop consolidation
+            print(f"[reflection] failed: {exc}", file=sys.stderr)
+
+    consolidator = components.consolidator
+    if consolidator is not None and components.settings.daily_consolidation:
+        try:
+            consolidator.run_daily()
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            print(f"[consolidation] failed: {exc}")
 
 
 def build_jobs(scheduler, holder) -> None:
@@ -202,42 +261,7 @@ def build_jobs(scheduler, holder) -> None:
         components = holder.get()
         _run_sentinel_pass(lambda: components.sentinel, app_state=components.app_state,
                            journal=components.journal, broker=components.broker)
-
-        def daily() -> None:
-            # Order: digest -> reflection -> consolidation (spec §①: the
-            # reflection's memory_update conclusions need to land before
-            # consolidation runs, so the same night's consolidation pass
-            # can pick them up). All three share one once-per-day gate
-            # (_maybe_run_daily below), but each gets its OWN try/except
-            # here so one broken task can never silently prevent the other
-            # two from running — a lesson the original digest-after-
-            # consolidation ordering already established for consolidation;
-            # extending it to reflection and the digest itself is what lets
-            # both new orderings ("digest raising doesn't stop reflection",
-            # "reflection raising doesn't stop consolidation") hold.
-            # The digest fires unconditionally, same as before (it doesn't
-            # depend on daily_consolidation or daily_reflection); reflection
-            # and consolidation each stay gated by their own setting.
-            try:
-                _send_daily_digest(components)
-            except Exception as exc:  # noqa: BLE001 — a failed digest must not stop the rest
-                print(f"[digest] failed: {exc}")
-
-            reflector = components.reflector
-            if reflector is not None and components.settings.daily_reflection:
-                try:
-                    reflector.run_daily()
-                except Exception as exc:  # noqa: BLE001 — must not stop consolidation
-                    print(f"[reflection] failed: {exc}", file=sys.stderr)
-
-            consolidator = components.consolidator
-            if consolidator is not None and components.settings.daily_consolidation:
-                try:
-                    consolidator.run_daily()
-                except Exception as exc:  # noqa: BLE001 — see comment above
-                    print(f"[consolidation] failed: {exc}")
-
-        _maybe_run_daily(daily, state)
+        _maybe_run_daily(lambda: run_daily_jobs(components), state)
 
     scheduler.add_job(job, "interval",
                       minutes=holder.settings().sentinel_interval_minutes,

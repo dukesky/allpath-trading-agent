@@ -568,33 +568,20 @@ def main(argv: list[str] | None = None,
     if args.command == "check":
         return cmd_check(sentinel)
     if args.command == "run":
-        from allpath_trade.scheduler import run_daemon
+        from allpath_trade.scheduler import run_daemon, run_daily_jobs
 
-        def daily() -> None:
-            # No daily digest here: the headless `run` daemon has never
-            # sent one (docs/TODO.md -- `_send_daily_digest` only hangs off
-            # `serve`'s build_jobs); Task 5 doesn't introduce it, only
-            # brings reflection in at the same relative position build_jobs
-            # uses (digest -> reflection -> consolidation, minus the
-            # missing digest step). Each step gets its own try/except, same
-            # isolation reasoning as build_jobs's daily(): a broken
-            # reflection must not silently prevent consolidation from
-            # running.
-            if components.reflector is not None and settings.daily_reflection:
-                try:
-                    print(components.reflector.run_daily())
-                except Exception as exc:  # noqa: BLE001 — must not stop consolidation
-                    print(f"[reflection] failed: {exc}", file=sys.stderr)
-            if components.consolidator is not None:
-                try:
-                    print("[memory] " + components.consolidator.run_daily())
-                except Exception as exc:  # noqa: BLE001 — see comment above
-                    print(f"[consolidation] failed: {exc}")
-
-        daily_job = (daily if (components.reflector is not None
-                               or components.consolidator is not None) else None)
+        # Same daily sequence as `serve`'s build_jobs -- digest, then
+        # gated reflection, then gated consolidation -- via the shared
+        # helper in scheduler.py so the two entry points can't drift out
+        # of sync again (docs/TODO.md's Phase 5 leftover this closes: the
+        # headless `run` daemon used to skip the digest entirely and never
+        # gated consolidation on `daily_consolidation`). Unconditional,
+        # like build_jobs's job(): the digest itself has no reflector/
+        # consolidator dependency, so there is no longer a "nothing to do
+        # today" case to special-case away.
         run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
-                   daily_job=daily_job, app_state=components.app_state,
+                   daily_job=lambda: run_daily_jobs(components),
+                   app_state=components.app_state,
                    journal=components.journal, broker=components.broker)
         return 0
     if args.command == "strategies":

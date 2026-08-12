@@ -440,6 +440,34 @@ def test_build_jobs_sends_daily_digest_once_per_day_after_close(monkeypatch):
     assert "http" not in body.lower() and "<" not in body
 
 
+def test_build_jobs_digest_is_not_resent_after_a_simulated_restart(monkeypatch):
+    # I3: _maybe_run_daily's once-per-day gate (state["last_daily"]) is
+    # in-memory only and owned by build_jobs's own closure -- a `serve`
+    # restart after 16:05 gets a brand-new `state` dict, so without a
+    # persisted marker the digest would go out a second time for the same
+    # ET day. Simulated here by calling build_jobs TWICE (a fresh closure
+    # each time, exactly like a fresh process) against the SAME app_state,
+    # the way a real sqlite-backed AppState would survive a restart.
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    shared_app_state = FakeAppState()
+    components = _components(sentinel=FakeSentinel(), notifier=notifier,
+                             app_state=shared_app_state)
+
+    scheduler1 = FakeScheduler()
+    build_jobs(scheduler1, FakeHolder(components))
+    scheduler1.job()  # "process 1": sends the digest
+
+    scheduler2 = FakeScheduler()
+    build_jobs(scheduler2, FakeHolder(components))  # "restart": fresh in-memory state
+    scheduler2.job()  # same ET day: must not re-send
+
+    assert len(notifier.sent) == 1
+
+
 def test_build_jobs_digest_counts_only_sentinel_observations(monkeypatch):
     import allpath_trade.scheduler as sched
 

@@ -229,6 +229,14 @@ def test_serve_ensures_token_before_constructing_the_app(tmp_path, monkeypatch):
 
 
 # -- run: headless daemon's daily job (Task 5 parity with build_jobs) --
+#
+# cli's `run` daily job now goes through scheduler.run_daily_jobs, the same
+# helper build_jobs uses (see test_scheduler.py's "-- build_jobs: daily
+# digest email --" and "-- build_jobs / daily reflection --" sections for
+# the behavior this dedupes against) -- so these fakes reuse test_scheduler.
+# py's fixtures rather than redefining their own, and the tests below only
+# cover what's specific to the `run` entry point (that it's actually wired
+# through run_daemon's daily_job).
 
 
 class _FakeRunReflector:
@@ -262,17 +270,37 @@ def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
     monkeypatch.setattr("allpath_trade.scheduler.run_daemon", fake_run_daemon)
 
 
-def test_run_daily_job_runs_reflection_before_consolidation_isolated(
-        tmp_path, monkeypatch, capsys):
+def _fake_run_components(reflector=None, consolidator=None, daily_reflection=True,
+                         daily_consolidation=True, notifier=None, journal=None,
+                         queue=None, observations=None, app_state=None):
     from types import SimpleNamespace
 
+    from tests.test_scheduler import (
+        DigestNotifier,
+        FakeAppState,
+        FakeJournal,
+        FakeObservations,
+        FakeQueue,
+    )
+
+    return SimpleNamespace(
+        strategies=None, sentinel=None, broker=None,
+        queue=queue if queue is not None else FakeQueue(),
+        journal=journal if journal is not None else FakeJournal(),
+        app_state=app_state if app_state is not None else FakeAppState(),
+        notifier=notifier if notifier is not None else DigestNotifier(),
+        observations=observations if observations is not None else FakeObservations(),
+        reflector=reflector, consolidator=consolidator,
+        settings=SimpleNamespace(daily_reflection=daily_reflection,
+                                 daily_consolidation=daily_consolidation))
+
+
+def test_run_daily_job_runs_reflection_before_consolidation_isolated(
+        tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     reflector = _FakeRunReflector(fail=True)
     consolidator = _FakeRunConsolidator()
-    fake_components = SimpleNamespace(
-        strategies=None, queue=None, sentinel=None, app_state=None,
-        journal=None, broker=None,
-        reflector=reflector, consolidator=consolidator)
+    fake_components = _fake_run_components(reflector=reflector, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)
     captured = {}
@@ -290,16 +318,11 @@ def test_run_daily_job_runs_reflection_before_consolidation_isolated(
 
 
 def test_run_daily_job_skips_reflection_when_setting_disabled(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".env").write_text('DAILY_REFLECTION="false"\n')
     reflector = _FakeRunReflector()
     consolidator = _FakeRunConsolidator()
-    fake_components = SimpleNamespace(
-        strategies=None, queue=None, sentinel=None, app_state=None,
-        journal=None, broker=None,
-        reflector=reflector, consolidator=consolidator)
+    fake_components = _fake_run_components(reflector=reflector, consolidator=consolidator,
+                                           daily_reflection=False)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)
     captured = {}
@@ -314,14 +337,9 @@ def test_run_daily_job_skips_reflection_when_setting_disabled(tmp_path, monkeypa
 
 def test_run_daily_job_skips_reflection_cleanly_when_no_reflector_configured(
         tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     monkeypatch.chdir(tmp_path)
     consolidator = _FakeRunConsolidator()
-    fake_components = SimpleNamespace(
-        strategies=None, queue=None, sentinel=None, app_state=None,
-        journal=None, broker=None,
-        reflector=None, consolidator=consolidator)
+    fake_components = _fake_run_components(reflector=None, consolidator=consolidator)
     monkeypatch.setattr("allpath_trade.app.build_components",
                         lambda settings, broker=None: fake_components)
     captured = {}
@@ -331,6 +349,67 @@ def test_run_daily_job_skips_reflection_cleanly_when_no_reflector_configured(
 
     assert code == 0  # must not raise
     assert consolidator.calls == 1
+
+
+def test_run_daily_job_sends_digest(tmp_path, monkeypatch):
+    # I2: `run`'s daily job never sent a digest at all before this round --
+    # `_send_daily_digest` only ever hung off `serve`'s build_jobs. Now both
+    # entry points funnel through the same scheduler.run_daily_jobs.
+    monkeypatch.chdir(tmp_path)
+    from tests.test_scheduler import DigestNotifier
+
+    notifier = DigestNotifier()
+    fake_components = _fake_run_components(notifier=notifier)
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    code = main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    assert len(notifier.sent) == 1
+
+
+def test_run_daily_job_respects_daily_consolidation_gate(tmp_path, monkeypatch):
+    # I2: `run`'s consolidation branch used to run unconditionally,
+    # ignoring `daily_consolidation` -- build_jobs already gated it.
+    monkeypatch.chdir(tmp_path)
+    consolidator = _FakeRunConsolidator()
+    fake_components = _fake_run_components(consolidator=consolidator,
+                                           daily_consolidation=False)
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    code = main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert code == 0
+    assert consolidator.calls == 0
+
+
+def test_run_daily_job_digest_deduped_across_a_simulated_restart(tmp_path, monkeypatch):
+    # I3: the digest's own app_state marker (digest_last_date) must survive
+    # a process restart -- two separate `run` invocations sharing the same
+    # (persisted) app_state on the same ET day must send only once.
+    monkeypatch.chdir(tmp_path)
+    from tests.test_scheduler import DigestNotifier, FakeAppState
+
+    shared_app_state = FakeAppState()
+    notifier = DigestNotifier()
+    fake_components = _fake_run_components(notifier=notifier, app_state=shared_app_state)
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    main(["run"], broker_factory=lambda settings: FakeBroker())
+    # "restart": a fresh call, but app_state (and its digest_last_date row)
+    # survives, the same way a real sqlite-backed AppState would.
+    main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert len(notifier.sent) == 1
 
 
 class SpyCompactor:

@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
+
 from allpath_trade.llm.anthropic_client import AnthropicClient
-from allpath_trade.llm.base import ToolSpec
+from allpath_trade.llm.base import LLMError, ToolSpec
 
 TOOL = ToolSpec(name="get_quote", description="quote",
                 parameters={"type": "object", "properties": {}})
@@ -91,3 +93,24 @@ def test_parallel_tool_calls_merge_into_single_user_message():
     assert merged["content"][0]["content"] == "200"
     assert merged["content"][1]["tool_use_id"] == "t2"
     assert merged["content"][1]["content"] == "300"
+
+
+# -- Ops-hardening: `complete()` catches ANY exception from `.create()` and
+# re-raises as LLMError -- this is what makes an SDK timeout (e.g.
+# anthropic.APITimeoutError, raised once llm_timeout_seconds elapses)
+# surface through AgentSession's `except LLMError` as the existing
+# "(llm error: ...)" notice rather than an uncaught crash. Exercised here
+# with a plain TimeoutError since the wrapping is exception-class-agnostic
+# (a bare `except Exception`), so this covers the real SDK exception too.
+def test_sdk_call_raising_any_exception_becomes_llm_error():
+    class HangingStub:
+        def __init__(self):
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs):
+            raise TimeoutError("upstream hung")
+
+    c = AnthropicClient("k", "claude-x", client=HangingStub())
+    with pytest.raises(LLMError) as ei:
+        c.complete([{"role": "user", "content": "x"}])
+    assert "upstream hung" in str(ei.value)

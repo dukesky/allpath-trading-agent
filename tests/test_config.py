@@ -44,6 +44,18 @@ def test_out_of_range_smtp_port_is_rejected():
         Settings(_env_file=None, smtp_port=70000)
 
 
+# -- Ops-hardening: llm_timeout_seconds bounds a genuinely hung LLM call
+# (see llm/factory.py) so it can never block the after-close chain forever.
+
+def test_llm_timeout_defaults_to_180_seconds():
+    assert Settings(_env_file=None).llm_timeout_seconds == 180
+
+
+def test_llm_timeout_below_floor_is_rejected():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_timeout_seconds=5)
+
+
 # -- Task 8 review Finding 1: a scheme-less ntfy_url reaches
 # urllib.request.Request (ntfy.py's NtfyNotifier.send), which raises
 # ValueError("unknown url type") for it -- and the settings-page hint says
