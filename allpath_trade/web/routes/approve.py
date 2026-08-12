@@ -10,12 +10,13 @@ from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.web.routes.dashboard import order_price_context
 
-# `_diff_lines` is the same server-side line-classing helper the in-app
-# review card (web/routes/reviews.py -> _review_card.html) uses to render a
-# strategy_revision's diff -- reused verbatim (I3) so the approve-link
-# confirm page never invents its own escaping/class logic for the same
-# content. No import cycle: reviews.py never imports approve.py.
-from allpath_trade.web.routes.reviews import _diff_lines
+# `split_diff_rows` is the same server-side diff-pairing helper the in-app
+# review card (web/routes/reviews.py -> _review_card.html, via the shared
+# _split_diff.html macro) uses to render a strategy_revision's diff --
+# reused verbatim (I3) so the approve-link confirm page never invents its
+# own escaping/pairing logic for the same content. No import cycle:
+# reviews.py never imports approve.py.
+from allpath_trade.web.routes.reviews import split_diff_rows
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -78,7 +79,7 @@ def _confirm_context(c, row) -> dict:
         "side": "", "amount_label": "",
         "trigger_price": None, "current_price": None, "price_class": "",
         "day_change_pct": None, "deviation_pct": None, "est_shares": None,
-        "market_open": False, "rationale": "", "diff_lines": [],
+        "market_open": False, "rationale": "", "diff_rows": [],
     }
     if kind == "strategy_revision":
         # I3: a revision confirm page has no order to price -- the template
@@ -86,17 +87,21 @@ def _confirm_context(c, row) -> dict:
         # approve_confirm.html) so it's never rendered here at all, rather
         # than rendering a false "Market closed" line above a Confirm
         # button with no evidence of *what* is being confirmed. Rationale +
-        # the stored diff (not a live re-generate -- see reviews.py's
-        # `_revision_diff` docstring for why a resolved-row diff is shown
-        # historically; here the row is still pending, but a link visitor
-        # has no session to re-check the file against, so the diff shown is
-        # the one the proposal actually recorded) are what a human needs to
-        # decide, and are now what's shown instead.
+        # a diff (not a live re-generate -- see reviews.py's `_revision_diff`
+        # docstring for why a resolved-row diff is shown historically; here
+        # the row is still pending, but a link visitor has no session to
+        # re-check the file against, so the diff shown is built from the
+        # proposal's own frozen old_yaml/new_yaml, labelled "Base (at
+        # proposal)" in the template rather than "Current" -- honest about
+        # what the left column actually is for a visitor with no session)
+        # are what a human needs to decide, and are now what's shown
+        # instead.
         ctx["side"] = "Strategy revision"
         ctx["amount_label"] = f"Proposed change to {row['strategy_id']}"
         snapshot = json.loads(row["snapshot"]) if row["snapshot"] else {}
         ctx["rationale"] = snapshot.get("rationale", "")
-        ctx["diff_lines"] = _diff_lines(snapshot.get("diff", ""))
+        ctx["diff_rows"] = split_diff_rows(
+            snapshot.get("old_yaml", ""), snapshot.get("new_yaml", ""))
         return ctx
 
     intent = json.loads(row["intent"]) if row["intent"] else None

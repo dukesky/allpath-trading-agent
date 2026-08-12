@@ -1,3 +1,4 @@
+{% from "_split_diff.html" import split_diff %}
 <div class="card" id="review-{{ item['id'] }}" style="margin-bottom:12px">
   <div class="row">
     {# A chat-sourced row's `action` is the LLM's free-text reason (see
@@ -47,8 +48,7 @@
     {% if item['revision_diff']['stale'] %}
     <p class="warn" style="font-size:13px;margin:0 0 8px">The strategy file has changed since this proposal — approving will fail safely; re-propose or reject.</p>
     {% endif %}
-    <pre class="diff">{% for line in item['revision_diff']['lines'] %}<span class="{{ line['cls'] }}">{{ line['text'] }}</span>
-{% endfor %}</pre>
+    {{ split_diff(item['revision_diff']['rows'], item['revision_diff']['left_label'], item['revision_diff']['right_label']) }}
   </div>
   {% endif %}
   {% if item['agent_analysis'] %}

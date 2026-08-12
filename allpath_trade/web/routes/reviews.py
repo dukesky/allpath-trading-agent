@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import itertools
 import json
 import time
 
@@ -60,27 +61,94 @@ def _attach_price_context(c, items: list[dict]) -> None:
             item["price_context"] = None
 
 
-def _diff_lines(diff_text: str) -> list[dict]:
-    """Splits a unified-diff string into per-line dicts carrying the CSS
-    class the template tints it with (`diff-add`/`diff-del` for `+`/`-`
-    content lines -- the `+++`/`---` file-header lines and `@@` hunk
-    headers get their own, unhighlighted classes so a real added/removed
-    line is never confused with the `+++ file`/`--- file` header lines
-    that also start with those characters)."""
-    lines = []
-    for line in diff_text.splitlines():
-        if line.startswith(("+++", "---")):
-            cls = "diff-hdr"
-        elif line.startswith("@@"):
-            cls = "diff-hunk"
-        elif line.startswith("+"):
-            cls = "diff-add"
-        elif line.startswith("-"):
-            cls = "diff-del"
+_DIFF_CONTEXT = 2  # lines of unchanged context kept on each side of a change
+
+
+def split_diff_rows(old: str, new: str) -> list[dict]:
+    """Builds side-by-side diff rows from `old`/`new` text for the split
+    view shared by all three strategy_revision diff renders (pending and
+    resolved review cards -- _review_card.html -- and the approve-link
+    confirm page -- approve_confirm.html). Each row pairs a left (old) and
+    right (new) cell so the two sides lay out as matching table columns
+    instead of a scrolling unified diff (this also sidesteps the old
+    unified-diff renderer's double-spacing bug: that view put each line in
+    its own `display:block` <span> *and* a literal template newline right
+    after it -- inside a <pre>, which preserves whitespace, so every diff
+    line got two line breaks instead of one. A table has no such
+    footgun -- each line is exactly one <tr>, full stop).
+
+    `difflib.SequenceMatcher.get_opcodes()` gives the alignment: an
+    'equal' run becomes context rows (class `ctx`) on both sides;
+    'replace'/'delete'/'insert' are all handled as one case -- pair the
+    two segments position-by-position with `zip_longest`, tinting a
+    present old line `del` and a present new line `add`; whichever side
+    runs out first pads with an empty cell (class `empty`) so the row
+    never goes ragged. Long equal runs are collapsed to a single `gap`
+    row via `_collapse_context`, keeping `_DIFF_CONTEXT` lines adjacent to
+    each surrounding change -- a proposal that only touches one rule in a
+    40-line strategy file shouldn't force scrolling past the other 35
+    unchanged lines to find it. A diff with no changes at all collapses to
+    one explanatory row rather than a wall of context."""
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    opcodes = difflib.SequenceMatcher(
+        a=old_lines, b=new_lines, autojunk=False).get_opcodes()
+
+    # Two empty texts produce ZERO opcodes (not one 'equal'), so check both
+    # shapes -- otherwise the documented "No changes" row silently becomes an
+    # empty table body.
+    if not opcodes or (len(opcodes) == 1 and opcodes[0][0] == "equal"):
+        return [{"kind": "none", "text": "No changes"}]
+
+    rows: list[dict] = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            for a_line, b_line in zip(old_lines[i1:i2], new_lines[j1:j2]):
+                rows.append({"kind": "row", "ctx": True,
+                             "left": {"cls": "ctx", "text": a_line},
+                             "right": {"cls": "ctx", "text": b_line}})
         else:
-            cls = "diff-ctx"
-        lines.append({"text": line, "cls": cls})
-    return lines
+            for a_line, b_line in itertools.zip_longest(
+                    old_lines[i1:i2], new_lines[j1:j2]):
+                left = ({"cls": "del", "text": a_line} if a_line is not None
+                        else {"cls": "empty", "text": ""})
+                right = ({"cls": "add", "text": b_line} if b_line is not None
+                         else {"cls": "empty", "text": ""})
+                rows.append({"kind": "row", "ctx": False, "left": left, "right": right})
+
+    return _collapse_context(rows)
+
+
+def _collapse_context(rows: list[dict]) -> list[dict]:
+    """Collapses an interior run of consecutive context rows down to
+    `_DIFF_CONTEXT` lines on each side of a change, replacing the hidden
+    middle with a single `gap` row. A run touching the very start or end
+    of the diff (no change on that side) only keeps the edge nearest a
+    change -- there is no change on the other side to anchor context to."""
+    out: list[dict] = []
+    i, n = 0, len(rows)
+    while i < n:
+        if not rows[i]["ctx"]:
+            out.append(rows[i])
+            i += 1
+            continue
+        j = i
+        while j < n and rows[j]["ctx"]:
+            j += 1
+        run = rows[i:j]
+        head = _DIFF_CONTEXT if i > 0 else 0
+        tail = _DIFF_CONTEXT if j < n else 0
+        if len(run) <= head + tail:
+            out.extend(run)
+        else:
+            out.extend(run[:head])
+            hidden = len(run) - head - tail
+            out.append({"kind": "gap",
+                        "text": f"… {hidden} unchanged line{'s' if hidden != 1 else ''}"})
+            if tail:
+                out.extend(run[-tail:])
+        i = j
+    return out
 
 
 def _revision_diff(c, item: dict) -> dict:
@@ -96,16 +164,17 @@ def _revision_diff(c, item: dict) -> dict:
     reflection_tools.py) rejects at approval time. `stale` mirrors that
     same check (current text != the proposal's recorded base) so the card
     can warn about the failure *before* the user clicks Approve, instead
-    of only after."""
+    of only after. Labelled `Current`/`Proposed` -- the left column really
+    is what's on disk right now, not a frozen snapshot."""
     snapshot = item["snapshot"]
     strategy_id = item["strategy_id"]
     path = c.strategies.directory / f"{strategy_id}.yaml"
     current_yaml = path.read_text() if path.exists() else ""
-    diff_text = "\n".join(difflib.unified_diff(
-        current_yaml.splitlines(), snapshot["new_yaml"].splitlines(),
-        fromfile=f"{strategy_id} (current)", tofile=f"{strategy_id} (proposed)",
-        lineterm=""))
-    return {"lines": _diff_lines(diff_text), "stale": current_yaml != snapshot["old_yaml"]}
+    return {
+        "rows": split_diff_rows(current_yaml, snapshot["new_yaml"]),
+        "stale": current_yaml != snapshot["old_yaml"],
+        "left_label": "Current", "right_label": "Proposed",
+    }
 
 
 def _attach_revision_diffs(c, items: list[dict]) -> None:
@@ -121,10 +190,16 @@ def _attach_revision_diffs(c, items: list[dict]) -> None:
             # be redundant (approved: the file now matches new_yaml, so a
             # live diff is empty) or misleading (rejected: unrelated later
             # edits could make it look like something changed because of
-            # this proposal). The historical diff the agent actually
-            # proposed is the honest thing to show for a resolved row.
+            # this proposal). The frozen old/new the agent actually
+            # proposed against is the honest thing to show for a resolved
+            # row -- labelled `Base (at proposal)` so it doesn't read as
+            # "current", which it may no longer be.
+            snapshot = item["snapshot"]
             item["revision_diff"] = {
-                "lines": _diff_lines(item["snapshot"]["diff"]), "stale": False}
+                "rows": split_diff_rows(snapshot["old_yaml"], snapshot["new_yaml"]),
+                "stale": False,
+                "left_label": "Base (at proposal)", "right_label": "Proposed",
+            }
 
 
 @router.get("/reviews", response_class=HTMLResponse)

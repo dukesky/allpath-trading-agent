@@ -87,9 +87,11 @@ def queue_revision(client, strategy_id="s1", old_yaml=CURRENT_S1_YAML,
     path = strategies_dir / f"{strategy_id}.yaml"
     if not path.exists():
         path.write_text(old_yaml)
-    # A real unified diff (not a placeholder) -- I3's confirm page renders
-    # the *stored* diff verbatim, unlike the in-app card's live regenerate,
-    # so a test asserting on diff-add/diff-del content needs the real thing.
+    # A real unified diff (not a placeholder). The confirm page now builds
+    # its split view from the frozen old_yaml/new_yaml (the stored unified
+    # diff is written for the record but no longer rendered anywhere) --
+    # keeping the stored field realistic here mirrors what production rows
+    # actually contain.
     diff_text = "\n".join(difflib.unified_diff(
         old_yaml.splitlines(), new_yaml.splitlines(),
         fromfile=f"{strategy_id} (current)", tofile=f"{strategy_id} (proposed)",
@@ -313,10 +315,28 @@ def test_revision_confirm_page_shows_diff_and_rationale_not_a_price_block(client
     assert "Market closed" not in body
     assert "Rationale:" in body
     assert "guidance updated after earnings" in body
-    assert 'class="diff-add"' in body
-    assert 'class="diff-del"' in body
+    # split-diff-round: side-by-side table, frozen snapshot old/new (a link
+    # visitor has no session to re-check the file against), labelled
+    # honestly as the base the proposal was drafted against, not "Current".
+    assert 'class="add"' in body
+    assert 'class="del"' in body
+    assert "Base (at proposal)" in body
     assert "target_weight: 10%" in body  # proposed
-    assert "target_weight: 15%" in body  # current
+    assert "target_weight: 15%" in body  # base
+
+
+def test_revision_confirm_page_diff_is_frozen_not_a_live_recompute(client):
+    # Same honesty guarantee as the in-app resolved-row card: the confirm
+    # page has no session to re-check the file against, so it must show
+    # the proposal's own frozen old_yaml/new_yaml, not whatever is on disk
+    # right now.
+    rid = queue_revision(client)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    (strategies_dir / "s1.yaml").write_text(
+        CURRENT_S1_YAML.replace("target_weight: 15%", "target_weight: 99%"))
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "target_weight: 15%" in body
+    assert "target_weight: 99%" not in body
 
 
 # --- assert_english_only across all three /a/ templates --------------------
@@ -458,3 +478,16 @@ def test_null_intent_order_row_reject_is_unaffected(client):
     assert r.status_code == 200
     assert "Rejected" in r.text
     assert client.app.state.holder.get().queue.get(rid)["status"] == "rejected"
+
+
+def test_confirm_page_escapes_script_tags_in_revision_yaml(client):
+    # The /a/ confirm page is the one UNAUTHENTICATED surface that renders
+    # strategy YAML -- a template edit that added |safe here would ship an
+    # XSS reachable without login. Pin escaping at the route level, not just
+    # on the in-app card.
+    hostile_new = VALID_REVISION_YAML.replace(
+        'name: "S1"', 'name: "<script>alert(1)</script>"')
+    rid = queue_revision(client, new_yaml=hostile_new)
+    body = client.get(f"/a/{rid}?k={rid.token}").text
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body

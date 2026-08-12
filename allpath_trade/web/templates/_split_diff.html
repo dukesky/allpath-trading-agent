@@ -1,0 +1,31 @@
+{# Side-by-side diff table shared by all three strategy_revision diff
+   renders (pending/resolved review cards -- _review_card.html -- and the
+   approve-link confirm page -- approve_confirm.html). `rows` is the list
+   built by web/routes/reviews.py's `split_diff_rows` -- server-side
+   classes only, closed set (ctx/add/del/empty on cells, gap/none on a
+   full-width row), every cell's text goes through Jinja's normal
+   autoescaping (no |safe here -- the `md` filter is for LLM prose, not
+   diffs of user/agent-authored YAML). Wrapped in .table-scroll, the same
+   horizontal-scroll idiom the rules table already uses, so two ~280px-min
+   columns don't get crushed on a phone. #}
+{% macro split_diff(rows, left_label, right_label) %}
+<div class="table-scroll">
+  <table class="split-diff">
+    <thead><tr><th>{{ left_label }}</th><th>{{ right_label }}</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      {% if row['kind'] == 'row' %}
+      <tr>
+        <td class="{{ row['left']['cls'] }}">{{ row['left']['text'] }}</td>
+        <td class="{{ row['right']['cls'] }}">{{ row['right']['text'] }}</td>
+      </tr>
+      {% elif row['kind'] == 'gap' %}
+      <tr class="gap"><td colspan="2">{{ row['text'] }}</td></tr>
+      {% else %}
+      <tr class="none"><td colspan="2">{{ row['text'] }}</td></tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endmacro %}

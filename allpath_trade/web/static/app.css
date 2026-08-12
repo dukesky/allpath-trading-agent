@@ -350,21 +350,35 @@ a.strategy-card:hover { border-color:var(--accent); }
    benefits from more characters per line. */
 .report-body { word-wrap:break-word; max-width:820px; line-height:1.65; }
 
-/* Unified-diff rendering for a strategy_revision card's regenerated diff
-   (routes/reviews.py's _diff_lines). Each line is its own <span> so the
-   +/- tint can span the full row width via display:block, the same
-   direction-coded green/red vocabulary --up/--down already carry
-   elsewhere (P/L, key-level chips) -- an added line is "what the proposal
-   introduces", a removed line is "what it takes away", not itself a
-   value judgement. Header (`+++`/`---`) and hunk (`@@`) lines stay
-   unhighlighted so they read as diff furniture, not content. */
-.diff { line-height:1.55; }
-.diff span { display:block; padding:0 4px; margin:0 -4px; }
-.diff .diff-add { color:var(--up); background:var(--up-soft); }
-.diff .diff-del { color:var(--down); background:var(--down-soft); }
-.diff .diff-hunk { color:var(--muted-2); }
-.diff .diff-hdr { color:var(--muted); font-weight:600; }
-.diff .diff-ctx { color:var(--muted); }
+/* Side-by-side diff table for a strategy_revision's old/new YAML
+   (routes/reviews.py's split_diff_rows, rendered by the shared
+   _split_diff.html macro). One <tr> per paired line -- deliberately NOT
+   the previous <pre><span display:block> layout, which put each line in
+   its own block box *and* left a literal template newline right after it
+   inside a whitespace-preserving <pre>, doubling every line break. A
+   table row has exactly one line-break-equivalent per line, so that bug
+   class doesn't exist here. Column tint reuses the same direction-coded
+   green/red vocabulary --up/--down already carry elsewhere (P/L,
+   key-level chips): added (right-side, class `add`) is "what the
+   proposal introduces", deleted (left-side, class `del`) is "what it
+   takes away", not itself a value judgement. `empty` is the padding cell
+   on the shorter side of a replace/insert/delete pair -- hatched rather
+   than blank so an uneven pair still reads as deliberate, not a rendering
+   glitch. `gap` is the collapsed-context row; `none` is the whole-table
+   "No changes" case. */
+.split-diff { min-width:560px; }
+.split-diff th, .split-diff td { width:50%; min-width:280px; }
+.split-diff td { font-family:var(--mono); font-size:12.5px; line-height:1.5;
+  white-space:pre; padding:2px 8px; border-top:none; vertical-align:top; }
+.split-diff th { padding:0 8px 8px; }
+.split-diff tbody tr:hover { background:none; }
+.split-diff td.ctx { color:var(--muted); }
+.split-diff td.add { color:var(--up); background:var(--up-soft); }
+.split-diff td.del { color:var(--down); background:var(--down-soft); }
+.split-diff td.empty { background:repeating-linear-gradient(
+  135deg, var(--surface-2), var(--surface-2) 6px, var(--line-soft) 6px, var(--line-soft) 12px); }
+.split-diff tr.gap td, .split-diff tr.none td { color:var(--muted-2); font-style:italic;
+  text-align:center; background:var(--surface-2); white-space:normal; }
 
 /* Pending-review card additions (approve-link + price-context round).
    .review-reason: a chat-sourced review's `action` field is the LLM's own
