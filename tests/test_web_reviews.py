@@ -9,6 +9,7 @@ from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
 from allpath_trade.web.routes import dashboard as dashboard_route
+from allpath_trade.web.routes.reviews import split_diff_rows
 from tests.helpers import assert_english_only
 from tests.test_sentinel import FakeBroker
 from tests.test_web_dashboard import FakeDataSource
@@ -475,14 +476,16 @@ def test_revision_card_is_english_only(client):
 
 
 def test_pending_revision_card_shows_regenerated_diff(client):
-    # Task 6: the card renders a diff regenerated at render time (against
-    # the CURRENT file) rather than trusting the stored `diff` field --
-    # here the file matches the recorded base, so the regenerated diff is
-    # the "normal" case and should still show the real +/- content.
+    # Task 6 / split-diff-round: the card renders a diff regenerated at
+    # render time (against the CURRENT file) rather than trusting the
+    # stored `diff` field -- here the file matches the recorded base, so
+    # the regenerated diff is the "normal" case and should still show the
+    # real added/removed content, now as split-diff table cells.
     queue_revision(client)
     body = client.get("/reviews").text
-    assert 'class="diff-add"' in body
-    assert 'class="diff-del"' in body
+    assert 'class="add"' in body
+    assert 'class="del"' in body
+    assert "Current" in body and "Proposed" in body  # pending column labels
     assert "target_weight: 10%" in body  # proposed (added)
     assert "target_weight: 15%" in body  # current (removed)
 
@@ -541,7 +544,7 @@ def test_approve_revision_omits_the_note_when_the_rule_is_armed(client):
     assert "re-arm" not in body
 
 
-def test_resolved_revision_card_shows_recorded_diff_not_a_live_recompute(client):
+def test_resolved_revision_card_shows_frozen_diff_not_a_live_recompute(client):
     rid = queue_revision(client)
     client.post(f"/reviews/{rid}/reject", follow_redirects=False)
     strategies_dir = client.app.state.holder.get().strategies.directory
@@ -550,8 +553,30 @@ def test_resolved_revision_card_shows_recorded_diff_not_a_live_recompute(client)
     (strategies_dir / "s1.yaml").write_text(
         CURRENT_S1_YAML.replace("target_weight: 15%", "target_weight: 99%"))
     body = client.get("/reviews").text
-    assert ">d</span>" in body  # the recorded snapshot diff (queue_revision's diff="d")
+    # split-diff-round: a resolved row's diff is built from the frozen
+    # snapshot old_yaml/new_yaml (not the raw stored `diff` field, and
+    # never a live recompute), labelled honestly as the base the proposal
+    # was actually drafted against rather than "Current".
+    assert "Base (at proposal)" in body
+    assert "target_weight: 15%" in body  # frozen base
+    assert "target_weight: 10%" in body  # frozen proposed
     assert "target_weight: 99%" not in body
+
+
+def test_revision_card_escapes_script_tags_in_yaml_lines(client):
+    # No |safe anywhere in the split-diff render path -- a proposal whose
+    # YAML happens to contain something that looks like markup must come
+    # out as inert escaped text, same as every other server-rendered value
+    # on this page.
+    rid = queue_revision(
+        client,
+        old_yaml=CURRENT_S1_YAML,
+        new_yaml=CURRENT_S1_YAML.replace(
+            'target_weight: 15%', 'target_weight: "<script>alert(1)</script>"'))
+    body = client.get("/reviews").text
+    assert f"#{rid}" in body
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
 
 
 # --- I1: /reviews' price-context loop pays one shared budget, not N *
@@ -611,3 +636,79 @@ def test_resolved_rows_are_never_passed_through_attach_price_context(client, mon
 
     assert len(calls) == 1  # called once (pending items), not twice for recent
     assert "review-price-context" not in body
+
+
+# --- split-diff-round: split_diff_rows unit tests ---------------------------
+
+def test_split_diff_rows_no_changes_collapses_to_a_single_row():
+    text = "a\nb\nc\n"
+    rows = split_diff_rows(text, text)
+    assert rows == [{"kind": "none", "text": "No changes"}]
+
+
+def test_split_diff_rows_replace_pairs_lines_side_by_side():
+    old = "x\nsame\ny\n"
+    new = "1\nsame\n2\n"
+    rows = split_diff_rows(old, new)
+    changed = [r for r in rows if r["kind"] == "row" and not r["ctx"]]
+    assert {"cls": "del", "text": "x"} == changed[0]["left"]
+    assert {"cls": "add", "text": "1"} == changed[0]["right"]
+    assert {"cls": "del", "text": "y"} == changed[1]["left"]
+    assert {"cls": "add", "text": "2"} == changed[1]["right"]
+
+
+def test_split_diff_rows_replace_pads_the_shorter_side_with_empty_cells():
+    old = "one\ntwo\nthree\n"
+    new = "uno\n"
+    rows = split_diff_rows(old, new)
+    changed = [r for r in rows if r["kind"] == "row" and not r["ctx"]]
+    assert len(changed) == 3  # zip_longest over the longer (3-line) side
+    assert changed[0]["left"] == {"cls": "del", "text": "one"}
+    assert changed[0]["right"] == {"cls": "add", "text": "uno"}
+    # "uno" is the only new line -- the rest of the pairing is delete-only,
+    # padded on the right with an empty cell.
+    assert changed[1]["left"] == {"cls": "del", "text": "two"}
+    assert changed[1]["right"] == {"cls": "empty", "text": ""}
+    assert changed[2]["left"] == {"cls": "del", "text": "three"}
+    assert changed[2]["right"] == {"cls": "empty", "text": ""}
+
+
+def test_split_diff_rows_pure_insert_pads_the_left_side():
+    rows = split_diff_rows("a\n", "a\nb\n")
+    changed = [r for r in rows if r["kind"] == "row" and not r["ctx"]]
+    assert changed == [{"kind": "row", "ctx": False,
+                        "left": {"cls": "empty", "text": ""},
+                        "right": {"cls": "add", "text": "b"}}]
+
+
+def test_split_diff_rows_pure_delete_pads_the_right_side():
+    rows = split_diff_rows("a\nb\n", "a\n")
+    changed = [r for r in rows if r["kind"] == "row" and not r["ctx"]]
+    assert changed == [{"kind": "row", "ctx": False,
+                        "left": {"cls": "del", "text": "b"},
+                        "right": {"cls": "empty", "text": ""}}]
+
+
+def test_split_diff_rows_collapses_long_equal_runs_with_2_lines_of_context():
+    # 10 unchanged lines between two single-line changes -- only 2 lines of
+    # context should survive on each side of the run, with a `gap` row
+    # standing in for the other 6.
+    old_lines = ["del"] + [f"ctx{i}" for i in range(10)] + ["also-del"]
+    new_lines = ["add"] + [f"ctx{i}" for i in range(10)] + ["also-add"]
+    rows = split_diff_rows("\n".join(old_lines), "\n".join(new_lines))
+    gaps = [r for r in rows if r["kind"] == "gap"]
+    assert len(gaps) == 1
+    assert gaps[0]["text"] == "… 6 unchanged lines"
+    ctx_rows = [r for r in rows if r["kind"] == "row" and r["ctx"]]
+    assert [r["left"]["text"] for r in ctx_rows] == ["ctx0", "ctx1", "ctx8", "ctx9"]
+
+
+def test_split_diff_rows_short_equal_run_is_not_collapsed():
+    # A run of only 3 unchanged lines between two changes is at or below
+    # the 2+2 context budget -- nothing hidden, so no gap row.
+    old_lines = ["del", "a", "b", "c", "also-del"]
+    new_lines = ["add", "a", "b", "c", "also-add"]
+    rows = split_diff_rows("\n".join(old_lines), "\n".join(new_lines))
+    assert not [r for r in rows if r["kind"] == "gap"]
+    ctx_rows = [r for r in rows if r["kind"] == "row" and r["ctx"]]
+    assert [r["left"]["text"] for r in ctx_rows] == ["a", "b", "c"]

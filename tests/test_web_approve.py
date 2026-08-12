@@ -313,10 +313,28 @@ def test_revision_confirm_page_shows_diff_and_rationale_not_a_price_block(client
     assert "Market closed" not in body
     assert "Rationale:" in body
     assert "guidance updated after earnings" in body
-    assert 'class="diff-add"' in body
-    assert 'class="diff-del"' in body
+    # split-diff-round: side-by-side table, frozen snapshot old/new (a link
+    # visitor has no session to re-check the file against), labelled
+    # honestly as the base the proposal was drafted against, not "Current".
+    assert 'class="add"' in body
+    assert 'class="del"' in body
+    assert "Base (at proposal)" in body
     assert "target_weight: 10%" in body  # proposed
-    assert "target_weight: 15%" in body  # current
+    assert "target_weight: 15%" in body  # base
+
+
+def test_revision_confirm_page_diff_is_frozen_not_a_live_recompute(client):
+    # Same honesty guarantee as the in-app resolved-row card: the confirm
+    # page has no session to re-check the file against, so it must show
+    # the proposal's own frozen old_yaml/new_yaml, not whatever is on disk
+    # right now.
+    rid = queue_revision(client)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    (strategies_dir / "s1.yaml").write_text(
+        CURRENT_S1_YAML.replace("target_weight: 15%", "target_weight: 99%"))
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "target_weight: 15%" in body
+    assert "target_weight: 99%" not in body
 
 
 # --- assert_english_only across all three /a/ templates --------------------
