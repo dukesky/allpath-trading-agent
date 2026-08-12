@@ -45,6 +45,24 @@ class ChatService:
         age = datetime.now(UTC).timestamp() - self._built_at
         return age > SNAPSHOT_TTL_SECONDS
 
+    def invalidate(self) -> None:
+        """Discard the cached session so the next `session()` call rebuilds
+        via `_build()`, which re-resolves everything (LLM client, tools,
+        prompt) through `self.holder.get()` -- picking up whatever Components
+        a settings save just installed.
+
+        This object is now constructed once at app startup and shared with
+        the Telegram poller (Task 3), so a settings save can no longer just
+        replace `app.state.chat_service` with a fresh instance the way the
+        old lazy-`_service()` reset did (`request.app.state.chat = None`) --
+        that would leave the poller holding a stale, orphaned ChatService
+        while the web route got a new one, splitting the shared turn lock
+        and conversation the whole hoist-to-startup design exists to keep
+        unified. Invalidating just the cached session preserves identity
+        while still forcing the next turn to pick up new config."""
+        with self._lock:
+            self._session = None
+
     def session(self) -> AgentSession:
         with self._lock:
             if self._session is None or self._stale():

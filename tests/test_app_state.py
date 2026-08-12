@@ -1,4 +1,8 @@
-from allpath_trade.store.app_state import AppState
+from allpath_trade.store.app_state import (
+    TELEGRAM_CHAT_ID_KEY,
+    TELEGRAM_OFFSET_KEY,
+    AppState,
+)
 from allpath_trade.store.db import connect
 
 
@@ -36,3 +40,17 @@ def test_distinct_keys_do_not_collide(tmp_path):
     app_state.set("b", "2")
     assert app_state.get("a") == "1"
     assert app_state.get("b") == "2"
+
+
+def test_telegram_key_constants_exist_and_are_distinct():
+    assert TELEGRAM_CHAT_ID_KEY == "telegram_chat_id"
+    assert TELEGRAM_OFFSET_KEY == "telegram_update_offset"
+    assert TELEGRAM_CHAT_ID_KEY != TELEGRAM_OFFSET_KEY
+
+
+def test_telegram_keys_round_trip_independently(tmp_path):
+    app_state = make_app_state(tmp_path)
+    app_state.set(TELEGRAM_CHAT_ID_KEY, "555")
+    app_state.set(TELEGRAM_OFFSET_KEY, "42")
+    assert app_state.get(TELEGRAM_CHAT_ID_KEY) == "555"
+    assert app_state.get(TELEGRAM_OFFSET_KEY) == "42"

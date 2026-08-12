@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     # REFLECTION_MAX_ITERS. Floor of 10s guards against a value so low every
     # call would time out immediately.
     llm_timeout_seconds: int = Field(default=180, ge=10)
+    # Telegram chat channel (Task 1 of the Telegram plan): the bot token from
+    # BotFather (@BotFather -> /newbot). Empty (the default) means the
+    # channel is off -- no poller starts, no pairing is possible.
+    telegram_bot_token: str = ""
 
 
 def describe_validation_error(exc: ValidationError) -> str:

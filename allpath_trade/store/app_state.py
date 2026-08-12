@@ -11,6 +11,14 @@ SENTINEL_HEARTBEAT_KEY = "sentinel_last_pass"
 # ago, nothing evaluated since" -- misleading on a weekend or after close.
 SENTINEL_MARKET_OPEN_KEY = "sentinel_last_pass_market_open"
 
+# Telegram pairing/poll state -- runtime state discovered at pairing time and
+# advanced on every poll, not user-editable configuration, so it lives here
+# rather than on Settings (which is .env-backed and rewritten wholesale).
+TELEGRAM_CHAT_ID_KEY = "telegram_chat_id"
+# Long-poll cursor: the highest Telegram update_id already processed, so a
+# restart resumes after it instead of re-delivering old updates.
+TELEGRAM_OFFSET_KEY = "telegram_update_offset"
+
 
 class AppState:
     """Get/set access to the `app_state` key-value table.

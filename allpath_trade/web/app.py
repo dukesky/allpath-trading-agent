@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings
 from allpath_trade.web.auth import install_auth
+from allpath_trade.web.chat_service import ChatService
 from allpath_trade.web.deps import ComponentHolder
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -79,6 +80,17 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app = FastAPI(title="AllPath Trade", lifespan=lifespan, docs_url=None,
                   redoc_url=None, openapi_url=None)
     app.state.holder = ComponentHolder(settings, broker)
+    # Constructed once, here, and shared for the life of the process --
+    # not lazily inside the /chat route anymore. The Telegram poller (Task 3)
+    # is handed this exact same object so its messages share the web chat's
+    # `_turn_lock` and conversation; a settings save invalidates its cached
+    # session (ChatService.invalidate(), called from settings.py) rather than
+    # replacing the object, which would silently split the two.
+    # `app.state.chat` is kept as an alias to the same instance -- existing
+    # tests reach the service through that name; new code should use
+    # `app.state.chat_service`.
+    app.state.chat_service = ChatService(app.state.holder)
+    app.state.chat = app.state.chat_service
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     install_auth(app)

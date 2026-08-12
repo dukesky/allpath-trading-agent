@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import threading
-
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
@@ -12,22 +10,13 @@ from allpath_trade.web.templating import templates
 
 router = APIRouter()
 
-# Guards the get-or-create of `request.app.state.chat`: two requests racing
-# on the very first hit to /chat could otherwise each see `chat` unset and
-# each build their own ChatService, silently discarding one of them along
-# with whatever AgentSession it had already built.
-_service_lock = threading.Lock()
-
 
 def _service(request: Request) -> ChatService:
-    service = getattr(request.app.state, "chat", None)
-    if service is None:
-        with _service_lock:
-            service = getattr(request.app.state, "chat", None)
-            if service is None:
-                service = ChatService(request.app.state.holder)
-                request.app.state.chat = service
-    return service
+    # Built once at app startup (web/app.py's create_app) and shared with the
+    # Telegram poller (Task 3) -- no more lazy get-or-create here. A settings
+    # save invalidates the cached session in place (ChatService.invalidate())
+    # instead of swapping this out for a new instance.
+    return request.app.state.chat_service
 
 
 def _render(request: Request, template: str, *, include_activity: bool) -> HTMLResponse:

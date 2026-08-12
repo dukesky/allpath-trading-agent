@@ -34,7 +34,8 @@ BOOLEAN_FIELDS = ["daily_consolidation", "consolidate_after_chat"]
 
 # Secret values: never rendered back. A blank field means "leave it alone".
 SECRET_FIELDS = ["openrouter_api_key", "openai_api_key", "anthropic_api_key",
-                 "alpaca_api_key", "alpaca_secret_key", "smtp_password"]
+                 "alpaca_api_key", "alpaca_secret_key", "smtp_password",
+                 "telegram_bot_token"]
 
 # Gmail displays app passwords as "abcd efgh ijkl mnop"; pasting that
 # verbatim used to store the separators and fail SMTP auth. The separators
@@ -158,12 +159,17 @@ async def save(request: Request) -> Response:
     for field, value in updates.items():
         store.set(field.upper(), value)
     holder.rebuild()
-    # The in-flight turn (if any) already holds its own ChatService/AgentSession
-    # object and keeps running against the configuration it captured -- this
-    # doesn't touch it. Clearing the attribute only means the *next* call to
-    # `_service()` builds a fresh ChatService against the just-rebuilt
-    # Components, so the next turn picks up the new provider/model/key.
-    request.app.state.chat = None
+    # The in-flight turn (if any) already holds its own AgentSession object
+    # (captured out of ChatService.session() before this ran) and keeps
+    # running against the configuration it captured -- this doesn't touch it.
+    # `app.state.chat_service` itself is a single instance shared with the
+    # Telegram poller for the life of the process (web/app.py), so it is no
+    # longer replaced here the way `app.state.chat = None` used to force a
+    # fresh ChatService -- that would leave the poller holding a stale,
+    # orphaned object. Instead, invalidate() drops just the cached session,
+    # so the *next* call to `session()` rebuilds against the just-rebuilt
+    # Components, picking up the new provider/model/key.
+    request.app.state.chat_service.invalidate()
 
     new_interval = holder.get().settings.sentinel_interval_minutes
     scheduler = getattr(request.app.state, "scheduler", None)
