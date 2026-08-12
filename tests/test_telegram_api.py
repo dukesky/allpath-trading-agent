@@ -10,7 +10,8 @@ import urllib.error
 
 import pytest
 
-from allpath_trade.telegram import TelegramAPI, strip_telegram_html_to_plain
+from allpath_trade.telegram import _HTML_TAG_RE, TelegramAPI, strip_telegram_html_to_plain
+from allpath_trade.web.markdown import TELEGRAM_ALLOWED_TAGS
 
 TOKEN = "123456:AAEsecret-bot-token-value"
 
@@ -292,3 +293,30 @@ def test_strip_telegram_html_to_plain_strips_tags_and_unescapes_entities():
 
 def test_strip_telegram_html_to_plain_leaves_plain_text_untouched():
     assert strip_telegram_html_to_plain("just plain text") == "just plain text"
+
+
+# ---------------------------------------------------------------------------
+# Cross-file drift test: _HTML_TAG_RE must match exactly TELEGRAM_ALLOWED_TAGS
+# (Finding 2: ensure the tag set in this file stays in sync with markdown.py's
+# TELEGRAM_ALLOWED_TAGS without requiring manual test maintenance).
+# ---------------------------------------------------------------------------
+
+def test_html_tag_re_matches_exactly_telegram_allowed_tags():
+    """The _HTML_TAG_RE regex must strip exactly the tags in TELEGRAM_ALLOWED_TAGS.
+    This test fails if either set changes without the other being updated."""
+    # Extract tag names from the regex pattern.
+    # The pattern is r"</?(?:b|code|pre)>" -- extract the tag names.
+    pattern_str = _HTML_TAG_RE.pattern
+    # Parse the pattern to extract tag names (between | separators inside the group).
+    # Pattern: </?(?:TAG1|TAG2|...)>
+    import re as _re_module
+    match = _re_module.search(r"\(\?:([^)]+)\)", pattern_str)
+    assert match, f"Could not parse tag names from _HTML_TAG_RE pattern: {pattern_str}"
+    tags_in_regex = set(match.group(1).split("|"))
+
+    # Verify the regex tags exactly match TELEGRAM_ALLOWED_TAGS.
+    assert tags_in_regex == TELEGRAM_ALLOWED_TAGS, (
+        f"Tag mismatch: _HTML_TAG_RE has {tags_in_regex}, "
+        f"but TELEGRAM_ALLOWED_TAGS has {TELEGRAM_ALLOWED_TAGS}. "
+        "Update both to stay in sync."
+    )

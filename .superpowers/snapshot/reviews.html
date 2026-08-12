@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pending · AllPath Trade</title>
+  <link rel="stylesheet" href="static/app.css?v=d94daa3a">
+  <script src="static/htmx.min.js?v=e209dda5" defer></script>
+</head>
+<body>
+  <nav>
+    <span class="brand">allpath trade</span>
+    <a href="/" class="">Dashboard</a>
+    <a href="/chat" class="">Chat</a>
+    <a href="/reviews" class="on">Pending<span class="badge">2</span></a>
+    <a href="/strategies" class="">Strategies</a>
+    <a href="/memory" class="">Memory</a>
+    <a href="/settings" class="">Settings</a>
+  </nav>
+  <main>
+<h1>Pending</h1>
+
+<div class="card" id="review-2" style="margin-bottom:12px">
+  <div class="row">
+    <strong>buy $2000 · MU</strong>
+    <span class="muted">#2</span>
+    <span style="margin-left:auto" class="muted">just now</span>
+  </div>
+  <p class="muted" style="font-size:13px;margin:6px 0">
+    
+    mu-swing/r1 — triggered on <code>price &lt; 750</code>
+    
+  </p>
+  
+  <p style="font-family:var(--mono);font-size:14px;margin:6px 0">
+    buy
+    $2,000.00
+    MU
+  </p>
+  
+  
+  
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="/reviews/2/approve"><button class="primary" type="submit">Approve</button></form>
+    <form method="post" action="/reviews/2/reject" style="display:flex;gap:6px;align-items:center">
+      <input type="text" name="note" placeholder="reason (optional)" style="font-size:13px">
+      <button class="danger" type="submit">Reject</button>
+    </form>
+  </div>
+  
+</div><div class="card" id="review-1" style="margin-bottom:12px">
+  <div class="row">
+    <strong>sell all · AAPL</strong>
+    <span class="muted">#1</span>
+    <span style="margin-left:auto" class="muted">just now</span>
+  </div>
+  <p class="muted" style="font-size:13px;margin:6px 0">
+    
+    aapl-services/r1 — triggered on <code>price &lt; 245</code>
+    
+  </p>
+  
+  <p style="font-family:var(--mono);font-size:14px;margin:6px 0">
+    sell
+    16 shares
+    AAPL
+  </p>
+  
+  
+  
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="/reviews/1/approve"><button class="primary" type="submit">Approve</button></form>
+    <form method="post" action="/reviews/1/reject" style="display:flex;gap:6px;align-items:center">
+      <input type="text" name="note" placeholder="reason (optional)" style="font-size:13px">
+      <button class="danger" type="submit">Reject</button>
+    </form>
+  </div>
+  
+</div>
+
+
+</main>
+</body>
+</html>

@@ -1,0 +1,62 @@
+id: nvda-ai-growth
+name: NVDA long-term hold - AI infrastructure play
+status: draft
+version: 1
+authorization: confirm
+thesis: 'Bullish on NVDA''s leadership in AI chips and data center hardware.
+
+  18-24 month horizon. Analysts consensus "Strong Buy" with avg target $302.
+
+  Key catalysts: AI infrastructure demand, OpenAI partnership, data center growth.
+
+  Invalidation: AI chip demand deterioration, significant market share loss to competitors,
+
+  or datacenter revenue growth <15% for two consecutive quarters.
+
+  '
+position:
+  ticker: NVDA
+  target_weight: '0.2'
+  target_value: null
+  max_weight: '0.25'
+  max_value: null
+rules:
+- id: initial-entry
+  type: soft
+  condition: position_weight == 0 and price < 205
+  action: buy $8000
+  state: armed
+- id: add-on-dip-1
+  type: soft
+  condition: price < 190 and position_weight < 12
+  action: buy $6000
+  state: armed
+- id: add-on-dip-2
+  type: soft
+  condition: price < 180 and position_weight < 18
+  action: buy $6000
+  state: armed
+- id: stop-loss
+  type: hard
+  condition: price < 170
+  action: sell all
+  state: armed
+- id: take-profit-1
+  type: soft
+  condition: pnl_pct > 40
+  action: sell 30%
+  state: armed
+- id: take-profit-2
+  type: soft
+  condition: pnl_pct > 80
+  action: sell 30%
+  state: armed
+- id: momentum-add
+  type: soft
+  condition: price > 215 and position_weight < target_weight
+  action: buy $3000
+  state: armed
+review:
+  cadence: weekly
+  invalidation: Datacenter revenue growth <15% for two consecutive quarters, or major
+    competitive loss

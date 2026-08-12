@@ -541,6 +541,81 @@ def _blocks(html: str) -> list[str]:
     return [_restore(b) for b in placeholder.split("\n\n")]
 
 
+def _find_safe_split_point(text: str, limit: int) -> int:
+    """Find a safe position to split text before `limit`, backtracking to avoid
+    cutting inside tags `<...>` or HTML entities `&...;`. Prefers the last
+    whitespace position (word boundary) before the limit; falls back to the
+    last safe non-word boundary if no whitespace is found. Returns the split
+    position (guaranteed <= limit)."""
+    if limit >= len(text):
+        return len(text)
+
+    pos = limit
+
+    # First, check if there are any unclosed tags before pos.
+    # Count opening and closing tags to detect unclosed ones.
+    text_before_pos = text[:pos]
+    open_b = text_before_pos.count("<b>") - text_before_pos.count("</b>")
+    open_code = text_before_pos.count("<code>") - text_before_pos.count("</code>")
+
+    # If there are unclosed tags, backtrack to before the last unclosed opening tag.
+    if open_b > 0:
+        last_b_open = text.rfind("<b>", 0, pos)
+        if last_b_open != -1:
+            pos = last_b_open
+    if open_code > 0:
+        last_code_open = text.rfind("<code>", 0, pos)
+        if last_code_open != -1:
+            pos = min(pos, last_code_open)
+
+    # Check for entity straddling: if there's an `&` before pos without
+    # a matching `;` before pos, we'd split the entity.
+    last_ampersand = text.rfind("&", 0, pos)
+    if last_ampersand != -1:
+        next_semicolon = text.find(";", last_ampersand)
+        if next_semicolon >= pos or next_semicolon == -1:
+            # Entity would be split; backtrack to before the `&`.
+            pos = last_ampersand
+
+    # Prefer a word boundary (whitespace) as the split point.
+    for i in range(pos, -1, -1):
+        if i < len(text) and text[i].isspace():
+            return i + 1  # Return position after the whitespace
+
+    # Fall back to the position after backtracking.
+    return max(1, pos)
+
+
+def _balance_tags(text: str) -> str:
+    """Given a text chunk, ensure any open `<b>` or `<code>` tags are closed
+    at the end. Returns the text with tags balanced."""
+    open_b = text.count("<b>") - text.count("</b>")
+    open_code = text.count("<code>") - text.count("</code>")
+
+    result = text
+    if open_b > 0:
+        result += "</b>" * open_b
+    if open_code > 0:
+        result += "</code>" * open_code
+    return result
+
+
+def _reopen_tags(text: str, prev_text: str) -> str:
+    """Prepend reopening tags if the previous chunk had unclosed tags.
+    Returns the text with reopened tags prepended."""
+    # Count unclosed tags from the previous text.
+    prev_open_b = prev_text.count("<b>") - prev_text.count("</b>")
+    prev_open_code = prev_text.count("<code>") - prev_text.count("</code>")
+
+    result = text
+    # Reopen in the reverse order they were closed to maintain proper nesting.
+    if prev_open_code > 0:
+        result = ("<code>" * prev_open_code) + result
+    if prev_open_b > 0:
+        result = ("<b>" * prev_open_b) + result
+    return result
+
+
 def _hard_split_block(block: str, limit: int) -> list[str]:
     """Last-resort split of a single block that alone exceeds `limit` --
     `split_for_telegram` only ever calls this once blank-line-boundary
@@ -548,16 +623,38 @@ def _hard_split_block(block: str, limit: int) -> list[str]:
     own. A `<pre>...</pre>` block gets its tags stripped, the inner content
     cut at fixed-size steps sized to leave room for the tags, and each piece
     re-wrapped in its own `<pre>`/`</pre>` -- otherwise a message would open
-    a `<pre>` it never closes. A non-`<pre>` block (plain text/`<b>`/`<code>`
-    that is, on its own, over 4096 chars) is cut at raw character
-    boundaries; there is no tag to re-open, and this shape is not expected
-    to occur from `to_telegram_html`'s own paragraph sizes in practice."""
+    a `<pre>` it never closes.
+
+    A non-`<pre>` block (plain text/`<b>`/`<code>` inline HTML) is split at a
+    safe boundary: never inside `<...>` or `&...;`, preferring the last
+    whitespace before the limit (word boundary), falling back to the last safe
+    non-word boundary. If an unclosed `<b>` or `<code>` tag would straddle the
+    boundary, it is closed at the chunk end and reopened at the next chunk
+    start to preserve formatting across splits. This occurs whenever a
+    single paragraph from `to_telegram_html` exceeds the limit."""
     if _PRE_BLOCK_RE.match(block):
         inner = block[len("<pre>"):-len("</pre>")]
         overhead = len("<pre>") + len("</pre>")
         step = max(1, limit - overhead)
         return [f"<pre>{inner[j:j + step]}</pre>" for j in range(0, len(inner), step)]
-    return [block[j:j + limit] for j in range(0, len(block), limit)]
+
+    # Non-<pre> block: split safely at tag/entity boundaries with tag balancing.
+    chunks: list[str] = []
+    pos = 0
+    while pos < len(block):
+        split_point = _find_safe_split_point(block, pos + limit)
+        if split_point <= pos:
+            # Avoid infinite loop if we can't make progress; take at least 1 char.
+            split_point = min(pos + 1, len(block))
+
+        chunk = block[pos:split_point]
+        chunk = _balance_tags(chunk)
+        if chunks:
+            chunk = _reopen_tags(chunk, chunks[-1])
+        chunks.append(chunk)
+        pos = split_point
+
+    return chunks
 
 
 def split_for_telegram(html: str, limit: int = 4096) -> list[str]:

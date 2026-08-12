@@ -628,3 +628,57 @@ def test_split_for_telegram_hard_split_of_a_huge_non_pre_block_has_no_tags_to_re
     assert "".join(result) == html
     for chunk in result:
         assert len(chunk) <= 4096
+
+
+# ---------------------------------------------------------------------------
+# 9. Regression tests for Finding 1: hard-split boundary safety and tag
+#    balancing in non-<pre> blocks.
+# ---------------------------------------------------------------------------
+
+def test_hard_split_block_word_boundary_splits():
+    """Splitting at word boundaries preserves whitespace boundaries."""
+    from allpath_trade.web.markdown import _hard_split_block
+    # A paragraph of repeated words that fits exactly when split at word boundary.
+    text = ("word " * 1000).strip()  # Just under the limit when split at spaces
+    result = _hard_split_block(text, 4096)
+    # Each chunk should be <= 4096 and end at a word boundary (no partial words).
+    assert all(len(c) <= 4096 for c in result)
+    # Reconstruct to ensure nothing was lost (accounting for potential trailing space).
+    reconstructed = " ".join(result)
+    # The original and reconstructed should match (modulo whitespace normalization).
+    assert reconstructed.replace("  ", " ") == text
+
+
+def test_hard_split_block_no_split_inside_bold_tags():
+    """Bold markers straddling the boundary don't get cut in half."""
+    from allpath_trade.web.markdown import _hard_split_block
+    # Create text where <b>**bold**</b> markers straddle a would-be split point.
+    # Pad to just under 4096, then add bold text.
+    text = "x" * 4090 + "<b>bold marker here</b>" + "y" * 500
+    result = _hard_split_block(text, 4096)
+    # Each chunk must have balanced tags.
+    for chunk in result:
+        assert chunk.count("<b>") == chunk.count("</b>"), f"Unbalanced <b> in chunk: {chunk!r}"
+        assert chunk.count("<code>") == chunk.count("</code>"), f"Unbalanced <code> in chunk: {chunk!r}"
+
+
+def test_hard_split_block_ampersand_entity_never_straddled():
+    """HTML entities like &amp; never get split across chunks."""
+    from allpath_trade.web.markdown import _hard_split_block
+    # Create text with &amp; at a position that would be split.
+    text = "a" * 4095 + "&amp;" + "b" * 500
+    result = _hard_split_block(text, 4096)
+    # Reconstruct and verify the entity is intact.
+    reconstructed = "".join(result)
+    # Count &amp; in original and reconstructed.
+    assert reconstructed.count("&amp;") == 1
+    # Ensure no partial entities like "amp;" or "&am" without the full entity.
+    for chunk in result:
+        # A chunk should either have complete "&amp;" or none of the entity chars
+        # fragmented across boundaries.
+        if "&" in chunk:
+            amp_pos = chunk.find("&")
+            semi_pos = chunk.find(";", amp_pos)
+            if semi_pos != -1:
+                # Entity is complete within this chunk.
+                assert chunk[amp_pos:semi_pos + 1] == "&amp;"

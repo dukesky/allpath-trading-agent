@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard · AllPath Trade</title>
+  <link rel="stylesheet" href="static/app.css?v=d94daa3a">
+  <script src="static/htmx.min.js?v=e209dda5" defer></script>
+</head>
+<body>
+  <nav>
+    <span class="brand">allpath trade</span>
+    <a href="/" class="on">Dashboard</a>
+    <a href="/chat" class="">Chat</a>
+    <a href="/reviews" class="">Pending<span class="badge">2</span></a>
+    <a href="/strategies" class="">Strategies</a>
+    <a href="/memory" class="">Memory</a>
+    <a href="/settings" class="">Settings</a>
+  </nav>
+  <main>
+<h1>Dashboard</h1>
+<p class="muted">Sentinel: never ran (daemon not running?)</p>
+
+
+
+<div class="metrics">
+  <div class="card metric"><div class="label">Equity</div><div class="value">$100,000.00</div></div>
+  <div class="card metric"><div class="label">Cash</div><div class="value">$38,000.00</div></div>
+  <div class="card metric"><div class="label">Buying power</div><div class="value">$76,000.00</div></div>
+</div>
+
+
+<h2>Positions</h2>
+
+<table>
+  <tr><th>Ticker</th><th class="num">Qty</th><th class="num">Avg cost</th><th class="num">Value</th><th class="num">P/L</th></tr>
+  
+  <tr>
+    <td>AAPL</td>
+    <td class="num">16</td>
+    <td class="num">$305.10</td>
+    <td class="num">$5,013.28</td>
+    <td class="num up">$131.68</td>
+  </tr>
+  
+  <tr>
+    <td>NVDA</td>
+    <td class="num">40</td>
+    <td class="num">$231.40</td>
+    <td class="num">$8,958.40</td>
+    <td class="num down">$-297.60</td>
+  </tr>
+  
+  <tr>
+    <td>TSM</td>
+    <td class="num">12</td>
+    <td class="num">$402.00</td>
+    <td class="num">$5,040.48</td>
+    <td class="num up">$216.48</td>
+  </tr>
+  
+</table>
+
+
+<h2>Strategies</h2>
+
+<a class="card strategy-card" href="/strategies/aapl-services">
+  <div class="strategy-card-head">
+    <div class="strategy-card-title">
+      <span class="strategy-ticker">AAPL</span>
+      <span class="muted">AAPL services growth - conservative entry</span>
+    </div>
+    <div class="strategy-card-price">
+      
+      
+      <span class="up">$313.33 +1.70%</span>
+    </div>
+  </div>
+  <div class="strategy-card-meta">
+    <span class="chip">draft</span>
+    <span class="muted" style="font-size:12px">confirm</span>
+    <span class="strategy-weight">
+      5.0%
+      <span class="muted"> of 15.0% target</span>
+    </span>
+  </div>
+  
+  
+  
+  
+  <div class="weight-bar"><div class="weight-bar-fill" style="width:33.4%"></div></div>
+  
+  
+  <div class="levels">
+    <span class="level-chip add">add zone &lt; 275</span><span class="level-chip add">add zone &lt; 265</span><span class="level-chip add">add zone &lt; 255</span><span class="level-chip stop">stop &lt; 245</span><span class="level-chip target">target &gt; 360</span>
+  </div>
+  
+  
+  <div class="strategy-alerts">
+    <span class="alert-chip">pending review</span>
+  </div>
+  
+</a>
+
+<a class="card strategy-card" href="/strategies/mu-swing">
+  <div class="strategy-card-head">
+    <div class="strategy-card-title">
+      <span class="strategy-ticker">MU</span>
+      <span class="muted">MU swing trade - AI memory volatility capture</span>
+    </div>
+    <div class="strategy-card-price">
+      
+      
+      <span class="">$877.57</span>
+    </div>
+  </div>
+  <div class="strategy-card-meta">
+    <span class="chip">draft</span>
+    <span class="muted" style="font-size:12px">confirm</span>
+    <span class="strategy-weight">
+      —
+      <span class="muted"> of 8.0% target</span>
+    </span>
+  </div>
+  
+  
+  <div class="levels">
+    <span class="level-chip add">add zone &lt; 800</span><span class="level-chip add">add zone &lt; 750</span><span class="level-chip stop">stop &lt; 685</span><span class="level-chip target">target &gt; 1000</span>
+  </div>
+  
+  
+  <div class="strategy-alerts">
+    <span class="alert-chip">pending review</span>
+  </div>
+  
+</a>
+
+<a class="card strategy-card" href="/strategies/nvda-ai-growth">
+  <div class="strategy-card-head">
+    <div class="strategy-card-title">
+      <span class="strategy-ticker">NVDA</span>
+      <span class="muted">NVDA long-term hold - AI infrastructure play</span>
+    </div>
+    <div class="strategy-card-price">
+      
+      
+      <span class="down">$223.96 -3.22%</span>
+    </div>
+  </div>
+  <div class="strategy-card-meta">
+    <span class="chip">draft</span>
+    <span class="muted" style="font-size:12px">confirm</span>
+    <span class="strategy-weight">
+      9.0%
+      <span class="muted"> of 20.0% target</span>
+    </span>
+  </div>
+  
+  
+  
+  
+  <div class="weight-bar"><div class="weight-bar-fill" style="width:44.8%"></div></div>
+  
+  
+  <div class="levels">
+    <span class="level-chip add">add zone &lt; 205</span><span class="level-chip add">add zone &lt; 190</span><span class="level-chip add">add zone &lt; 180</span><span class="level-chip stop">stop &lt; 170</span>
+  </div>
+  
+  
+</a>
+
+<a class="card strategy-card" href="/strategies/tsm-longhold">
+  <div class="strategy-card-head">
+    <div class="strategy-card-title">
+      <span class="strategy-ticker">TSM</span>
+      <span class="muted">TSM long-term hold - AI foundry leader</span>
+    </div>
+    <div class="strategy-card-price">
+      
+      
+      <span class="up">$420.04 +4.49%</span>
+    </div>
+  </div>
+  <div class="strategy-card-meta">
+    <span class="chip">draft</span>
+    <span class="muted" style="font-size:12px">confirm</span>
+    <span class="strategy-weight">
+      5.0%
+      <span class="muted"> of 10.0% target</span>
+    </span>
+  </div>
+  
+  
+  
+  
+  <div class="weight-bar"><div class="weight-bar-fill" style="width:50.4%"></div></div>
+  
+  
+  <div class="levels">
+    <span class="level-chip add">add zone &lt; 410</span><span class="level-chip add">add zone &lt; 390</span><span class="level-chip add">add zone &lt; 375</span><span class="level-chip stop">stop &lt; 350</span><span class="level-chip target">target &gt; 480</span>
+  </div>
+  
+  
+</a>
+
+
+
+<h2>Recent trades</h2>
+<p class="muted">No trades recorded yet.</p>
+</main>
+</body>
+</html>
