@@ -94,7 +94,10 @@ def split_diff_rows(old: str, new: str) -> list[dict]:
     opcodes = difflib.SequenceMatcher(
         a=old_lines, b=new_lines, autojunk=False).get_opcodes()
 
-    if len(opcodes) == 1 and opcodes[0][0] == "equal":
+    # Two empty texts produce ZERO opcodes (not one 'equal'), so check both
+    # shapes -- otherwise the documented "No changes" row silently becomes an
+    # empty table body.
+    if not opcodes or (len(opcodes) == 1 and opcodes[0][0] == "equal"):
         return [{"kind": "none", "text": "No changes"}]
 
     rows: list[dict] = []

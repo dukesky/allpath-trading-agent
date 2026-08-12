@@ -87,9 +87,11 @@ def queue_revision(client, strategy_id="s1", old_yaml=CURRENT_S1_YAML,
     path = strategies_dir / f"{strategy_id}.yaml"
     if not path.exists():
         path.write_text(old_yaml)
-    # A real unified diff (not a placeholder) -- I3's confirm page renders
-    # the *stored* diff verbatim, unlike the in-app card's live regenerate,
-    # so a test asserting on diff-add/diff-del content needs the real thing.
+    # A real unified diff (not a placeholder). The confirm page now builds
+    # its split view from the frozen old_yaml/new_yaml (the stored unified
+    # diff is written for the record but no longer rendered anywhere) --
+    # keeping the stored field realistic here mirrors what production rows
+    # actually contain.
     diff_text = "\n".join(difflib.unified_diff(
         old_yaml.splitlines(), new_yaml.splitlines(),
         fromfile=f"{strategy_id} (current)", tofile=f"{strategy_id} (proposed)",
@@ -476,3 +478,16 @@ def test_null_intent_order_row_reject_is_unaffected(client):
     assert r.status_code == 200
     assert "Rejected" in r.text
     assert client.app.state.holder.get().queue.get(rid)["status"] == "rejected"
+
+
+def test_confirm_page_escapes_script_tags_in_revision_yaml(client):
+    # The /a/ confirm page is the one UNAUTHENTICATED surface that renders
+    # strategy YAML -- a template edit that added |safe here would ship an
+    # XSS reachable without login. Pin escaping at the route level, not just
+    # on the in-app card.
+    hostile_new = VALID_REVISION_YAML.replace(
+        'name: "S1"', 'name: "<script>alert(1)</script>"')
+    rid = queue_revision(client, new_yaml=hostile_new)
+    body = client.get(f"/a/{rid}?k={rid.token}").text
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body

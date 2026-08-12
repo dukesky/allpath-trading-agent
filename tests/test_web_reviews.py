@@ -712,3 +712,11 @@ def test_split_diff_rows_short_equal_run_is_not_collapsed():
     assert not [r for r in rows if r["kind"] == "gap"]
     ctx_rows = [r for r in rows if r["kind"] == "row" and r["ctx"]]
     assert [r["left"]["text"] for r in ctx_rows] == ["a", "b", "c"]
+
+
+def test_split_diff_rows_two_empty_texts_still_say_no_changes():
+    # SequenceMatcher on two empty line-lists returns ZERO opcodes (not one
+    # 'equal'), which used to slip past the no-change guard and render an
+    # empty table body under the column headers.
+    rows = split_diff_rows("", "")
+    assert rows == [{"kind": "none", "text": "No changes"}]
