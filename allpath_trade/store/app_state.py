@@ -18,6 +18,12 @@ TELEGRAM_CHAT_ID_KEY = "telegram_chat_id"
 # Long-poll cursor: the highest Telegram update_id already processed, so a
 # restart resumes after it instead of re-delivering old updates.
 TELEGRAM_OFFSET_KEY = "telegram_update_offset"
+# The `from.id` of the Telegram user who completed pairing, recorded at
+# pairing time alongside TELEGRAM_CHAT_ID_KEY. Every paired-chat message must
+# match BOTH the chat id and this user id before it reaches chat_service --
+# belt-and-suspenders against a forwarded/anonymous-admin message inside the
+# right chat but from the wrong sender.
+TELEGRAM_USER_ID_KEY = "telegram_user_id"
 
 
 class AppState:

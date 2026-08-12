@@ -75,56 +75,65 @@ def test_get_updates_default_timeout_s_is_50():
         return _FakeResponse(_ok_body([]))
 
     api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
-    api.get_updates(offset=0)
+    assert api.get_updates(offset=0) == []
     assert captured["body"]["timeout"] == 50
     assert captured["timeout"] == 55
 
 
-def test_get_updates_http_error_returns_empty_list_and_one_stderr_line(capsys):
+def test_get_updates_genuinely_empty_long_poll_returns_empty_list_not_none():
+    # A well-formed `{"ok": true, "result": []}` -- Telegram genuinely had
+    # nothing new -- is NOT a failure and must stay distinguishable from the
+    # `None` a transport failure returns (see get_updates's own docstring
+    # and TelegramPoller.poll_once, which backs off on `None` but not `[]`).
+    api = TelegramAPI(TOKEN, urlopen=lambda req, timeout=None: _FakeResponse(_ok_body([])))
+    assert api.get_updates(offset=0) == []
+
+
+def test_get_updates_http_error_returns_none_and_one_stderr_line(capsys):
     def raise_http_error(req, timeout=None):
         raise urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", {}, None)
 
     api = TelegramAPI(TOKEN, urlopen=raise_http_error)
-    assert api.get_updates(offset=0) == []
+    assert api.get_updates(offset=0) is None
     err_lines = capsys.readouterr().err.strip().splitlines()
     assert len(err_lines) == 1
     assert "telegram" in err_lines[0]
 
 
-def test_get_updates_timeout_returns_empty_list_and_never_raises(capsys):
+def test_get_updates_timeout_returns_none_and_never_raises(capsys):
     def raise_timeout(req, timeout=None):
         raise TimeoutError("timed out")  # what a real socket timeout raises
 
     api = TelegramAPI(TOKEN, urlopen=raise_timeout)
-    assert api.get_updates(offset=0) == []
+    assert api.get_updates(offset=0) is None
     err_lines = capsys.readouterr().err.strip().splitlines()
     assert len(err_lines) == 1
 
 
-def test_get_updates_garbage_json_returns_empty_list(capsys):
+def test_get_updates_garbage_json_returns_none(capsys):
     def fake_urlopen(req, timeout=None):
         return _FakeResponse(b"not json at all {{{")
 
     api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
-    assert api.get_updates(offset=0) == []
+    assert api.get_updates(offset=0) is None
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
 
 
-def test_get_updates_ok_false_returns_empty_list(capsys):
+def test_get_updates_ok_false_returns_none(capsys):
     def fake_urlopen(req, timeout=None):
         return _FakeResponse(_fail_body("Unauthorized"))
 
     api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
-    assert api.get_updates(offset=0) == []
+    assert api.get_updates(offset=0) is None
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
 
 
-def test_get_updates_non_list_result_returns_empty_list(capsys):
+def test_get_updates_non_list_result_returns_none(capsys):
     def fake_urlopen(req, timeout=None):
         return _FakeResponse(json.dumps({"ok": True, "result": "not-a-list"}).encode())
 
     api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
-    assert api.get_updates(offset=0) == []
+    assert api.get_updates(offset=0) is None
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
 
 
@@ -133,7 +142,7 @@ def test_get_updates_never_raises_on_any_exception_type():
         raise ValueError("boom")
 
     api = TelegramAPI(TOKEN, urlopen=raise_value_error)
-    assert api.get_updates(offset=0) == []
+    assert api.get_updates(offset=0) is None
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +259,42 @@ def test_send_typing_never_raises_on_garbage_response():
 
     api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
     assert api.send_typing("42") is None
+
+
+# ---------------------------------------------------------------------------
+# delete_message
+# ---------------------------------------------------------------------------
+
+def test_delete_message_success_hits_deletemessage():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse(_ok_body(True))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.delete_message("42", 7) is None
+    assert captured["url"] == f"https://api.telegram.org/bot{TOKEN}/deleteMessage"
+    assert captured["body"] == {"chat_id": "42", "message_id": 7}
+
+
+def test_delete_message_swallows_every_failure_mode(capsys):
+    def raise_error(req, timeout=None):
+        raise urllib.error.URLError("nope")
+
+    api = TelegramAPI(TOKEN, urlopen=raise_error)
+    assert api.delete_message("42", 7) is None
+    # Best-effort: no stderr noise expected either.
+    assert capsys.readouterr().err == ""
+
+
+def test_delete_message_never_raises_on_garbage_response():
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse(b"garbage")
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.delete_message("42", 7) is None
 
 
 # ---------------------------------------------------------------------------
