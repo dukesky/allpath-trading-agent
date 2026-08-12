@@ -68,8 +68,13 @@ class AgentSession:
                 print(f"[warning] conversation not being saved: {exc}",
                       file=sys.stderr)
 
-    def run_turn(self, user_text: str) -> str:
-        self._append({"role": "user", "content": user_text})
+    def run_turn(self, user_text: str, extra: dict | None = None) -> str:
+        """`extra` merges presentation-only bookkeeping keys (e.g.
+        ChatService's `source`) onto the appended user message dict --
+        `_protocol_only` below strips them before any LLM call, same as
+        `note_resolution`'s `kind`/`display`. `run_turn` (not the caller)
+        owns the append, so this is the only seam that can attach them."""
+        self._append({"role": "user", "content": user_text, **(extra or {})})
         for _ in range(self.max_iters):
             context = self.history
             if self.compactor is not None and self.conversation_id is not None:
