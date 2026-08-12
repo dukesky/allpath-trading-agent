@@ -74,7 +74,17 @@ class AgentSession:
         `_protocol_only` below strips them before any LLM call, same as
         `note_resolution`'s `kind`/`display`. `run_turn` (not the caller)
         owns the append, so this is the only seam that can attach them."""
-        self._append({"role": "user", "content": user_text, **(extra or {})})
+        extra = extra or {}
+        # Reviewer-requested (Telegram plan, Task 4 review): an `extra` key
+        # that happened to be named `role`/`content`/`tool_call_id`/
+        # `tool_calls` would silently clobber the real protocol field via
+        # dict-unpacking order in the `_append` call below -- a caller bug
+        # that would only ever surface as a mangled message sent to the LLM,
+        # far from where the bad `extra` dict was built. Fail loudly here,
+        # at the one seam that ever merges `extra` in, instead.
+        collision = set(extra) & set(_PROTOCOL_KEYS)
+        assert not collision, f"extra keys collide with protocol keys: {collision}"
+        self._append({"role": "user", "content": user_text, **extra})
         for _ in range(self.max_iters):
             context = self.history
             if self.compactor is not None and self.conversation_id is not None:

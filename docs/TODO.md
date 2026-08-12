@@ -161,3 +161,32 @@
       验证通过后立即失效，不再复用同一个长期口令做两件事。这个改动涉及新增一张状态表
       （配对码 + 过期时间 + 是否已用）和 Settings 页面的一处 UI，本轮不做，留待后续 Phase
       纳入 plan 时再落地。
+
+## Telegram 频道（Task 5）遗留
+
+- [ ] **仅 `serve` 可用**：Telegram poller 只在 `allpath-trade serve`（web 界面）
+      的 lifespan 里起线程；无界面的 `allpath-trade run` 守护进程没有 Telegram
+      频道——同上面 Task 3 遗留段落里记录的同一个限制，这里再记一次是因为它是
+      Task 5（serve 接线）自己交付清单里明确列出的已知限制，不是新发现。
+- [ ] **镜像推送失败不补发**：网页轮完成后镜像到 Telegram 失败（网络问题、bot
+      被拉黑、chat 已不存在等），`_send_mirror_text`（`web/app.py`）只记一行
+      scrubbed stderr，不重试、不补发——完整记录以网页端 `ConversationStore`
+      为准，Telegram 端只是"尽力而为"的第二份拷贝，不是权威记录。
+- [ ] **至多一次（at-most-once）消息语义**：`TelegramPoller.poll_once`
+      （`telegram.py`）收到更新后立即推进并落库 offset，早于该消息实际处理
+      完成——中途崩溃宁可丢这条用户消息（用户重发即可，损失可见），也不重启后
+      重放（重放会导致一次不可见但有害的重复下单提案）。此取舍是设计里写死的，
+      不做配置项；这里记录是为了让"消息可能丢一条"这件事在文档里对用户可见，
+      不只是代码注释里的隐性约定。
+- [ ] **换 token 不影响已有配对，但重新配对必须用新 token**：更换 bot token
+      （Settings 页面）或重置 web token（"Reset access token"）都不会让已经
+      配对好的 Telegram chat 失效——配对状态（chat id + user id）存在
+      `app_state`，与两个 token 都无关。但如果之后要配对一个新 chat（或
+      Unpair 后重新配对同一个 chat），必须发送当前有效的 web token；重置过
+      web token 之后，旧 token 写的 `/start <旧token>` 会像陌生人消息一样被
+      静默丢弃，不会有任何报错提示——这一点目前只在这里记录，页面上没有专门
+      的提示文案。
+- [ ] **一次性配对码**：见上面 Task 3 遗留段落——`/start` 配对口令目前直接
+      复用长期 WEB_TOKEN，已有两层缓解（配对成功后 best-effort 删除含 token
+      的消息、失败配对静默丢弃不回应攻击者），更干净的独立一次性配对码设计
+      本轮仍未落地，留在同一条遗留里跟踪，不重复开新条目。

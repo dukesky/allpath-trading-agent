@@ -51,3 +51,11 @@ class AppState:
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value))
         self._conn.commit()
+
+    def delete(self, key: str) -> None:
+        """Removes `key` entirely (`get` then returns `None`, not `""`) --
+        used by the Telegram settings-page Unpair button (Task 5) to clear
+        pairing state outright rather than overwrite it with an empty
+        string. A no-op, not an error, when the key was never set."""
+        self._conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+        self._conn.commit()

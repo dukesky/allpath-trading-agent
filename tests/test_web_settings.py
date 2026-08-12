@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import allpath_trade.web.routes.settings as settings_route
 from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, TELEGRAM_USER_ID_KEY
 from allpath_trade.web import models_catalog
 from allpath_trade.web.app import create_app
 from allpath_trade.web.deps import ComponentHolder
@@ -478,14 +479,21 @@ class _StubQueue:
         return []
 
 
+class _StubAppState:
+    def get(self, key: str) -> str | None:
+        return None
+
+
 @dataclass
 class _StubComponents:
     settings: Settings
     conn: object = None
     queue: object = None
+    app_state: object = None
 
     def __post_init__(self) -> None:
         self.queue = _StubQueue()
+        self.app_state = _StubAppState()
 
 
 def test_save_writes_through_the_holders_store_not_a_default_one(client, tmp_path):
@@ -755,7 +763,7 @@ def test_help_toggles_present_with_key_setup_phrases(client):
     assert "<details" in body
     # F5: each `?` disclosure toggle needs an accessible name -- a bare "?"
     # glyph means nothing to a screen reader.
-    assert body.count('<summary aria-label="Setup help">?</summary>') == 2
+    assert body.count('<summary aria-label="Setup help">?</summary>') == 3
     # Email help: Gmail app-password setup, the most-common-failure hint,
     # and the grouping-space strip save() already implements.
     assert "myaccount.google.com/apppasswords" in body
@@ -765,6 +773,61 @@ def test_help_toggles_present_with_key_setup_phrases(client):
     assert "STARTTLS" in body
     # Push help: install/subscribe flow and the "topic is a password" warning.
     assert "ntfy app" in body
+    # Telegram help: BotFather steps, /start pairing, and the "delete your
+    # /start message" warning (Task 3 TODO carry-forward: the web token
+    # doubles as the pairing secret, so scrubbing it out of the chat history
+    # afterward matters).
+    assert "@BotFather" in body
+    assert "/start" in body
+    assert "delete your /start message" in body
+
+
+def test_telegram_section_renders_not_paired_by_default(client):
+    body = client.get("/settings").text
+    assert "Telegram" in body
+    assert "Not paired" in body
+    assert "Unpair Telegram" in body
+
+
+def test_telegram_section_shows_masked_pairing_status_when_paired(client):
+    app_state = client.app.state.holder.get().app_state
+    app_state.set(TELEGRAM_CHAT_ID_KEY, "987654321")
+    app_state.set(TELEGRAM_USER_ID_KEY, "987654321")
+
+    body = client.get("/settings").text
+
+    assert "Paired (chat …4321)" in body
+    assert "987654321" not in body  # the full chat id never renders
+
+
+def test_unpair_telegram_clears_both_pairing_keys(client):
+    app_state = client.app.state.holder.get().app_state
+    app_state.set(TELEGRAM_CHAT_ID_KEY, "111222333")
+    app_state.set(TELEGRAM_USER_ID_KEY, "444555666")
+
+    r = client.post("/settings/telegram/unpair", follow_redirects=False)
+
+    assert r.status_code == 303
+    assert r.headers["location"] == "/settings"
+    assert app_state.get(TELEGRAM_CHAT_ID_KEY) is None
+    assert app_state.get(TELEGRAM_USER_ID_KEY) is None
+
+    body = client.get("/settings").text
+    assert "Not paired" in body
+
+
+def test_unpair_telegram_when_never_paired_is_a_harmless_no_op(client):
+    r = client.post("/settings/telegram/unpair", follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_unpair_telegram_button_uses_a_confirm_dialog(client):
+    # Same destructive-ish-button pattern as strategy_detail.html's
+    # activate/pause/resume forms: a plain onsubmit=confirm(...), not a
+    # bespoke modal.
+    body = client.get("/settings").text
+    assert 'action="/settings/telegram/unpair"' in body
+    assert "onsubmit=\"return confirm(" in body
 
 
 def test_ntfy_topic_privacy_warning_appears_only_once_in_the_help_toggle(client):

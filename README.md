@@ -35,6 +35,7 @@
 - [Safety Model](#safety-model)
 - [Getting Started](#getting-started)
 - [Web Interface](#web-interface)
+- [Telegram Chat](#telegram-chat)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
 - [Development](#development)
@@ -251,6 +252,31 @@ Daily memory consolidation reads the day's conversation turns from every
 web chat session, not just terminal ones, so lessons and preferences you
 share in the browser make it into curated memory the same as a terminal
 session would.
+
+## Telegram Chat
+
+Talk to the same agent from Telegram — one conversation, one memory, shared
+with the web Chat page. Create a bot with [@BotFather](https://t.me/BotFather)
+(`/newbot`), paste the token it gives you into Settings → Telegram, and pair
+your account by sending `/start <your web token>` in a private chat with
+your new bot (the same token you sign in to the web dashboard with). Delete
+that `/start` message afterward — it contains your web token, and while the
+bot tries to delete it for you automatically, it may lack the permission to.
+
+Once paired, everything is mirrored both ways: a message you send in the
+web Chat page also appears in Telegram (prefixed `You (web): ...`, followed
+by the agent's reply), and a message you send in Telegram gets the agent's
+reply back in-channel and shows up in the web Chat page too — same
+conversation, same tool access, same order-approval discipline (a proposed
+order still lands in the Pending queue either way; Telegram cannot approve
+or reject anything itself). Approval/reject receipts mirror to Telegram as
+well, so it doubles as a pocket record of what actually happened.
+
+Only one Telegram chat can be paired at a time (re-pairing with `/start`
+overwrites it); a message from any other chat is silently ignored. The
+poller only runs under `allpath-trade serve` — the headless `run` daemon
+has no Telegram channel, a known limitation — and a settings-page token
+change takes effect after the next restart, not immediately.
 
 ## Project Structure
 
