@@ -7,10 +7,16 @@ from allpath_trade.llm.base import LLMClient, LLMError, LLMResponse, ToolCall, T
 
 class AnthropicClient(LLMClient):
     def __init__(self, api_key: str, model: str, client: object | None = None,
-                 max_tokens: int = 4096) -> None:
+                 max_tokens: int = 4096, timeout: float = 180.0) -> None:
         self.model = model
         self.max_tokens = max_tokens
-        self._client = client or anthropic.Anthropic(api_key=api_key)
+        # `timeout` only applies when we build the real SDK client -- an
+        # injected `client` (tests, or a caller with its own setup) owns its
+        # own timeout already. See config.py's llm_timeout_seconds for why
+        # this needs to be explicit at all: the anthropic SDK's own default
+        # is generous enough (~10min with retries) to hang the entire
+        # after-close chain on a stuck call.
+        self._client = client or anthropic.Anthropic(api_key=api_key, timeout=timeout)
 
     def complete(self, messages: list[dict],
                  tools: list[ToolSpec] | None = None) -> LLMResponse:

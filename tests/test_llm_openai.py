@@ -91,3 +91,23 @@ def test_none_choices_raises_llm_error():
     c, _ = make([SimpleNamespace(choices=None)])
     with pytest.raises(LLMError):
         c.complete([{"role": "user", "content": "x"}])
+
+
+# -- Ops-hardening: same reasoning as test_llm_anthropic.py's sibling test
+# -- `complete()`'s broad `except Exception` means an SDK timeout (e.g.
+# openai.APITimeoutError, raised once llm_timeout_seconds elapses) becomes
+# an LLMError regardless of its exact class, which is what lets
+# AgentSession's `except LLMError` produce "(llm error: ...)" instead of an
+# uncaught crash.
+def test_sdk_call_raising_any_exception_becomes_llm_error():
+    class HangingStub:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            raise TimeoutError("upstream hung")
+
+    c = OpenAICompatClient("k", "test-model", client=HangingStub())
+    with pytest.raises(LLMError) as ei:
+        c.complete([{"role": "user", "content": "x"}])
+    assert "upstream hung" in str(ei.value)

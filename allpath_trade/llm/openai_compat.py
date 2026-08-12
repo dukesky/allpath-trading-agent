@@ -11,9 +11,13 @@ class OpenAICompatClient(LLMClient):
     """OpenAI-compatible chat completions — covers OpenAI and OpenRouter."""
 
     def __init__(self, api_key: str, model: str, base_url: str | None = None,
-                 client: object | None = None) -> None:
+                 client: object | None = None, timeout: float = 180.0) -> None:
         self.model = model
-        self._client = client or OpenAI(api_key=api_key, base_url=base_url)
+        # See AnthropicClient.__init__: `timeout` only applies when we build
+        # the real SDK client, and exists to bound a genuinely hung call
+        # (config.py's llm_timeout_seconds) rather than trust the openai
+        # SDK's own default.
+        self._client = client or OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
     def complete(self, messages: list[dict],
                  tools: list[ToolSpec] | None = None) -> LLMResponse:
