@@ -580,7 +580,7 @@ def main(argv: list[str] | None = None,
         # consolidator dependency, so there is no longer a "nothing to do
         # today" case to special-case away.
         run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
-                   daily_job=lambda: run_daily_jobs(components),
+                   daily_job=lambda: run_daily_jobs(components, verbose=True),
                    app_state=components.app_state,
                    journal=components.journal, broker=components.broker)
         return 0

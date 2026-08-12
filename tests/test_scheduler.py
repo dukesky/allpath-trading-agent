@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from allpath_trade.scheduler import (
+    run_daily_jobs,
     SENTINEL_JOB_ID,
     SENTINEL_MARKET_OPEN_KEY,
     build_jobs,
@@ -849,3 +850,29 @@ def test_build_jobs_digest_failure_does_not_stop_reflection(monkeypatch, capsys)
 
     assert reflector.calls == 1
     assert "[digest] failed" in capsys.readouterr().out
+
+
+def _chatty_daily_components():
+    # Reflector/consolidator stand-ins whose run_daily returns a status line,
+    # like the real ones do -- verbose mode prints exactly that line.
+    reflector = SimpleNamespace(run_daily=lambda: "report stored for 2026-08-11")
+    consolidator = SimpleNamespace(run_daily=lambda: "consolidated 3 events")
+    return _components(sentinel=FakeSentinel(), consolidator=consolidator,
+                       reflector=reflector)
+
+
+def test_run_daily_jobs_verbose_prints_success_lines(capsys):
+    # The headless `run` daemon has no web UI -- its stdout is the operator's
+    # only window into whether the nightly chain did anything, so verbose=True
+    # must restore the success-path prints the pre-extraction daily() had.
+    run_daily_jobs(_chatty_daily_components(), verbose=True)
+    out = capsys.readouterr().out
+    assert "[reflection] report stored for 2026-08-11" in out
+    assert "[memory] consolidated 3 events" in out
+
+
+def test_run_daily_jobs_default_is_quiet_on_success(capsys):
+    run_daily_jobs(_chatty_daily_components())
+    out = capsys.readouterr().out
+    assert "[reflection]" not in out
+    assert "[memory]" not in out

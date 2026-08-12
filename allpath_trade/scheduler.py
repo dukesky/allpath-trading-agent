@@ -211,7 +211,7 @@ def _send_daily_digest(components) -> None:
     components.app_state.set(DIGEST_LAST_DATE_KEY, today)
 
 
-def run_daily_jobs(components) -> None:
+def run_daily_jobs(components, verbose: bool = False) -> None:
     """The after-close daily sequence, shared by `build_jobs` (`serve`) and
     `cli.py`'s `run` daemon so the two entry points can't drift out of sync
     again (docs/TODO.md's Phase 5 leftover: `run` used to skip the digest
@@ -227,7 +227,14 @@ def run_daily_jobs(components) -> None:
     and consolidation each stay gated by their own setting.
 
     Callers are expected to wrap this in their own once-per-day gate (see
-    `_maybe_run_daily`) -- this function itself is state-free."""
+    `_maybe_run_daily`) -- this function itself is state-free.
+
+    `verbose=True` restores the success-path prints the headless `run`
+    daemon had before this helper was extracted: `run` has no web UI, so
+    its stdout is the operator's only window into whether the nightly
+    chain did anything. `serve` keeps verbose=False -- its operator reads
+    the Reports page, and the pre-refactor daily() never printed on
+    success there either."""
     try:
         _send_daily_digest(components)
     except Exception as exc:  # noqa: BLE001 — a failed digest must not stop the rest
@@ -236,14 +243,18 @@ def run_daily_jobs(components) -> None:
     reflector = components.reflector
     if reflector is not None and components.settings.daily_reflection:
         try:
-            reflector.run_daily()
+            status = reflector.run_daily()
+            if verbose:
+                print(f"[reflection] {status}")
         except Exception as exc:  # noqa: BLE001 — must not stop consolidation
             print(f"[reflection] failed: {exc}", file=sys.stderr)
 
     consolidator = components.consolidator
     if consolidator is not None and components.settings.daily_consolidation:
         try:
-            consolidator.run_daily()
+            status = consolidator.run_daily()
+            if verbose:
+                print(f"[memory] {status}")
         except Exception as exc:  # noqa: BLE001 — see comment above
             print(f"[consolidation] failed: {exc}")
 
