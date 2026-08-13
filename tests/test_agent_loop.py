@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from allpath_trade.agent.compact import Compactor
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.tools import ToolRegistry
@@ -42,6 +44,25 @@ def test_plain_text_turn():
     assert s.run_turn("hello") == "hi"
     assert s.history[0] == {"role": "user", "content": "hello"}
     assert s.history[-1]["content"] == "hi"
+
+
+def test_run_turn_accepts_a_non_colliding_extra_key():
+    # ChatService's `source` (Telegram plan Task 4) is the real-world case:
+    # a presentation-only bookkeeping key that must ride along on the
+    # appended user message without touching the LLM-facing protocol.
+    s = AgentSession(ScriptedLLM([LLMResponse(text="hi")]), make_registry(), "SYS")
+    s.run_turn("hello", extra={"source": "telegram"})
+    assert s.history[0] == {"role": "user", "content": "hello", "source": "telegram"}
+
+
+def test_run_turn_asserts_extra_keys_never_collide_with_protocol_keys():
+    # Reviewer-requested carry-forward (Telegram plan Task 4 review): an
+    # `extra` key named e.g. "role" or "content" would silently clobber the
+    # real protocol field via dict-unpacking order -- this must fail loudly
+    # at the merge point rather than send a mangled message to the LLM.
+    s = AgentSession(ScriptedLLM([]), make_registry(), "SYS")
+    with pytest.raises(AssertionError):
+        s.run_turn("hello", extra={"role": "system"})
 
 
 def test_tool_loop_executes_and_feeds_back():

@@ -2,6 +2,42 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Telegram chat channel — 2026-08-12
+
+- Two-way Telegram chat with the same agent, same conversation, same
+  memory as the web Chat page: a long-polling `TelegramPoller`
+  (`allpath_trade/telegram.py`, stdlib `urllib` only, no new dependency)
+  drives the same `ChatService` instance under `allpath-trade serve`.
+- Pairing: `/start <your web token>` in a private chat with your bot
+  (created via `@BotFather`) pairs exactly one chat, constant-time token
+  check, no reply to a wrong/missing token or a stranger. The pairing
+  message is best-effort deleted afterward (it carries the web token); the
+  Settings page also tells you to delete it yourself, since delete
+  permission isn't guaranteed.
+- Full mirroring: every web Chat turn (and every approval/reject receipt)
+  pushes to the paired Telegram chat as `You (web): ...` plus the reply;
+  Telegram-originated turns don't mirror back (no echo loop). Mirror
+  sends are fire-and-forget on their own thread pool — a slow or failed
+  Telegram send never adds latency to, or breaks, the web chat turn that
+  triggered it.
+- Message formatting: a narrow Markdown-to-Telegram-HTML renderer
+  (`to_telegram_html`, `web/markdown.py`) maps bold/inline-code/code
+  fences/tables to Telegram's `b`/`code`/`pre` tags, escaping everything
+  else; long replies split at paragraph boundaries under Telegram's 4096-
+  character limit, with a plain-text fallback if a message ever fails to
+  parse as HTML.
+- Settings page: a Telegram section (bot token as a write-only secret
+  field, `?` setup help, pairing status masked to the last 4 characters
+  of the chat id, and an Unpair button with the same confirm-dialog
+  pattern as other destructive actions).
+- Known limitations (see `docs/TODO.md`): the poller only runs under
+  `serve`, not the headless `run` daemon; a failed mirror push is not
+  retried or replayed; message handling is at-most-once by design (a
+  mid-turn crash drops the incoming message rather than risk replaying a
+  duplicate order proposal on restart); pairing currently reuses the
+  long-lived web token as the one-time pairing secret, with a dedicated
+  one-shot pairing code recorded as a future improvement.
+
 ## Phase 6 — 2026-08-10
 
 - After-close **reflection loop**: a bounded agent session (`REFLECTION_MAX_ITERS`

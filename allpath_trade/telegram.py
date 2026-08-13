@@ -1,0 +1,543 @@
+"""Telegram Bot API transport (`TelegramAPI`) -- stdlib `urllib.request`
+only, no new dependency, mirroring the precedent `notify/ntfy.py` already
+set for this codebase's "one HTTP call, no SDK" shape.
+
+This module owns the HTTP boundary only. `get_updates`/`send_message`/
+`send_typing` never raise -- every failure mode (network error, HTTP error,
+malformed JSON, a well-formed `{"ok": false, ...}` body) is caught here and
+turned into a return value plus at most one `stderr` line, because the
+caller (this module's own `TelegramPoller`, running on a daemon thread with
+nothing watching for an uncaught exception) must never die from a flaky
+Telegram API or a slow network.
+
+Token scrubbing: every Telegram API URL is shaped `.../bot<token>/<method>`,
+so the token is embedded in the URL string that shows up inside
+`urllib.error.URLError`/`HTTPError` messages (and in the request itself).
+Every stderr line and every string derived from an exception message is run
+through `TelegramAPI._scrub` first, which masks the token verbatim -- this
+is the ONLY thing standing between a transient network error and the bot
+token leaking into server logs, so it is applied unconditionally, not
+opt-in per call site.
+"""
+
+from __future__ import annotations
+
+import hmac
+import html as _html
+import json
+import re
+import sys
+import threading
+import urllib.error
+import urllib.request
+from collections.abc import Callable
+from typing import Any
+
+from allpath_trade.store.app_state import (
+    TELEGRAM_CHAT_ID_KEY,
+    TELEGRAM_OFFSET_KEY,
+    TELEGRAM_USER_ID_KEY,
+)
+from allpath_trade.web.markdown import (
+    MAX_TELEGRAM_REPLY_CHUNKS,
+    split_for_telegram,
+    to_telegram_html,
+)
+
+_API_URL = "https://api.telegram.org/bot{token}/{method}"
+_TOKEN_MASK = "***"
+
+# sendMessage/sendChatAction are single, quick calls -- 10s matches the
+# timeout ntfy.py already uses for the same shape of one-call HTTP POST.
+_SEND_TIMEOUT_SECONDS = 10
+# getUpdates is a long poll: Telegram holds the connection open for up to
+# `timeout_s` seconds server-side before answering with an empty result, so
+# the socket timeout must be strictly longer than that or every long poll
+# would look like a network failure. +5s of slack for the response to
+# actually arrive after Telegram's own wait completes -- with the default
+# timeout_s=50 this is exactly the 55s the design spec calls for.
+_GETUPDATES_TIMEOUT_MARGIN_SECONDS = 5
+
+# The exact set of tags `web/markdown.py`'s `to_telegram_html` can ever
+# produce (see its ALLOWED_TAGS-equivalent docstring there) -- this is the
+# tag whitelist the plain-text fallback below strips, kept here rather than
+# imported so this module's never-raises transport half has zero import-time
+# dependency on the formatting module (Task 2 lands both in one PR, but they
+# stay decoupled: a future change to markdown.py's tag set can't newly break
+# this file's fallback without a test in *this* file catching it too).
+_HTML_TAG_RE = re.compile(r"</?(?:b|code|pre)>")
+
+
+def strip_telegram_html_to_plain(text: str) -> str:
+    """Fallback for `send_message`'s HTML -> plain-text retry: Telegram
+    rejected the HTML as an entity-parse failure, so send the same content
+    back with the b/code/pre tags removed and the entities `to_telegram_html`
+    escaped (`&amp;`, `&lt;`, ...) unescaped back to their literal
+    characters -- otherwise the fallback message would read as literal
+    "&lt;b&gt;" noise instead of the original text."""
+    return _html.unescape(_HTML_TAG_RE.sub("", text))
+
+
+class TelegramAPI:
+    """Thin wrapper over three Telegram Bot API methods. `urlopen` is
+    injectable (defaults to `urllib.request.urlopen`) so tests never touch
+    api.telegram.org -- see `notify/ntfy.py`'s tests for the same pattern
+    this module's tests follow."""
+
+    def __init__(self, token: str, urlopen: Callable[..., Any] = urllib.request.urlopen) -> None:
+        self.token = token
+        self._urlopen = urlopen
+
+    def _scrub(self, text: str) -> str:
+        """Mask every occurrence of the bot token in `text`. A no-op on an
+        empty token (nothing to leak) rather than replacing "" with "***"
+        everywhere, which would otherwise corrupt any message when the
+        token happens to be unset."""
+        if not self.token:
+            return text
+        return text.replace(self.token, _TOKEN_MASK)
+
+    def _request(self, method: str, payload: dict[str, Any]) -> urllib.request.Request:
+        return urllib.request.Request(
+            _API_URL.format(token=self.token, method=method),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+    def get_updates(self, offset: int, timeout_s: int = 50) -> list[dict[str, Any]] | None:
+        """Long-poll `getUpdates`. Returns the `result` array on success
+        (`[]` when Telegram genuinely has nothing new -- a normal long-poll
+        timeout, not a failure), or `None` -- after exactly one scrubbed
+        stderr line -- for ANY failure: a network/HTTP error, a response
+        body that isn't valid JSON, a well-formed-but-`ok:false` body, or a
+        body whose `result` isn't a list.
+
+        The `[]`/`None` distinction is load-bearing for the poller
+        (`TelegramPoller.poll_once`/`run_forever`): without it, a network
+        outage and an empty long poll look identical, so the retry backoff
+        never engages and the poller hot-loops against a dead transport
+        instead of backing off."""
+        req = self._request("getUpdates", {"offset": offset, "timeout": timeout_s})
+        timeout = timeout_s + _GETUPDATES_TIMEOUT_MARGIN_SECONDS
+        try:
+            with self._urlopen(req, timeout=timeout) as resp:
+                body = resp.read()
+            data = json.loads(body)
+        except Exception as exc:  # noqa: BLE001 — transport must never raise
+            print(f"[telegram] getUpdates failed: {self._scrub(str(exc))}", file=sys.stderr)
+            return None
+        if not isinstance(data, dict) or not data.get("ok"):
+            print(f"[telegram] getUpdates failed: {self._scrub(str(data))}", file=sys.stderr)
+            return None
+        result = data.get("result")
+        if not isinstance(result, list):
+            print("[telegram] getUpdates failed: unexpected response shape", file=sys.stderr)
+            return None
+        return result
+
+    def _send_once(self, chat_id: str, text: str, parse_mode: str | None) -> str:
+        """One sendMessage attempt. Returns "ok", "http400" (so the caller
+        can retry as plain text -- a 400 from Telegram's sendMessage is how
+        an entity-parse failure surfaces), or "fail" for anything else.
+        Always prints at most one scrubbed stderr line on failure."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        req = self._request("sendMessage", payload)
+        try:
+            with self._urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp:
+                body = resp.read()
+            data = json.loads(body)
+        except urllib.error.HTTPError as exc:
+            print(f"[telegram] sendMessage failed: {self._scrub(str(exc))}", file=sys.stderr)
+            return "http400" if exc.code == 400 else "fail"
+        except Exception as exc:  # noqa: BLE001 — transport must never raise
+            print(f"[telegram] sendMessage failed: {self._scrub(str(exc))}", file=sys.stderr)
+            return "fail"
+        if not isinstance(data, dict) or not data.get("ok"):
+            print(f"[telegram] sendMessage failed: {self._scrub(str(data))}", file=sys.stderr)
+            return "fail"
+        return "ok"
+
+    def send_message(self, chat_id: str, html: str) -> bool:
+        """Send `html` with `parse_mode=HTML`. On a Telegram 400 (entity
+        parse failure -- e.g. an unbalanced tag slipped past
+        `to_telegram_html`), retries EXACTLY ONCE as plain text via
+        `strip_telegram_html_to_plain`. Never raises; returns whether the
+        message was ultimately delivered."""
+        status = self._send_once(chat_id, html, "HTML")
+        if status == "ok":
+            return True
+        if status == "http400":
+            plain = strip_telegram_html_to_plain(html)
+            return self._send_once(chat_id, plain, None) == "ok"
+        return False
+
+    def send_typing(self, chat_id: str) -> None:
+        """Best-effort `sendChatAction(typing)`. Swallows everything --
+        including a malformed response body -- because a missing typing
+        indicator is never worth surfacing, let alone worth risking the
+        poller loop on."""
+        try:
+            req = self._request("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+            with self._urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp:
+                resp.read()
+        except Exception:  # noqa: BLE001, S110 — best-effort, swallow everything
+            pass
+
+    def delete_message(self, chat_id: str, message_id: int) -> None:
+        """Best-effort `deleteMessage`. Used right after a successful `/start
+        <token>` pairing to scrub the token out of the chat's visible
+        history -- swallows everything, same as `send_typing`, because a
+        failed delete (missing permission, message already gone, message
+        too old for the bot to delete) is never worth surfacing, let alone
+        worth risking the poller loop on."""
+        try:
+            req = self._request("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+            with self._urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp:
+                resp.read()
+        except Exception:  # noqa: BLE001, S110 — best-effort, swallow everything
+            pass
+
+
+# Backoff for `TelegramPoller.run_forever`'s retry loop: 5s to start, doubling
+# on each consecutive failure, capped at 60s -- reset to the base the moment a
+# poll succeeds again. Values match the design spec verbatim.
+_BACKOFF_BASE_SECONDS = 5
+_BACKOFF_CAP_SECONDS = 60
+
+# Every poller stderr line is truncated to this many characters after
+# scrubbing (see `TelegramPoller._log_error`) -- `chat_service.send` can
+# raise with arbitrary user-supplied text embedded in the exception message,
+# and an unbounded line is a way for a user to flood or obscure the log.
+_STDERR_TRUNCATE_LENGTH = 200
+
+# How often `_handle_chat_text`'s keepalive thread re-sends the typing
+# indicator while `chat_service.send` is still running (Finding 6) --
+# comfortably inside Telegram's own few-second expiry for a single
+# `sendChatAction` call.
+_TYPING_RESEND_SECONDS = 4
+
+
+class TelegramPoller:
+    """Long-polls Telegram's `getUpdates`, pairs a single chat via `/start
+    <web_token>`, and forwards paired-chat text into `chat_service` --
+    replying with the agent's turn.
+
+    `poll_once` is the unit tests drive directly: one `getUpdates` call, one
+    pass over whatever updates came back. `run_forever` is the thin loop
+    `serve` runs on a daemon thread -- call `poll_once` forever, backing off
+    on repeated failure, until `stop` is set.
+
+    `chat_service` is duck-typed as `send(text: str, source: str = "web") ->
+    str` -- that `source` keyword is `ChatService`'s (Task 4 in the design
+    plan); this class only ever needs the interface, not the concrete type,
+    so it has no import-time dependency on `chat_service.py`.
+
+    `holder` is duck-typed as `get() -> object` where the returned object
+    exposes `.app_state` and `.settings.web_token` (the shape
+    `web.deps.ComponentHolder.get()` -- a `Components` instance -- already
+    has). Both are read fresh via `holder.get()` at the point of use, NEVER
+    captured once in `__init__`, for two review findings this class used to
+    get wrong:
+
+      * (Finding 2, security) A snapshotted `web_token` never picked up a
+        `/settings/reset-token` save -- the poller kept validating `/start`
+        against the OLD token forever (until process restart), so a leaked
+        old token could still pair via Telegram after the user believed
+        they'd revoked it, and the freshly reset token was rejected. Reading
+        `holder.get().settings.web_token` at compare time fixes both halves
+        at once: the old token stops working and the new one starts working
+        the instant the reset takes effect, no restart required.
+      * (Finding 5) A snapshotted `app_state` object outlives a `db_path`
+        change from `ComponentHolder.rebuild()` -- `_current_offset` and
+        every other read/write in this class would keep hitting the OLD
+        (possibly-closed) sqlite connection forever, a permanent error loop
+        indistinguishable from a dead network from `run_forever`'s point of
+        view. Reading `holder.get().app_state` at each use closes this the
+        same way."""
+
+    def __init__(self, api: TelegramAPI, chat_service: Any, holder: Any,
+                 stop: threading.Event) -> None:
+        self.api = api
+        self.chat_service = chat_service
+        self.holder = holder
+        self.stop = stop
+
+    @property
+    def app_state(self) -> Any:
+        """Always the CURRENT `AppState` -- see the class docstring's
+        Finding 5 note. A `@property` (not a plain attribute) so every one
+        of this class's many `self.app_state.get/set(...)` call sites below
+        stays unchanged; only `__init__` and this accessor needed to
+        change."""
+        return self.holder.get().app_state
+
+    def _web_token(self) -> str:
+        """Always the CURRENT web token -- see the class docstring's
+        Finding 2 note. A method, not a `@property`, to make the "read at
+        compare time" intent explicit at the one call site that uses it
+        (`_handle_pairing`)."""
+        return self.holder.get().settings.web_token
+
+    # -- single poll step -----------------------------------------------
+
+    def poll_once(self) -> str:
+        """One `getUpdates` call plus one pass over its results. Every
+        per-update failure (a malformed update, an exception raised while
+        handling it) is caught right there so it can never take the rest of
+        the batch down with it -- see `_handle_update`'s per-update
+        try/except below.
+
+        Returns `"failed"` when `run_forever` should back off, `"ok"`
+        otherwise:
+
+          * `get_updates` returning `None` (transport failure, see its own
+            docstring) is always `"failed"`.
+          * A non-empty batch where NOT ONE update advanced the offset is
+            also `"failed"`, even though `get_updates` itself succeeded --
+            e.g. every update in the batch raised while being processed
+            (a disk-full `app_state.set`), or Telegram sent update_ids this
+            code can't parse as `int`. Without this, the next poll would
+            fetch the exact same batch again (offset never moved) and do so
+            in a tight loop with no backoff -- a hot-loop that looks
+            identical to genuine progress from `run_forever`'s point of
+            view unless it's told otherwise.
+        """
+        offset = self._current_offset()
+        updates = self.api.get_updates(offset=offset, timeout_s=50)
+        if updates is None:
+            return "failed"
+        dropped = 0
+        advanced_any = False
+        for update in updates:
+            try:
+                # Offset is persisted the instant an update is received --
+                # BEFORE any processing of it. This is deliberate at-most-once
+                # semantics (verbatim from the design spec): a mid-turn crash
+                # must drop the message (visible: the user just resends it)
+                # rather than replay it on restart (invisible: a duplicate
+                # order proposal re-enters the pending queue). This tradeoff
+                # is fixed, not configurable.
+                if self._advance_offset(update):
+                    advanced_any = True
+                if self._handle_update(update) == "dropped":
+                    dropped += 1
+            except Exception as exc:  # noqa: BLE001 — one bad update must not kill the batch
+                self._log_error(f"failed to process update: {exc}")
+        if dropped:
+            # At most one stderr line per batch, however many stranger
+            # messages or failed pairing attempts (wrong/non-ASCII token,
+            # non-private /start) showed up in it -- a burst must not spam
+            # the log one line per message, but the count still gives an
+            # operator visibility into a brute-force attempt without ever
+            # replying to the attacker.
+            self._log_error(f"dropped {dropped} message(s) from unpaired chat(s) "
+                             "or failed pairing attempt(s)")
+        if updates and not advanced_any:
+            return "failed"
+        return "ok"
+
+    def _log_error(self, message: str) -> None:
+        """Every poller stderr line goes through this: scrubbed (the token
+        can end up embedded in an exception's message the same way it can
+        in the transport, see `TelegramAPI._scrub`'s docstring) and
+        truncated -- `chat_service.send` can raise with the user's own
+        message text inside the exception, and an unbounded line is a log
+        an attacker can use to flood or hide behind."""
+        scrubbed = self.api._scrub(message)
+        print(f"[telegram] {scrubbed[:_STDERR_TRUNCATE_LENGTH]}", file=sys.stderr)
+
+    def _current_offset(self) -> int:
+        raw = self.app_state.get(TELEGRAM_OFFSET_KEY)
+        try:
+            return int(raw) if raw is not None else 0
+        except ValueError:
+            return 0
+
+    def _advance_offset(self, update: dict[str, Any]) -> bool:
+        """Returns whether the offset was actually advanced -- `False` for
+        an update whose `update_id` isn't an `int` (malformed/adversarial
+        payload), which `poll_once` needs to know about: see its own
+        docstring for why a batch that never advances the offset must be
+        treated as a failure."""
+        update_id = update.get("update_id")
+        if isinstance(update_id, int):
+            self.app_state.set(TELEGRAM_OFFSET_KEY, str(update_id + 1))
+            return True
+        return False
+
+    def _handle_update(self, update: dict[str, Any]) -> str | None:
+        """Returns `"dropped"` when the update was a text message from an
+        unpaired/unmatched sender, or a failed `/start` pairing attempt (so
+        `poll_once` can count it for its one stderr line), `None` otherwise
+        -- including every non-text update shape (photos, stickers,
+        `edited_message`, `callback_query`, ...), which are simply ignored:
+        this bot only ever understands plain text."""
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return None
+        text = message.get("text")
+        if not isinstance(text, str):
+            return None
+        chat = message.get("chat")
+        chat_id = chat.get("id") if isinstance(chat, dict) else None
+        if chat_id is None:
+            return None
+        chat_id = str(chat_id)
+        chat_type = chat.get("type") if isinstance(chat, dict) else None
+        from_ = message.get("from")
+        from_id = from_.get("id") if isinstance(from_, dict) else None
+
+        # Exact command match only: "/start" is the pairing command,
+        # "/starting a position..." (or any other text that merely begins
+        # with the same five characters) is ordinary chat text and must
+        # flow to chat_service like anything else. The "@botname" suffix
+        # (how a command reads when it's @-mentioned in a group) is
+        # stripped before comparing.
+        parts = text.split(maxsplit=1)
+        command = parts[0].split("@", 1)[0] if parts else ""
+        if command == "/start":
+            token = parts[1].strip() if len(parts) > 1 else ""
+            message_id = message.get("message_id")
+            paired = self._handle_pairing(chat_id, chat_type, from_id, token, message_id)
+            return None if paired else "dropped"
+
+        paired_chat_id = self.app_state.get(TELEGRAM_CHAT_ID_KEY)
+        paired_user_id = self.app_state.get(TELEGRAM_USER_ID_KEY)
+        # Both the chat id AND the sender's user id (recorded at pairing
+        # time) must match. Belt-and-suspenders on top of the chat id check:
+        # even inside the one paired chat, a forwarded message or an
+        # anonymous-admin post can carry a `from.id` that isn't the person
+        # who paired -- this fails that closed rather than trusting the
+        # chat id alone.
+        if (paired_chat_id is None or chat_id != paired_chat_id
+                or paired_user_id is None or from_id is None
+                or str(from_id) != paired_user_id):
+            # No reply of any kind, not even to confirm the bot is alive.
+            # Counted by the caller, not logged per-message.
+            return "dropped"
+
+        self._handle_chat_text(chat_id, text)
+        return None
+
+    def _handle_pairing(self, chat_id: str, chat_type: Any, from_id: Any,
+                         token: str, message_id: Any) -> bool:
+        """`/start <token>` pairing. Returns whether pairing succeeded.
+
+        Requires ALL of: a private chat (`chat.type == "private"` --
+        pairing from a group/supergroup/channel is rejected outright, since
+        this bot is single-user-DM only by design and a group /start would
+        pair the bot to a shared chat everyone in it can then talk through),
+        a known sender id, and a correct token (constant-time compare, both
+        sides encoded utf-8 first -- see `hmac.compare_digest`'s own
+        restriction against comparing `str`s that contain non-ASCII
+        characters, and `web/auth.py`'s `_authorized` for the same pattern
+        already established in this codebase).
+
+        On success: stores the chat id AND the pairing user's id, replies
+        once, and best-effort deletes the `/start` message (it has the web
+        token in it). On failure (wrong/missing token, non-private chat):
+        NO reply of any kind -- confirming the bot is alive to a guesser is
+        itself information leakage. Re-pairing (a second correct `/start`
+        from a different private chat) simply overwrites the stored chat id
+        and user id; this is single-chat-only by design."""
+        if chat_type != "private":
+            return False
+        if from_id is None:
+            return False
+        web_token = self._web_token()
+        if not token or not web_token:
+            return False
+        if not hmac.compare_digest(token.encode("utf-8"), web_token.encode("utf-8")):
+            return False
+        self.app_state.set(TELEGRAM_CHAT_ID_KEY, chat_id)
+        self.app_state.set(TELEGRAM_USER_ID_KEY, str(from_id))
+        self.api.send_message(
+            chat_id,
+            "Paired. This chat now talks to your AllPath agent. "
+            "(I tried to delete your /start message — if it is still "
+            "visible, delete it: it contains your web token.)",
+        )
+        if isinstance(message_id, int):
+            self.api.delete_message(chat_id, message_id)
+        return True
+
+    def _handle_chat_text(self, chat_id: str, text: str) -> None:
+        stop_typing = threading.Event()
+
+        def _keep_typing() -> None:
+            # Telegram's typing indicator expires a few seconds after each
+            # `sendChatAction` call; a single call at the start of a long
+            # agent turn (tool calls, LLM round-trips, reflection) reads
+            # "typing..." for a moment and then silently goes stale for the
+            # rest of the turn (Finding 6). Re-sending on a short interval
+            # keeps it alive until `chat_service.send` returns. Runs on its
+            # own thread so it never blocks the turn itself; `send_typing`
+            # is already best-effort/never-raises (see `TelegramAPI`'s own
+            # docstring), so nothing here needs its own try/except.
+            while not stop_typing.wait(_TYPING_RESEND_SECONDS):
+                self.api.send_typing(chat_id)
+
+        self.api.send_typing(chat_id)
+        ticker = threading.Thread(target=_keep_typing, daemon=True,
+                                  name="telegram-typing")
+        ticker.start()
+        try:
+            reply = self.chat_service.send(text, source="telegram")
+        finally:
+            stop_typing.set()
+            ticker.join(timeout=1)
+
+        html = to_telegram_html(reply)
+        chunks = split_for_telegram(html)
+        if not chunks:
+            # `split_for_telegram` returns `[]` for empty input -- an empty
+            # or whitespace-only agent reply must still tell the user
+            # *something* happened, not leave them staring at a typing
+            # indicator that silently vanishes.
+            chunks = ["(empty reply)"]
+        if len(chunks) > MAX_TELEGRAM_REPLY_CHUNKS:
+            # Defensive belt (Finding 1): `split_for_telegram` is now proven
+            # correct for the corpus this codebase's tests exercise, but if
+            # some future input shape still produces a pathological
+            # explosion, truncate and log rather than firing hundreds of
+            # `sendMessage` calls for one reply.
+            self._log_error(
+                f"reply split into {len(chunks)} chunks (cap "
+                f"{MAX_TELEGRAM_REPLY_CHUNKS}); truncating")
+            chunks = [*chunks[:MAX_TELEGRAM_REPLY_CHUNKS], "(reply truncated: too long for Telegram)"]
+        for chunk in chunks:
+            self.api.send_message(chat_id, chunk)
+
+    # -- daemon loop -------------------------------------------------------
+
+    def run_forever(self) -> None:
+        """Runs `poll_once` in a loop until `stop` is set. Any exception
+        `poll_once` itself lets through (it shouldn't, normally -- see its
+        own per-update try/except -- but a scripted-failing transport or a
+        storage hiccup on `_advance_offset`/`_handle_pairing` still can)
+        is caught here at the top level, because nothing else watches this
+        daemon thread for an uncaught exception; letting one through would
+        silently kill Telegram delivery for the rest of the process's life,
+        and counts as a failure for backoff purposes same as `poll_once`
+        returning `"failed"` explicitly.
+
+        Backs off 5s -> doubling -> capped at 60s on consecutive failure,
+        reset to 5s the moment a poll succeeds again. The backoff sleep is
+        `self.stop.wait(delay)`, not `time.sleep(delay)` -- so a shutdown
+        requested mid-backoff (up to 60s) wakes the loop immediately instead
+        of making it wait out the rest of the delay first."""
+        delay = _BACKOFF_BASE_SECONDS
+        while not self.stop.is_set():
+            try:
+                status = self.poll_once()
+            except Exception as exc:  # noqa: BLE001 — must never kill this thread
+                self._log_error(f"poll_once failed: {exc}")
+                status = "failed"
+            if status == "failed":
+                self.stop.wait(delay)
+                delay = min(delay * 2, _BACKOFF_CAP_SECONDS)
+            else:
+                delay = _BACKOFF_BASE_SECONDS

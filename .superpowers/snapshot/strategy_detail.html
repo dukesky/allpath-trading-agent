@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AAPL services growth - conservative entry · AllPath Trade</title>
+  <link rel="stylesheet" href="static/app.css?v=d94daa3a">
+  <script src="static/htmx.min.js?v=e209dda5" defer></script>
+</head>
+<body>
+  <nav>
+    <span class="brand">allpath trade</span>
+    <a href="/" class="">Dashboard</a>
+    <a href="/chat" class="">Chat</a>
+    <a href="/reviews" class="">Pending<span class="badge">2</span></a>
+    <a href="/strategies" class="on">Strategies</a>
+    <a href="/memory" class="">Memory</a>
+    <a href="/settings" class="">Settings</a>
+  </nav>
+  <main>
+<h1>AAPL services growth - conservative entry</h1>
+<p class="muted">aapl-services · v1 · confirm</p>
+<div class="row" style="margin-top:6px;margin-bottom:16px">
+  <span class="chip">draft</span>
+  <span class="badge">pending review</span>
+</div>
+
+
+<h2>Rules</h2>
+<div class="table-scroll">
+<table>
+  <tr><th>Rule</th><th>Type</th><th>Condition</th><th>Action</th><th>State</th><th></th></tr>
+  
+  <tr>
+    <td>initial-entry</td><td>soft</td>
+    <td><code>position_weight == 0 and price &lt; 275</code></td><td>buy $6000</td>
+    <td>armed</td>
+    <td class="num">
+      
+    </td>
+  </tr>
+  
+  <tr>
+    <td>add-on-dip-1</td><td>soft</td>
+    <td><code>price &lt; 265 and position_weight &lt; 10</code></td><td>buy $4500</td>
+    <td>armed</td>
+    <td class="num">
+      
+    </td>
+  </tr>
+  
+  <tr>
+    <td>add-on-dip-2</td><td>soft</td>
+    <td><code>price &lt; 255 and position_weight &lt; 14</code></td><td>buy $4500</td>
+    <td>armed</td>
+    <td class="num">
+      
+    </td>
+  </tr>
+  
+  <tr>
+    <td>stop-loss</td><td>hard</td>
+    <td><code>price &lt; 245</code></td><td>sell all</td>
+    <td>armed</td>
+    <td class="num">
+      
+    </td>
+  </tr>
+  
+  <tr>
+    <td>take-profit-1</td><td>soft</td>
+    <td><code>pnl_pct &gt; 25</code></td><td>sell 30%</td>
+    <td>armed</td>
+    <td class="num">
+      
+    </td>
+  </tr>
+  
+  <tr>
+    <td>take-profit-2</td><td>soft</td>
+    <td><code>pnl_pct &gt; 50</code></td><td>sell 30%</td>
+    <td>armed</td>
+    <td class="num">
+      
+    </td>
+  </tr>
+  
+  <tr>
+    <td>earnings-spike-trim</td><td>soft</td>
+    <td><code>price &gt; 360 and position_weight &gt; 8</code></td><td>sell $3000</td>
+    <td>armed</td>
+    <td class="num">
+      
+    </td>
+  </tr>
+  
+</table>
+</div>
+<p class="hint">Re-arming a triggered rule makes it eligible to fire and place an order again — it is not a neutral reset.</p>
+
+<h2>Notifications</h2>
+<div class="card">
+  <p class="muted">Notifications (email and push) for this strategy's rule triggers, orders, and queued reviews are currently on. This does not change whether rules fire, execute, or queue for review — only whether you get notified about it.</p>
+  
+  <form method="post" action="/strategies/aapl-services/notify-email">
+    <button type="submit">Turn off notifications (email and push)</button>
+  </form>
+</div>
+
+<h2>Definition</h2>
+<pre>id: aapl-services
+name: AAPL services growth - conservative entry
+status: draft
+version: 1
+authorization: confirm
+thesis: &#39;Moderate bullish on AAPL services revenue growth, 12-18 month horizon.
+
+  User is cautious on long-term upside, waiting for significant pullback.
+
+  Entry target: $275 area (strong support from June 2026 lows).
+
+  Invalidation: Services revenue growth stalls (&lt;10%) for two consecutive quarters,
+
+  or iPhone sales decline &gt;15% YoY.
+
+  &#39;
+position:
+  ticker: AAPL
+  target_weight: &#39;0.15&#39;
+  target_value: null
+  max_weight: &#39;0.2&#39;
+  max_value: null
+rules:
+- id: initial-entry
+  type: soft
+  condition: position_weight == 0 and price &lt; 275
+  action: buy $6000
+  state: armed
+- id: add-on-dip-1
+  type: soft
+  condition: price &lt; 265 and position_weight &lt; 10
+  action: buy $4500
+  state: armed
+- id: add-on-dip-2
+  type: soft
+  condition: price &lt; 255 and position_weight &lt; 14
+  action: buy $4500
+  state: armed
+- id: stop-loss
+  type: hard
+  condition: price &lt; 245
+  action: sell all
+  state: armed
+- id: take-profit-1
+  type: soft
+  condition: pnl_pct &gt; 25
+  action: sell 30%
+  state: armed
+- id: take-profit-2
+  type: soft
+  condition: pnl_pct &gt; 50
+  action: sell 30%
+  state: armed
+- id: earnings-spike-trim
+  type: soft
+  condition: price &gt; 360 and position_weight &gt; 8
+  action: sell $3000
+  state: armed
+review:
+  cadence: weekly
+  invalidation: Services revenue growth &lt;10% for two consecutive quarters, or iPhone
+    sales decline &gt;15% YoY
+</pre>
+<p class="hint">Saving a strategy change isn't available from the web chat yet — run <code>allpath-trade chat</code> in a terminal to draft and save a revision.</p>
+
+<h2>Version history</h2>
+<table>
+  <tr><th>Version</th><th>When</th><th>Reason</th></tr>
+  
+  <tr><td colspan="3" class="muted">No revisions recorded yet.</td></tr>
+  
+</table>
+</main>
+</body>
+</html>

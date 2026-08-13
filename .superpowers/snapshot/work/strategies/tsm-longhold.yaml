@@ -1,0 +1,65 @@
+id: tsm-longhold
+name: TSM long-term hold - AI foundry leader
+status: draft
+version: 1
+authorization: confirm
+thesis: 'TSM is the dominant AI chip foundry with strong, stable fundamentals compared
+  to
+
+  volatile memory/GPU peers. Revenue growth accelerating (H1 2026 +35.6% YoY, June
+  +67.9% YoY).
+
+  2026 EPS growth projected +48% to $15.80. Advanced node capacity (3nm/5nm) remains
+  tight.
+
+  User views TSM as the "stable long-hold" anchor within a semiconductor basket,
+
+  planned hold duration ~6-12 months, contrasted against high-volatility swing names
+  (MU, SK Hynix).
+
+  Invalidation: foundry demand collapse, major customer loss (Apple/Nvidia/AMD), or
+
+  geopolitical disruption to Taiwan operations.
+
+  '
+position:
+  ticker: TSM
+  target_weight: '0.1'
+  target_value: null
+  max_weight: '0.13'
+  max_value: null
+rules:
+- id: initial-entry
+  type: soft
+  condition: position_weight == 0 and price < 410
+  action: buy $4000
+  state: armed
+- id: add-on-dip-1
+  type: soft
+  condition: price < 390 and position_weight < 6
+  action: buy $3500
+  state: armed
+- id: add-on-dip-2
+  type: soft
+  condition: price < 375 and position_weight < 9
+  action: buy $2500
+  state: armed
+- id: stop-loss
+  type: hard
+  condition: price < 350
+  action: sell all
+  state: armed
+- id: take-profit-1
+  type: soft
+  condition: price > 480
+  action: sell 30%
+  state: armed
+- id: review-hold
+  type: soft
+  condition: pnl_pct > 30
+  action: sell 20%
+  state: armed
+review:
+  cadence: weekly
+  invalidation: Foundry order growth stalls, major customer diversifies away, or Taiwan
+    geopolitical risk escalates materially

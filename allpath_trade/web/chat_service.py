@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
 
@@ -40,10 +42,29 @@ class ChatService:
         self._session: AgentSession | None = None
         self._built_at = 0.0
         self.activity: list[str] = []
+        self._mirror: Callable[[str, str, str], None] | None = None
 
     def _stale(self) -> bool:
         age = datetime.now(UTC).timestamp() - self._built_at
         return age > SNAPSHOT_TTL_SECONDS
+
+    def invalidate(self) -> None:
+        """Discard the cached session so the next `session()` call rebuilds
+        via `_build()`, which re-resolves everything (LLM client, tools,
+        prompt) through `self.holder.get()` -- picking up whatever Components
+        a settings save just installed.
+
+        This object is now constructed once at app startup and shared with
+        the Telegram poller (Task 3), so a settings save can no longer just
+        replace `app.state.chat_service` with a fresh instance the way the
+        old lazy-`_service()` reset did (`request.app.state.chat = None`) --
+        that would leave the poller holding a stale, orphaned ChatService
+        while the web route got a new one, splitting the shared turn lock
+        and conversation the whole hoist-to-startup design exists to keep
+        unified. Invalidating just the cached session preserves identity
+        while still forcing the next turn to pick up new config."""
+        with self._lock:
+            self._session = None
 
     def session(self) -> AgentSession:
         with self._lock:
@@ -96,10 +117,41 @@ class ChatService:
                             compactor=compactor,
                             on_tool=lambda call: self.activity.append(call.name))
 
-    def send(self, text: str) -> str:
+    def send(self, text: str, source: str = "web") -> str:
         with self._turn_lock:
             self.activity = []
-            return self.session().run_turn(text)
+            reply = self.session().run_turn(text, extra={"source": source})
+        # Mirroring happens after `_turn_lock` is released (the `with` block
+        # above has already exited) -- Task 5's mirror fn does its own
+        # thread-pool submit for the actual Telegram HTTP call, but even the
+        # synchronous dispatch here must not extend the lock hold, or a
+        # slow/hanging mirror would add latency to every web chat turn and
+        # block the Telegram poller's own next `send()` behind it.
+        self._call_mirror(source, text, reply)
+        return reply
+
+    def set_mirror(self, fn: Callable[[str, str, str], None] | None) -> None:
+        """Registers the hook `send`/`note_resolution` call after a turn
+        completes, as `fn(source, user_text, reply)`. Direction (push to
+        Telegram only for web-sourced turns) is Task 5's `_mirror_to_telegram`
+        policy, not this class's concern -- ChatService just fires the hook
+        for every source and lets the fn decide. No mirror registered (the
+        default) means zero behavior change from pre-Task-4 ChatService.
+
+        `fn=None` clears a previously registered hook -- `_stop_telegram`
+        (Finding 3) calls this on shutdown so a mirror hook never outlives
+        the executor/queue it was closed over."""
+        self._mirror = fn
+
+    def _call_mirror(self, source: str, text: str, reply: str) -> None:
+        if self._mirror is None:
+            return
+        try:
+            self._mirror(source, text, reply)
+        except Exception as exc:  # noqa: BLE001 — a mirror failure must never
+            # surface as a broken chat turn; the turn already completed and
+            # the reply already went to the caller by the time this runs.
+            print(f"[warning] chat mirror failed: {exc}", file=sys.stderr)
 
     def messages(self) -> list[dict]:
         return list(self.session().history)
@@ -138,3 +190,10 @@ class ChatService:
             session = self.session()
             session._append({"role": "user", "content": fence_external(line),
                              "kind": "system_note", "display": line})
+        # An approval receipt is part of the full record the user chose to
+        # mirror (spec §④) -- same hook as send(), fired after the lock for
+        # the same reason, source="web" since this only ever happens from
+        # the web reviews flow. No agent reply accompanies a resolution
+        # note, so `reply` is the empty string; the mirror fn decides what
+        # (if anything) to do with that.
+        self._call_mirror("web", line, "")

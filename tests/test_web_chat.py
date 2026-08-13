@@ -539,3 +539,25 @@ def test_a_second_send_waits_for_the_first_turn_to_finish(tmp_path, monkeypatch)
 
     contents = [m.get("content") for m in client.app.state.chat.messages()]
     assert contents == ["first", "first reply", "second", "second reply"]
+
+
+def test_chat_service_is_a_single_shared_instance_built_at_startup(tmp_path, monkeypatch):
+    # Task 1 of the Telegram plan hoists ChatService construction out of the
+    # /chat route's lazy get-or-create and into create_app, so the poller
+    # (Task 3) can be handed the exact same object -- shared `_turn_lock` and
+    # conversation is the whole point. Two separate requests must observe
+    # identically the same object, and it must already be the object
+    # `app.state.chat_service` (the route's `_service()` just returns it).
+    client = make_client(tmp_path, monkeypatch, [
+        LLMResponse(text="hi there"), LLMResponse(text="hi again")])
+
+    from_startup = client.app.state.chat_service
+    assert from_startup is not None
+
+    client.get("/chat")
+    seen_first = client.app.state.chat_service
+    client.post("/chat/send", data={"message": "hello"})
+    seen_second = client.app.state.chat_service
+
+    assert seen_first is from_startup
+    assert seen_second is from_startup

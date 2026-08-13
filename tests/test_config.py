@@ -11,6 +11,14 @@ def test_settings_defaults(tmp_path: Path):
     assert s.alpaca_paper is True
     assert s.alpaca_api_key == ""
     assert s.context_budget_tokens == 60000
+    # Telegram channel is off by default -- empty token, no poller starts.
+    assert s.telegram_bot_token == ""
+
+
+def test_telegram_bot_token_loads_from_env(tmp_path: Path):
+    store = SettingsStore(tmp_path / ".env")
+    store.set("TELEGRAM_BOT_TOKEN", "123:abc")
+    assert store.load().telegram_bot_token == "123:abc"
 
 
 # -- Finding 4: range validation, not just type validation -- a negative

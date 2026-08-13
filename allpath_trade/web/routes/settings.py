@@ -13,6 +13,7 @@ from allpath_trade.config import Settings, describe_validation_error
 from allpath_trade.notify.email import EmailNotifier
 from allpath_trade.notify.ntfy import NtfyNotifier
 from allpath_trade.scheduler import reschedule_sentinel_job
+from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, TELEGRAM_USER_ID_KEY
 from allpath_trade.web import models_catalog
 from allpath_trade.web.auth import COOKIE
 from allpath_trade.web.routes.dashboard import nav_context
@@ -34,7 +35,8 @@ BOOLEAN_FIELDS = ["daily_consolidation", "consolidate_after_chat"]
 
 # Secret values: never rendered back. A blank field means "leave it alone".
 SECRET_FIELDS = ["openrouter_api_key", "openai_api_key", "anthropic_api_key",
-                 "alpaca_api_key", "alpaca_secret_key", "smtp_password"]
+                 "alpaca_api_key", "alpaca_secret_key", "smtp_password",
+                 "telegram_bot_token"]
 
 # Gmail displays app passwords as "abcd efgh ijkl mnop"; pasting that
 # verbatim used to store the separators and fail SMTP auth. The separators
@@ -78,6 +80,21 @@ def _validation_message(exc: ValidationError) -> str:
     return "Could not save: " + describe_validation_error(exc)
 
 
+def _telegram_status(chat_id: str | None) -> str:
+    """Pairing status line for the Telegram section (spec §①): a paired chat
+    id is masked to its last 4 characters, same "never show more than the
+    tail" discipline as `_mask` above -- a Telegram chat id is not a secret
+    the way a bot token is, but it's still an identifier this page has no
+    reason to print in full. `chat_id` is `None`/`""` (AppState.get's
+    "never set" return, or the empty string Unpair used to leave before it
+    switched to a real delete) for "not paired" -- both read the same way to
+    a user looking at this line."""
+    if not chat_id:
+        return "Not paired"
+    tail = chat_id[-4:] if len(chat_id) > 4 else chat_id
+    return f"Paired (chat …{tail})"
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, saved: str = "") -> HTMLResponse:
     c = request.app.state.holder.get()
@@ -91,6 +108,7 @@ def settings_page(request: Request, saved: str = "") -> HTMLResponse:
         # own timeout and any-failure fallback, so this can never be what
         # makes a GET here hang or 500.
         "model_options": models_catalog.list_models(s.llm_provider),
+        "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
         **nav_context(c)})
 
 
@@ -151,6 +169,7 @@ async def save(request: Request) -> Response:
             # failed validation elsewhere; the catalog must match whichever
             # provider is actually selected on the redisplayed page.
             "model_options": models_catalog.list_models(display.llm_provider),
+            "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
             **nav_context(c)}, status_code=400)
 
     old_interval = current.sentinel_interval_minutes
@@ -158,12 +177,17 @@ async def save(request: Request) -> Response:
     for field, value in updates.items():
         store.set(field.upper(), value)
     holder.rebuild()
-    # The in-flight turn (if any) already holds its own ChatService/AgentSession
-    # object and keeps running against the configuration it captured -- this
-    # doesn't touch it. Clearing the attribute only means the *next* call to
-    # `_service()` builds a fresh ChatService against the just-rebuilt
-    # Components, so the next turn picks up the new provider/model/key.
-    request.app.state.chat = None
+    # The in-flight turn (if any) already holds its own AgentSession object
+    # (captured out of ChatService.session() before this ran) and keeps
+    # running against the configuration it captured -- this doesn't touch it.
+    # `app.state.chat_service` itself is a single instance shared with the
+    # Telegram poller for the life of the process (web/app.py), so it is no
+    # longer replaced here the way `app.state.chat = None` used to force a
+    # fresh ChatService -- that would leave the poller holding a stale,
+    # orphaned object. Instead, invalidate() drops just the cached session,
+    # so the *next* call to `session()` rebuilds against the just-rebuilt
+    # Components, picking up the new provider/model/key.
+    request.app.state.chat_service.invalidate()
 
     new_interval = holder.get().settings.sentinel_interval_minutes
     scheduler = getattr(request.app.state, "scheduler", None)
@@ -271,6 +295,23 @@ async def test_push(request: Request) -> HTMLResponse:
     message = ("Test push sent — check your phone." if ok else
                "Test push failed to send — check your settings and server logs.")
     return _test_result_fragment(request, ok=ok, message=message)
+
+
+@router.post("/settings/telegram/unpair")
+def unpair_telegram(request: Request) -> Response:
+    """Clears pairing state (spec §①: "Unpair 按钮清 app_state key,
+    POST,不碰交易语义"). Deletes both keys `TelegramPoller._handle_update`
+    checks (chat id AND the paired user id -- see `telegram.py`'s
+    belt-and-suspenders match on both) so a stale row can never leave the
+    pairing check half-satisfied. Idempotent: unpairing when nothing is
+    paired just deletes rows that were never there, no error. Does not
+    touch `.env`/Settings or `holder.rebuild()` -- this is Telegram-poller
+    runtime state (app_state), the same distinction store/app_state.py's
+    module docstring draws for the Telegram keys, not configuration."""
+    c = request.app.state.holder.get()
+    c.app_state.delete(TELEGRAM_CHAT_ID_KEY)
+    c.app_state.delete(TELEGRAM_USER_ID_KEY)
+    return RedirectResponse("/settings", status_code=303)
 
 
 @router.post("/settings/reset-token")

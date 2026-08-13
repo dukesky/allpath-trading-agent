@@ -134,6 +134,33 @@
     <div id="push-test-result"></div>
   </div>
 
+  <div class="row section-header" style="margin:34px 0 14px">
+    <h2 style="margin:0">Telegram</h2>
+    <details class="help-toggle">
+      <summary aria-label="Setup help">?</summary>
+      <div class="hint">
+        <p>Message <code>@BotFather</code> on Telegram, send
+        <code>/newbot</code>, and follow its prompts — it hands you a bot
+        token when it's done. Paste that token below and save.</p>
+        <p>To pair your Telegram account, open a private chat with your new
+        bot and send <code>/start &lt;your web token&gt;</code> — the same
+        token you sign in to this dashboard with (see Access below, or your
+        login screen). <strong>After pairing, delete your /start message —
+        it contains your web token.</strong> The bot tries to delete it for
+        you automatically, but it may lack permission to.</p>
+        <p>Once paired, the bot mirrors your web chat both ways: messages
+        you send here also go to Telegram, and vice versa.</p>
+        <p>Token changes take effect after a restart, not immediately on
+        save — the poller keeps using the old token until then.</p>
+      </div>
+    </details>
+  </div>
+  <div class="card" id="telegram-card">
+    <label>Bot token <span class="muted">{{ masks['telegram_bot_token'] or 'not set' }}</span></label>
+    <input name="telegram_bot_token" type="password" placeholder="Replace" autocomplete="off">
+    <p class="hint">{{ telegram_status }}</p>
+  </div>
+
   <h2>Sentinel and memory</h2>
   <div class="card">
     <label>Check interval (minutes)</label><input name="sentinel_interval_minutes" value="{{ s.sentinel_interval_minutes }}" type="number">
@@ -174,6 +201,10 @@
 
 <div class="row" style="margin-top:12px">
   <form method="post" action="/settings/reset-token"><button class="danger" type="submit">Reset access token</button></form>
+  <form method="post" action="/settings/telegram/unpair"
+        onsubmit="return confirm('Unpair Telegram? This chat will stop receiving messages until you pair again with /start <your web token>. Continue?')">
+    <button class="danger" type="submit">Unpair Telegram</button>
+  </form>
 </div>
 
 <script>

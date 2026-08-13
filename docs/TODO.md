@@ -149,3 +149,54 @@
       优先按 `filled_at`（若已回填）分桶，仅当 `filled_at` 缺失时退回 `ts`；`trades_today()`
       是否要同步改口径需要单独判断，因为它喂给的是风控当日下单笔数上限，按"下单日"计数可能才是
       本来就想要的语义，不能直接照搬简报那边的修法
+
+## Telegram 频道（Task 3）遗留
+
+- [ ] `/start <web_token>` 配对目前直接复用 Settings 页面上的长期 WEB_TOKEN 本身作为配对口令——
+      能用就必须泄露给 Telegram 服务器（token 会经由 `/start` 消息文本进出 Telegram 的
+      服务端）、且这个口令本身还兼职网页会话认证，混用两种用途。已经加了两层缓解（配对成功后
+      best-effort 删除含 token 的 `/start` 消息；失败配对与陌生人共用同一条 stderr 计数行，
+      不单独回复攻击者），但更干净的设计是引入独立的**一次性配对码**：网页 Settings 页面
+      生成一个短时效（如 10 分钟）、一次性、与 WEB_TOKEN 完全解耦的随机码，`/start <配对码>`
+      验证通过后立即失效，不再复用同一个长期口令做两件事。这个改动涉及新增一张状态表
+      （配对码 + 过期时间 + 是否已用）和 Settings 页面的一处 UI，本轮不做，留待后续 Phase
+      纳入 plan 时再落地。
+
+## Telegram 频道（Task 5）遗留
+
+- [ ] **仅 `serve` 可用**：Telegram poller 只在 `allpath-trade serve`（web 界面）
+      的 lifespan 里起线程；无界面的 `allpath-trade run` 守护进程没有 Telegram
+      频道——同上面 Task 3 遗留段落里记录的同一个限制，这里再记一次是因为它是
+      Task 5（serve 接线）自己交付清单里明确列出的已知限制，不是新发现。
+- [ ] **镜像推送失败不补发**：网页轮完成后镜像到 Telegram 失败（网络问题、bot
+      被拉黑、chat 已不存在等），`_send_mirror_text`（`web/app.py`）只记一行
+      scrubbed stderr，不重试、不补发——完整记录以网页端 `ConversationStore`
+      为准，Telegram 端只是"尽力而为"的第二份拷贝，不是权威记录。**whole-branch
+      review round（Finding 3）已在此基础上补了一层相关但不同的行为**：
+      `_MirrorQueue`（`web/app.py`，替代原先从不关闭的模块级 `ThreadPoolExecutor`
+      单例）现在是有界队列（上限 50 条），持续积压时新消息会挤掉队首最旧的一条
+      而不是无限增长——同一条"尽力而为、不是权威记录"的哲学延伸到了积压场景，
+      不是新引入的取舍。`_stop_telegram` 现在也会真正关闭这个队列
+      （`shutdown(wait=False, cancel_futures=True)`）并清空 mirror 钩子，
+      不会再让一个挂死的 Telegram 端点拖慢 `serve` 的干净关闭。
+- [ ] **至多一次（at-most-once）消息语义**：`TelegramPoller.poll_once`
+      （`telegram.py`）收到更新后立即推进并落库 offset，早于该消息实际处理
+      完成——中途崩溃宁可丢这条用户消息（用户重发即可，损失可见），也不重启后
+      重放（重放会导致一次不可见但有害的重复下单提案）。此取舍是设计里写死的，
+      不做配置项；这里记录是为了让"消息可能丢一条"这件事在文档里对用户可见，
+      不只是代码注释里的隐性约定。
+- [x] **重置 web token 立即生效于配对**：whole-branch review round（Finding 2，
+      安全相关）修复前，这条曾经记录反了——`TelegramPoller` 在构造时把
+      `web_token`/`app_state` 各拷贝一份快照，`/settings/reset-token` 之后
+      快照永远不会更新（除非重启进程），实际效果是**旧 token 泄漏后依然能在
+      Telegram 里配对**（"已撤销"形同虚设），而重置后的新 token 反而在配对时
+      被当成陌生人消息静默拒绝。现在 `TelegramPoller` 改为持有 `ComponentHolder`，
+      每次比较都通过 `holder.get().settings.web_token` 实时读取（`app_state`
+      同理，见 `telegram.py` 的 `TelegramPoller` 类文档字符串）——重置生效后，
+      旧 token 立即被拒绝，新 token 立即可用，都不需要重启进程。已有的配对
+      状态（chat id + user id）仍然与两个 token 无关，不会因为改 token 而失效，
+      这一点不变。
+- [ ] **一次性配对码**：见上面 Task 3 遗留段落——`/start` 配对口令目前直接
+      复用长期 WEB_TOKEN，已有两层缓解（配对成功后 best-effort 删除含 token
+      的消息、失败配对静默丢弃不回应攻击者），更干净的独立一次性配对码设计
+      本轮仍未落地，留在同一条遗留里跟踪，不重复开新条目。
