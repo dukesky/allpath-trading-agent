@@ -37,9 +37,12 @@ from allpath_trade.store.app_state import (
     TELEGRAM_CHAT_ID_KEY,
     TELEGRAM_OFFSET_KEY,
     TELEGRAM_USER_ID_KEY,
-    AppState,
 )
-from allpath_trade.web.markdown import split_for_telegram, to_telegram_html
+from allpath_trade.web.markdown import (
+    MAX_TELEGRAM_REPLY_CHUNKS,
+    split_for_telegram,
+    to_telegram_html,
+)
 
 _API_URL = "https://api.telegram.org/bot{token}/{method}"
 _TOKEN_MASK = "***"
@@ -210,6 +213,12 @@ _BACKOFF_CAP_SECONDS = 60
 # and an unbounded line is a way for a user to flood or obscure the log.
 _STDERR_TRUNCATE_LENGTH = 200
 
+# How often `_handle_chat_text`'s keepalive thread re-sends the typing
+# indicator while `chat_service.send` is still running (Finding 6) --
+# comfortably inside Telegram's own few-second expiry for a single
+# `sendChatAction` call.
+_TYPING_RESEND_SECONDS = 4
+
 
 class TelegramPoller:
     """Long-polls Telegram's `getUpdates`, pairs a single chat via `/start
@@ -225,15 +234,52 @@ class TelegramPoller:
     str` -- that `source` keyword is `ChatService`'s (Task 4 in the design
     plan); this class only ever needs the interface, not the concrete type,
     so it has no import-time dependency on `chat_service.py`.
-    """
 
-    def __init__(self, api: TelegramAPI, chat_service: Any, app_state: AppState,
-                 web_token: str, stop: threading.Event) -> None:
+    `holder` is duck-typed as `get() -> object` where the returned object
+    exposes `.app_state` and `.settings.web_token` (the shape
+    `web.deps.ComponentHolder.get()` -- a `Components` instance -- already
+    has). Both are read fresh via `holder.get()` at the point of use, NEVER
+    captured once in `__init__`, for two review findings this class used to
+    get wrong:
+
+      * (Finding 2, security) A snapshotted `web_token` never picked up a
+        `/settings/reset-token` save -- the poller kept validating `/start`
+        against the OLD token forever (until process restart), so a leaked
+        old token could still pair via Telegram after the user believed
+        they'd revoked it, and the freshly reset token was rejected. Reading
+        `holder.get().settings.web_token` at compare time fixes both halves
+        at once: the old token stops working and the new one starts working
+        the instant the reset takes effect, no restart required.
+      * (Finding 5) A snapshotted `app_state` object outlives a `db_path`
+        change from `ComponentHolder.rebuild()` -- `_current_offset` and
+        every other read/write in this class would keep hitting the OLD
+        (possibly-closed) sqlite connection forever, a permanent error loop
+        indistinguishable from a dead network from `run_forever`'s point of
+        view. Reading `holder.get().app_state` at each use closes this the
+        same way."""
+
+    def __init__(self, api: TelegramAPI, chat_service: Any, holder: Any,
+                 stop: threading.Event) -> None:
         self.api = api
         self.chat_service = chat_service
-        self.app_state = app_state
-        self.web_token = web_token
+        self.holder = holder
         self.stop = stop
+
+    @property
+    def app_state(self) -> Any:
+        """Always the CURRENT `AppState` -- see the class docstring's
+        Finding 5 note. A `@property` (not a plain attribute) so every one
+        of this class's many `self.app_state.get/set(...)` call sites below
+        stays unchanged; only `__init__` and this accessor needed to
+        change."""
+        return self.holder.get().app_state
+
+    def _web_token(self) -> str:
+        """Always the CURRENT web token -- see the class docstring's
+        Finding 2 note. A method, not a `@property`, to make the "read at
+        compare time" intent explicit at the one call site that uses it
+        (`_handle_pairing`)."""
+        return self.holder.get().settings.web_token
 
     # -- single poll step -----------------------------------------------
 
@@ -401,9 +447,10 @@ class TelegramPoller:
             return False
         if from_id is None:
             return False
-        if not token or not self.web_token:
+        web_token = self._web_token()
+        if not token or not web_token:
             return False
-        if not hmac.compare_digest(token.encode("utf-8"), self.web_token.encode("utf-8")):
+        if not hmac.compare_digest(token.encode("utf-8"), web_token.encode("utf-8")):
             return False
         self.app_state.set(TELEGRAM_CHAT_ID_KEY, chat_id)
         self.app_state.set(TELEGRAM_USER_ID_KEY, str(from_id))
@@ -418,8 +465,31 @@ class TelegramPoller:
         return True
 
     def _handle_chat_text(self, chat_id: str, text: str) -> None:
+        stop_typing = threading.Event()
+
+        def _keep_typing() -> None:
+            # Telegram's typing indicator expires a few seconds after each
+            # `sendChatAction` call; a single call at the start of a long
+            # agent turn (tool calls, LLM round-trips, reflection) reads
+            # "typing..." for a moment and then silently goes stale for the
+            # rest of the turn (Finding 6). Re-sending on a short interval
+            # keeps it alive until `chat_service.send` returns. Runs on its
+            # own thread so it never blocks the turn itself; `send_typing`
+            # is already best-effort/never-raises (see `TelegramAPI`'s own
+            # docstring), so nothing here needs its own try/except.
+            while not stop_typing.wait(_TYPING_RESEND_SECONDS):
+                self.api.send_typing(chat_id)
+
         self.api.send_typing(chat_id)
-        reply = self.chat_service.send(text, source="telegram")
+        ticker = threading.Thread(target=_keep_typing, daemon=True,
+                                  name="telegram-typing")
+        ticker.start()
+        try:
+            reply = self.chat_service.send(text, source="telegram")
+        finally:
+            stop_typing.set()
+            ticker.join(timeout=1)
+
         html = to_telegram_html(reply)
         chunks = split_for_telegram(html)
         if not chunks:
@@ -428,6 +498,16 @@ class TelegramPoller:
             # *something* happened, not leave them staring at a typing
             # indicator that silently vanishes.
             chunks = ["(empty reply)"]
+        if len(chunks) > MAX_TELEGRAM_REPLY_CHUNKS:
+            # Defensive belt (Finding 1): `split_for_telegram` is now proven
+            # correct for the corpus this codebase's tests exercise, but if
+            # some future input shape still produces a pathological
+            # explosion, truncate and log rather than firing hundreds of
+            # `sendMessage` calls for one reply.
+            self._log_error(
+                f"reply split into {len(chunks)} chunks (cap "
+                f"{MAX_TELEGRAM_REPLY_CHUNKS}); truncating")
+            chunks = [*chunks[:MAX_TELEGRAM_REPLY_CHUNKS], "(reply truncated: too long for Telegram)"]
         for chunk in chunks:
             self.api.send_message(chat_id, chunk)
 

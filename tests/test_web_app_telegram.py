@@ -11,14 +11,19 @@ Two things live here:
      api.telegram.org.
   2. `_mirror_to_telegram` -- the direction policy for spec §④'s web->
      Telegram mirroring. Tested directly (not through a live turn) against
-     fake `TelegramAPI`/`AppState` objects, with `_MIRROR_EXECUTOR` swapped
-     for a synchronous stand-in so assertions don't race a background
+     fake `TelegramAPI`/`AppState` objects, with an `ImmediateExecutor`
+     passed as `mirror_queue=` so assertions don't race a background
      thread.
+  3. `_MirrorQueue` itself -- Finding 3's bounded, drop-oldest,
+     cleanly-shut-down replacement for the old module-level
+     `ThreadPoolExecutor` singleton.
 """
 
 from __future__ import annotations
 
+import queue
 import threading
+import time
 from typing import ClassVar
 
 from fastapi.testclient import TestClient
@@ -45,15 +50,19 @@ class SpyPoller:
     `stop` Event (same shape the real one blocks on during backoff via
     `self.stop.wait(delay)`) so `_stop_telegram`'s `join(timeout=2)` has
     something real to prove: the thread actually exits once `stop` is set,
-    not just that `stop.set()` was called."""
+    not just that `stop.set()` was called.
+
+    Constructor shape matches the real `TelegramPoller`'s post-Finding-2/5
+    signature: `holder` (not a separate `app_state`/`web_token` snapshot),
+    read at the point of use via `holder.get()` -- see the real class's
+    docstring."""
 
     instances: ClassVar[list[SpyPoller]] = []
 
-    def __init__(self, api, chat_service, app_state, web_token, stop):
+    def __init__(self, api, chat_service, holder, stop):
         self.api = api
         self.chat_service = chat_service
-        self.app_state = app_state
-        self.web_token = web_token
+        self.holder = holder
         self.stop = stop
         self.started = threading.Event()
         SpyPoller.instances.append(self)
@@ -94,7 +103,7 @@ def test_token_starts_a_daemon_thread_running_the_poller(tmp_path):
         assert len(SpyPoller.instances) == 1
         poller = SpyPoller.instances[0]
         assert poller.started.wait(timeout=2)
-        assert poller.web_token == settings.web_token
+        assert poller.holder.get().settings.web_token == settings.web_token
         assert app.state.telegram_thread.daemon is True
         assert app.state.telegram_thread.is_alive()
         assert not poller.stop.is_set()
@@ -132,7 +141,21 @@ def test_poller_shares_the_same_app_state_the_chat_service_uses(tmp_path):
 
     with TestClient(app):
         poller = SpyPoller.instances[0]
-        assert poller.app_state is app.state.holder.get().app_state
+        assert poller.holder.get().app_state is app.state.holder.get().app_state
+
+
+def test_poller_is_handed_the_real_holder_not_a_snapshot(tmp_path):
+    # Finding 2/5: the poller must be handed the SAME ComponentHolder the
+    # rest of the app uses, not a one-time snapshot of its current
+    # settings/app_state -- otherwise a token reset or a db_path-changing
+    # rebuild() would never reach it.
+    SpyPoller.instances = []
+    settings = _settings(tmp_path, telegram_bot_token="123:ABC")
+    app = create_app(settings, broker=FakeBroker(), telegram_poller_cls=SpyPoller)
+
+    with TestClient(app):
+        poller = SpyPoller.instances[0]
+        assert poller.holder is app.state.holder
 
 
 # --- mirror direction policy -------------------------------------------------
@@ -174,76 +197,139 @@ def _paired_app_state(tmp_path, chat_id: str = "555") -> AppState:
     return app_state
 
 
-def test_web_source_with_a_reply_sends_two_messages(tmp_path, monkeypatch):
-    monkeypatch.setattr(app_module, "_MIRROR_EXECUTOR", ImmediateExecutor())
+def test_web_source_with_a_reply_sends_two_messages(tmp_path):
     api = FakeMirrorAPI()
     app_state = _paired_app_state(tmp_path)
 
-    _mirror_to_telegram("web", "hello", "hi there", api=api, app_state=app_state)
+    _mirror_to_telegram("web", "hello", "hi there", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
     assert api.sent == [("555", "You (web): hello"), ("555", "hi there")]
 
 
-def test_web_source_with_an_empty_reply_sends_only_the_note_line(tmp_path, monkeypatch):
+def test_web_source_with_an_empty_reply_sends_only_the_note_line(tmp_path):
     # note_resolution's shape: `text` is already the full record line, and
     # `reply` is "" -- must NOT get the "You (web): " prefix, and must not
     # send a second, empty message.
-    monkeypatch.setattr(app_module, "_MIRROR_EXECUTOR", ImmediateExecutor())
     api = FakeMirrorAPI()
     app_state = _paired_app_state(tmp_path)
 
     _mirror_to_telegram("web", "You resolved #1. Result: order submitted", "",
-                        api=api, app_state=app_state)
+                        api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
     assert api.sent == [("555", "You resolved #1. Result: order submitted")]
 
 
-def test_telegram_source_is_a_no_op(tmp_path, monkeypatch):
+def test_telegram_source_is_a_no_op(tmp_path):
     # The poller already replied in-channel -- mirroring it back would be
     # an echo loop.
-    monkeypatch.setattr(app_module, "_MIRROR_EXECUTOR", ImmediateExecutor())
     api = FakeMirrorAPI()
     app_state = _paired_app_state(tmp_path)
 
-    _mirror_to_telegram("telegram", "hello", "reply", api=api, app_state=app_state)
+    _mirror_to_telegram("telegram", "hello", "reply", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
     assert api.sent == []
 
 
-def test_unpaired_chat_sends_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(app_module, "_MIRROR_EXECUTOR", ImmediateExecutor())
+def test_unpaired_chat_sends_nothing(tmp_path):
     api = FakeMirrorAPI()
     app_state = AppState(connect(tmp_path / "t.db"))  # never paired
 
-    _mirror_to_telegram("web", "hello", "reply", api=api, app_state=app_state)
+    _mirror_to_telegram("web", "hello", "reply", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
     assert api.sent == []
 
 
-def test_send_failure_is_swallowed_and_logged_scrubbed(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(app_module, "_MIRROR_EXECUTOR", ImmediateExecutor())
+def test_send_failure_is_swallowed_and_logged_scrubbed(tmp_path, capsys):
     api = FakeMirrorAPI(fail=True)
     app_state = _paired_app_state(tmp_path)
 
-    _mirror_to_telegram("web", "hello", "reply", api=api, app_state=app_state)  # must not raise
+    _mirror_to_telegram("web", "hello", "reply", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())  # must not raise
 
     err = capsys.readouterr().err
     assert "[telegram] mirror send failed" in err
     assert api.token not in err  # scrubbed, same discipline as the poller/transport
 
 
-def test_paired_chat_id_is_re_read_on_every_call_not_captured_once(tmp_path, monkeypatch):
+def test_paired_chat_id_is_re_read_on_every_call_not_captured_once(tmp_path):
     # Pairing can change mid-process (re-pair, Unpair on the settings page)
     # -- a captured chat id from registration time would leak to a stale
     # chat or silently drop a message to a freshly (re-)paired one.
-    monkeypatch.setattr(app_module, "_MIRROR_EXECUTOR", ImmediateExecutor())
     api = FakeMirrorAPI()
     app_state = AppState(connect(tmp_path / "t.db"))
     app_state.set(TELEGRAM_CHAT_ID_KEY, "111")
 
-    _mirror_to_telegram("web", "first", "", api=api, app_state=app_state)
+    _mirror_to_telegram("web", "first", "", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
     app_state.set(TELEGRAM_CHAT_ID_KEY, "222")
-    _mirror_to_telegram("web", "second", "", api=api, app_state=app_state)
+    _mirror_to_telegram("web", "second", "", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
     assert [chat_id for chat_id, _ in api.sent] == ["111", "222"]
+
+
+# ---------------------------------------------------------------------------
+# Whole-branch review Finding 3: the mirror queue must be bounded
+# (drop-oldest under backlog, never block the caller) and must actually be
+# shut down -- including the mirror hook itself -- on `_stop_telegram`,
+# instead of the old module-level `ThreadPoolExecutor` singleton that
+# `_stop_telegram` never touched at all.
+# ---------------------------------------------------------------------------
+
+def test_mirror_queue_full_drops_oldest_rather_than_blocking():
+    # Worker thread never started -- nothing drains the queue -- so this
+    # proves `submit` itself never blocks and drops the OLDEST entry to
+    # make room, not the newest.
+    q = app_module._MirrorQueue(maxsize=2)
+    sink: list[str] = []
+    q.submit(sink.append, "first")
+    q.submit(sink.append, "second")
+    q.submit(sink.append, "third")  # queue was full -- "first" must be dropped
+
+    remaining = []
+    while True:
+        try:
+            _fn, args = q._queue.get_nowait()
+        except queue.Empty:
+            break
+        remaining.append(args[0])
+    assert remaining == ["second", "third"]
+
+
+def test_mirror_queue_shutdown_cancels_pending_sends():
+    q = app_module._MirrorQueue(maxsize=10)
+    sink: list[str] = []
+    q.submit(sink.append, "queued-but-never-run")
+
+    q.shutdown(wait=False, cancel_futures=True)
+
+    assert q._queue.empty()
+    assert sink == []
+
+
+def test_mirror_queue_processes_submitted_work_in_order():
+    q = app_module._MirrorQueue(maxsize=10)
+    q.start()
+    sink: list[str] = []
+    q.submit(sink.append, "one")
+    q.submit(sink.append, "two")
+
+    for _ in range(50):
+        if sink == ["one", "two"]:
+            break
+        time.sleep(0.05)
+    assert sink == ["one", "two"]
+
+    q.shutdown(wait=True, cancel_futures=True)
+
+
+def test_stop_telegram_shuts_down_the_mirror_queue_and_clears_the_hook(tmp_path):
+    SpyPoller.instances = []
+    settings = _settings(tmp_path, telegram_bot_token="123:ABC")
+    app = create_app(settings, broker=FakeBroker(), telegram_poller_cls=SpyPoller)
+
+    with TestClient(app):
+        mirror_queue = app.state.mirror_queue
+        assert app.state.chat_service._mirror is not None
+
+    # Lifespan shutdown already ran by the time the `with` block exits.
+    assert mirror_queue._stop.is_set()
+    assert app.state.chat_service._mirror is None

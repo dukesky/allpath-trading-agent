@@ -523,6 +523,17 @@ def to_telegram_html(text: str) -> str:
 _PRE_SPAN_RE = re.compile(r"<pre>.*?</pre>", re.DOTALL)
 _PRE_BLOCK_RE = re.compile(r"^<pre>.*</pre>$", re.DOTALL)
 
+# Defensive cap on the number of chunks a single reply may be split into
+# before a Telegram send loop (the poller's `_handle_chat_text`, the web
+# app's mirror send) gives up and truncates -- a second, independent line
+# of defense on top of the Finding-1 fix above. `split_for_telegram` is now
+# proven correct for the corpus this module's tests exercise, but a send
+# loop firing hundreds/thousands of `sendMessage` calls for one reply would
+# itself be a problem (rate limits, a wedged poller) even if every chunk
+# were correctly formed, so the cap is enforced at the call site regardless
+# of whether the split logic is ever wrong again.
+MAX_TELEGRAM_REPLY_CHUNKS = 30
+
 
 def _blocks(html: str) -> list[str]:
     pres: list[str] = []
@@ -541,49 +552,58 @@ def _blocks(html: str) -> list[str]:
     return [_restore(b) for b in placeholder.split("\n\n")]
 
 
-def _find_safe_split_point(text: str, limit: int) -> int:
-    """Find a safe position to split text before `limit`, backtracking to avoid
-    cutting inside tags `<...>` or HTML entities `&...;`. Prefers the last
-    whitespace position (word boundary) before the limit; falls back to the
-    last safe non-word boundary if no whitespace is found. Returns the split
-    position (guaranteed <= limit)."""
-    if limit >= len(text):
+def _find_safe_split_point(text: str, start: int, limit: int) -> int:
+    """Find a safe position to split `text[start:]` into a chunk of at most
+    `limit` characters, never landing inside a literal `<...>` tag or a
+    `&...;` entity run. Prefers the last whitespace at or before
+    `start + limit`; falls back to a hard cut at `start + limit` if no
+    whitespace exists in the back half of the window (`start + limit // 2`
+    .. `start + limit`) -- otherwise a single very long unbroken run with no
+    spaces at all (e.g. one giant `**bold**` block) would backtrack one
+    character at a time toward `start`.
+
+    Deliberately does NOT backtrack past an unclosed `<b>`/`<code>` tag --
+    that is `_balance_tags`/`_reopen_tags`'s job in `_hard_split_block`, not
+    this function's. An earlier version counted "unclosed tags" from index
+    0 of the WHOLE text on every call, which made every backtrack land on
+    the very first unclosed tag regardless of where the current chunk
+    starts -- for a single long `<b>...</b>` block that's always index 0,
+    which collapsed the search to `max(1, 0) == 1` on every iteration and
+    exploded a 5KB bold paragraph into ~1000 one-character chunks (Finding
+    1). `start` is threaded through precisely so this function only ever
+    reasons about `text[start:]`, guaranteeing forward progress: the
+    returned position is always `> start` (and `<= min(start + limit,
+    len(text))`) whenever `start < len(text)`."""
+    end = min(start + limit, len(text))
+    if end >= len(text):
         return len(text)
 
-    pos = limit
+    pos = end
 
-    # First, check if there are any unclosed tags before pos.
-    # Count opening and closing tags to detect unclosed ones.
-    text_before_pos = text[:pos]
-    open_b = text_before_pos.count("<b>") - text_before_pos.count("</b>")
-    open_code = text_before_pos.count("<code>") - text_before_pos.count("</code>")
+    # Never split inside a literal `<...>` tag run -- a `<` after `start`
+    # with no matching `>` yet before `pos` means `pos` is mid-tag.
+    last_lt = text.rfind("<", start, pos)
+    last_gt = text.rfind(">", start, pos)
+    if last_lt > last_gt:
+        pos = last_lt
 
-    # If there are unclosed tags, backtrack to before the last unclosed opening tag.
-    if open_b > 0:
-        last_b_open = text.rfind("<b>", 0, pos)
-        if last_b_open != -1:
-            pos = last_b_open
-    if open_code > 0:
-        last_code_open = text.rfind("<code>", 0, pos)
-        if last_code_open != -1:
-            pos = min(pos, last_code_open)
+    # Never split inside a literal `&...;` entity run.
+    last_amp = text.rfind("&", start, pos)
+    if last_amp != -1:
+        next_semi = text.find(";", last_amp, end)
+        if next_semi == -1 or next_semi >= pos:
+            pos = last_amp
 
-    # Check for entity straddling: if there's an `&` before pos without
-    # a matching `;` before pos, we'd split the entity.
-    last_ampersand = text.rfind("&", 0, pos)
-    if last_ampersand != -1:
-        next_semicolon = text.find(";", last_ampersand)
-        if next_semicolon >= pos or next_semicolon == -1:
-            # Entity would be split; backtrack to before the `&`.
-            pos = last_ampersand
-
-    # Prefer a word boundary (whitespace) as the split point.
-    for i in range(pos, -1, -1):
+    # Prefer a whitespace boundary, but only within the back half of the
+    # window -- backtracking further than that toward `start` is exactly
+    # the pathological one-char-at-a-time behavior this function must not
+    # repeat for a run with no whitespace at all.
+    floor = start + max(1, limit // 2)
+    for i in range(pos, floor - 1, -1):
         if i < len(text) and text[i].isspace():
-            return i + 1  # Return position after the whitespace
+            return i + 1  # position after the whitespace
 
-    # Fall back to the position after backtracking.
-    return max(1, pos)
+    return max(start + 1, pos)
 
 
 def _balance_tags(text: str) -> str:
@@ -600,19 +620,24 @@ def _balance_tags(text: str) -> str:
     return result
 
 
-def _reopen_tags(text: str, prev_text: str) -> str:
-    """Prepend reopening tags if the previous chunk had unclosed tags.
-    Returns the text with reopened tags prepended."""
-    # Count unclosed tags from the previous text.
-    prev_open_b = prev_text.count("<b>") - prev_text.count("</b>")
-    prev_open_code = prev_text.count("<code>") - prev_text.count("</code>")
-
+def _reopen_tags(text: str, open_b: int, open_code: int) -> str:
+    """Prepend reopening tags for the nesting depth carried open from the
+    previous chunk. `open_b`/`open_code` are the caller's running counts,
+    tracked across the whole `_hard_split_block` loop from each chunk's RAW
+    (pre-`_balance_tags`) content -- NOT recomputed from the previous
+    chunk's already-`_balance_tags`'d text. That distinction is Finding 4:
+    `_balance_tags` always closes every tag it sees before a chunk is
+    stored, so counting opens on the STORED chunk always finds 0 and this
+    function was dead code -- a `**bold**` run straddling a hard-split
+    boundary silently lost its formatting on the second chunk instead of
+    reopening. Order matches nesting: `<b>` (outer) before `<code>`
+    (inner) -- see `to_telegram_html`'s own `<b><code>...</code></b>`
+    nesting shape."""
     result = text
-    # Reopen in the reverse order they were closed to maintain proper nesting.
-    if prev_open_code > 0:
-        result = ("<code>" * prev_open_code) + result
-    if prev_open_b > 0:
-        result = ("<b>" * prev_open_b) + result
+    if open_code > 0:
+        result = ("<code>" * open_code) + result
+    if open_b > 0:
+        result = ("<b>" * open_b) + result
     return result
 
 
@@ -638,19 +663,43 @@ def _hard_split_block(block: str, limit: int) -> list[str]:
         step = max(1, limit - overhead)
         return [f"<pre>{inner[j:j + step]}</pre>" for j in range(0, len(inner), step)]
 
-    # Non-<pre> block: split safely at tag/entity boundaries with tag balancing.
+    # Non-<pre> block: split safely at tag/entity boundaries with tag
+    # balancing. `open_b`/`open_code` track the running nesting depth from
+    # each chunk's RAW content (see `_reopen_tags`'s docstring for why that
+    # -- not the previous chunk's balanced/closed text -- is what must be
+    # carried forward).
+    #
+    # `_reopen_tags`'s prefix and `_balance_tags`'s trailing close both add
+    # characters AFTER `_find_safe_split_point` has already picked a slice
+    # length -- budgeting for both here (rather than after the fact) is
+    # what keeps the finished chunk at or under `limit` instead of quietly
+    # running a few characters over it. `to_telegram_html`'s own output
+    # only ever has `<b>`/`<code>` open 0-or-1 deep each at any point (a
+    # regex substitution pass, never two consecutive unclosed opens of the
+    # same tag), so reserving room for exactly one closing `</b>` and one
+    # closing `</code>` covers the worst case.
+    _CLOSE_RESERVE = len("</b>") + len("</code>")
+
     chunks: list[str] = []
     pos = 0
+    open_b = 0
+    open_code = 0
     while pos < len(block):
-        split_point = _find_safe_split_point(block, pos + limit)
+        prefix_len = (len("<b>") * open_b) + (len("<code>") * open_code)
+        budget = max(1, limit - prefix_len - _CLOSE_RESERVE)
+        split_point = _find_safe_split_point(block, pos, budget)
         if split_point <= pos:
-            # Avoid infinite loop if we can't make progress; take at least 1 char.
+            # Defensive belt: `_find_safe_split_point` is engineered to
+            # always make forward progress, but never let a future change
+            # to it turn into a silent infinite loop here.
             split_point = min(pos + 1, len(block))
 
-        chunk = block[pos:split_point]
-        chunk = _balance_tags(chunk)
-        if chunks:
-            chunk = _reopen_tags(chunk, chunks[-1])
+        raw_slice = block[pos:split_point]
+        raw_chunk = _reopen_tags(raw_slice, open_b, open_code)
+        open_b = raw_chunk.count("<b>") - raw_chunk.count("</b>")
+        open_code = raw_chunk.count("<code>") - raw_chunk.count("</code>")
+        chunk = _balance_tags(raw_chunk)
+        assert len(chunk) <= limit, "budget accounting drifted from actual chunk size"
         chunks.append(chunk)
         pos = split_point
 

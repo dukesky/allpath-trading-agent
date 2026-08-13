@@ -130,13 +130,17 @@ class ChatService:
         self._call_mirror(source, text, reply)
         return reply
 
-    def set_mirror(self, fn: Callable[[str, str, str], None]) -> None:
+    def set_mirror(self, fn: Callable[[str, str, str], None] | None) -> None:
         """Registers the hook `send`/`note_resolution` call after a turn
         completes, as `fn(source, user_text, reply)`. Direction (push to
         Telegram only for web-sourced turns) is Task 5's `_mirror_to_telegram`
         policy, not this class's concern -- ChatService just fires the hook
         for every source and lets the fn decide. No mirror registered (the
-        default) means zero behavior change from pre-Task-4 ChatService."""
+        default) means zero behavior change from pre-Task-4 ChatService.
+
+        `fn=None` clears a previously registered hook -- `_stop_telegram`
+        (Finding 3) calls this on shutdown so a mirror hook never outlives
+        the executor/queue it was closed over."""
         self._mirror = fn
 
     def _call_mirror(self, source: str, text: str, reply: str) -> None:

@@ -275,8 +275,17 @@ well, so it doubles as a pocket record of what actually happened.
 Only one Telegram chat can be paired at a time (re-pairing with `/start`
 overwrites it); a message from any other chat is silently ignored. The
 poller only runs under `allpath-trade serve` — the headless `run` daemon
-has no Telegram channel, a known limitation — and a settings-page token
-change takes effect after the next restart, not immediately.
+has no Telegram channel, a known limitation — and a settings-page bot
+token change takes effect after the next restart, not immediately (a
+reset of your web token, the one you sign in and pair with, applies
+immediately instead — the old value stops pairing and the new one starts
+working right away).
+
+Web chat and Telegram share the same conversation lock: a long-running
+Telegram turn (a slow LLM call, several tool round-trips) holds that lock
+for its whole duration, so an Approve/Reject click on the web dashboard
+during that window will simply wait its turn rather than fail — expect a
+brief stall, not an error.
 
 ## Project Structure
 

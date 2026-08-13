@@ -12,6 +12,7 @@ chat and report templates -- and that user-typed text does NOT."""
 
 from __future__ import annotations
 
+import math
 import re
 
 import markupsafe
@@ -682,3 +683,79 @@ def test_hard_split_block_ampersand_entity_never_straddled():
             if semi_pos != -1:
                 # Entity is complete within this chunk.
                 assert chunk[amp_pos:semi_pos + 1] == "&amp;"
+
+
+# ---------------------------------------------------------------------------
+# 10. Whole-branch review Finding 1 (CRITICAL): the actual explosion the
+#     reviewer reproduced end-to-end through split_for_telegram(
+#     to_telegram_html(...)) -- not just _hard_split_block in isolation.
+#     `_find_safe_split_point` used to count unclosed tags from index 0 of
+#     the WHOLE block on every call, so a single all-bold paragraph
+#     backtracked to the same position every iteration and the
+#     anti-infinite-loop guard forced 1 char/iteration -- 1012 chunks for a
+#     5KB all-bold block. These assert chunk COUNT and a size floor, not
+#     just tag balance, which is exactly the gap that let the bug survive
+#     two prior reviews.
+# ---------------------------------------------------------------------------
+
+def _strip_tg_tags(html: str) -> str:
+    return re.sub(r"</?(?:b|code)>", "", html)
+
+
+def test_split_for_telegram_giant_all_bold_block_does_not_explode_into_one_char_chunks():
+    long_text = "word " * 1000  # 5000 chars, no internal blank line -> ONE block
+    html = to_telegram_html("**" + long_text + "**")
+    assert len(html) > 4096
+
+    result = split_for_telegram(html)
+
+    assert len(result) == math.ceil(len(html) / 4096)
+    # Every chunk but the last must be well over the one-char-per-iteration
+    # failure mode -- comfortably past half the limit.
+    for chunk in result[:-1]:
+        assert len(chunk) > 4096 // 2
+    for chunk in result:
+        assert len(chunk) <= 4096
+        assert chunk.count("<b>") == chunk.count("</b>")
+    # Reassembles losslessly modulo the balance/reopen tags themselves.
+    assert "".join(_strip_tg_tags(c) for c in result) == long_text
+
+
+def test_split_for_telegram_giant_inline_code_span_does_not_explode():
+    inner = "x" * 5000
+    html = to_telegram_html("`" + inner + "`")
+    assert len(html) > 4096
+
+    result = split_for_telegram(html)
+
+    assert len(result) == math.ceil(len(html) / 4096)
+    for chunk in result[:-1]:
+        assert len(chunk) > 4096 // 2
+    for chunk in result:
+        assert len(chunk) <= 4096
+        assert chunk.count("<code>") == chunk.count("</code>")
+    assert "".join(_strip_tg_tags(c) for c in result) == inner
+
+
+def test_split_for_telegram_bold_run_straddling_a_split_reopens_on_the_next_chunk():
+    # A single long bold paragraph that must hard-split mid-run: the second
+    # chunk must start with a live `<b>` (reopened), not plain unformatted
+    # text -- this is Finding 4 (the `_reopen_tags` dead-code bug): before
+    # the fix, `_reopen_tags` counted opens on the PREVIOUS chunk AFTER
+    # `_balance_tags` had already force-closed it, so it always saw 0 and
+    # never reopened anything.
+    long_text = "bold run " * 600  # 5400 chars
+    html = to_telegram_html("**" + long_text + "**")
+    assert len(html) > 4096
+
+    result = split_for_telegram(html)
+
+    assert len(result) >= 2
+    first, *rest = result
+    assert first.startswith("<b>")
+    assert first.endswith("</b>")
+    for chunk in rest:
+        # Every non-first chunk must reopen the bold run it's continuing.
+        assert chunk.startswith("<b>"), f"chunk did not reopen <b>: {chunk[:20]!r}"
+        assert chunk.count("<b>") == chunk.count("</b>")
+    assert "".join(_strip_tg_tags(c) for c in result) == long_text

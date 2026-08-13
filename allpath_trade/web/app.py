@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import queue
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -19,22 +19,103 @@ from allpath_trade.telegram import TelegramAPI, TelegramPoller
 from allpath_trade.web.auth import install_auth
 from allpath_trade.web.chat_service import ChatService
 from allpath_trade.web.deps import ComponentHolder
-from allpath_trade.web.markdown import split_for_telegram, to_telegram_html
+from allpath_trade.web.markdown import (
+    MAX_TELEGRAM_REPLY_CHUNKS,
+    split_for_telegram,
+    to_telegram_html,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Fire-and-forget mirror sends (spec §④) get their own single-worker pool --
-# same shape as execution.py's `_poll_pool` and models_catalog.py's
-# `_fetch_pool` -- so a slow/hung Telegram API call never shares a thread
-# with, or blocks behind, unrelated background work in this process.
-# Single-worker keeps the two-message-per-turn mirror send strictly ordered
-# ("You (web): ..." before the reply), matching how a reader would expect a
-# conversation transcript to read.
-_MIRROR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="telegram-mirror")
+# Bound on `_MirrorQueue`'s backlog -- see the class docstring's Finding 3
+# note for why "bounded, drop-oldest" beats both "unbounded" and "blocks the
+# caller".
+_MIRROR_QUEUE_MAXSIZE = 50
+
+
+class _MirrorQueue:
+    """Fire-and-forget mirror-send queue for spec §④ (Finding 3 fix).
+
+    ONE per `FastAPI` app instance -- created in `_start_telegram`, stored
+    on `app.state.mirror_queue`, shut down in `_stop_telegram` -- rather
+    than the module-level `ThreadPoolExecutor` singleton this replaced.
+    That singleton was never shut down anywhere: `_stop_telegram` touched
+    neither it nor the mirror hook, so its non-daemon worker thread was
+    still joined at interpreter exit -- with a dead Telegram endpoint and
+    unbounded queueing (every send retries for up to 10s per chunk), a
+    heavy web-chat session could leave minutes of queued mirror sends
+    blocking a clean `Ctrl-C` shutdown. A per-app instance also means
+    `_stop_telegram` can actually shut its queue down for real: a shared
+    process-wide singleton can't be permanently shut down without breaking
+    every subsequent `create_app()` call in the same process (the test
+    suite alone creates dozens of `FastAPI` apps in one process).
+
+    Bounded to `_MIRROR_QUEUE_MAXSIZE` entries with drop-oldest-under-
+    backlog semantics -- consistent with docs/TODO.md's existing "mirror
+    sends never retried, web ConversationStore is the authoritative record"
+    entry: dropping the oldest queued mirror message under sustained
+    backlog is the honest continuation of that policy, not a new one.
+
+    A single background worker thread processes the queue strictly in
+    order, preserving the ordering guarantee the previous single-worker
+    executor gave: "You (web): ..." always sent before the reply."""
+
+    def __init__(self, maxsize: int = _MIRROR_QUEUE_MAXSIZE) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="telegram-mirror")
+        self._thread.start()
+
+    def submit(self, fn, *args) -> None:
+        try:
+            self._queue.put_nowait((fn, args))
+        except queue.Full:
+            # Drop the oldest queued send to make room -- best-effort
+            # delivery under backlog (see the class docstring) rather than
+            # blocking the caller (a web request thread) or growing
+            # unbounded while a dead/blocked Telegram endpoint holds up
+            # every send for its full retry timeout.
+            with contextlib.suppress(queue.Empty):
+                self._queue.get_nowait()
+            with contextlib.suppress(queue.Full):
+                self._queue.put_nowait((fn, args))
+
+    def _run(self) -> None:
+        while True:
+            try:
+                fn, args = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._stop.is_set():
+                    return
+                continue
+            try:
+                fn(*args)
+            except Exception:  # noqa: BLE001, S110 — background worker thread;
+                pass          # the send fns already swallow+log internally,
+                              # this is a pure belt-and-suspenders catch.
+
+    def shutdown(self, wait: bool = False, cancel_futures: bool = True) -> None:
+        self._stop.set()
+        if cancel_futures:
+            # Drain anything still queued -- shutdown must not block on a
+            # dead Telegram endpoint's retry/backoff (Finding 3).
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+        if wait and self._thread is not None:
+            self._thread.join(timeout=2)
 
 
 def _send_mirror_text(api: TelegramAPI, app_state: AppState, text: str) -> None:
-    """Runs on `_MIRROR_EXECUTOR`'s single worker thread -- never on the
+    """Runs on the `_MirrorQueue` worker thread -- never on the
     request/turn thread that queued it. Re-reads the paired chat id on
     *every* call rather than once when the mirror fn was registered: pairing
     can change (re-pair, Unpair on the settings page) while the process
@@ -43,8 +124,8 @@ def _send_mirror_text(api: TelegramAPI, app_state: AppState, text: str) -> None:
     (re-)paired. Not paired -> silently do nothing, same invariant
     TelegramPoller's own unpaired-chat handling follows.
 
-    Wrapped in a broad except: this runs on a background thread pool worker
-    with nothing watching it for an uncaught exception (same reasoning as
+    Wrapped in a broad except: this runs on a background thread with
+    nothing watching it for an uncaught exception (same reasoning as
     TelegramPoller.run_forever's own top-level catch) -- a formatting bug in
     `to_telegram_html`/`split_for_telegram` must degrade to one scrubbed
     stderr line, never take the worker down or (worse) go unnoticed."""
@@ -53,14 +134,25 @@ def _send_mirror_text(api: TelegramAPI, app_state: AppState, text: str) -> None:
         if not chat_id:
             return
         html = to_telegram_html(text)
-        for chunk in split_for_telegram(html):
+        chunks = split_for_telegram(html)
+        if len(chunks) > MAX_TELEGRAM_REPLY_CHUNKS:
+            # Defensive belt (Finding 1), mirrored from
+            # `TelegramPoller._handle_chat_text`'s own cap -- see its
+            # comment for why this exists even though `split_for_telegram`
+            # is now proven correct for the corpus this codebase's tests
+            # exercise.
+            print(f"[telegram] mirror text split into {len(chunks)} chunks "
+                  f"(cap {MAX_TELEGRAM_REPLY_CHUNKS}); truncating", file=sys.stderr)
+            chunks = [*chunks[:MAX_TELEGRAM_REPLY_CHUNKS], "(message truncated: too long for Telegram)"]
+        for chunk in chunks:
             api.send_message(chat_id, chunk)
     except Exception as exc:  # noqa: BLE001 — background thread, must not raise
         print(f"[telegram] mirror send failed: {api._scrub(str(exc))}", file=sys.stderr)
 
 
 def _mirror_to_telegram(source: str, text: str, reply: str, *,
-                        api: TelegramAPI, app_state: AppState) -> None:
+                        api: TelegramAPI, app_state: AppState,
+                        mirror_queue: _MirrorQueue) -> None:
     """The direction policy for spec §④'s full mirroring: ChatService fires
     this hook for every turn/note regardless of source (see
     `chat_service.py`'s `set_mirror` docstring); direction is this
@@ -68,10 +160,11 @@ def _mirror_to_telegram(source: str, text: str, reply: str, *,
 
     `source == "telegram"` -> no-op: the poller already replied in-channel,
     and mirroring it back would be an echo loop. `source == "web"` ->
-    fire-and-forget submit(s) to `_MIRROR_EXECUTOR`, never a direct call:
-    the caller here is `ChatService.send`/`note_resolution`, already outside
-    `_turn_lock` by the time this runs, but a synchronous Telegram HTTP call
-    would still add latency to the web request that triggered it.
+    fire-and-forget submit(s) to `mirror_queue` (this app instance's
+    `_MirrorQueue`, see its own docstring for Finding 3), never a direct
+    call: the caller here is `ChatService.send`/`note_resolution`, already
+    outside `_turn_lock` by the time this runs, but a synchronous Telegram
+    HTTP call would still add latency to the web request that triggered it.
 
     Two shapes, both from spec §④: the normal chat-turn case sends "You
     (web): {text}" and then the reply as two separate messages (so a reader
@@ -84,10 +177,10 @@ def _mirror_to_telegram(source: str, text: str, reply: str, *,
     if source != "web":
         return
     if reply:
-        _MIRROR_EXECUTOR.submit(_send_mirror_text, api, app_state, f"You (web): {text}")
-        _MIRROR_EXECUTOR.submit(_send_mirror_text, api, app_state, reply)
+        mirror_queue.submit(_send_mirror_text, api, app_state, f"You (web): {text}")
+        mirror_queue.submit(_send_mirror_text, api, app_state, reply)
     else:
-        _MIRROR_EXECUTOR.submit(_send_mirror_text, api, app_state, text)
+        mirror_queue.submit(_send_mirror_text, api, app_state, text)
 
 
 def static_content_hash(path: Path) -> str:
@@ -144,15 +237,20 @@ def _start_telegram(app: FastAPI, poller_cls: type) -> None:
     `scheduler_cls`) so tests can spy on construction/`run_forever` without
     a real poller thread blocking on a live long-poll.
 
-    The poller is handed `holder.get().app_state` -- and, via the mirror
-    fn, so is the mirror -- captured ONCE, here, at startup. A settings save
-    that changes `telegram_bot_token` calls `holder.rebuild()` (see
-    routes/settings.py) but this thread and this `AppState` object are never
-    touched by it: the new token only takes effect after a process restart.
-    That's a deliberate, documented tradeoff (see settings.html's Telegram
-    help text) to avoid thread lifecycle management (start/stop/rebuild a
-    daemon thread mid-request) for what is, in practice, a rare
-    configuration change."""
+    The poller is handed `holder` itself (not a `c.app_state`/
+    `c.settings.web_token` snapshot) -- see `TelegramPoller`'s own class
+    docstring for Findings 2 and 5: reading through `holder.get()` at the
+    point of use means a `/settings/reset-token` save takes effect on the
+    poller's very next `/start` check, and an in-place `db_path` change via
+    `holder.rebuild()` never leaves the poller pinned to a stale/closed
+    connection. The bot TOKEN itself (`TelegramAPI(token)` below) is still
+    captured once at startup, unaffected by either finding -- changing
+    *that* setting still requires a restart, same as `settings.html`'s
+    Telegram help text has always documented.
+
+    The mirror queue (`_MirrorQueue`, Finding 3) is created and started
+    here too, one per app instance, and stored on `app.state.mirror_queue`
+    so `_stop_telegram` can shut it down."""
     holder = app.state.holder
     c = holder.get()
     token = c.settings.telegram_bot_token
@@ -160,15 +258,18 @@ def _start_telegram(app: FastAPI, poller_cls: type) -> None:
         return
     api = TelegramAPI(token)
     stop = threading.Event()
-    poller = poller_cls(api, app.state.chat_service, c.app_state,
-                        c.settings.web_token, stop)
+    poller = poller_cls(api, app.state.chat_service, holder, stop)
     thread = threading.Thread(target=poller.run_forever, daemon=True,
                               name="telegram-poller")
     thread.start()
     app.state.telegram_stop = stop
     app.state.telegram_thread = thread
+    mirror_queue = _MirrorQueue()
+    mirror_queue.start()
+    app.state.mirror_queue = mirror_queue
     app.state.chat_service.set_mirror(
-        partial(_mirror_to_telegram, api=api, app_state=c.app_state))
+        partial(_mirror_to_telegram, api=api, app_state=c.app_state,
+               mirror_queue=mirror_queue))
 
 
 def _stop_telegram(app: FastAPI) -> None:
@@ -180,12 +281,22 @@ def _stop_telegram(app: FastAPI) -> None:
     exit is normally near-instant; the timeout exists so a wedged poller
     (e.g. a `getUpdates` call that outlived its own socket timeout somehow)
     can never hang `serve`'s shutdown indefinitely -- the thread is a
-    daemon, so the process can still exit around it either way."""
+    daemon, so the process can still exit around it either way.
+
+    Also shuts down the per-app `_MirrorQueue` (Finding 3) with
+    `wait=False, cancel_futures=True` -- shutdown must not block on a dead
+    Telegram endpoint's retry/backoff, whatever is still queued is dropped
+    -- and clears the mirror hook so it can never fire against a queue
+    that's already been told to stop."""
     stop = getattr(app.state, "telegram_stop", None)
     if stop is None:
         return
     stop.set()
     app.state.telegram_thread.join(timeout=2)
+    app.state.chat_service.set_mirror(None)
+    mirror_queue = getattr(app.state, "mirror_queue", None)
+    if mirror_queue is not None:
+        mirror_queue.shutdown(wait=False, cancel_futures=True)
 
 
 def create_app(settings: Settings, broker: Broker | None = None,

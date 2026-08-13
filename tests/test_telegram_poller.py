@@ -23,6 +23,7 @@ from __future__ import annotations
 import threading
 import time
 import urllib.error
+from types import SimpleNamespace
 
 from allpath_trade.store.app_state import (
     TELEGRAM_CHAT_ID_KEY,
@@ -38,6 +39,28 @@ WEB_TOKEN = "correct-horse-battery-staple"
 
 def make_app_state(tmp_path):
     return AppState(connect(tmp_path / "t.db"))
+
+
+class FakeHolder:
+    """Minimal stand-in for `web.deps.ComponentHolder`: `.get()` returns a
+    fresh snapshot exposing `.app_state`/`.settings.web_token`, mirroring
+    the real `Components` shape `TelegramPoller` now reads through (see its
+    class docstring's Finding 2/5 notes). `set_web_token` lets a test
+    simulate a live `/settings/reset-token` save without reconstructing the
+    poller -- this is the Finding 2 regression coverage: the SAME poller
+    instance must reject the old token and accept the new one the moment
+    the holder starts returning it, no restart."""
+
+    def __init__(self, app_state: AppState, web_token: str) -> None:
+        self._app_state = app_state
+        self._web_token = web_token
+
+    def get(self) -> SimpleNamespace:
+        return SimpleNamespace(app_state=self._app_state,
+                               settings=SimpleNamespace(web_token=self._web_token))
+
+    def set_web_token(self, token: str) -> None:
+        self._web_token = token
 
 
 def pair(app_state: AppState, chat_id, user_id=None) -> None:
@@ -134,7 +157,7 @@ class LoggingAppState:
 
 
 def make_poller(api, chat_service, app_state, web_token=WEB_TOKEN):
-    return TelegramPoller(api, chat_service, app_state, web_token, threading.Event())
+    return TelegramPoller(api, chat_service, FakeHolder(app_state, web_token), threading.Event())
 
 
 def _update(update_id, chat_id, text, from_id=None, chat_type="private"):
@@ -689,7 +712,7 @@ def test_run_forever_backs_off_on_repeated_failure_and_resets_on_success(tmp_pat
         stop.set()  # stop after the 5th call so the loop terminates
 
     api = FakeTelegramAPI(on_get_updates=flaky_get_updates)
-    poller = TelegramPoller(api, FakeChatService(), app_state, WEB_TOKEN, stop)
+    poller = TelegramPoller(api, FakeChatService(), FakeHolder(app_state, WEB_TOKEN), stop)
 
     poller.run_forever()
 
@@ -713,7 +736,7 @@ def test_run_forever_caps_backoff_at_60_seconds(tmp_path, monkeypatch):
         stop.set()  # 6th call succeeds -- no wait for it, loop exits next check
 
     api = FakeTelegramAPI(on_get_updates=fails_five_times_then_succeeds_and_stops)
-    poller = TelegramPoller(api, FakeChatService(), app_state, WEB_TOKEN, stop)
+    poller = TelegramPoller(api, FakeChatService(), FakeHolder(app_state, WEB_TOKEN), stop)
 
     poller.run_forever()
 
@@ -726,7 +749,7 @@ def test_run_forever_does_not_poll_at_all_once_stop_is_already_set(tmp_path):
     stop = threading.Event()
     stop.set()
     api = FakeTelegramAPI()
-    poller = TelegramPoller(api, FakeChatService(), app_state, WEB_TOKEN, stop)
+    poller = TelegramPoller(api, FakeChatService(), FakeHolder(app_state, WEB_TOKEN), stop)
 
     poller.run_forever()
 
@@ -748,7 +771,7 @@ def test_stop_during_backoff_does_not_wait_out_the_full_delay(tmp_path):
         raise RuntimeError("network is down")
 
     api = FakeTelegramAPI(on_get_updates=always_fails)
-    poller = TelegramPoller(api, FakeChatService(), app_state, WEB_TOKEN, stop)
+    poller = TelegramPoller(api, FakeChatService(), FakeHolder(app_state, WEB_TOKEN), stop)
 
     timer = threading.Timer(0.05, stop.set)
     timer.start()
@@ -784,7 +807,7 @@ def test_real_telegram_api_offline_transport_backs_off_instead_of_hot_looping(tm
     api = TelegramAPI("fake-bot-token", urlopen=always_offline_urlopen)
     app_state = make_app_state(tmp_path)
     stop = threading.Event()
-    poller = TelegramPoller(api, FakeChatService(), app_state, WEB_TOKEN, stop)
+    poller = TelegramPoller(api, FakeChatService(), FakeHolder(app_state, WEB_TOKEN), stop)
 
     def stop_soon():
         time.sleep(0.2)
@@ -841,7 +864,7 @@ def test_batch_with_no_offset_advance_backs_off_instead_of_replaying_hot(tmp_pat
     app_state = make_app_state(tmp_path)
     stop = threading.Event()
     api = ReplayingAPI()
-    poller = TelegramPoller(api, FakeChatService(), app_state, WEB_TOKEN, stop)
+    poller = TelegramPoller(api, FakeChatService(), FakeHolder(app_state, WEB_TOKEN), stop)
 
     def stop_soon():
         time.sleep(0.2)
@@ -853,3 +876,79 @@ def test_batch_with_no_offset_advance_backs_off_instead_of_replaying_hot(tmp_pat
     stopper.join()
 
     assert 1 <= api.calls < 5
+
+
+# ---------------------------------------------------------------------------
+# Whole-branch review Finding 2 (security) / Finding 5: the poller must read
+# web_token/app_state live through `holder.get()`, never from a snapshot
+# taken once at construction time.
+# ---------------------------------------------------------------------------
+
+def test_web_token_reset_revokes_the_old_token_and_accepts_the_new_one(tmp_path):
+    # Same poller instance throughout -- no reconstruction -- proving the
+    # token is read at compare time, not captured once in __init__.
+    app_state = make_app_state(tmp_path)
+    holder = FakeHolder(app_state, WEB_TOKEN)
+    api = FakeTelegramAPI(batches=[[_update(1, 111, f"/start {WEB_TOKEN}")]])
+    poller = TelegramPoller(api, FakeChatService(), holder, threading.Event())
+
+    poller.poll_once()
+    assert app_state.get(TELEGRAM_CHAT_ID_KEY) == "111"
+
+    # Simulate /settings/reset-token: the holder now serves a new token.
+    new_token = "brand-new-token-after-reset"
+    holder.set_web_token(new_token)
+
+    # A second chat tries to pair with the OLD (now-revoked) token.
+    api2 = FakeTelegramAPI(batches=[[_update(2, 222, f"/start {WEB_TOKEN}")]])
+    poller2 = TelegramPoller(api2, FakeChatService(), holder, threading.Event())
+    poller2.poll_once()
+    assert app_state.get(TELEGRAM_CHAT_ID_KEY) == "111"  # unchanged: old token rejected
+    assert api2.sent_messages == []
+
+    # The NEW token pairs immediately, no restart, same holder.
+    api3 = FakeTelegramAPI(batches=[[_update(3, 333, f"/start {new_token}")]])
+    poller3 = TelegramPoller(api3, FakeChatService(), holder, threading.Event())
+    poller3.poll_once()
+    assert app_state.get(TELEGRAM_CHAT_ID_KEY) == "333"
+
+
+def test_app_state_is_read_live_through_the_holder_not_captured_once(tmp_path):
+    # Finding 5: a db_path change (ComponentHolder.rebuild()) swaps the
+    # AppState object the holder returns -- the poller must pick up the new
+    # one, not keep writing to a stale/closed connection forever.
+    first_app_state = make_app_state(tmp_path)
+    holder = FakeHolder(first_app_state, WEB_TOKEN)
+    poller = TelegramPoller(FakeTelegramAPI(), FakeChatService(), holder, threading.Event())
+    assert poller.app_state is first_app_state
+
+    second_app_state = make_app_state(tmp_path)
+    holder._app_state = second_app_state
+    assert poller.app_state is second_app_state
+
+
+# ---------------------------------------------------------------------------
+# Whole-branch review Finding 6 (minor): the typing indicator is re-sent
+# while a long chat_service.send() call is still running, not just once at
+# the start of the turn.
+# ---------------------------------------------------------------------------
+
+def test_typing_indicator_is_resent_during_a_slow_turn(tmp_path, monkeypatch):
+    from allpath_trade import telegram as telegram_module
+
+    monkeypatch.setattr(telegram_module, "_TYPING_RESEND_SECONDS", 0.05)
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+
+    class SlowChatService:
+        def send(self, text, source="web"):
+            time.sleep(0.2)
+            return "done"
+
+    api = FakeTelegramAPI(batches=[[_update(1, 111, "hi")]])
+    poller = make_poller(api, SlowChatService(), app_state)
+
+    poller.poll_once()
+
+    # One immediate call plus at least one resend during the ~0.2s turn.
+    assert len(api.typing_calls) >= 2
