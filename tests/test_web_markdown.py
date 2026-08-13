@@ -759,3 +759,19 @@ def test_split_for_telegram_bold_run_straddling_a_split_reopens_on_the_next_chun
         assert chunk.startswith("<b>"), f"chunk did not reopen <b>: {chunk[:20]!r}"
         assert chunk.count("<b>") == chunk.count("</b>")
     assert "".join(_strip_tg_tags(c) for c in result) == long_text
+
+
+def test_split_for_telegram_nested_bold_code_closes_inner_tag_first():
+    # to_telegram_html nests only as <b><code>...</code></b> (bold wraps an
+    # inline-code span). A hard split inside that span must close </code>
+    # before </b> -- crossed </b></code> is malformed HTML that Telegram
+    # rejects with a 400 (delivery then survives only via the plain-text
+    # fallback, silently losing that chunk's formatting).
+    html = to_telegram_html("**`" + "z" * 9000 + "`**")
+    chunks = split_for_telegram(html)
+    assert len(chunks) >= 2
+    for chunk in chunks:
+        # every chunk independently well-nested: no crossed close, balanced
+        assert "</b></code>" not in chunk
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert chunk.count("<code>") == chunk.count("</code>")

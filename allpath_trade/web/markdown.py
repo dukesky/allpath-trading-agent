@@ -612,11 +612,18 @@ def _balance_tags(text: str) -> str:
     open_b = text.count("<b>") - text.count("</b>")
     open_code = text.count("<code>") - text.count("</code>")
 
+    # Close the INNER tag first. to_telegram_html only ever nests as
+    # <b><code>...</code></b> (bold wraps an inline-code span, never the
+    # reverse), so a chunk that leaves both open must emit </code> before
+    # </b> -- the reverse produces crossed tags that Telegram's HTML parser
+    # rejects with a 400 (delivery then survives only via the plain-text
+    # fallback, losing that chunk's formatting). This close order mirrors
+    # _reopen_tags' <b><code> reopen order.
     result = text
-    if open_b > 0:
-        result += "</b>" * open_b
     if open_code > 0:
         result += "</code>" * open_code
+    if open_b > 0:
+        result += "</b>" * open_b
     return result
 
 
