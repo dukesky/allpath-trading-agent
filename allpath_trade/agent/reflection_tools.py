@@ -167,14 +167,23 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
         propose_strategy_revision)
 
 
-def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str], None]:
+def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str], None]:
     """Builds the applier `ReviewQueue.set_revision_applier` calls when a
     strategy_revision row is approved. Lives alongside
     `propose_strategy_revision` (rather than in strategy/) because it is
     that tool's write-side counterpart -- keeping propose+apply together
     beats splitting one paired flow across packages."""
 
-    def apply(strategy_id: str, new_yaml: str, expected_base_yaml: str) -> None:
+    def apply(strategy_id: str, new_yaml: str, expected_base_yaml: str,
+              source: str = "reflection") -> None:
+        # `source` (the row's proposer -- "reflection" or "chat", see
+        # `ReviewQueue.add_strategy_revision`) is accepted here so this
+        # applier satisfies the widened 4-arg applier contract
+        # `ReviewQueue._approve_revision` now always calls with. It isn't
+        # branched on yet -- every guard below still runs unconditionally
+        # for both sources, i.e. this applier's behavior is unchanged.
+        # Task 2 is where `source` starts actually relaxing the
+        # authorization/status freeze for `source="chat"` (spec §①).
         # Pre-flight gates, in this order, ALL before any write, ALL
         # raising RevisionValidationError (and only that) so
         # ReviewQueue._approve_revision's rollback-to-pending on this

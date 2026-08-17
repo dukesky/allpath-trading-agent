@@ -81,16 +81,20 @@ class ReviewQueue:
         # (mirrors how `_executor` itself is threaded through app.py), so a
         # setter is needed too. None until set: revision approvals fail
         # loudly (see `approve`) rather than silently no-op-ing.
-        self._revision_applier: Callable[[str, str, str], None] | None = None
+        self._revision_applier: Callable[[str, str, str, str], None] | None = None
 
-    def set_revision_applier(self, fn: Callable[[str, str, str], None]) -> None:
+    def set_revision_applier(self, fn: Callable[[str, str, str, str], None]) -> None:
         """Wire up the function that actually applies an approved strategy
-        revision: `fn(strategy_id, new_yaml, expected_base_yaml)` --
+        revision: `fn(strategy_id, new_yaml, expected_base_yaml, source)` --
         `expected_base_yaml` is the file text the proposal was drafted
         against (snapshot["old_yaml"]), which the applier compares to the
         file's current-on-disk text to catch staleness (see
-        `apply_revision_factory`). Task 3 calls this once at startup with
-        the real strategy-file writer."""
+        `apply_revision_factory`). `source` is the row's own `source`
+        column ("reflection" or "chat", see `add_strategy_revision`) --
+        threaded through so the applier can branch its guards by proposer
+        (spec §①: reflection keeps its authorization/status freeze; a
+        user-initiated chat proposal doesn't). Task 3 calls this once at
+        startup with the real strategy-file writer."""
         self._revision_applier = fn
 
     def _issue_token(self) -> tuple[str, str, str]:
@@ -124,16 +128,30 @@ class ReviewQueue:
 
     def add_strategy_revision(self, *, strategy_id: str, ticker: str, old_yaml: str,
                               new_yaml: str, diff: str, rationale: str,
-                              conversation_id: int | None = None) -> ReviewHandle:
-        """Queue a reflection-proposed strategy revision for human approval.
-        Shares `pending_reviews` with order reviews (a unified inbox, see
-        Phase 6 design §④) rather than a separate table -- so it has to
-        fill the legacy order-shaped NOT NULL columns honestly rather than
-        leaving them blank: `rule_id`/`rule_type`/`action` are fixed
-        sentinel values identifying "this is a revision, not a rule
-        trigger", `condition` carries a truncated rationale (there's no
-        other free-text summary column to put it in), and `intent` is None
-        since there is no order to execute."""
+                              conversation_id: int | None = None,
+                              source: str = "reflection") -> ReviewHandle:
+        """Queue a proposed strategy revision for human approval. Shares
+        `pending_reviews` with order reviews (a unified inbox, see Phase 6
+        design §④) rather than a separate table -- so it has to fill the
+        legacy order-shaped NOT NULL columns honestly rather than leaving
+        them blank: `rule_id`/`rule_type`/`action` are fixed sentinel
+        values identifying "this is a revision, not a rule trigger",
+        `condition` carries a truncated rationale (there's no other
+        free-text summary column to put it in), and `intent` is None since
+        there is no order to execute.
+
+        `source` distinguishes the proposer: `"reflection"` (default -- the
+        automated agent) or `"chat"` (the user drafting via web/Telegram
+        chat, spec §①). Persisted on the `source` column that already
+        exists on `pending_reviews`; `_approve_revision` threads it through
+        to the revision applier so it can branch its guards accordingly.
+
+        There is no separate `is_new` column/flag. The established
+        convention -- honored by the applier (Task 2) and the UI (Task 4)
+        -- is `old_yaml == ""` meaning "this proposes a brand-new strategy,
+        not a revision of an existing one" (spec §②): the applier's base
+        check becomes "the file must not already exist" rather than a
+        byte-for-byte match against a non-empty base."""
         token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
             "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
@@ -144,10 +162,55 @@ class ReviewQueue:
              "revision", rationale[:200], "revise strategy",
              json.dumps({"old_yaml": old_yaml, "new_yaml": new_yaml,
                         "diff": diff, "rationale": rationale}),
-             None, "reflection", conversation_id, "strategy_revision",
+             None, source, conversation_id, "strategy_revision",
              token_hash, expires))
         self._conn.commit()
         return ReviewHandle(cur.lastrowid, token)
+
+    def supersede_pending_chat_revision(self, strategy_id: str, note: str) -> int | None:
+        """Spec §③: a same-`strategy_id` chat proposal replaces (rather
+        than piling up alongside) any earlier chat proposal that's still
+        pending -- "改两轮很常见" (revising twice in one conversation is
+        common). Marks every currently-pending `strategy_revision` row with
+        `source='chat'` for this `strategy_id` as `status='superseded'`
+        (a resolved status -- it sorts into "recent"/history the same way
+        `rejected`/`approved` do, just with its own label), stamping
+        `resolved_ts` and `resolution_note` (expected to name the
+        replacing row, e.g. "replaced by #99") so the audit trail explains
+        why it's gone from Pending without the user having acted on it.
+
+        Deliberately scoped to `source='chat'`: a reflection proposal for
+        the same strategy is a different proposer's independent judgment
+        call (spec §③: "反思提案不受聊天提案影响、也不替换聊天提案") and
+        is left untouched, as is any already-resolved chat row (only
+        `status='pending'` rows are touched -- a rejected/approved/already-
+        superseded row keeps its own resolution).
+
+        Also clears the approval-link token (mirrors the M5 pattern in
+        `_approve_order`/`reject`), so a stale approve-by-link email/
+        Telegram notification for a superseded row can't be used even by
+        accident -- belt-and-suspenders on top of `_token_ok` already
+        gating on `status == "pending"`.
+
+        Returns the id of the most recently created row that was
+        superseded (there should ordinarily be at most one pending chat
+        row per strategy, since each new one supersedes the last), or
+        `None` if there was nothing pending to supersede."""
+        rows = list(self._conn.execute(
+            "SELECT id FROM pending_reviews WHERE kind='strategy_revision'"
+            " AND source='chat' AND strategy_id=? AND status='pending'"
+            " ORDER BY id DESC", (strategy_id,)))
+        if not rows:
+            return None
+        ids = [row["id"] for row in rows]
+        resolved_ts = datetime.now(UTC).isoformat()
+        self._conn.executemany(
+            "UPDATE pending_reviews SET status='superseded', resolved_ts=?,"
+            " resolution_note=?, approval_token_hash=NULL, token_expires_ts=NULL"
+            " WHERE id=?",
+            [(resolved_ts, note, review_id) for review_id in ids])
+        self._conn.commit()
+        return ids[0]
 
     def list(self, status: str | None = "pending") -> list[sqlite3.Row]:
         if status is None:
@@ -338,7 +401,7 @@ class ReviewQueue:
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
 
         try:
-            self._revision_applier(row["strategy_id"], new_yaml, old_yaml)
+            self._revision_applier(row["strategy_id"], new_yaml, old_yaml, row["source"])
         except RevisionValidationError:
             # Spec §④: a same-strategy proposal approved after an earlier
             # one already changed the file must fail revalidation without
