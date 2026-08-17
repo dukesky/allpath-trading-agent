@@ -2,6 +2,24 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## UI round 3 — 2026-08-17
+
+- Dashboard **equity chart**: a server-rendered SVG line of account equity
+  from Alpaca's portfolio history, with Week / Month / YTD / Year range
+  tabs, the current equity headline and period change coloured by
+  direction (the line follows the same sign as the headline), and a
+  "since <date>" caption so a young account's "Year" tab reads honestly.
+  Degrades to "No history yet" on any broker failure; readable in both
+  themes.
+- **Settings tabs**: the seven settings sections are now client-side tabs
+  inside the same single form with one Save — typed input in other tabs
+  survives switching, a validation error reopens the tab it belongs to,
+  the active tab lives in the URL hash (deep-linkable, back/forward aware).
+- **Reports date filter**: date picker + Go jumps to that day's report (or
+  says there isn't one), plus Today / This week / This month / All chips
+  computed on the ET calendar; inverted ranges are swapped, malformed
+  dates get a 400 notice, never a 500.
+
 ## Chat strategy proposals — 2026-08-17
 
 - `draft_strategy` in web/Telegram chat now queues a proposal instead of
