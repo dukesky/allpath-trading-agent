@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import difflib
-from collections.abc import Callable
 
 import yaml
 
 from allpath_trade.agent.tools import ToolRegistry
-from allpath_trade.store.reviews import ReviewQueue, RevisionValidationError
+from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.strategy.apply import apply_revision_factory
 from allpath_trade.strategy.loader import (
     StrategyValidationError,
-    atomic_write_text,
     is_valid_strategy_id,
     parse_strategy_text,
 )
 from allpath_trade.strategy.model import Authorization
 from allpath_trade.strategy.store import StrategyStore
+
+# Re-exported so existing importers (cli.py, app.py, tests) keep working
+# unchanged -- the applier itself now lives in strategy/apply.py (it's the
+# strategy write path shared by reflection and chat proposals, not
+# reflection-specific anymore; see that module's docstring).
+__all__ = ["apply_revision_factory", "register_reflection_tools"]
 
 # Tool-arg hygiene: a reflection session's rationale is model-generated free
 # text with no other length limit upstream -- caps how much of it lands in
@@ -165,115 +170,3 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
             "rationale": {"type": t}},
          "required": ["strategy_id", "new_yaml", "rationale"]},
         propose_strategy_revision)
-
-
-def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str], None]:
-    """Builds the applier `ReviewQueue.set_revision_applier` calls when a
-    strategy_revision row is approved. Lives alongside
-    `propose_strategy_revision` (rather than in strategy/) because it is
-    that tool's write-side counterpart -- keeping propose+apply together
-    beats splitting one paired flow across packages."""
-
-    def apply(strategy_id: str, new_yaml: str, expected_base_yaml: str,
-              source: str = "reflection") -> None:
-        # `source` (the row's proposer -- "reflection" or "chat", see
-        # `ReviewQueue.add_strategy_revision`) is accepted here so this
-        # applier satisfies the widened 4-arg applier contract
-        # `ReviewQueue._approve_revision` now always calls with. It isn't
-        # branched on yet -- every guard below still runs unconditionally
-        # for both sources, i.e. this applier's behavior is unchanged.
-        # Task 2 is where `source` starts actually relaxing the
-        # authorization/status freeze for `source="chat"` (spec §①).
-        # Pre-flight gates, in this order, ALL before any write, ALL
-        # raising RevisionValidationError (and only that) so
-        # ReviewQueue._approve_revision's rollback-to-pending on this
-        # exception stays safe (see the loud comment there -- it only holds
-        # if this exception never fires after a write has happened):
-        #
-        # 1. strategy_id must pass the same path-traversal gate the tool
-        #    used at propose time. The applier must not trust that that gate
-        #    already ran -- it's reachable on its own (directly in tests
-        #    today, and this is exactly the kind of gap a future second
-        #    caller could slip through). Reproduced by the reviewer:
-        #    apply_fn("../escaped", yaml) wrote OUTSIDE the strategies dir.
-        if not is_valid_strategy_id(strategy_id):
-            raise RevisionValidationError(f"invalid strategy id {strategy_id!r}")
-        path = store.directory / f"{strategy_id}.yaml"
-        # 2. the strategy file must still exist. Reproduced by the
-        #    reviewer: approving a revision for a since-deleted strategy
-        #    resurrected it into sentinel monitoring.
-        if not path.exists():
-            raise RevisionValidationError(
-                f"strategy '{strategy_id}' no longer exists")
-        # 3. the file's CURRENT text must match `expected_base_yaml`
-        #    (snapshot["old_yaml"], threaded through by
-        #    ReviewQueue._approve_revision) byte for byte. This is the
-        #    check that actually catches staleness -- spec §④'s named
-        #    scenario: two proposals drafted from one base, approve the
-        #    first, then approving the second must fail and leave it
-        #    pending, not silently revert the first approval. The old
-        #    "re-validate against parse_strategy_text(new_yaml)" version of
-        #    this comment claimed to cover that scenario while being blind
-        #    to it -- parsing the proposal's own (already-valid) yaml can
-        #    never fail just because the file moved. Reproduced by the
-        #    reviewer: approving a stale sibling proposal reverted an
-        #    already-approved stop tightening (price<95 back to price<100).
-        #    Deliberately an exact-text comparison, not a
-        #    structural/version one: ANY intervening change -- including an
-        #    unrelated notify_email toggle -- invalidates the proposal,
-        #    which also closes the notify_email-revert hole a diff-based
-        #    check would still miss.
-        if path.read_text() != expected_base_yaml:
-            raise RevisionValidationError(
-                "strategy file changed since this proposal was made -- "
-                "re-propose from the current version")
-        try:
-            doc = parse_strategy_text(strategy_id, new_yaml)
-        except StrategyValidationError as exc:
-            raise RevisionValidationError(str(exc)) from exc
-        # 4. Finding 1: authorization/status must not move via a revision --
-        #    mirrors propose_strategy_revision's own gate (above, same file)
-        #    so an approval reached around that tool (a corrupt/hand-edited
-        #    queue row, or a future second caller of this applier) can't
-        #    still flip a strategy to `auto` or silently drop `status:
-        #    active`. Gate 3 above already proved `expected_base_yaml` is
-        #    byte-for-byte the file's current text, so it doubles as the
-        #    comparison base here. When it doesn't itself parse (a repair
-        #    proposal against an already-broken file) there's no base value
-        #    to diff against -- fail conservative the same way the propose-
-        #    time gate does: reject `auto` outright, and require the
-        #    proposal to set `status:` explicitly. All before the write
-        #    below, per this function's pre-flight ordering contract.
-        try:
-            base_doc = parse_strategy_text(strategy_id, expected_base_yaml)
-        except StrategyValidationError:
-            base_doc = None
-        if base_doc is not None:
-            if (doc.authorization != base_doc.authorization
-                    or doc.status != base_doc.status):
-                raise RevisionValidationError(
-                    "reflection proposals cannot change authorization or "
-                    "status -- thesis and rules only")
-        else:
-            if doc.authorization == Authorization.AUTO:
-                raise RevisionValidationError(
-                    "reflection proposals against an unparseable base "
-                    "strategy cannot set authorization: auto -- no base to "
-                    "compare, failing conservative")
-            raw = yaml.safe_load(new_yaml)
-            if not (isinstance(raw, dict) and "status" in raw):
-                raise RevisionValidationError(
-                    "reflection proposals against an unparseable base "
-                    "strategy must set status: explicitly -- no base to "
-                    "compare, failing conservative")
-        # No version bump here: `new_yaml` is written verbatim. Gate 3 above
-        # already guarantees the base didn't move underneath this proposal,
-        # and propose_strategy_revision's version check already guaranteed
-        # `doc.version` moved strictly forward from that base -- bumping
-        # again here would be redundant (and, unlike draft_strategy, there
-        # is no interactive user to silently rewrite a version out from
-        # under).
-        atomic_write_text(path, new_yaml)
-        store.snapshot_version(doc, reason="reflection revision approved via web")
-
-    return apply

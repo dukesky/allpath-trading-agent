@@ -35,8 +35,8 @@
 - Modify: `allpath_trade/agent/reflection_tools.py` `apply_revision_factory` (or move the applier to `strategy/apply.py` — it now serves two proposers; one line why)
 - Test: `tests/test_reflection_tools.py`, `tests/test_strategy_apply.py`
 
-- [ ] Failing tests: reflection source → authorization/status change rejected (existing tests stay green); chat source → authorization/status change ALLOWED; chat + auto → applied (the warning is UI, not applier); new-strategy (`base_yaml==""`) → applies only when file absent, raises RevisionValidationError if present; all other guards (id, dir, byte-exact base for existing files, version monotonic, YAML validation) enforced for BOTH sources; snapshot reason names the source (`"chat proposal approved via web"` / existing reflection reason).
-- [ ] Implement; suite; ruff; commit `feat: source-branched revision applier with new-strategy support`.
+- [x] Failing tests: reflection source → authorization/status change rejected (existing tests stay green); chat source → authorization/status change ALLOWED; chat + auto → applied (the warning is UI, not applier); new-strategy (`base_yaml==""`) → applies only when file absent, raises RevisionValidationError if present; all other guards (id, dir, byte-exact base for existing files, version monotonic, YAML validation) enforced for BOTH sources; snapshot reason names the source (`"chat proposal approved via web"` / existing reflection reason).
+- [x] Implement; suite; ruff; commit `feat: source-branched revision applier with new-strategy support`.
 
 ### Task 3: draft_strategy queues in web/Telegram mode
 
