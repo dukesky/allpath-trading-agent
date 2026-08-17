@@ -48,10 +48,24 @@
 - [ ] 上下文个股档案包含非 active 策略的 ticker（轻微膨胀，预算兜底）
 
 ## Phase 5 遗留
-- [ ] Web chat 的 draft_strategy 审批卡片——目前 `order_sink` 只覆盖 propose_order，
+- [x] Web chat 的 draft_strategy 审批卡片——目前 `order_sink` 只覆盖 propose_order，
       strategy 草稿在 web 模式下完全无法保存（只如实告知用户改用终端
       `allpath-trade chat`），需要仿照 Pending 队列给 strategy 保存也做一条
-      排队 + 批准的路径，而不是直接落盘（终审 Finding 3）
+      排队 + 批准的路径，而不是直接落盘（终审 Finding 3）——**chat-strategy-proposals
+      分支已落地**：`draft_strategy` 在 web/Telegram 模式下现在复用 Phase 6 的
+      reflection revision 流水线（`pending_reviews`，kind `strategy_revision`，
+      `source="chat"`），新策略与已有策略的修订都排队等批准，applier 按 source
+      分支放行 authorization/status 改动（reflection 仍冻结，chat 不冻结，因为
+      后者代表用户自己的意图）；同一策略的第二份聊天草稿会自动 supersede 前一份；
+      审批卡片显示提议者、新策略徽标与 auto/status 倒退警告。终端 `allpath-trade
+      chat` 的阻塞式确认体验未改动。详见 `docs/superpowers/plans/
+      2026-08-12-chat-strategy-proposals.md` 与 CHANGELOG。
+- [ ] `QueueingOrderSink.propose`（`web/order_sink.py`）在 web 模式下把
+      `propose_order` 排进 Pending 队列时不发通知——这是本轮 chat-strategy-proposals
+      分支给策略提案新增通知管线时确认过的既有行为，不是这次改动引入的回归：
+      在此之前订单提案也从未发过通知。建议后续复用同一条
+      `notify.events.review_queued` + `approve_link` 管线，让排队的订单
+      提案也能像现在的策略提案一样带通知与批准链接发出。
 - [ ] 策略 YAML 在线编辑（当前只读，修改走聊天让 agent 起草）
 - [ ] SSE 实时推送工具活动（当前为回合结束后整体刷新，见 `_chat_messages.html` 里的说明）
 - [ ] `serve` 的 HTTPS / 反向代理部署文档

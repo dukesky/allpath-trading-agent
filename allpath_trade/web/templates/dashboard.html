@@ -77,7 +77,7 @@
   </div>
   {% endif %}
 </a>
-{% else %}<p class="muted">No strategies yet. Draft one with <code>allpath-trade chat</code> in a terminal.</p>{% endfor %}
+{% else %}<p class="muted">No strategies yet. Ask the agent to draft one in <a href="/chat">Chat</a> — it lands on Pending for your approval and starts as a draft until you activate it.</p>{% endfor %}
 {% for e in strategy_errors %}<p class="error">{{ e }}</p>{% endfor %}
 
 <h2>Recent trades</h2>

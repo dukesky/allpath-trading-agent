@@ -63,7 +63,7 @@
 
 **Files:** `README.md`, `README.zh-CN.md` (Strategies section: chat drafts now save via approval; terminal note removed/updated; the "run allpath-trade chat in a terminal" hint in `chat.html` footer + strategy pages updated), `CHANGELOG.md`, `docs/TODO.md` (close the Phase 5 leftover "web chat cannot save strategies"), the `chat.html` hint text.
 
-- [ ] Verify every hint string in templates that mentions the terminal; update; English-only sweep; suite; commit `docs: chat strategy proposals`.
+- [x] Verify every hint string in templates that mentions the terminal; update; English-only sweep; suite; commit `docs: chat strategy proposals`.
 
 ## Self-Review Notes
 
