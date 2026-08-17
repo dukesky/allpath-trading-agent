@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -154,3 +154,62 @@ def test_get_positions_with_none_fields():
     assert p.ticker == "AAPL"
     assert p.market_value == Decimal(0)
     assert p.unrealized_pl == Decimal(0)
+
+
+# --- Minor 6: get_equity_history -------------------------------------------
+
+def _epoch(dt: datetime) -> int:
+    return int(dt.timestamp())
+
+
+class PortfolioHistoryClient(StubClient):
+    """Adds `get_portfolio_history` on top of StubClient's existing stubs --
+    a separate subclass rather than growing StubClient itself, since only
+    these tests care about the shape of a portfolio-history response."""
+
+    def __init__(self, timestamps, equities):
+        super().__init__()
+        self._history = SimpleNamespace(timestamp=timestamps, equity=equities)
+
+    def get_portfolio_history(self, request):
+        return self._history
+
+
+def test_get_equity_history_filters_zero_equity_days():
+    # Pre-funding days report equity as exactly 0.0 -- not a real data
+    # point, and would otherwise wreck the chart's y-axis scale.
+    now = datetime.now(UTC)
+    timestamps = [_epoch(now - timedelta(days=2)), _epoch(now - timedelta(days=1)),
+                  _epoch(now)]
+    equities = [0.0, 10000.0, 10500.0]
+    client = PortfolioHistoryClient(timestamps, equities)
+    broker = AlpacaBroker("k", "s", paper=True, client=client)
+
+    points = broker.get_equity_history(days=30)
+
+    assert len(points) == 2
+    assert all(v > 0 for _, v in points)
+
+
+def test_get_equity_history_respects_days_cutoff():
+    now = datetime.now(UTC)
+    timestamps = [_epoch(now - timedelta(days=40)), _epoch(now - timedelta(days=1))]
+    equities = [9000.0, 10000.0]
+    client = PortfolioHistoryClient(timestamps, equities)
+    broker = AlpacaBroker("k", "s", paper=True, client=client)
+
+    points = broker.get_equity_history(days=30)
+
+    assert len(points) == 1
+    assert points[0][1] == Decimal("10000.0")
+
+
+def test_get_equity_history_raises_on_mismatched_lengths():
+    # zip(..., strict=True) is what's actually doing the guarding here --
+    # this proves it's wired up, not silently truncating to the shorter
+    # list on a malformed response.
+    client = PortfolioHistoryClient([1, 2, 3], [10000.0, 10500.0])
+    broker = AlpacaBroker("k", "s", paper=True, client=client)
+
+    with pytest.raises(ValueError):
+        broker.get_equity_history(days=30)

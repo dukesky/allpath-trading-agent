@@ -13,6 +13,21 @@
 </div>
 {% endif %}
 
+<h2>Equity history</h2>
+<div class="tabs">
+  {% for key, label in range_labels.items() %}
+  <a href="/?range={{ key }}" class="tab-link{% if range == key %} on{% endif %}">{{ label }}</a>
+  {% endfor %}
+</div>
+{% if equity_current is not none %}
+<p>
+  <span style="font-family:var(--mono); font-size:23px; font-weight:500">{{ equity_current | money }}</span>
+  {% if equity_change_str %}<span class="{{ 'up' if equity_up else 'down' }}"> {{ equity_change_str }} ({{ equity_change_pct_str }})</span>{% endif %}
+</p>
+{% endif %}
+<div class="card">{{ equity_svg_markup | svg }}</div>
+{% if equity_since %}<p class="muted" style="font-size:12.5px; margin-top:6px">{{ equity_since }}</p>{% endif %}
+
 <h2>Positions</h2>
 {% if positions %}
 <table>

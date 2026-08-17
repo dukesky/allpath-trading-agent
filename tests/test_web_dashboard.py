@@ -2,11 +2,12 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 
-from allpath_trade.broker.base import Position
+from allpath_trade.broker.base import Account, Position
 from allpath_trade.config import Settings
 from allpath_trade.data.base import Quote
 from allpath_trade.scheduler import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
@@ -68,6 +69,17 @@ def _clear_quote_cache():
     dashboard_route._quote_cache.clear()
     yield
     dashboard_route._quote_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_equity_history_cache():
+    # Same rationale as `_clear_quote_cache` above -- the equity-history
+    # cache is module-level so it survives across requests within a
+    # process, which is the point, but that would make assertions depend on
+    # test order unless cleared between tests.
+    dashboard_route._equity_history_cache.clear()
+    yield
+    dashboard_route._equity_history_cache.clear()
 
 
 @pytest.fixture
@@ -806,3 +818,188 @@ rules: []
     assert elapsed < 1.0
     assert "—" in r.text  # at least the skipped tickers render as a dash
     release.set()
+
+
+# --- Equity history chart (Item 1) ------------------------------------------
+
+class EquityHistoryBroker(FakeBroker):
+    """Canned get_equity_history so route tests don't depend on a real
+    broker call -- 5 ascending points, comfortably enough to render a line
+    regardless of which range's day-count the route computes."""
+
+    def get_equity_history(self, days):
+        base = datetime(2026, 8, 1, tzinfo=UTC)
+        return [(base + timedelta(days=i), Decimal(str(10000 + i * 100)))
+                for i in range(5)]
+
+
+class FailingEquityHistoryBroker(FakeBroker):
+    def get_equity_history(self, days):
+        raise RuntimeError("history unavailable")
+
+
+def test_dashboard_equity_chart_renders_line_for_each_range(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    # The client fixture's own login POST already rendered "/" once (with
+    # the default range and the fixture's original FakeBroker) before this
+    # test's monkeypatch ran, caching an empty history under the default
+    # range's key -- clear it so every range below actually hits the
+    # broker just swapped in above.
+    dashboard_route._equity_history_cache.clear()
+    for key in ("1w", "1m", "ytd", "1y"):
+        body = client.get(f"/?range={key}").text
+        assert "<polyline" in body
+        assert "No history yet" not in body
+
+
+def test_dashboard_equity_chart_range_tabs_mark_active(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/?range=ytd").text
+    assert '<a href="/?range=ytd" class="tab-link on">YTD</a>' in body
+
+
+def test_dashboard_equity_chart_default_range_is_month(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/").text
+    assert '<a href="/?range=1m" class="tab-link on">Month</a>' in body
+
+
+def test_dashboard_equity_chart_invalid_range_falls_back_to_default(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/?range=garbage").text
+    assert '<a href="/?range=1m" class="tab-link on">Month</a>' in body
+
+
+def test_dashboard_equity_chart_broker_failure_shows_placeholder(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", FailingEquityHistoryBroker())
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "No history yet" in r.text
+
+
+def test_dashboard_equity_chart_empty_history_shows_placeholder(client):
+    # Default FakeBroker.get_equity_history inherits the base class's `[]`.
+    body = client.get("/").text
+    assert "No history yet" in body
+
+
+def test_dashboard_equity_chart_shows_current_equity_and_change(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    body = client.get("/?range=1w").text
+    # FakeBroker.get_account().equity is a fixed 10000; history's first
+    # point in a 5-point ascending series is also 10000 -- change is $0.
+    assert "$10,000.00" in body
+
+
+def test_dashboard_equity_chart_is_english_only(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    assert_english_only(client.get("/?range=ytd").text)
+
+
+# --- Important 3: headline direction and chart-line colour must agree ------
+
+class DivergentEquityBroker(EquityHistoryBroker):
+    """Live equity below the history's first point, while the history
+    itself still trends upward -- reproduces Important 3: the headline
+    (live equity vs first history point) and the raw line colour (history's
+    last vs first point) used to be two independent comparisons that could
+    disagree. Chart colour must follow the headline's sign."""
+
+    def get_account(self):
+        return Account(equity=Decimal(9000), cash=Decimal(5000), buying_power=Decimal(9000))
+
+
+def test_dashboard_equity_chart_colour_follows_the_headline_not_the_raw_line(
+        client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", DivergentEquityBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/?range=1w").text
+    # Headline: live equity (9000) - first history point (10000) = -1000 -> down.
+    assert 'class="down"> -$1,000.00' in body
+    # The line itself trends up (last 10400 >= first 10000) -- naive
+    # last-vs-first would paint it green, contradicting the red headline
+    # right above it. It must be red instead.
+    assert 'class="equity-svg down"' in body
+    assert 'class="equity-svg up"' not in body
+
+
+# --- Minor 1: a failed/empty equity-history lookup gets a short cache TTL --
+
+def test_equity_history_cache_retries_a_failure_well_before_the_success_ttl(
+        client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", FailingEquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    client.get("/")
+    ts, history = dashboard_route._equity_history_cache[dashboard_route._DEFAULT_RANGE]
+    assert history == []
+
+    # 31s back is past the 30s failure TTL but nowhere near the 5-minute
+    # success TTL -- a genuine failure must not get to hide behind the long
+    # TTL meant for a working chart.
+    dashboard_route._equity_history_cache[dashboard_route._DEFAULT_RANGE] = (ts - 31, history)
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    body = client.get("/").text
+    assert "<polyline" in body
+
+
+# --- Minor 2: a one-point history hides the period-change headline ---------
+
+class OnePointEquityHistoryBroker(FakeBroker):
+    def get_equity_history(self, days):
+        return [(datetime(2026, 8, 1, tzinfo=UTC), Decimal(10000))]
+
+
+def test_dashboard_equity_chart_one_point_history_hides_the_change_headline(
+        client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", OnePointEquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/").text
+    # Not enough points for equity_svg to draw a line -- placeholder chart.
+    assert "No history yet" in body
+    # A single point has nothing to compare against; the "current equity +
+    # period change" headline above the chart must not show a number over
+    # what is, visually, an empty chart.
+    assert 'font-size:23px; font-weight:500">$10,000.00</span>' not in body
+
+
+# --- Minor 4: "since <date>" caption under the chart ------------------------
+
+def test_dashboard_equity_chart_shows_since_caption_when_history_exists(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/").text
+    first_et = datetime(2026, 8, 1, tzinfo=UTC).astimezone(ZoneInfo("America/New_York"))
+    assert f"since {first_et.strftime('%b %d, %Y')}" in body
+
+
+def test_dashboard_equity_chart_no_since_caption_when_history_is_empty(client):
+    body = client.get("/").text
+    assert "since " not in body
+
+
+# --- Minor 11: YTD anchor uses the ET calendar date, not UTC's -------------
+
+def test_range_days_ytd_anchors_to_et_calendar_date_not_utc():
+    # 2026-01-01 00:30 UTC is still 2025-12-31 evening in ET (UTC-5 in
+    # January) -- anchoring YTD's "start of year" to the UTC calendar date
+    # treats this instant as day 1 of 2026 (a 1-day YTD window); the ET
+    # calendar -- the same one the reports page's Today/This week/This
+    # month chips already anchor to -- still considers it the last day of
+    # 2025, giving a YTD window of almost the whole year instead.
+    now = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
+    assert dashboard_route._range_days("ytd", now) == 364
+
+
+# --- Minor 12: the `?range=` query param no longer shadows the `range`
+# builtin inside the route function (renamed to `range_key`) -- the URL
+# contract itself (`?range=...`) is unchanged, verified by every other
+# equity-chart test above still passing with plain `?range=...` URLs. -------
+
+def test_dashboard_range_query_param_name_is_unchanged(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/?range=1y").text
+    assert '<a href="/?range=1y" class="tab-link on">Year</a>' in body

@@ -36,5 +36,15 @@ class ReportStore:
         return list(self._conn.execute(
             "SELECT * FROM reports ORDER BY date DESC LIMIT ?", (limit,)))
 
+    def list_between(self, start: str, end: str) -> list[sqlite3.Row]:
+        """Rows with `date` inclusively between `start` and `end`
+        (`YYYY-MM-DD` strings), newest first -- callers (web/routes/reports.py's
+        `?from=&to=` filter) pass already-validated dates, and `YYYY-MM-DD`
+        sorts identically as a string or as a real date, so no date parsing
+        is needed here."""
+        return list(self._conn.execute(
+            "SELECT * FROM reports WHERE date >= ? AND date <= ? ORDER BY date DESC",
+            (start, end)))
+
     def exists(self, date: str) -> bool:
         return self.get(date) is not None

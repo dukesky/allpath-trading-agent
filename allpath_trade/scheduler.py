@@ -40,6 +40,19 @@ def ts_to_et_date(ts_iso: str) -> str | None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(ET).date().isoformat()
 
+
+def today_et_date(now: datetime | None = None) -> str:
+    """Today's ET calendar date (`YYYY-MM-DD`) -- the same "convert to ET,
+    take the date" rule as `ts_to_et_date` above, just anchored to `now`
+    (real clock by default) instead of a stored row's timestamp. Used by
+    web/routes/reports.py's quick date-filter chips (Today/This
+    week/This month), which need "today" in the same calendar the reports
+    themselves are keyed by, not the server process's local/UTC date."""
+    now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    return now.astimezone(ET).date().isoformat()
+
 # Stable id for the interval job build_jobs registers, so a later settings
 # save can find and reschedule the same job instead of only being able to
 # add a second one alongside it (see reschedule_sentinel_job below).

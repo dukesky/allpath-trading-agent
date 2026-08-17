@@ -3,6 +3,19 @@
 {% block content %}
 <h1>Reports</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<form method="get" action="/reports" class="row" style="gap:8px; margin-bottom:14px">
+  <input type="date" name="date" value="{{ date_filter }}" style="width:auto">
+  <button type="submit">Go</button>
+</form>
+<div class="tabs">
+  <a href="/reports?date={{ today }}" class="tab-link{% if date_filter == today %} on{% endif %}">Today</a>
+  <a href="/reports?from={{ week_start }}&amp;to={{ today }}" class="tab-link{% if from_filter == week_start and to_filter == today %} on{% endif %}">This week</a>
+  <a href="/reports?from={{ month_start }}&amp;to={{ today }}" class="tab-link{% if from_filter == month_start and to_filter == today %} on{% endif %}">This month</a>
+  <a href="/reports" class="tab-link{% if not date_filter and not from_filter and not to_filter %} on{% endif %}">All</a>
+</div>
+{% if notice %}<p class="muted">{{ notice }}</p>{% endif %}
+
 {% for r in reports %}
 <a class="card report-card" href="/reports/{{ r['date'] }}">
   <div class="row">
@@ -16,6 +29,8 @@
   {% endif %}
 </a>
 {% else %}
+{% if not notice %}
 <p class="muted">No reports yet — the daily reflection runs after market close on trading days.</p>
+{% endif %}
 {% endfor %}
 {% endblock %}

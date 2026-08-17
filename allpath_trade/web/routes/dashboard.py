@@ -3,19 +3,20 @@ from __future__ import annotations
 import concurrent.futures
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from allpath_trade.app import Components
-from allpath_trade.broker.base import Position
+from allpath_trade.broker.base import Broker, Position
 from allpath_trade.data.base import DataSource, Quote
-from allpath_trade.scheduler import is_market_hours
+from allpath_trade.scheduler import is_market_hours, today_et_date
 from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
+from allpath_trade.web.charts import equity_since_caption, equity_svg, signed_money, signed_pct
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -85,6 +86,89 @@ def _cached_quote(data: DataSource, ticker: str) -> Quote | None:
 # lookup) need this same cached lookup and must not reach across module
 # boundaries into a name prefixed `_private`.
 cached_quote = _cached_quote
+
+
+# Dashboard equity-chart range tabs. Values are the `?range=` query string;
+# `_RANGE_DAYS` maps each to the lookback window passed to
+# Broker.get_equity_history -- everything except "ytd" is a fixed count,
+# "ytd" is computed per-request in `_range_days` below since the right day
+# count changes every calendar day.
+_RANGE_LABELS = {"1w": "Week", "1m": "Month", "ytd": "YTD", "1y": "Year"}
+_DEFAULT_RANGE = "1m"
+_RANGE_DAYS = {"1w": 7, "1m": 30, "1y": 365}
+
+
+def _range_days(range_key: str, now: datetime) -> int:
+    if range_key == "ytd":
+        # Anchored to `today_et_date` -- the same ET calendar "today" the
+        # reports page's Today/This week/This month chips already use --
+        # not `now`'s own (UTC) calendar date. Late evening ET is already
+        # past midnight UTC for several hours a day; anchoring to UTC would
+        # occasionally compute YTD as "since yesterday" while ET, and every
+        # other "what day is it" computation in this app, still considers it
+        # the previous calendar day.
+        today = date.fromisoformat(today_et_date(now))
+        jan1 = date(today.year, 1, 1)
+        return max((today - jan1).days, 1)
+    return _RANGE_DAYS.get(range_key, _RANGE_DAYS[_DEFAULT_RANGE])
+
+
+_EQUITY_HISTORY_CACHE_TTL_SECONDS = 300  # 5 min -- same reasoning as the quote cache
+# A failed (or empty) lookup gets a much shorter TTL than a working one -- a
+# quote failure degrades to a quiet "—" that blends into a page full of other
+# text, but a failed equity history degrades to a large, obvious empty chart
+# card; holding that up for the full 5 minutes is far more conspicuous than
+# the quote cache's equivalent failure, so a stale broker hiccup shouldn't
+# get to keep the chart blank nearly as long.
+_EQUITY_HISTORY_FAILURE_TTL_SECONDS = 30
+# Module-level, keyed by range -- same "survive across requests, not just
+# within one render" rationale as `_quote_cache` above. A single-process app
+# talks to one broker, so the range alone is a sufficient key.
+_equity_history_cache: dict[str, tuple[float, list]] = {}
+
+
+def _cached_equity_history(broker: Broker, range_key: str, days: int) -> list:
+    now = time.monotonic()
+    cached = _equity_history_cache.get(range_key)
+    if cached is not None:
+        cached_at, cached_history = cached
+        # An empty cached result reads as "the last attempt failed (or a
+        # genuinely empty history)" either way -- both get the short TTL, so
+        # a real failure retries promptly instead of hiding behind the long
+        # success TTL meant for a working chart.
+        ttl = (_EQUITY_HISTORY_CACHE_TTL_SECONDS if cached_history
+               else _EQUITY_HISTORY_FAILURE_TTL_SECONDS)
+        if now - cached_at < ttl:
+            return cached_history
+    try:
+        history = _with_timeout(lambda: broker.get_equity_history(days))
+    except Exception:  # noqa: BLE001 — a history failure must render the placeholder, never an error page
+        history = []
+    _equity_history_cache[range_key] = (now, history)
+    return history
+
+
+def equity_period_summary(history: list, account_equity) -> dict:
+    """Pure function -- the "current equity big + period change" line above
+    the chart. `account_equity` (the broker's real-time balance, already
+    fetched for the metrics cards) is used as "current", not the equity
+    history's own last point, since Alpaca's portfolio-history series is
+    end-of-day while the account call is live; the period baseline is still
+    the history's first point in range. Fewer than two history points --
+    empty (no history, or a broker/timeout failure already degraded to
+    `[]`), or exactly one point with nothing else to compare it against --
+    means there is nothing to show a period change against, so this renders
+    nothing. `equity_svg` also draws no line below two points (a muted
+    placeholder instead), so this keeps the headline and the chart agreeing
+    about when there's "enough" history to say anything at all -- a
+    one-point account otherwise showed a real change figure sitting right
+    above what is, visually, an empty chart."""
+    if len(history) < 2 or account_equity is None:
+        return {"current": None, "change": None, "change_pct": None}
+    first_equity = history[0][1]
+    change = account_equity - first_equity
+    change_pct = float(change / first_equity * 100) if first_equity else None
+    return {"current": account_equity, "change": change, "change_pct": change_pct}
 
 
 def order_price_context(data: DataSource, ticker: str, snapshot: dict | None,
@@ -308,8 +392,18 @@ def notice_redirect(target: str, message: str) -> RedirectResponse:
 
 
 @router.get("/", response_class=HTMLResponse)
-def dashboard(request: Request) -> HTMLResponse:
+def dashboard(request: Request,
+              range_key: str = Query(_DEFAULT_RANGE, alias="range")) -> HTMLResponse:
+    # Renamed from the query param's own name (`range`) -- that shadows the
+    # `range` builtin for the whole function body; `alias="range"` keeps the
+    # `?range=` URL contract unchanged while the Python-side name doesn't.
     c = request.app.state.holder.get()
+
+    # Whitelist, not a 400 -- an unrecognized `?range=` (a stale bookmark, a
+    # hand-edited URL) just falls back to the default tab rather than
+    # breaking the page.
+    if range_key not in _RANGE_LABELS:
+        range_key = _DEFAULT_RANGE
 
     # Computed first, before either the broker calls or the strategy/quote
     # loop below -- this line's entire purpose is answering "is my system
@@ -337,6 +431,20 @@ def dashboard(request: Request) -> HTMLResponse:
         broker_error = f"Broker unavailable: timed out after {BROKER_TIMEOUT_SECONDS}s"
     except Exception as exc:  # noqa: BLE001 — a broker outage must not blank the page
         broker_error = f"Broker unavailable: {exc}"
+
+    days = _range_days(range_key, _utcnow())
+    equity_history = _cached_equity_history(c.broker, range_key, days)
+    equity_summary = equity_period_summary(
+        equity_history, account.equity if account is not None else None)
+    # None (not a plain bool) when there's no headline to show at all
+    # (equity_summary["change"] is None) -- passing a forced False into
+    # `equity_svg` in that case would paint the chart "down" with no
+    # headline sign to actually justify it; None instead falls through to
+    # equity_svg's own last-vs-first fallback. When there IS a headline,
+    # this is the one comparison that then decides both the headline's sign
+    # AND the chart line's colour (Important 3), so they can never disagree.
+    equity_up_for_chart = (None if equity_summary["change"] is None
+                           else equity_summary["change"] >= 0)
 
     errors: list[str] = []
     strategies = c.strategies.load_all(status=None, errors=errors)
@@ -366,4 +474,13 @@ def dashboard(request: Request) -> HTMLResponse:
         "broker_error": broker_error, "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": c.journal.recent(limit=8),
         "sentinel_status": sentinel_status, "market_open": market_open,
+        "range": range_key, "range_labels": _RANGE_LABELS,
+        "equity_svg_markup": equity_svg(equity_history, up=equity_up_for_chart),
+        "equity_since": equity_since_caption(equity_history),
+        "equity_current": equity_summary["current"],
+        "equity_change_str": (signed_money(equity_summary["change"])
+                              if equity_summary["change"] is not None else None),
+        "equity_change_pct_str": (signed_pct(equity_summary["change_pct"])
+                                  if equity_summary["change_pct"] is not None else None),
+        "equity_up": bool(equity_summary["change"] is not None and equity_summary["change"] >= 0),
         **nav_context(c)})

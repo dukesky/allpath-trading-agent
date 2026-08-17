@@ -98,3 +98,15 @@ class Broker(ABC):
 
     @abstractmethod
     def cancel_order(self, order_id: str) -> None: ...
+
+    def get_equity_history(self, days: int) -> list[tuple[datetime, Decimal]]:
+        """Equity curve for the last `days` days, oldest first, empty
+        (equity == 0) days already filtered out. Deliberately NOT
+        `@abstractmethod` -- unlike every other Broker method above, dozens
+        of `FakeBroker` subclasses across the test suite construct today
+        without implementing this, and this is a new addition (the
+        dashboard equity chart); forcing a stub onto every one of them just
+        to keep instantiating would be a lot of churn for a feature that
+        already degrades cleanly ("No history yet") on an empty list.
+        AlpacaBroker overrides this for real data."""
+        return []

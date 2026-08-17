@@ -27,7 +27,14 @@
        placeholder="provider/model-slug" disabled style="display:none">
 {% endmacro %}
 
+<div class="tabs" id="settings-tabs">
+  {% for key, label in tabs %}
+  <a href="#{{ key }}" class="tab-link{% if active_tab == key %} on{% endif %}" data-tab="{{ key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
 <form method="post" action="/settings">
+  <section data-panel="model"{% if active_tab != 'model' %} hidden{% endif %}>
   <h2>Model</h2>
   <div class="card">
     <label>Provider</label>
@@ -47,7 +54,9 @@
     <label>Memory model</label>{{ model_select('memory_model', s.memory_model, model_options) }}
     <p class="hint">Changing provider and saving refreshes this list on the next visit. Pick "Custom…" to type a slug that isn't in the list.</p>
   </div>
+  </section>
 
+  <section data-panel="brokerage"{% if active_tab != 'brokerage' %} hidden{% endif %}>
   <h2>Brokerage</h2>
   <div class="card">
     <p class="muted">Alpaca · {{ 'paper' if s.alpaca_paper else 'LIVE' }}</p>
@@ -57,8 +66,10 @@
     <input name="alpaca_secret_key" type="password" placeholder="Replace" autocomplete="off">
     <p class="hint">Switching to live trading is not available here. Edit <code>ALPACA_PAPER</code> in <code>.env</code> — connecting real money should take a deliberate step.</p>
   </div>
+  </section>
 
-  <div class="row section-header" style="margin:34px 0 14px">
+  <section data-panel="email"{% if active_tab != 'email' %} hidden{% endif %}>
+  <div class="row section-header" style="margin:0 0 14px">
     <h2 style="margin:0">Email notifications</h2>
     <details class="help-toggle">
       <summary aria-label="Setup help">?</summary>
@@ -106,8 +117,10 @@
     </div>
     <div id="email-test-result"></div>
   </div>
+  </section>
 
-  <div class="row section-header" style="margin:34px 0 14px">
+  <section data-panel="push"{% if active_tab != 'push' %} hidden{% endif %}>
+  <div class="row section-header" style="margin:0 0 14px">
     <h2 style="margin:0">Push notifications</h2>
     <details class="help-toggle">
       <summary aria-label="Setup help">?</summary>
@@ -133,8 +146,10 @@
     </div>
     <div id="push-test-result"></div>
   </div>
+  </section>
 
-  <div class="row section-header" style="margin:34px 0 14px">
+  <section data-panel="telegram"{% if active_tab != 'telegram' %} hidden{% endif %}>
+  <div class="row section-header" style="margin:0 0 14px">
     <h2 style="margin:0">Telegram</h2>
     <details class="help-toggle">
       <summary aria-label="Setup help">?</summary>
@@ -160,7 +175,9 @@
     <input name="telegram_bot_token" type="password" placeholder="Replace" autocomplete="off">
     <p class="hint">{{ telegram_status }}</p>
   </div>
+  </section>
 
+  <section data-panel="sentinel"{% if active_tab != 'sentinel' %} hidden{% endif %}>
   <h2>Sentinel and memory</h2>
   <div class="card">
     <label>Check interval (minutes)</label><input name="sentinel_interval_minutes" value="{{ s.sentinel_interval_minutes }}" type="number">
@@ -179,7 +196,9 @@
        safety net in their browser as a side effect. #}
     <label class="check"><input type="checkbox" name="consolidate_after_chat" value="true" {{ 'checked' if s.consolidate_after_chat }}> Consolidate after each terminal chat session</label>
   </div>
+  </section>
 
+  <section data-panel="access"{% if active_tab != 'access' %} hidden{% endif %}>
   <h2>Access</h2>
   <div class="card">
     <p class="muted">Listening on {{ s.web_host }}:{{ s.web_port }}</p>
@@ -193,21 +212,92 @@
     listening on that address too, not just 127.0.0.1). Leave this blank
     and notifications never include a link, which is the default.</p>
   </div>
+  </section>
 
   <div class="row" style="margin-top:18px">
     <button class="primary" type="submit">Save settings</button>
   </div>
 </form>
 
-<div class="row" style="margin-top:12px">
-  <form method="post" action="/settings/reset-token"><button class="danger" type="submit">Reset access token</button></form>
-  <form method="post" action="/settings/telegram/unpair"
-        onsubmit="return confirm('Unpair Telegram? This chat will stop receiving messages until you pair again with /start <your web token>. Continue?')">
-    <button class="danger" type="submit">Unpair Telegram</button>
-  </form>
+{# Reset token / Unpair Telegram are deliberately their own <form>s, outside
+   the settings form above -- neither is part of "Save settings" (each POSTs
+   its own endpoint immediately, no draft state to lose), and a <form>
+   cannot be nested inside another one. Each is wrapped in its own
+   `[data-panel]` container so the same tab-switcher script that shows/hides
+   the sections above also shows/hides these -- Access/Telegram each end up
+   with two same-keyed `[data-panel]` elements (the section inside the form,
+   and this div), which the script's generic `[data-panel]` selector (not
+   scoped to `section`) toggles together. #}
+<div data-panel="telegram"{% if active_tab != 'telegram' %} hidden{% endif %}>
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="/settings/telegram/unpair"
+          onsubmit="return confirm('Unpair Telegram? This chat will stop receiving messages until you pair again with /start <your web token>. Continue?')">
+      <button class="danger" type="submit">Unpair Telegram</button>
+    </form>
+  </div>
+</div>
+<div data-panel="access"{% if active_tab != 'access' %} hidden{% endif %}>
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="/settings/reset-token">
+      <button class="danger" type="submit">Reset access token</button>
+    </form>
+  </div>
 </div>
 
 <script>
+// Client-side tab switching, not `?tab=` navigation: every panel stays in
+// the DOM inside the one settings form at all times (the hard product
+// requirement is a single form / single Save), so switching tabs must never
+// reload the page -- that would discard whatever the user has typed in
+// every *other* section since the last save. The active tab is tracked in
+// the URL hash purely so reload/deep-link (e.g. a link straight to
+// "#telegram") lands on the right panel; it plays no part in what gets
+// submitted.
+(function () {
+  var panels = document.querySelectorAll('[data-panel]');
+  var links = document.querySelectorAll('#settings-tabs .tab-link');
+
+  function showTab(key) {
+    var found = false;
+    panels.forEach(function (p) {
+      var match = p.getAttribute('data-panel') === key;
+      p.hidden = !match;
+      found = found || match;
+    });
+    if (!found && panels.length) {
+      panels[0].hidden = false;
+      key = panels[0].getAttribute('data-panel');
+    }
+    links.forEach(function (a) {
+      a.classList.toggle('on', a.getAttribute('data-tab') === key);
+    });
+  }
+
+  links.forEach(function (a) {
+    a.addEventListener('click', function () {
+      // The href="#key" navigation still runs (so back/forward and
+      // copy-link keep working); this only adds the panel swap on top.
+      showTab(a.getAttribute('data-tab'));
+    });
+  });
+
+  // A hash in the URL (a reload, or a deep link) wins over whatever tab the
+  // server rendered as active; otherwise keep the server's choice -- on a
+  // validation-error redisplay that is deliberately the tab holding the
+  // first invalid field, not always "Model".
+  var initialHash = window.location.hash.replace('#', '');
+  if (initialHash) {
+    showTab(initialHash);
+  }
+
+  // Back/Forward moves between hash entries without a page reload, so the
+  // click handler above never fires for it -- listen for the hash itself
+  // changing instead, or the panel would go stale on Back/Forward.
+  window.addEventListener('hashchange', function () {
+    showTab(window.location.hash.replace('#', ''));
+  });
+})();
+
 // Exactly one of the select/text pair for a given model field is ever
 // "live" (submitted under that field's name) at a time. The <select>'s
 // `name` attribute -- not `disabled` -- is what's toggled off while

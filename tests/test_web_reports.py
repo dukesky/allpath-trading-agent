@@ -155,3 +155,116 @@ def test_nav_link_present(client):
     body = client.get("/").text
     assert 'href="/reports"' in body
     assert ">Reports<" in body
+
+
+# --- Item 3: date filter bar -------------------------------------------------
+
+def test_date_jump_redirects_straight_to_detail_when_report_exists(client):
+    add_report(client, date="2026-08-10")
+    r = client.get("/reports?date=2026-08-10", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/reports/2026-08-10"
+
+
+def test_date_jump_shows_no_report_notice_when_none_exists(client):
+    r = client.get("/reports?date=2026-08-11")
+    assert r.status_code == 200
+    assert "No report for 2026-08-11" in r.text
+
+
+def test_date_jump_invalid_date_shows_notice_not_500(client):
+    r = client.get("/reports?date=not-a-date")
+    assert r.status_code == 400
+    assert "Invalid date" in r.text
+
+
+def test_date_jump_path_traversal_attempt_is_rejected_not_500(client):
+    r = client.get("/reports?date=..%2f..%2fetc")
+    assert r.status_code == 400
+    assert "Invalid date" in r.text
+
+
+def test_range_filter_shows_only_reports_in_range(client):
+    add_report(client, date="2026-08-01")
+    add_report(client, date="2026-08-10")
+    add_report(client, date="2026-08-20")
+    body = client.get("/reports?from=2026-08-05&to=2026-08-15").text
+    # `<strong>{date}</strong>` is specifically the report-card date, not a
+    # chip href -- today's date (fixed by the harness at 2026-08-17) makes
+    # the "This month" chip's own href legitimately contain "2026-08-01",
+    # so a bare substring check on the full body would false-positive.
+    assert "<strong>2026-08-10</strong>" in body
+    assert "<strong>2026-08-01</strong>" not in body
+    assert "<strong>2026-08-20</strong>" not in body
+
+
+def test_range_filter_invalid_bound_shows_notice_not_500(client):
+    r = client.get("/reports?from=garbage&to=2026-08-15")
+    assert r.status_code == 400
+    assert "Invalid date range" in r.text
+
+
+def test_range_filter_open_ended_from_only(client):
+    add_report(client, date="2026-08-01")
+    add_report(client, date="2026-08-20")
+    body = client.get("/reports?from=2026-08-10").text
+    assert "<strong>2026-08-20</strong>" in body
+    assert "<strong>2026-08-01</strong>" not in body
+
+
+def test_all_chip_link_present_and_clears_filter(client):
+    add_report(client, date="2026-08-10")
+    body = client.get("/reports?date=2026-08-11").text
+    assert 'href="/reports"' in body
+
+
+def test_quick_chips_render_today_this_week_this_month_all(client):
+    body = client.get("/reports").text
+    assert ">Today</a>" in body
+    assert ">This week</a>" in body
+    assert ">This month</a>" in body
+    assert ">All</a>" in body
+
+
+def test_date_filter_pages_are_english_only(client):
+    add_report(client, date="2026-08-10")
+    assert_english_only(client.get("/reports").text)
+    assert_english_only(client.get("/reports?date=2026-08-11").text)
+    assert_english_only(client.get("/reports?date=not-a-date").text)
+    assert_english_only(client.get("/reports?from=2026-08-01&to=2026-08-15").text)
+
+
+# --- Minor 9: from > to is swapped (lenient), and an empty filtered range
+# gets its own notice instead of the fresh-install copy --------------------
+
+def test_range_filter_from_after_to_is_swapped_not_rejected(client):
+    add_report(client, date="2026-08-10")
+    r = client.get("/reports?from=2026-08-15&to=2026-08-01")
+    assert r.status_code == 200
+    assert "<strong>2026-08-10</strong>" in r.text
+    assert "Invalid date range" not in r.text
+
+
+def test_range_filter_empty_result_shows_range_notice_not_new_user_copy(client):
+    add_report(client, date="2026-08-10")
+    body = client.get("/reports?from=2026-01-01&to=2026-01-31").text
+    assert "No reports between 2026-01-01 and 2026-01-31" in body
+    assert "No reports yet" not in body
+
+
+def test_range_filter_open_ended_empty_result_shows_directional_notice(client):
+    add_report(client, date="2026-08-01")
+    body = client.get("/reports?from=2026-09-01").text
+    assert "No reports on or after 2026-09-01" in body
+    assert "No reports yet" not in body
+
+
+# --- Minor 10: _DATE_RE only matches ASCII digits --------------------------
+
+def test_date_re_matches_only_ascii_digits():
+    from allpath_trade.web.routes.reports import _DATE_RE
+    assert _DATE_RE.match("2026-08-17")
+    # Arabic-Indic digits -- Python's bare `\d` matches these too without
+    # `re.ASCII`, which would let a string that merely *looks* like
+    # `YYYY-MM-DD` through this gate.
+    assert _DATE_RE.match("٢٠٢٦-٠٨-١٧") is None

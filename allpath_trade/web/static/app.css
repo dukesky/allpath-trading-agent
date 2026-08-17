@@ -274,7 +274,13 @@ code { font-family:var(--mono); }
    underline on the active tab -- two cheap, complementary signals instead
    of the color-only distinction this replaces, so "which tab am I on"
    reads at a glance even at a glance. */
-.tabs { display:flex; gap:2px; border-bottom:1px solid var(--line); margin:22px 0 24px; }
+/* overflow-x:auto lets the settings page's 7-tab bar (added alongside
+   memory's original 5) scroll horizontally on a narrow phone instead of
+   wrapping or overflowing the viewport -- flex-wrap is deliberately not
+   used instead, since a wrapped second row would push the active-tab
+   underline out of the single-row baseline this bar is designed around. */
+.tabs { display:flex; gap:2px; border-bottom:1px solid var(--line); margin:22px 0 24px;
+  overflow-x:auto; -webkit-overflow-scrolling:touch; }
 .tab-link { flex:0 0 auto; padding:9px 14px; font-size:14px; font-weight:500;
   color:var(--muted); border-bottom:2px solid transparent; border-radius:var(--radius-sm) var(--radius-sm) 0 0;
   cursor:pointer; text-decoration:none; margin-bottom:-1px;
@@ -282,6 +288,22 @@ code { font-family:var(--mono); }
 .tab-link:hover { color:var(--text); background:var(--surface-2); }
 .tab-link.on { color:var(--text); font-weight:600; border-bottom-color:var(--accent);
   background:var(--surface-2); }
+
+/* --- Equity history chart (charts.py's equity_svg) ----------------------
+   CSS `color` has no effect on SVG <text> -- it needs `fill`, and the
+   initial fill is black, which used to render every money label (and the
+   "No history yet" placeholder) invisibly black-on-near-black against the
+   DEFAULT (dark) theme. All colour for the chart -- text, line, and area
+   fill -- is driven from here, keyed off the `.equity-svg`/`.up`/`.down`/
+   `.empty` classes charts.py puts on the outer <svg>, rather than from
+   `var(--up)`/`var(--down)` inside the SVG's own presentation attributes:
+   real CSS custom-property resolution, verified in both themes, instead of
+   trusting that a `fill="var(--x)"` attribute behaves identically to one. */
+.equity-svg text { fill: var(--muted); }
+.equity-svg.up polyline { stroke: var(--up); }
+.equity-svg.up .area { fill: var(--up-soft); }
+.equity-svg.down polyline { stroke: var(--down); }
+.equity-svg.down .area { fill: var(--down-soft); }
 
 /* --- Dashboard strategy cards ------------------------------------------
    Signature detail: each key-level chip is tinted by what it actually
