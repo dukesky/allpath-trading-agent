@@ -181,6 +181,25 @@ def test_draft_strategy_web_mode_queues_new_strategy(tmp_path):
     assert store.versions("new") == []
 
 
+def test_draft_strategy_web_mode_new_strategy_floors_version_at_one(tmp_path):
+    # Minor 1: a new-strategy draft has no `old_text` to bump against (the
+    # `if old_text:` version-bump block never runs), so an LLM-drafted
+    # `version: 0` used to sail straight into the queued `new_yaml`
+    # unchanged -- approving it would then hit the applier's own "version
+    # must be a positive integer" gate (strategy/apply.py) forever, with no
+    # way for the user to fix it short of re-drafting from scratch.
+    reg, _store, queue = make_web(tmp_path)
+    zero_version = GOOD.replace("version: 1", "version: 0")
+
+    out = call(reg, "draft_strategy", strategy_id="new", yaml_text=zero_version, reason="init")
+
+    assert "declined" not in out
+    row = queue.list("pending")[0]
+    snapshot = json.loads(row["snapshot"])
+    assert "version: 1" in snapshot["new_yaml"]
+    assert "version: 0" not in snapshot["new_yaml"]
+
+
 def test_draft_strategy_web_mode_queues_revision_of_existing_strategy(tmp_path):
     reg, store, queue = make_web(tmp_path)
     (tmp_path / "strategies" / "existing.yaml").write_text(GOOD)

@@ -36,8 +36,36 @@
    ran, never on a plain GET, so a page reload never renders a past turn's
    tools as if live. #}
 {% if activity %}<div class="activity">{{ activity | join(' · ') }}</div>{% endif %}
+{# This loop is filtered by `source == 'chat'`, NOT by `kind` -- any new
+   pending kind that can carry source='chat' MUST get an explicit branch
+   here, or it silently inherits whichever branch happens to match first.
+   Important 1 (chat-strategy-proposals review): a strategy_revision row
+   started arriving with source='chat' and fell straight into the
+   order-approval card below -- a bare, un-warned, diff-less Approve
+   button for a strategy file write. #}
 {% for id, item in pending.items() %}
-  {% if item['source'] == 'chat' %}
+  {% if item['source'] == 'chat' and item['kind'] == 'strategy_revision' %}
+  {# No inline approve/reject here -- a strategy write needs the diff,
+     staleness check, and confirm() dialog that only /reviews renders
+     (_review_card.html). This card is a pointer to that surface, not a
+     second, weaker way to approve the same row. #}
+  <div class="card" style="margin:12px 0">
+    <div class="row">
+      <strong>{{ 'new strategy' if item['is_new'] else 'revise strategy' }} · {{ item['ticker'] }}</strong>
+      <span style="margin-left:auto" class="muted">#{{ id }}</span>
+    </div>
+    <p class="muted" style="font-size:13px;margin:8px 0">
+      Strategy draft #{{ id }} is waiting for your review —
+      <a href="/reviews">review it on the Reviews page</a>.
+    </p>
+    {% if item['auth_becomes_auto'] %}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal sets authorization: auto — once approved, hard rules can place orders without asking you.</p>
+    {% endif %}
+    {% if item['status_regresses'] %}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
+    {% endif %}
+  </div>
+  {% elif item['source'] == 'chat' %}
   <div class="card" style="margin:12px 0">
     <div class="row">
       <strong>Waiting for your approval</strong>

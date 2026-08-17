@@ -88,9 +88,22 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                     doc = doc.model_copy(update={"version": current.version + 1})
             except StrategyValidationError:
                 pass  # unreadable current file: keep drafted version
+        # Minor 1: floor at draft time, same silent-bump design as the
+        # current-version bump above. Without this, a new-strategy draft
+        # (is_new -- no `old_text` to bump against) or a repair draft
+        # against an unreadable current file (the `except` above, which
+        # deliberately keeps the drafted version rather than guessing) can
+        # carry `version: 0` (or an omitted/negative one) straight into
+        # `new_text` below. The applier's own gate (strategy/apply.py) then
+        # rejects every approval attempt with "version must be a positive
+        # integer" -- the row queues, can never be approved, and bounces
+        # back to pending forever with no way for the user to fix it short
+        # of re-drafting from scratch.
+        if doc.version < 1:
+            doc = doc.model_copy(update={"version": 1})
         # The version written into `new_text` below is the FINAL one (after
-        # the bump above) in both modes, so a queued diff shows what will
-        # actually land if approved, not what was originally typed.
+        # the bump/floor above) in both modes, so a queued diff shows what
+        # will actually land if approved, not what was originally typed.
         new_text = yaml.safe_dump(doc.model_dump(mode="json"), sort_keys=False,
                                   allow_unicode=True)
         diff = "".join(difflib.unified_diff(
