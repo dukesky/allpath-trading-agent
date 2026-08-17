@@ -18,8 +18,12 @@ router = APIRouter()
 # "../../etc" would reach ReportStore.get as a raw SQL parameter (safe from
 # injection, since it's bound, but there is no reason to let a malformed
 # value past the point where it obviously can't ever match a real ET
-# calendar date).
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# calendar date). `re.ASCII` so `\d` matches only the ASCII digits 0-9 --
+# without it, Python's `\d` also matches non-ASCII decimal digits (e.g.
+# Arabic-Indic ٠-٩), which would let a string that merely *looks* like
+# `YYYY-MM-DD` through this gate and on to `date.fromisoformat`/ReportStore
+# as something that was never actually a valid calendar date.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$", re.ASCII)
 
 # Caps how much of a tool call's compacted `k=v, k=v` argument text lands in
 # the transcript one-liner -- an arg like a full strategy YAML string would
@@ -126,7 +130,26 @@ def index(request: Request, date: str = "",
             status_code = 400
             reports = c.reports.list()
         else:
-            reports = c.reports.list_between(from_ or "0000-01-01", to or "9999-12-31")
+            start, end = from_ or "0000-01-01", to or "9999-12-31"
+            if from_ and to and start > end:
+                # Lenient, not a 400 -- bounds typed backwards ("to" before
+                # "from") has an obvious intended meaning; swapping them
+                # shows the user their own range instead of bouncing a plain
+                # typo back with an error.
+                start, end = end, start
+            reports = c.reports.list_between(start, end)
+            if not reports:
+                # Distinct from the "No reports yet" copy reports.html shows
+                # on a genuinely fresh install (its empty-loop fallback) --
+                # an empty *filtered* result must say so explicitly, or a
+                # user who filtered to a quiet stretch reads the new-user
+                # copy and wrongly concludes reflection has never run.
+                if from_ and to:
+                    notice = f"No reports between {from_} and {to}"
+                elif from_:
+                    notice = f"No reports on or after {from_}"
+                else:
+                    notice = f"No reports on or before {to}"
     else:
         reports = c.reports.list()
 

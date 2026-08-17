@@ -289,6 +289,13 @@
   if (initialHash) {
     showTab(initialHash);
   }
+
+  // Back/Forward moves between hash entries without a page reload, so the
+  // click handler above never fires for it -- listen for the hash itself
+  // changing instead, or the panel would go stale on Back/Forward.
+  window.addEventListener('hashchange', function () {
+    showTab(window.location.hash.replace('#', ''));
+  });
 })();
 
 // Exactly one of the select/text pair for a given model field is ever

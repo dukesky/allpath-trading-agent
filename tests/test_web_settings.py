@@ -948,3 +948,22 @@ def test_settings_test_buttons_still_work_inside_their_hidden_panels(client, mon
         "smtp_host": "smtp.example.com", "notify_to": "me@example.com"})
     assert r.status_code == 200
     assert "Test email sent" in r.text
+
+
+# --- Minor 5: FIELD_TO_TAB must cover every configurable field -------------
+
+def test_field_to_tab_covers_exactly_every_plain_boolean_and_secret_field():
+    # _error_tab falls back to DEFAULT_TAB for any field this map doesn't
+    # know about -- a field added to one of the three lists below without a
+    # matching FIELD_TO_TAB entry would silently reopen "Model" on its own
+    # validation error instead of the tab the field actually lives on.
+    all_fields = set(settings_route.PLAIN_FIELDS) | set(settings_route.BOOLEAN_FIELDS) \
+        | set(settings_route.SECRET_FIELDS)
+    assert set(settings_route.FIELD_TO_TAB) == all_fields
+
+
+# --- Minor 8: Back/Forward through the hash history must move the panel ----
+
+def test_settings_page_wires_a_hashchange_listener_for_back_forward(client):
+    body = client.get("/settings").text
+    assert "addEventListener('hashchange'" in body

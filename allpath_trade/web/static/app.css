@@ -289,6 +289,22 @@ code { font-family:var(--mono); }
 .tab-link.on { color:var(--text); font-weight:600; border-bottom-color:var(--accent);
   background:var(--surface-2); }
 
+/* --- Equity history chart (charts.py's equity_svg) ----------------------
+   CSS `color` has no effect on SVG <text> -- it needs `fill`, and the
+   initial fill is black, which used to render every money label (and the
+   "No history yet" placeholder) invisibly black-on-near-black against the
+   DEFAULT (dark) theme. All colour for the chart -- text, line, and area
+   fill -- is driven from here, keyed off the `.equity-svg`/`.up`/`.down`/
+   `.empty` classes charts.py puts on the outer <svg>, rather than from
+   `var(--up)`/`var(--down)` inside the SVG's own presentation attributes:
+   real CSS custom-property resolution, verified in both themes, instead of
+   trusting that a `fill="var(--x)"` attribute behaves identically to one. */
+.equity-svg text { fill: var(--muted); }
+.equity-svg.up polyline { stroke: var(--up); }
+.equity-svg.up .area { fill: var(--up-soft); }
+.equity-svg.down polyline { stroke: var(--down); }
+.equity-svg.down .area { fill: var(--down-soft); }
+
 /* --- Dashboard strategy cards ------------------------------------------
    Signature detail: each key-level chip is tinted by what it actually
    means for the position (stop/target/add-zone), reusing the same

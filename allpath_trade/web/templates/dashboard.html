@@ -26,6 +26,7 @@
 </p>
 {% endif %}
 <div class="card">{{ equity_svg_markup | svg }}</div>
+{% if equity_since %}<p class="muted" style="font-size:12.5px; margin-top:6px">{{ equity_since }}</p>{% endif %}
 
 <h2>Positions</h2>
 {% if positions %}

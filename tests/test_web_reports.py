@@ -232,3 +232,39 @@ def test_date_filter_pages_are_english_only(client):
     assert_english_only(client.get("/reports?date=2026-08-11").text)
     assert_english_only(client.get("/reports?date=not-a-date").text)
     assert_english_only(client.get("/reports?from=2026-08-01&to=2026-08-15").text)
+
+
+# --- Minor 9: from > to is swapped (lenient), and an empty filtered range
+# gets its own notice instead of the fresh-install copy --------------------
+
+def test_range_filter_from_after_to_is_swapped_not_rejected(client):
+    add_report(client, date="2026-08-10")
+    r = client.get("/reports?from=2026-08-15&to=2026-08-01")
+    assert r.status_code == 200
+    assert "<strong>2026-08-10</strong>" in r.text
+    assert "Invalid date range" not in r.text
+
+
+def test_range_filter_empty_result_shows_range_notice_not_new_user_copy(client):
+    add_report(client, date="2026-08-10")
+    body = client.get("/reports?from=2026-01-01&to=2026-01-31").text
+    assert "No reports between 2026-01-01 and 2026-01-31" in body
+    assert "No reports yet" not in body
+
+
+def test_range_filter_open_ended_empty_result_shows_directional_notice(client):
+    add_report(client, date="2026-08-01")
+    body = client.get("/reports?from=2026-09-01").text
+    assert "No reports on or after 2026-09-01" in body
+    assert "No reports yet" not in body
+
+
+# --- Minor 10: _DATE_RE only matches ASCII digits --------------------------
+
+def test_date_re_matches_only_ascii_digits():
+    from allpath_trade.web.routes.reports import _DATE_RE
+    assert _DATE_RE.match("2026-08-17")
+    # Arabic-Indic digits -- Python's bare `\d` matches these too without
+    # `re.ASCII`, which would let a string that merely *looks* like
+    # `YYYY-MM-DD` through this gate.
+    assert _DATE_RE.match("٢٠٢٦-٠٨-١٧") is None

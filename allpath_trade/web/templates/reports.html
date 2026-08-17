@@ -29,6 +29,8 @@
   {% endif %}
 </a>
 {% else %}
+{% if not notice %}
 <p class="muted">No reports yet — the daily reflection runs after market close on trading days.</p>
+{% endif %}
 {% endfor %}
 {% endblock %}
