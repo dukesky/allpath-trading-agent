@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 import pytest
@@ -8,6 +9,7 @@ from allpath_trade.execution import ExecutionResult
 from allpath_trade.llm.base import ToolCall
 from allpath_trade.risk.gate import RiskDecision
 from allpath_trade.store.db import connect
+from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.store import StrategyStore
 
 GOOD = """\
@@ -127,55 +129,169 @@ def test_propose_order_invalid_never_prompts(tmp_path):
     assert out.startswith("error:") and prompts == [] and executor.calls == []
 
 
-def test_draft_strategy_in_web_mode_says_it_cannot_save_yet(tmp_path):
-    # Finding 3: web mode is signaled by `order_sink` being set (the same
-    # wiring ChatService._build uses for propose_order) -- draft_strategy
-    # must not fall through to `confirm()` (which web mode always sets to
-    # `lambda _: False`) and tell the user they "declined" a save they were
-    # never asked about.
+def make_web(tmp_path, *, conversation_id=None, notifier=None, web_base_url=""):
+    # `queue` (not `order_sink`) is draft_strategy's own web-mode
+    # discriminator -- see action_tools.py's register_action_tools for why
+    # the two tools don't share one signal. `confirm` fails the test if
+    # ever reached: web mode must never fall through to the blocking-confirm
+    # terminal path.
     (tmp_path / "strategies").mkdir(exist_ok=True)
     conn = connect(tmp_path / "db.sqlite")
     store = StrategyStore(tmp_path / "strategies", conn)
+    queue = ReviewQueue(conn, executor=None)
     reg = ToolRegistry()
-
-    class Sink:
-        def propose(self, intent):
-            pytest.fail("draft_strategy must never reach the order sink")
-
     register_action_tools(
-        reg, strategies=store, executor=None,
+        reg, strategies=store, executor=SpyExecutor(),
         confirm=lambda _prompt: pytest.fail("must not prompt in web mode"),
-        order_sink=Sink())
+        queue=queue, conversation_id=conversation_id,
+        notifier=notifier, web_base_url=web_base_url)
+    return reg, store, queue
+
+
+class SpyNotifier:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, subject, body):
+        self.sent.append((subject, body))
+        return True
+
+
+class RaisingNotifier:
+    def send(self, subject, body):
+        raise RuntimeError("smtp down")
+
+
+def test_draft_strategy_web_mode_queues_new_strategy(tmp_path):
+    reg, store, queue = make_web(tmp_path, conversation_id=42)
 
     out = call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
 
     assert "declined" not in out
-    assert "web chat" in out.lower()
-    assert "allpath-trade chat" in out
+    row = queue.list("pending")[0]
+    assert f"#{row['id']}" in out
+    assert "It will not take effect until you approve it." in out
+    assert row["source"] == "chat"
+    assert row["kind"] == "strategy_revision"
+    assert row["conversation_id"] == 42
+    snapshot = json.loads(row["snapshot"])
+    assert snapshot["is_new"] is True
+    assert snapshot["old_yaml"] == ""
     assert not (tmp_path / "strategies" / "new.yaml").exists()
     assert store.versions("new") == []
 
 
-def test_draft_strategy_in_web_mode_still_reports_invalid_yaml(tmp_path):
-    # The web-mode short-circuit must not swallow real validation errors --
-    # a genuinely broken draft should still say so, not just "can't save yet".
-    (tmp_path / "strategies").mkdir(exist_ok=True)
-    conn = connect(tmp_path / "db.sqlite")
-    store = StrategyStore(tmp_path / "strategies", conn)
-    reg = ToolRegistry()
+def test_draft_strategy_web_mode_queues_revision_of_existing_strategy(tmp_path):
+    reg, store, queue = make_web(tmp_path)
+    (tmp_path / "strategies" / "existing.yaml").write_text(GOOD)
 
-    class Sink:
-        def propose(self, intent):
-            pytest.fail("must not be reached for an invalid draft")
+    call(reg, "draft_strategy", strategy_id="existing", yaml_text=GOOD, reason="tweak")
 
-    register_action_tools(
-        reg, strategies=store, executor=None,
-        confirm=lambda _prompt: pytest.fail("must not prompt"), order_sink=Sink())
+    row = queue.list("pending")[0]
+    snapshot = json.loads(row["snapshot"])
+    assert snapshot["is_new"] is False
+    assert snapshot["old_yaml"] == GOOD
+    # GOOD is version 1, same as the on-disk file -- the existing bump rule
+    # (<= current -> current + 1) applies, and the FINAL (post-bump) version
+    # is what lands in new_yaml, so the queued diff shows the truth.
+    assert "version: 2" in snapshot["new_yaml"]
+    assert not store.versions("existing")  # nothing written directly
+
+
+def test_draft_strategy_web_mode_second_draft_supersedes_first(tmp_path):
+    reg, _store, queue = make_web(tmp_path)
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="v1")
+    rid1 = queue.list("pending")[0]["id"]
+
+    out2 = call(reg, "draft_strategy", strategy_id="new",
+               yaml_text=GOOD.replace('"New"', '"New2"'), reason="v2")
+
+    assert f"replaced draft #{rid1}" in out2
+    all_rows = {r["id"]: r for r in queue.list(None)}
+    assert all_rows[rid1]["status"] == "superseded"
+    pending = queue.list("pending")
+    assert len(pending) == 1
+    assert pending[0]["id"] != rid1
+
+
+def test_draft_strategy_web_mode_invalid_yaml_nothing_queued(tmp_path):
+    reg, _store, queue = make_web(tmp_path)
 
     out = call(reg, "draft_strategy", strategy_id="bad",
               yaml_text="name: x\nstatus: active\n", reason="x")
 
     assert out.startswith("error:")
+    assert queue.list(None) == []
+
+
+def test_draft_strategy_web_mode_queue_failure_returns_error_and_keeps_yaml(tmp_path):
+    reg, _store, queue = make_web(tmp_path)
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("db locked")
+
+    queue.add_strategy_revision = boom
+
+    out = call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
+
+    assert out.startswith("error:")
+    assert queue.list(None) == []
+    assert not (tmp_path / "strategies" / "new.yaml").exists()
+
+
+def test_draft_strategy_web_mode_notifies_with_approve_link_when_configured(tmp_path):
+    notifier = SpyNotifier()
+    reg, _store, queue = make_web(
+        tmp_path, notifier=notifier, web_base_url="http://192.168.1.20:8791")
+
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
+
+    assert len(notifier.sent) == 1
+    subject, body = notifier.sent[0]
+    row = queue.list("pending")[0]
+    assert "MSFT" in subject  # GOOD's position.ticker
+    assert "create new strategy" in body.lower()
+    assert f"/a/{row['id']}?k=" in body
+
+
+def test_draft_strategy_web_mode_notification_says_revise_for_existing_strategy(tmp_path):
+    notifier = SpyNotifier()
+    reg, _store, _queue = make_web(tmp_path, notifier=notifier)
+    (tmp_path / "strategies" / "existing.yaml").write_text(GOOD)
+
+    call(reg, "draft_strategy", strategy_id="existing", yaml_text=GOOD, reason="tweak")
+
+    _subject, body = notifier.sent[0]
+    assert "revise strategy" in body.lower()
+
+
+def test_draft_strategy_web_mode_notifies_without_link_when_base_url_unset(tmp_path):
+    notifier = SpyNotifier()
+    reg, _store, _queue = make_web(tmp_path, notifier=notifier)
+
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
+
+    _subject, body = notifier.sent[0]
+    assert "http" not in body.lower()
+
+
+def test_draft_strategy_web_mode_no_notifier_configured_still_queues(tmp_path):
+    reg, _store, queue = make_web(tmp_path)  # notifier=None default
+
+    out = call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
+
+    assert "Draft queued" in out
+    assert len(queue.list("pending")) == 1
+
+
+def test_draft_strategy_web_mode_notify_failure_does_not_fail_the_tool(tmp_path):
+    reg, _store, queue = make_web(
+        tmp_path, notifier=RaisingNotifier(), web_base_url="http://192.168.1.20:8791")
+
+    out = call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
+
+    assert "Draft queued" in out
+    assert len(queue.list("pending")) == 1
 
 
 def test_order_sink_takes_precedence_over_confirm(tmp_path):

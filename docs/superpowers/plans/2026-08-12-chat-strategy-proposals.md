@@ -45,8 +45,8 @@
 - Modify: `allpath_trade/notify/events.py` (`review_queued` copy for revision/new-strategy kinds) + `allpath_trade/web/order_sink.py` or wherever web-mode queue notifications fire — send the queued notification with the approve link when base_url configured (mirror how orders notify)
 - Test: `tests/test_action_tools.py`, `tests/test_web_chat.py`, `tests/test_notify_events.py`
 
-- [ ] Failing tests: web mode → row queued (source chat, conversation_id set), NO file write, return text contains "#N" + "approve"; second draft same id → previous superseded, text says so; new strategy → old_yaml ""; terminal mode → unchanged (confirm called, file written on yes); notification sent with kind-specific copy + link when configured; agent tool description mentions queueing.
-- [ ] Implement; suite; ruff; commit `feat: chat drafts queue as strategy proposals`.
+- [x] Failing tests: web mode → row queued (source chat, conversation_id set), NO file write, return text contains "#N" + "approve"; second draft same id → previous superseded, text says so; new strategy → old_yaml ""; terminal mode → unchanged (confirm called, file written on yes); notification sent with kind-specific copy + link when configured; agent tool description mentions queueing.
+- [x] Implement; suite; ruff; commit `feat: chat drafts queue as strategy proposals`.
 
 ### Task 4: UI — proposer + new-strategy badges, auto warning, confirm page parity
 

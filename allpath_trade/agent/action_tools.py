@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import sys
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
@@ -11,6 +12,9 @@ from pydantic import ValidationError
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.execution import ExecutionError, Executor
+from allpath_trade.notify import events
+from allpath_trade.notify.base import Notifier
+from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.loader import (
     StrategyValidationError,
     atomic_write_text,
@@ -31,7 +35,29 @@ if TYPE_CHECKING:
 def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                           executor: Executor,
                           confirm: Callable[[str], bool],
-                          order_sink: QueueingOrderSink | None = None) -> None:
+                          order_sink: QueueingOrderSink | None = None,
+                          queue: ReviewQueue | None = None,
+                          conversation_id: int | None = None,
+                          notifier: Notifier | None = None,
+                          web_base_url: str = "") -> None:
+
+    def _notify_chat_draft_queued(doc, review_id, *, is_new: bool) -> None:
+        # Spec §④/降级: a notification failure must never affect queueing --
+        # the row above is already committed by the time this runs, so the
+        # whole thing is best-effort and swallows everything.
+        if notifier is None or not doc.notify_email:
+            return
+        try:
+            action = (f"create new strategy '{doc.id}'" if is_new
+                      else f"revise strategy '{doc.id}' to v{doc.version}")
+            approve_url = events.approve_link(web_base_url, review_id)
+            subject, body = events.review_queued(
+                review_id=review_id, ticker=doc.position.ticker, action=action,
+                strategy_id=doc.id, approve_url=approve_url)
+            notifier.send(subject, body)
+        except Exception as exc:  # noqa: BLE001 — see docstring above
+            print(f"[action_tools] chat draft notification failed: {exc}",
+                  file=sys.stderr)
 
     def draft_strategy(strategy_id: str, yaml_text: str, reason: str) -> str:
         if not is_valid_strategy_id(strategy_id):
@@ -40,23 +66,9 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             doc = parse_strategy_text(strategy_id, yaml_text)
         except StrategyValidationError as exc:
             return f"error: {'; '.join(exc.errors)}"
-        if order_sink is not None:
-            # `order_sink` being set is exactly what marks this as the web
-            # chat (ChatService._build injects one; cmd_chat's terminal chat
-            # never does). Unlike propose_order, there is no queue/approval
-            # card for a strategy save yet -- that's real feature work,
-            # deliberately out of scope for this fix (see docs/TODO.md,
-            # Phase 5 leftovers). Falling through to the `confirm(...)`
-            # below would call web mode's `confirm=lambda _: False` and
-            # return "user declined", telling the user *they* rejected a
-            # save they were never asked about. Say what's actually true
-            # instead, after still validating the draft above so a genuinely
-            # broken YAML gets a real error either way.
-            return ("Strategy changes can't be saved from the web chat yet "
-                    "-- run `allpath-trade chat` in a terminal to save this "
-                    "one.")
         path = strategies.directory / f"{strategy_id}.yaml"
-        old_text = path.read_text() if path.exists() else ""
+        is_new = not path.exists()
+        old_text = "" if is_new else path.read_text()
         if old_text:
             try:
                 current = parse_strategy_text(strategy_id, old_text)
@@ -64,12 +76,44 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                     doc = doc.model_copy(update={"version": current.version + 1})
             except StrategyValidationError:
                 pass  # unreadable current file: keep drafted version
+        # The version written into `new_text` below is the FINAL one (after
+        # the bump above) in both modes, so a queued diff shows what will
+        # actually land if approved, not what was originally typed.
         new_text = yaml.safe_dump(doc.model_dump(mode="json"), sort_keys=False,
                                   allow_unicode=True)
         diff = "".join(difflib.unified_diff(
             old_text.splitlines(keepends=True), new_text.splitlines(keepends=True),
             fromfile=f"{strategy_id}.yaml (current)",
             tofile=f"{strategy_id}.yaml (proposed)"))
+        if queue is not None:
+            # Web/Telegram mode: queue the draft as a strategy_revision
+            # proposal (spec 2026-08-12-chat-strategy-proposals-design.md)
+            # instead of blocking on confirm() (web mode's confirm is always
+            # `lambda _: False`). `queue` being explicitly injected -- rather
+            # than reusing propose_order's `order_sink is not None` -- is
+            # the mode discriminator here: draft_strategy and propose_order
+            # are independent tools with independent web-mode wiring, and an
+            # explicit kwarg says so at the call site instead of relying on
+            # a sibling tool's parameter as an implicit signal.
+            try:
+                superseded = queue.supersede_pending_chat_revision(
+                    strategy_id, note="replaced by a newer chat draft")
+                rid = queue.add_strategy_revision(
+                    strategy_id=strategy_id, ticker=doc.position.ticker,
+                    old_yaml=old_text, new_yaml=new_text, diff=diff,
+                    rationale=reason, conversation_id=conversation_id,
+                    source="chat", is_new=is_new)
+            except Exception as exc:  # noqa: BLE001 — spec 降级: a queue
+                # failure must return an error string, not lose the drafted
+                # YAML (it's still right there in the conversation).
+                return f"error: could not queue draft: {exc}"
+            _notify_chat_draft_queued(doc, rid, is_new=is_new)
+            msg = (f"Draft queued for your approval as #{rid} — open Pending "
+                   "(or tap the link in the notification). It will not "
+                   "take effect until you approve it.")
+            if superseded is not None:
+                msg += f" (replaced draft #{superseded})"
+            return msg
         if not confirm(f"Save strategy '{strategy_id}' v{doc.version}?"
                        f" Reason: {reason}\n{diff or new_text}"):
             return "user declined"
@@ -107,12 +151,17 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
     t = "string"
     registry.register(
         "draft_strategy",
-        "Draft or revise a strategy YAML. The user must confirm before it is "
-        "saved; a version snapshot is recorded. Optional fields `horizon` "
-        "(long/medium/swing) and `bias` (bullish/bearish/neutral) drive the "
-        "strategies page's at-a-glance chips -- include them when the "
-        "thesis makes the time horizon and market direction clear, but "
-        "leave them out rather than guessing when it doesn't.",
+        "Draft or revise a strategy YAML -- including a brand-new strategy, "
+        "not just changes to an existing one. In web/Telegram chat this "
+        "queues the draft as a proposal for the user's approval on the "
+        "Pending page and does not save anything by itself; in a terminal "
+        "session the user confirms inline before it's saved. A version "
+        "snapshot is recorded once the draft is approved (or saved, in a "
+        "terminal). Optional fields `horizon` (long/medium/swing) and "
+        "`bias` (bullish/bearish/neutral) drive the strategies page's "
+        "at-a-glance chips -- include them when the thesis makes the time "
+        "horizon and market direction clear, but leave them out rather "
+        "than guessing when it doesn't.",
         {"type": "object", "properties": {
             "strategy_id": {"type": t}, "yaml_text": {"type": t},
             "reason": {"type": t}},

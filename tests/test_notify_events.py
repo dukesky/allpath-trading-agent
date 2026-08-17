@@ -72,3 +72,27 @@ def test_review_queued_with_approve_url_is_english_only():
         approve_url="http://192.168.1.20:8791/a/12?k=abc123")
     for text in (subject, body):
         assert_english_only(text)
+
+
+# -- approve_link: shared by sentinel.py and agent/action_tools.py --
+
+
+class _Handle(int):
+    def __new__(cls, value, token=None):
+        obj = super().__new__(cls, value)
+        obj.token = token
+        return obj
+
+
+def test_approve_link_empty_when_base_url_unset():
+    assert events.approve_link("", _Handle(12, "tok")) == ""
+
+
+def test_approve_link_empty_when_no_token():
+    assert events.approve_link("http://192.168.1.20:8791", _Handle(12, None)) == ""
+    assert events.approve_link("http://192.168.1.20:8791", 12) == ""
+
+
+def test_approve_link_built_when_both_present():
+    url = events.approve_link("http://192.168.1.20:8791", _Handle(12, "abc123"))
+    assert url == "http://192.168.1.20:8791/a/12?k=abc123"

@@ -163,6 +163,44 @@ def test_proposed_order_becomes_a_pending_review(tmp_path, monkeypatch):
     assert rows[0]["source"] == "chat"
 
 
+DRAFT_STRATEGY_YAML = """\
+name: "New MSFT swing"
+status: draft
+version: 1
+position: {ticker: MSFT, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+
+
+def test_draft_strategy_becomes_a_pending_revision_visible_on_reviews(
+        tmp_path, monkeypatch):
+    # Spec 2026-08-12-chat-strategy-proposals-design.md §③④: a chat-drafted
+    # strategy queues for approval (same pending_reviews inbox propose_order
+    # already uses) instead of being written straight to disk, and shows up
+    # on /reviews like any other pending item.
+    client = make_client(tmp_path, monkeypatch, [
+        tool_response("draft_strategy", {
+            "strategy_id": "new", "yaml_text": DRAFT_STRATEGY_YAML,
+            "reason": "user asked for a new MSFT swing strategy"}),
+        LLMResponse(text="queued it for your approval"),
+    ])
+
+    r = client.post("/chat/send", data={"message": "draft a new MSFT strategy"})
+
+    assert r.status_code == 200
+    rows = client.app.state.holder.get().queue.list("pending")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["source"] == "chat"
+    assert row["kind"] == "strategy_revision"
+    assert not (tmp_path / "strategies" / "new.yaml").exists()
+
+    page = client.get("/reviews")
+    assert page.status_code == 200
+    assert f"#{row['id']}" in page.text
+
+
 def test_empty_message_is_ignored(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch, [])
     r = client.post("/chat/send", data={"message": "   "})
