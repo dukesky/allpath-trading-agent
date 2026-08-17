@@ -26,8 +26,8 @@
 
 **Interfaces produced:** `add_strategy_revision(..., source="reflection")`; applier signature `(sid, new_yaml, base_yaml, source)`; `supersede_pending_chat_revision`.
 
-- [ ] Failing tests: source persisted; supersede marks exactly the pending chat rows for that id (not reflection rows, not other ids), returns superseded id; applier receives source; `superseded` rows excluded from pending list + badge.
-- [ ] Implement; suite; ruff; commit `feat: source-aware strategy revision rows`.
+- [x] Failing tests: source persisted; supersede marks exactly the pending chat rows for that id (not reflection rows, not other ids), returns superseded id; applier receives source; `superseded` rows excluded from pending list + badge.
+- [x] Implement; suite; ruff; commit `feat: source-aware strategy revision rows`.
 
 ### Task 2: Applier — source-branched guards + new-strategy base
 
@@ -35,8 +35,8 @@
 - Modify: `allpath_trade/agent/reflection_tools.py` `apply_revision_factory` (or move the applier to `strategy/apply.py` — it now serves two proposers; one line why)
 - Test: `tests/test_reflection_tools.py`, `tests/test_strategy_apply.py`
 
-- [ ] Failing tests: reflection source → authorization/status change rejected (existing tests stay green); chat source → authorization/status change ALLOWED; chat + auto → applied (the warning is UI, not applier); new-strategy (`base_yaml==""`) → applies only when file absent, raises RevisionValidationError if present; all other guards (id, dir, byte-exact base for existing files, version monotonic, YAML validation) enforced for BOTH sources; snapshot reason names the source (`"chat proposal approved via web"` / existing reflection reason).
-- [ ] Implement; suite; ruff; commit `feat: source-branched revision applier with new-strategy support`.
+- [x] Failing tests: reflection source → authorization/status change rejected (existing tests stay green); chat source → authorization/status change ALLOWED; chat + auto → applied (the warning is UI, not applier); new-strategy (`base_yaml==""`) → applies only when file absent, raises RevisionValidationError if present; all other guards (id, dir, byte-exact base for existing files, version monotonic, YAML validation) enforced for BOTH sources; snapshot reason names the source (`"chat proposal approved via web"` / existing reflection reason).
+- [x] Implement; suite; ruff; commit `feat: source-branched revision applier with new-strategy support`.
 
 ### Task 3: draft_strategy queues in web/Telegram mode
 
@@ -45,8 +45,8 @@
 - Modify: `allpath_trade/notify/events.py` (`review_queued` copy for revision/new-strategy kinds) + `allpath_trade/web/order_sink.py` or wherever web-mode queue notifications fire — send the queued notification with the approve link when base_url configured (mirror how orders notify)
 - Test: `tests/test_action_tools.py`, `tests/test_web_chat.py`, `tests/test_notify_events.py`
 
-- [ ] Failing tests: web mode → row queued (source chat, conversation_id set), NO file write, return text contains "#N" + "approve"; second draft same id → previous superseded, text says so; new strategy → old_yaml ""; terminal mode → unchanged (confirm called, file written on yes); notification sent with kind-specific copy + link when configured; agent tool description mentions queueing.
-- [ ] Implement; suite; ruff; commit `feat: chat drafts queue as strategy proposals`.
+- [x] Failing tests: web mode → row queued (source chat, conversation_id set), NO file write, return text contains "#N" + "approve"; second draft same id → previous superseded, text says so; new strategy → old_yaml ""; terminal mode → unchanged (confirm called, file written on yes); notification sent with kind-specific copy + link when configured; agent tool description mentions queueing.
+- [x] Implement; suite; ruff; commit `feat: chat drafts queue as strategy proposals`.
 
 ### Task 4: UI — proposer + new-strategy badges, auto warning, confirm page parity
 
@@ -55,14 +55,15 @@
 - Modify: `strategy_detail.html` — if a pending chat proposal exists for this strategy, a line "A chat draft is awaiting your approval → Pending"
 - Test: `tests/test_web_reviews.py`, `tests/test_web_approve.py`, `tests/test_web_strategies.py`
 
-- [ ] Failing tests: chip text per source; New badge + left-column label; auto warning appears exactly when new authorization is auto and base isn't; superseded rows render as resolved with note; confirm page mirrors all three; English-only; escaping (yaml with `<script>`).
-- [ ] Implement; suite; ruff; commit `feat: proposal cards show proposer, new-strategy, and auto warnings`.
+- [x] Failing tests: chip text per source; New badge + left-column label; auto warning appears exactly when new authorization is auto and base isn't; superseded rows render as resolved with note; confirm page mirrors all three; English-only; escaping (yaml with `<script>`).
+- [x] Implement; suite; ruff; commit `feat: proposal cards show proposer, new-strategy, and auto warnings`.
+- [x] Carried from Task 1+2 review: a chat proposal that flips an existing strategy `active → draft` deserves the same card warning treatment as an `authorization: auto` flip (both are consequential, easy-to-miss changes a reviewer should be flagged about before approving) -- add a `status_becomes_draft`-style flag alongside `auth_becomes_auto`, computed the same way (parse new_yaml vs base), and show it on both the review card and the confirm page.
 
 ### Task 5: Docs + closeout
 
 **Files:** `README.md`, `README.zh-CN.md` (Strategies section: chat drafts now save via approval; terminal note removed/updated; the "run allpath-trade chat in a terminal" hint in `chat.html` footer + strategy pages updated), `CHANGELOG.md`, `docs/TODO.md` (close the Phase 5 leftover "web chat cannot save strategies"), the `chat.html` hint text.
 
-- [ ] Verify every hint string in templates that mentions the terminal; update; English-only sweep; suite; commit `docs: chat strategy proposals`.
+- [x] Verify every hint string in templates that mentions the terminal; update; English-only sweep; suite; commit `docs: chat strategy proposals`.
 
 ## Self-Review Notes
 

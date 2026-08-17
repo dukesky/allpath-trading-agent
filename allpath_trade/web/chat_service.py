@@ -89,7 +89,17 @@ class ChatService:
             registry, strategies=c.strategies, executor=c.executor,
             confirm=lambda _prompt: False,
             order_sink=QueueingOrderSink(c.queue, c.gate, c.broker, c.data,
-                                         c.journal, conversation_id))
+                                         c.journal, conversation_id),
+            # `queue` (not `order_sink`) is draft_strategy's own web-mode
+            # discriminator -- see action_tools.py's register_action_tools
+            # docstring comment for why the two tools don't share one
+            # signal. `conversation_id` is the same stable per-session id
+            # order_sink above was built with (store.latest()/start() a few
+            # lines up); this is the ChatService's ONE per-request build
+            # site, so passing it directly here is as fresh as a callable
+            # indirection would be, with none of the extra machinery.
+            queue=c.queue, conversation_id=conversation_id,
+            notifier=c.notifier, web_base_url=c.settings.web_base_url)
 
         prompt = build_system_prompt(
             identity=load_identity(), broker=c.broker, journal=c.journal,

@@ -616,3 +616,52 @@ rules: []
     # copy), never as a stuck page or a raised error.
     assert "—" in r.text
     release.set()  # let the background call finish so it doesn't linger
+
+
+# --- Task 4: strategy detail page points at a pending proposal, source-aware
+
+def test_detail_page_shows_pending_chat_draft_line(client):
+    queue = client.app.state.holder.get().queue
+    text = (client.app.state.holder.get().strategies.directory / "semis.yaml").read_text()
+    rid = queue.add_strategy_revision(
+        strategy_id="semis", ticker="AAPL", old_yaml=text, new_yaml=text,
+        diff="d", rationale="tighten stop", source="chat")
+    body = client.get("/strategies/semis").text
+    assert f"A chat draft (#{rid}) is awaiting your approval" in body
+    assert 'href="/reviews"' in body
+
+
+def test_detail_page_shows_pending_reflection_proposal_line(client):
+    queue = client.app.state.holder.get().queue
+    text = (client.app.state.holder.get().strategies.directory / "semis.yaml").read_text()
+    rid = queue.add_strategy_revision(
+        strategy_id="semis", ticker="AAPL", old_yaml=text, new_yaml=text,
+        diff="d", rationale="tighten stop")  # default source="reflection"
+    body = client.get("/strategies/semis").text
+    assert f"A reflection proposal (#{rid}) is awaiting your approval" in body
+    assert 'href="/reviews"' in body
+
+
+def test_detail_page_omits_pending_proposal_line_when_none(client):
+    body = client.get("/strategies/semis").text
+    assert "is awaiting your approval" not in body
+
+
+def test_detail_page_omits_pending_proposal_line_for_a_different_strategy(client):
+    _write_strategy_with_status(client, "other", "active")
+    queue = client.app.state.holder.get().queue
+    text = (client.app.state.holder.get().strategies.directory / "other.yaml").read_text()
+    queue.add_strategy_revision(
+        strategy_id="other", ticker="AAPL", old_yaml=text, new_yaml=text,
+        diff="d", rationale="tighten stop", source="chat")
+    body = client.get("/strategies/semis").text
+    assert "is awaiting your approval" not in body
+
+
+def test_detail_page_pending_proposal_line_is_english_only(client):
+    queue = client.app.state.holder.get().queue
+    text = (client.app.state.holder.get().strategies.directory / "semis.yaml").read_text()
+    queue.add_strategy_revision(
+        strategy_id="semis", ticker="AAPL", old_yaml=text, new_yaml=text,
+        diff="d", rationale="tighten stop", source="chat")
+    assert_english_only(client.get("/strategies/semis").text)

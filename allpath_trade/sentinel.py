@@ -274,14 +274,10 @@ class Sentinel:
             with contextlib.suppress(ArithmeticError, InvalidOperation):
                 est_shares = f"{intent.notional / price:.2f}"
         # Part A: only when the operator opted in (Settings -> Access) AND
-        # this review actually has a live token -- `review_id.token` is
-        # None for the (today theoretical) case of a `ReviewHandle` built
-        # without one; `getattr` rather than a bare attribute access keeps
-        # this safe even if `review_id` were ever a plain int.
-        approve_url = ""
-        token = getattr(review_id, "token", None)
-        if self.web_base_url and token:
-            approve_url = f"{self.web_base_url}/a/{int(review_id)}?k={token}"
+        # this review actually has a live token -- see `events.approve_link`
+        # (shared with agent/action_tools.py's chat strategy drafts) for the
+        # `getattr`-based degrade-to-no-link rationale.
+        approve_url = events.approve_link(self.web_base_url, review_id)
         subject, body = events.review_queued(
             review_id=review_id, ticker=ticker, action=action,
             strategy_id=doc.id, recommendation=recommendation,

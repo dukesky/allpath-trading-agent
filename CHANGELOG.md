@@ -2,6 +2,33 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Chat strategy proposals — 2026-08-17
+
+- `draft_strategy` in web/Telegram chat now queues a proposal instead of
+  telling the user to open a terminal: it reuses the Phase 6 reflection
+  revision pipeline (`pending_reviews`, kind `strategy_revision`), tagged
+  `source="chat"`, for both brand-new strategies and revisions to existing
+  ones. The terminal `allpath-trade chat` REPL is unchanged — it still
+  confirms inline and saves immediately.
+- The applier branches its guards on `source`: a reflection-sourced
+  revision still cannot change `authorization` or `status` (spec-mandated
+  freeze — reflection only fixes rule logic), while a chat-sourced
+  revision can, since it reflects the user's own request. A brand-new
+  strategy is recorded with an empty `old_yaml` base and the applier
+  requires the file to still be absent at approval time.
+- A second chat draft for the same strategy supersedes the earlier
+  pending one automatically (marked `superseded` with a resolution note)
+  rather than piling up duplicate proposals.
+- Pending cards and the confirm page show who proposed the change
+  (reflection vs. chat), a "new strategy" badge, and a warning when the
+  proposal would flip `authorization` to `auto` or `status` from `active`
+  to `draft` — both are consequential, easy-to-miss changes to wave
+  through. Approval fires a notification with a kind-specific message and
+  an approve link, mirrored to Telegram like any other queued item.
+- Known limitation: chat-sourced order proposals (`propose_order` in web
+  mode) still don't send a notification when queued — pre-existing, not a
+  regression from this change — see `docs/TODO.md`.
+
 ## Telegram chat channel — 2026-08-12
 
 - Two-way Telegram chat with the same agent, same conversation, same

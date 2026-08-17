@@ -7,20 +7,52 @@
        oversized-bold-text card the "reason" text was meant to be quiet
        context, not a title (Part C, item 8). The full text still renders,
        just below at body size -- see the .review-reason block. #}
-    <strong>{% if item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}</strong>
+    {# Minor 2: a strategy_revision row's own `action` column is always the
+       fixed sentinel "revise strategy" (store/reviews.py's
+       add_strategy_revision writes it verbatim for every row, new or
+       not) -- rendering it here as-is mislabelled a brand-new-strategy
+       proposal "revise strategy · TICKER". The headline for a revision
+       row is now derived from the row's own `is_new` flag instead of
+       echoing that sentinel. #}
+    <strong>{% if item['kind'] == 'strategy_revision' %}{{ 'new strategy' if item['is_new'] else 'revise strategy' }}{% elif item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}</strong>
     <span class="muted">#{{ item['id'] }}</span>
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
+  {% if item['kind'] == 'strategy_revision' %}
+  {# Proposer chip + New-strategy badge: who made this proposal, and
+     whether it's a brand-new strategy (spec §②) rather than a revision of
+     an existing one -- both apply to pending AND resolved rows alike (a
+     superseded/rejected chat draft is still worth labelling as such in
+     history). #}
+  <div class="row" style="margin:4px 0">
+    {# Minor 6: renders the row's own `source` verbatim -- collapsing
+       everything non-'chat' to the literal string "reflection" would
+       mislabel any future/unexpected source value as reflection instead
+       of surfacing it. `'?'` only covers a genuinely missing/empty value,
+       never a substitute for an unrecognized-but-present one. #}
+    <span class="chip">{{ item['source'] or '?' }}</span>
+    {% if item['is_new'] %}<span class="badge">New strategy</span>{% endif %}
+  </div>
+  {% endif %}
   <p class="muted" style="font-size:13px;margin:6px 0">
     {% if item['kind'] == 'strategy_revision' %}
+    {% if item['source'] == 'chat' %}
+    Strategy draft from your chat for {{ item['strategy_id'] }}
+    {% else %}
     Strategy revision proposed by reflection for {{ item['strategy_id'] }}
+    {% endif %}
     {% elif item['source'] == 'chat' %}
     From chat — triggered on <code>{{ item['condition'] }}</code>
     {% else %}
     {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
     {% endif %}
   </p>
-  {% if item['source'] == 'chat' and item['action'] %}
+  {# Minor 2: a strategy_revision row's `action` is the fixed "revise
+     strategy" sentinel, not free-text worth echoing as a reason -- the
+     revision block below already shows the real rationale
+     (item['snapshot']['rationale']). Only an order-kind chat proposal's
+     `action` (the LLM's free-text reason, order_sink.py) belongs here. #}
+  {% if item['source'] == 'chat' and item['kind'] != 'strategy_revision' and item['action'] %}
   <p class="review-reason">{{ item['action'] }}</p>
   {% endif %}
   {% if item['intent'] %}
@@ -45,8 +77,20 @@
   {% if item['kind'] == 'strategy_revision' %}
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
     <p style="font-size:13px;margin:0 0 8px"><strong>Rationale:</strong> {{ item['snapshot']['rationale'] }}</p>
+    {% if item['status'] == 'pending' and item['auth_becomes_auto'] %}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal sets authorization: auto — once approved, hard rules can place orders without asking you.</p>
+    {% endif %}
+    {% if item['status'] == 'pending' and item['status_regresses'] %}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
+    {% endif %}
     {% if item['revision_diff']['stale'] %}
     <p class="warn" style="font-size:13px;margin:0 0 8px">The strategy file has changed since this proposal — approving will fail safely; re-propose or reject.</p>
+    {% endif %}
+    {% if item['status'] == 'pending' and item['lands_as_draft'] %}
+    {# Minor 5 / spec §②: applies to a landing-as-draft proposal whether
+       it's brand-new or an existing strategy explicitly proposed into
+       draft -- either way approving alone won't arm it. #}
+    <p class="muted" style="font-size:13px;margin:0 0 8px">This strategy will be draft after approval — activate it on the strategy page to arm its rules.</p>
     {% endif %}
     {{ split_diff(item['revision_diff']['rows'], item['revision_diff']['left_label'], item['revision_diff']['right_label']) }}
   </div>
@@ -76,7 +120,12 @@
   {% endif %}
   {% if item['status'] == 'pending' %}
   <div class="row" style="margin-top:12px">
-    <form method="post" action="/reviews/{{ item['id'] }}/approve"><button class="primary" type="submit">Approve</button></form>
+    {# Minor 3: an auto-flipping proposal's Approve button carries the same
+       interaction weight as the strategy page's Activate button (see
+       strategy_detail.html) -- a confirm() dialog, not a bare submit --
+       since clicking it has the exact same consequence (hard rules can
+       place orders unattended from this point on). #}
+    <form method="post" action="/reviews/{{ item['id'] }}/approve"{% if item['auth_becomes_auto'] %} onsubmit="return confirm('This proposal sets authorization: auto — once approved, hard rules can place orders without asking you. Approve anyway?')"{% endif %}><button class="primary" type="submit">Approve</button></form>
     <form method="post" action="/reviews/{{ item['id'] }}/reject" style="display:flex;gap:6px;align-items:center">
       <input type="text" name="note" placeholder="reason (optional)" style="font-size:13px">
       <button class="danger" type="submit">Reject</button>
@@ -93,6 +142,14 @@
   <p class="muted" style="font-size:13px;margin:10px 0 0">
     {% if item['status'] == 'rejected' %}
     Rejected{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
+    {% elif item['status'] == 'superseded' %}
+    {# Spec §③: a same-strategy_id chat proposal replaces an earlier
+       pending chat proposal rather than piling up alongside it --
+       store/reviews.py's supersede_pending_chat_revision leaves the old
+       row's status here, with resolution_note naming the replacement, so
+       history shows why it's gone from Pending without the user having
+       acted on it themselves. #}
+    Superseded{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
     {% elif item['kind'] == 'strategy_revision' %}
     {# Same minimal-honesty scope as the info line above: a revision has no
        order/risk-gate outcome, so the order branch's copy ("order status

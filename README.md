@@ -23,7 +23,7 @@
 
 ---
 
-> **Project status:** Phases 1-6 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Phase 6 closed the third loop: an after-close **reflection** pass that re-checks each strategy against the day's trades and prices, writes durable lessons to memory, and proposes strategy revisions for your approval — see [Reflection](#reflection). The agent is now also reachable from Telegram — same conversation and memory as the web chat, mirrored both ways — see [Telegram Chat](#telegram-chat). **Paper trading only by default.**
+> **Project status:** Phases 1-6 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Phase 6 closed the third loop: an after-close **reflection** pass that re-checks each strategy against the day's trades and prices, writes durable lessons to memory, and proposes strategy revisions for your approval — see [Reflection](#reflection). The agent is now also reachable from Telegram — same conversation and memory as the web chat, mirrored both ways — see [Telegram Chat](#telegram-chat); and drafting or revising a strategy from either chat surface now queues a Pending approval instead of requiring a terminal. **Paper trading only by default.**
 
 ## Table of Contents
 
@@ -238,7 +238,7 @@ is no built-in HTTPS, so only bind `--host 0.0.0.0` on a network you trust.
 | Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes; your message appears instantly with a "thinking" indicator while the agent works |
 | Pending | The confirmation queue — approve or reject agent-proposed orders and strategy revisions, each with a risk pre-check (orders) or a byte-exact staleness check (revisions) |
 | Reports | One row per day the reflection job ran, with a summary teaser; the detail view shows the full report and proposed revisions raised that day, and a transcript replay shows every tool call the session made |
-| Strategies | Strategy documents, lifecycle badges, and version history, read-only except for a per-strategy notification toggle; saving a rule change still requires `allpath-trade chat` in a terminal (see [Roadmap](#roadmap)) |
+| Strategies | Strategy documents, lifecycle badges, and version history, read-only on this page itself, but ask the agent in Chat to draft or revise one — the proposal lands on Pending for your approval |
 | Memory | The four memory layers, tabbed, plus their change history — read-only |
 | Settings | LLM/broker keys (write-only, never redisplayed); model dropdowns fed by a cached OpenRouter catalog; email and ntfy push notification settings with a save-and-test button that reports each channel's outcome; sentinel interval and consolidation toggles |
 
@@ -247,6 +247,17 @@ land in the Pending queue exactly like a sentinel soft-rule trigger, and
 only your approval sends them on. Switching to live trading is not
 reachable from the web interface; that still requires editing `.env`
 directly (see [Safety Model](#safety-model)).
+
+Strategy changes work the same way: ask the agent to draft a brand-new
+strategy or revise an existing one, from the web Chat page or Telegram,
+and it lands on Pending as a side-by-side diff against the current file
+instead of being saved directly. Approving it is the only thing that
+writes the YAML. A new strategy starts as a `draft` — you activate it from
+its Strategies page when you're ready for the sentinel to evaluate it. If
+a proposal would flip a strategy's authorization to `auto` (hard rules
+place orders without a further approval) or its status from `active` to
+`draft`, the card carries a warning so you don't approve that change by
+accident.
 
 Daily memory consolidation reads the day's conversation turns from every
 web chat session, not just terminal ones, so lessons and preferences you
@@ -312,6 +323,7 @@ allpath_trade/          # import package (PyPI/CLI name: allpath-trade)
 | 5.5 | **UI polish + notification completion** — sticky nav, compact strategy cards, chat instant feedback, strategy lifecycle badges, tabbed memory page, model dropdowns from a cached catalog, save-and-test notifications, sentinel heartbeat, ntfy push, daily consolidation reads web chat | ✅ Complete |
 | 6 | **Reflection loop** — after-close daily deep review, memory updates, strategy revision proposals, Reports page | ✅ Complete |
 | 6.5 | **Telegram chat channel** — two-way chat with the same agent from Telegram, paired to one private chat, full web→Telegram mirroring, no new write capability | ✅ Complete |
+| 6.6 | **Chat strategy proposals** — `draft_strategy` in web/Telegram chat queues a proposal on Pending instead of requiring a terminal, reusing the reflection revision pipeline (proposer chip, new-strategy and auto/status-regression warnings, superseding an earlier chat draft) | ✅ Complete |
 
 ## Development
 

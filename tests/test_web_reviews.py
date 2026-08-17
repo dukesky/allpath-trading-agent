@@ -714,6 +714,239 @@ def test_split_diff_rows_short_equal_run_is_not_collapsed():
     assert [r["left"]["text"] for r in ctx_rows] == ["a", "b", "c"]
 
 
+# --- Task 4: proposer chip, New-strategy badge, auto/status warnings ------
+
+
+def new_strategy_yaml(*, authorization=None, status="draft"):
+    lines = f'name: "New one"\nstatus: {status}\nversion: 1\n'
+    if authorization:
+        lines += f"authorization: {authorization}\n"
+    lines += ('position: {ticker: AAPL, target_weight: 5%}\n'
+             'rules:\n  - {id: r1, type: hard, condition: "price < 90", action: "sell all"}\n')
+    return lines
+
+
+def test_reflection_card_shows_reflection_chip(client):
+    queue_revision(client)
+    body = client.get("/reviews").text
+    assert '<span class="chip">reflection</span>' in body
+
+
+def test_chat_card_shows_chat_chip(client):
+    client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=CURRENT_S1_YAML,
+        new_yaml=VALID_REVISION_YAML, diff="d", rationale="user asked",
+        source="chat")
+    (client.app.state.holder.get().strategies.directory / "s1.yaml").write_text(CURRENT_S1_YAML)
+    body = client.get("/reviews").text
+    assert '<span class="chip">chat</span>' in body
+    assert "Strategy draft from your chat for s1" in body
+
+
+def test_new_strategy_card_shows_new_badge_and_empty_left_column(client):
+    client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="brandnew", ticker="AAPL", old_yaml="",
+        new_yaml=new_strategy_yaml(), diff="d", rationale="brand new idea",
+        source="chat", is_new=True)
+    body = client.get("/reviews").text
+    assert '<span class="badge">New strategy</span>' in body
+    assert "— (new strategy)" in body
+
+
+def test_existing_strategy_revision_has_no_new_badge(client):
+    queue_revision(client)
+    body = client.get("/reviews").text
+    assert "New strategy" not in body
+
+
+def test_left_column_label_reflects_the_current_file_not_the_stale_is_new_flag(client):
+    # Minor 1: a proposal drafted as `is_new=True` whose file has since
+    # appeared (a sibling proposal approved, or a manual write) must show
+    # that real content under "Current" -- not bury it under "— (new
+    # strategy)", which `is_new` alone (frozen at proposal time) would say.
+    client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="brandnew", ticker="AAPL", old_yaml="",
+        new_yaml=new_strategy_yaml(), diff="d", rationale="brand new idea",
+        source="chat", is_new=True)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    strategies_dir.joinpath("brandnew.yaml").write_text(CURRENT_S1_YAML)
+    body = client.get("/reviews").text
+    assert "— (new strategy)" not in body
+    assert "Current" in body
+    # The real, now-existing content renders in the diff, not "nothing here".
+    assert "target_weight: 15%" in body
+
+
+def _queue_with_auth(client, *, base_auth=None, new_auth=None, is_new=False,
+                     strategy_id="s1"):
+    base = new_strategy_yaml(authorization=base_auth, status="active")
+    new = new_strategy_yaml(authorization=new_auth, status="active")
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    old_yaml = "" if is_new else base
+    if not is_new:
+        (strategies_dir / f"{strategy_id}.yaml").write_text(base)
+    return client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id=strategy_id, ticker="AAPL", old_yaml=old_yaml, new_yaml=new,
+        diff="d", rationale="r", source="chat", is_new=is_new)
+
+
+AUTO_WARNING = "sets authorization: auto"
+
+
+def test_auto_warning_shown_when_base_not_auto_and_new_is_auto(client):
+    _queue_with_auth(client, base_auth="confirm", new_auth="auto")
+    body = client.get("/reviews").text
+    assert AUTO_WARNING in body
+    assert_english_only(body)
+
+
+def test_auto_warning_absent_when_base_already_auto(client):
+    _queue_with_auth(client, base_auth="auto", new_auth="auto")
+    body = client.get("/reviews").text
+    assert AUTO_WARNING not in body
+
+
+def test_auto_warning_absent_when_new_is_not_auto(client):
+    _queue_with_auth(client, base_auth="confirm", new_auth="confirm")
+    body = client.get("/reviews").text
+    assert AUTO_WARNING not in body
+
+
+def test_auto_warning_shown_for_new_strategy_with_auto(client):
+    _queue_with_auth(client, new_auth="auto", is_new=True, strategy_id="brandnew2")
+    body = client.get("/reviews").text
+    assert AUTO_WARNING in body
+
+
+def test_approve_button_confirms_when_proposal_flips_to_auto(client):
+    # Minor 3: same interaction weight as the strategy page's Activate
+    # button (strategy_detail.html) -- a confirm() dialog, not a bare
+    # submit, since approving has the exact same consequence.
+    rid = _queue_with_auth(client, base_auth="confirm", new_auth="auto")
+    body = client.get("/reviews").text
+    assert (f'action="/reviews/{rid}/approve" onsubmit="return confirm(' in body)
+
+
+def test_approve_button_has_no_confirm_when_not_flipping_to_auto(client):
+    rid = _queue_with_auth(client, base_auth="confirm", new_auth="confirm")
+    body = client.get("/reviews").text
+    assert f'action="/reviews/{rid}/approve"><button' in body
+
+
+def test_source_chip_renders_actual_value_for_an_unrecognized_source(client):
+    # Minor 6: must render the row's real `source`, not silently relabel
+    # any non-'chat' value "reflection".
+    client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=CURRENT_S1_YAML,
+        new_yaml=VALID_REVISION_YAML, diff="d", rationale="r", source="webhook")
+    (client.app.state.holder.get().strategies.directory / "s1.yaml").write_text(CURRENT_S1_YAML)
+    body = client.get("/reviews").text
+    assert '<span class="chip">webhook</span>' in body
+    assert '<span class="chip">reflection</span>' not in body
+
+
+DRAFT_HINT = "This strategy will be draft after approval"
+
+
+def test_draft_status_hint_shown_for_new_strategy_landing_as_draft(client):
+    client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="brandnew5", ticker="AAPL", old_yaml="",
+        new_yaml=new_strategy_yaml(status="draft"), diff="d", rationale="idea",
+        source="chat", is_new=True)
+    body = client.get("/reviews").text
+    assert DRAFT_HINT in body
+
+
+def test_draft_status_hint_shown_for_existing_strategy_proposed_into_draft(client):
+    _queue_with_status(client, base_status="active", new_status="draft")
+    body = client.get("/reviews").text
+    assert DRAFT_HINT in body
+
+
+def test_draft_status_hint_absent_when_landing_active(client):
+    queue_revision(client)  # both sides status: active (CURRENT_S1_YAML)
+    body = client.get("/reviews").text
+    assert DRAFT_HINT not in body
+
+
+STATUS_WARNING = "takes the strategy out of active"
+
+
+def _queue_with_status(client, *, base_status, new_status, strategy_id="s1"):
+    base = new_strategy_yaml(status=base_status)
+    new = new_strategy_yaml(status=new_status)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    (strategies_dir / f"{strategy_id}.yaml").write_text(base)
+    return client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id=strategy_id, ticker="AAPL", old_yaml=base, new_yaml=new,
+        diff="d", rationale="r", source="chat")
+
+
+def test_status_warning_shown_when_active_goes_to_draft(client):
+    _queue_with_status(client, base_status="active", new_status="draft")
+    body = client.get("/reviews").text
+    assert STATUS_WARNING in body
+    assert_english_only(body)
+
+
+def test_status_warning_absent_when_status_unchanged(client):
+    _queue_with_status(client, base_status="active", new_status="active")
+    body = client.get("/reviews").text
+    assert STATUS_WARNING not in body
+
+
+def test_status_warning_absent_when_base_was_not_active(client):
+    _queue_with_status(client, base_status="draft", new_status="draft")
+    body = client.get("/reviews").text
+    assert STATUS_WARNING not in body
+
+
+def test_revision_card_headline_says_revise_strategy_for_an_existing_strategy(client):
+    rid = queue_revision(client)
+    body = client.get("/reviews").text
+    assert "<strong>revise strategy · AAPL</strong>" in body
+    assert f'id="review-{rid}"' in body
+
+
+def test_revision_card_headline_says_new_strategy_not_revise(client):
+    # Minor 2: the row's `action` column is always the fixed "revise
+    # strategy" sentinel (store/reviews.py's add_strategy_revision) -- a
+    # brand-new-strategy proposal must not echo it verbatim as its
+    # headline.
+    client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="brandnew3", ticker="AAPL", old_yaml="",
+        new_yaml=new_strategy_yaml(), diff="d", rationale="brand new idea",
+        source="chat", is_new=True)
+    body = client.get("/reviews").text
+    assert "<strong>new strategy · AAPL</strong>" in body
+    assert "<strong>revise strategy · AAPL</strong>" not in body
+
+
+def test_revision_card_does_not_render_a_stray_review_reason_paragraph(client):
+    # Minor 2: `item['action']` on a strategy_revision row is the fixed
+    # "revise strategy" sentinel, not free text -- it must not render in
+    # the .review-reason block the way an order-kind chat proposal's real
+    # free-text reason does.
+    queue_revision(client)
+    body = client.get("/reviews").text
+    assert 'class="review-reason"' not in body
+
+
+def test_superseded_revision_renders_in_resolved_history_with_note(client):
+    queue = client.app.state.holder.get().queue
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    strategies_dir.joinpath("s1.yaml").write_text(CURRENT_S1_YAML)
+    old_rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=CURRENT_S1_YAML,
+        new_yaml=VALID_REVISION_YAML, diff="d", rationale="first draft",
+        source="chat")
+    queue.supersede_pending_chat_revision("s1", note="replaced by a newer chat draft")
+    body = client.get("/reviews").text
+    assert f"#{old_rid}" in body
+    assert "Superseded" in body
+    assert "replaced by a newer chat draft" in body
+
+
 def test_split_diff_rows_two_empty_texts_still_say_no_changes():
     # SequenceMatcher on two empty line-lists returns ZERO opcodes (not one
     # 'equal'), which used to slip past the no-change guard and render an

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
 from allpath_trade.llm.factory import LLMConfigError
 from allpath_trade.web.chat_service import ChatService
 from allpath_trade.web.routes.dashboard import nav_context
+from allpath_trade.web.routes.reviews import revision_view
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -23,6 +26,18 @@ def _render(request: Request, template: str, *, include_activity: bool) -> HTMLR
     c = request.app.state.holder.get()
     service = _service(request)
     pending = {r["id"]: dict(r) for r in c.queue.list("pending")}
+    # Important 1: a chat strategy_revision row is filtered into this loop
+    # by `source == 'chat'` (see _chat_messages.html), not by `kind` -- it
+    # is NOT safe to reuse for approval the way a chat order row is (no
+    # diff, no confirm dialog on this surface). The template routes it to a
+    # link-to-/reviews card instead, but that card still owes the same
+    # auto/status honesty the /reviews page gives it -- so compute the same
+    # `revision_view` flags here, off the row's own parsed snapshot, rather
+    # than let the glance on THIS page be less honest than the one on
+    # /reviews.
+    for item in pending.values():
+        if item["kind"] == "strategy_revision":
+            item.update(revision_view(item["source"], json.loads(item["snapshot"])))
     # `service.activity` is only meaningful for the turn that just ran --
     # ChatService.send() resets it at the start of that turn, but never
     # clears it once the turn is over (see chat_service.py). Left to render

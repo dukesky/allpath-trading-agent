@@ -15,6 +15,24 @@ FOOTER = ("\n\nOpen the AllPath Trade dashboard to act on this. "
           "just that item, valid for 24 hours and dead as soon as it's used.")
 
 
+def approve_link(base_url: str, review_id: object) -> str:
+    """Builds the Phase 6 one-time approve-by-link URL for a review that was
+    just queued -- shared by every queueing path (sentinel.py's rule
+    triggers, agent/action_tools.py's chat strategy drafts) so the URL shape
+    lives in exactly one place rather than being re-derived per caller.
+
+    Returns `""` (no link) unless BOTH the operator opted in (`base_url`
+    set, Settings -> Access) AND the row actually carries a live token --
+    `getattr(review_id, "token", None)` reads `ReviewHandle.token`
+    (store/reviews.py) without requiring the caller's `review_id` to be
+    that exact type; a plain `int` (no `.token` attribute) degrades to no
+    link, same as a `ReviewHandle` built without one."""
+    token = getattr(review_id, "token", None)
+    if base_url and token:
+        return f"{base_url}/a/{int(review_id)}?k={token}"
+    return ""
+
+
 def rule_triggered(*, strategy_id: str, rule_id: str, ticker: str,
                    condition: str, disposition: str) -> tuple[str, str]:
     subject = f"[AllPath] {ticker}: rule {rule_id} triggered"

@@ -48,10 +48,24 @@
 - [ ] 上下文个股档案包含非 active 策略的 ticker（轻微膨胀，预算兜底）
 
 ## Phase 5 遗留
-- [ ] Web chat 的 draft_strategy 审批卡片——目前 `order_sink` 只覆盖 propose_order，
+- [x] Web chat 的 draft_strategy 审批卡片——目前 `order_sink` 只覆盖 propose_order，
       strategy 草稿在 web 模式下完全无法保存（只如实告知用户改用终端
       `allpath-trade chat`），需要仿照 Pending 队列给 strategy 保存也做一条
-      排队 + 批准的路径，而不是直接落盘（终审 Finding 3）
+      排队 + 批准的路径，而不是直接落盘（终审 Finding 3）——**chat-strategy-proposals
+      分支已落地**：`draft_strategy` 在 web/Telegram 模式下现在复用 Phase 6 的
+      reflection revision 流水线（`pending_reviews`，kind `strategy_revision`，
+      `source="chat"`），新策略与已有策略的修订都排队等批准，applier 按 source
+      分支放行 authorization/status 改动（reflection 仍冻结，chat 不冻结，因为
+      后者代表用户自己的意图）；同一策略的第二份聊天草稿会自动 supersede 前一份；
+      审批卡片显示提议者、新策略徽标与 auto/status 倒退警告。终端 `allpath-trade
+      chat` 的阻塞式确认体验未改动。详见 `docs/superpowers/plans/
+      2026-08-12-chat-strategy-proposals.md` 与 CHANGELOG。
+- [ ] `QueueingOrderSink.propose`（`web/order_sink.py`）在 web 模式下把
+      `propose_order` 排进 Pending 队列时不发通知——这是本轮 chat-strategy-proposals
+      分支给策略提案新增通知管线时确认过的既有行为，不是这次改动引入的回归：
+      在此之前订单提案也从未发过通知。建议后续复用同一条
+      `notify.events.review_queued` + `approve_link` 管线，让排队的订单
+      提案也能像现在的策略提案一样带通知与批准链接发出。
 - [ ] 策略 YAML 在线编辑（当前只读，修改走聊天让 agent 起草）
 - [ ] SSE 实时推送工具活动（当前为回合结束后整体刷新，见 `_chat_messages.html` 里的说明）
 - [ ] `serve` 的 HTTPS / 反向代理部署文档
@@ -200,3 +214,29 @@
       复用长期 WEB_TOKEN，已有两层缓解（配对成功后 best-effort 删除含 token
       的消息、失败配对静默丢弃不回应攻击者），更干净的独立一次性配对码设计
       本轮仍未落地，留在同一条遗留里跟踪，不重复开新条目。
+
+## chat-strategy-proposals review round 遗留
+
+- [ ] **`pending_reviews.conversation_id` 是只写字段**：`add_strategy_revision`
+      （`store/reviews.py`）把发起这条策略草稿的会话 id 存进这一列，但代码库里
+      没有任何地方把它读回来——不做展示（reviews/chat 页面都不渲染它），也不
+      做查询关联（没有按 conversation_id 反查草稿的路径）。目前唯一的价值是
+      "审计溯源"：真出问题时可以直接查 sqlite，靠这一列把一条排队中/已解决
+      的策略草稿对回它出自哪次对话。如实记录这一点，而不是假装它驱动着什么
+      现有行为——后续如果要让它派上用场，大概率是给 `/reviews` 或
+      `/conversations` 页面加一条"这条草稿来自这次对话"的反向链接。
+- [ ] **网页发起的策略草稿会触发两条内容不同、互不知晓的手机提醒**：一条聊天
+      草稿从网页排队后，用户会几乎同时收到两条通知——(1) 这轮
+      chat-strategy-proposals 新增的 `_notify_chat_draft_queued`
+      （`agent/action_tools.py`）经 email/ntfy 发出的"review queued"格式化
+      提醒（`notify.events.review_queued`，带批准链接）；(2) Task 5 既有的
+      Telegram 镜像（`web/app.py` 的 `_mirror_to_telegram`）把这轮聊天回合的
+      助手回复原文（"Draft queued for your approval as #N ..."）转发到
+      Telegram。两条走的是完全独立的通知管线，互相不知道对方的存在，文案也不
+      一致（一个是结构化的审批通知，一个是聊天回复的逐字转发）——不是 bug，
+      本轮 `draft_strategy` 新接上的是 email/ntfy 那一条腿，TG 镜像那一条腿
+      本来就对每个聊天回合无差别生效（见上面 Task 5 遗留段落）；两者叠在同一次
+      策略草稿排队事件上才第一次让"一次事件、两条不同文案的提醒"这个组合
+      出现（订单提案 `propose_order` 目前还没接 email/ntfy 那一条腿——见上面
+      Phase 5 遗留段落同一发现——所以暂时只有单条 TG 镜像）。如实记录，供后续
+      讨论是否要合并成一条、或至少让两条文案对齐。

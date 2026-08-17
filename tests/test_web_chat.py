@@ -163,6 +163,88 @@ def test_proposed_order_becomes_a_pending_review(tmp_path, monkeypatch):
     assert rows[0]["source"] == "chat"
 
 
+DRAFT_STRATEGY_YAML = """\
+name: "New MSFT swing"
+status: draft
+version: 1
+position: {ticker: MSFT, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+
+
+def test_draft_strategy_becomes_a_pending_revision_visible_on_reviews(
+        tmp_path, monkeypatch):
+    # Spec 2026-08-12-chat-strategy-proposals-design.md §③④: a chat-drafted
+    # strategy queues for approval (same pending_reviews inbox propose_order
+    # already uses) instead of being written straight to disk, and shows up
+    # on /reviews like any other pending item.
+    client = make_client(tmp_path, monkeypatch, [
+        tool_response("draft_strategy", {
+            "strategy_id": "new", "yaml_text": DRAFT_STRATEGY_YAML,
+            "reason": "user asked for a new MSFT swing strategy"}),
+        LLMResponse(text="queued it for your approval"),
+    ])
+
+    r = client.post("/chat/send", data={"message": "draft a new MSFT strategy"})
+
+    assert r.status_code == 200
+    rows = client.app.state.holder.get().queue.list("pending")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["source"] == "chat"
+    assert row["kind"] == "strategy_revision"
+    assert not (tmp_path / "strategies" / "new.yaml").exists()
+
+    page = client.get("/reviews")
+    assert page.status_code == 200
+    assert f"#{row['id']}" in page.text
+
+
+AUTO_DRAFT_STRATEGY_YAML = """\
+name: "New MSFT swing"
+status: draft
+version: 1
+authorization: auto
+position: {ticker: MSFT, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+
+
+def test_chat_page_pending_strategy_revision_has_no_inline_approve_form(
+        tmp_path, monkeypatch):
+    # Important 1 (whole-branch review): this loop in _chat_messages.html
+    # is filtered by `source == 'chat'`, not `kind` -- at base that only
+    # ever matched order rows, so the untouched card (bare Approve button,
+    # no diff, no confirm(), no warning) silently became the chat page's
+    # strategy-write approval surface once chat drafts started arriving
+    # here with kind='strategy_revision'. The fix: a strategy_revision row
+    # gets a link to /reviews (the surface with the diff + confirm()
+    # dialog) instead of its own approve/reject form, and echoes the same
+    # auto/status honesty /reviews shows.
+    client = make_client(tmp_path, monkeypatch, [
+        tool_response("draft_strategy", {
+            "strategy_id": "new", "yaml_text": AUTO_DRAFT_STRATEGY_YAML,
+            "reason": "user asked for a new auto MSFT swing strategy"}),
+        LLMResponse(text="queued it for your approval"),
+    ])
+
+    client.post("/chat/send", data={"message": "draft a new MSFT strategy"})
+    row = client.app.state.holder.get().queue.list("pending")[0]
+
+    page = client.get("/chat")
+    assert page.status_code == 200
+    body = page.text
+    assert f"/reviews/{row['id']}/approve" not in body
+    assert 'href="/reviews"' in body
+    assert f"#{row['id']}" in body
+    assert "new strategy" in body
+    assert "MSFT" in body
+    assert "authorization: auto" in body  # the warning line, not a code echo
+    assert "Risk pre-check" not in body
+
+
 def test_empty_message_is_ignored(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch, [])
     r = client.post("/chat/send", data={"message": "   "})

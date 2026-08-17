@@ -28,6 +28,9 @@
   {% endif %}
 </div>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% for pr in pending_revisions %}
+<p class="hint">{% if pr.source == 'chat' %}A chat draft{% else %}A reflection proposal{% endif %} (#{{ pr.id }}) is awaiting your approval — <a href="/reviews">Pending</a></p>
+{% endfor %}
 
 <h2>Rules</h2>
 <div class="table-scroll">
@@ -64,7 +67,7 @@
 
 <h2>Definition</h2>
 <pre>{{ yaml_text }}</pre>
-<p class="hint">Saving a strategy change isn't available from the web chat yet — run <code>allpath-trade chat</code> in a terminal to draft and save a revision.</p>
+<p class="hint">To change this strategy, ask the agent in <a href="/chat">Chat</a> to draft a revision — it lands on the <a href="/reviews">Pending</a> page for your approval.</p>
 
 <h2>Version history</h2>
 <table>
