@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide as _Side
 from alpaca.trading.enums import QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    GetPortfolioHistoryRequest,
+    MarketOrderRequest,
+)
 
 from allpath_trade.broker.base import (
     Account,
@@ -69,6 +74,27 @@ class AlpacaBroker(Broker):
 
     def cancel_order(self, order_id: str) -> None:
         self._client.cancel_order_by_id(order_id)
+
+    def get_equity_history(self, days: int) -> list[tuple[datetime, Decimal]]:
+        # Always fetch the full 1-year daily history and slice client-side
+        # to `days` -- simpler than computing an `nD` period string per
+        # range (and the only option for YTD, whose day count changes every
+        # calendar day). One request per call; the dashboard route caches
+        # results for 5 minutes so this isn't hit on every page load.
+        history = self._client.get_portfolio_history(
+            GetPortfolioHistoryRequest(period="1A", timeframe="1D"))
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        points = []
+        for ts, equity in zip(history.timestamp, history.equity, strict=True):
+            # Pre-funding days report equity as exactly 0.0 -- not a real
+            # data point, and would otherwise wreck the chart's y-axis scale.
+            if not equity:
+                continue
+            when = datetime.fromtimestamp(ts, tz=UTC)
+            if when < cutoff:
+                continue
+            points.append((when, Decimal(str(equity))))
+        return points
 
     @staticmethod
     def _to_order(o: object) -> Order:

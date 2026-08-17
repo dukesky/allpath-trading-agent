@@ -18,11 +18,11 @@ templates.env.filters["thesis_excerpt"] = fmt.thesis_excerpt
 
 
 def _md(text: str) -> Markup:
-    # THE ONE PLACE `Markup(...)` IS APPLIED IN THIS CODEBASE. Every prior
-    # phase's review confirmed zero `|safe`/`Markup` usage anywhere -- this
-    # is the first, deliberate exception, and it is scoped as tightly as
-    # possible: `render_markdown` itself does the escaping (its very first
-    # operation is `markupsafe.escape` on the raw input -- see
+    # One of exactly two sanctioned `Markup(...)` call sites in this
+    # codebase (see `_svg` below for the other) -- every other phase's
+    # review confirmed zero `|safe`/`Markup` usage anywhere else. Scoped as
+    # tightly as possible: `render_markdown` itself does the escaping (its
+    # very first operation is `markupsafe.escape` on the raw input -- see
     # allpath_trade/web/markdown.py) and only ever adds tags from its own
     # fixed literal set, so wrapping its *output* in `Markup` here just
     # tells Jinja "this string's escaping has already been handled, don't
@@ -34,3 +34,18 @@ def _md(text: str) -> Markup:
 
 
 templates.env.filters["md"] = _md
+
+
+def _svg(markup: str) -> Markup:
+    # The other of exactly two sanctioned `Markup(...)` call sites (see
+    # `_md` above). `web/charts.py`'s `equity_svg` assembles its output
+    # purely from formatted Decimal/datetime values -- money-formatted
+    # equity figures, computed x/y coordinates -- never from a user- or
+    # LLM-authored string, so there is nothing here Jinja's autoescape would
+    # ever need to protect against. Do not route arbitrary strings through
+    # this filter; if the source isn't `equity_svg` (or another function
+    # with the same "numbers only" guarantee), it doesn't belong here.
+    return Markup(markup)
+
+
+templates.env.filters["svg"] = _svg

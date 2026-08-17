@@ -70,6 +70,17 @@ def _clear_quote_cache():
     dashboard_route._quote_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _clear_equity_history_cache():
+    # Same rationale as `_clear_quote_cache` above -- the equity-history
+    # cache is module-level so it survives across requests within a
+    # process, which is the point, but that would make assertions depend on
+    # test order unless cleared between tests.
+    dashboard_route._equity_history_cache.clear()
+    yield
+    dashboard_route._equity_history_cache.clear()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -806,3 +817,82 @@ rules: []
     assert elapsed < 1.0
     assert "—" in r.text  # at least the skipped tickers render as a dash
     release.set()
+
+
+# --- Equity history chart (Item 1) ------------------------------------------
+
+class EquityHistoryBroker(FakeBroker):
+    """Canned get_equity_history so route tests don't depend on a real
+    broker call -- 5 ascending points, comfortably enough to render a line
+    regardless of which range's day-count the route computes."""
+
+    def get_equity_history(self, days):
+        base = datetime(2026, 8, 1, tzinfo=UTC)
+        return [(base + timedelta(days=i), Decimal(str(10000 + i * 100)))
+                for i in range(5)]
+
+
+class FailingEquityHistoryBroker(FakeBroker):
+    def get_equity_history(self, days):
+        raise RuntimeError("history unavailable")
+
+
+def test_dashboard_equity_chart_renders_line_for_each_range(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    # The client fixture's own login POST already rendered "/" once (with
+    # the default range and the fixture's original FakeBroker) before this
+    # test's monkeypatch ran, caching an empty history under the default
+    # range's key -- clear it so every range below actually hits the
+    # broker just swapped in above.
+    dashboard_route._equity_history_cache.clear()
+    for key in ("1w", "1m", "ytd", "1y"):
+        body = client.get(f"/?range={key}").text
+        assert "<polyline" in body
+        assert "No history yet" not in body
+
+
+def test_dashboard_equity_chart_range_tabs_mark_active(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/?range=ytd").text
+    assert '<a href="/?range=ytd" class="tab-link on">YTD</a>' in body
+
+
+def test_dashboard_equity_chart_default_range_is_month(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/").text
+    assert '<a href="/?range=1m" class="tab-link on">Month</a>' in body
+
+
+def test_dashboard_equity_chart_invalid_range_falls_back_to_default(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    dashboard_route._equity_history_cache.clear()
+    body = client.get("/?range=garbage").text
+    assert '<a href="/?range=1m" class="tab-link on">Month</a>' in body
+
+
+def test_dashboard_equity_chart_broker_failure_shows_placeholder(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", FailingEquityHistoryBroker())
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "No history yet" in r.text
+
+
+def test_dashboard_equity_chart_empty_history_shows_placeholder(client):
+    # Default FakeBroker.get_equity_history inherits the base class's `[]`.
+    body = client.get("/").text
+    assert "No history yet" in body
+
+
+def test_dashboard_equity_chart_shows_current_equity_and_change(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    body = client.get("/?range=1w").text
+    # FakeBroker.get_account().equity is a fixed 10000; history's first
+    # point in a 5-point ascending series is also 10000 -- change is $0.
+    assert "$10,000.00" in body
+
+
+def test_dashboard_equity_chart_is_english_only(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
+    assert_english_only(client.get("/?range=ytd").text)
