@@ -45,7 +45,19 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         # Spec §④/降级: a notification failure must never affect queueing --
         # the row above is already committed by the time this runs, so the
         # whole thing is best-effort and swallows everything.
-        if notifier is None or not doc.notify_email:
+        #
+        # Important 1: deliberately NOT gated on `doc.notify_email` -- that
+        # field is a per-strategy preference written by the PROPOSER (the
+        # LLM) into the very draft this call is about. A chat draft is
+        # user-initiated -- the user is mid-conversation right now -- so
+        # this notification is the loud confirmation channel that a draft
+        # is sitting there awaiting approval; the whole point is that it
+        # must never be silenceable by the proposal itself. Gating on
+        # `notify_email` let an injected `authorization: auto` +
+        # `notify_email: false` draft queue with ZERO human-visible signal.
+        # Reflection's own notify path (sentinel.py) is untouched -- this
+        # only covers chat-sourced drafts.
+        if notifier is None:
             return
         try:
             action = (f"create new strategy '{doc.id}'" if is_new
@@ -96,13 +108,27 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             # explicit kwarg says so at the call site instead of relying on
             # a sibling tool's parameter as an implicit signal.
             try:
-                superseded = queue.supersede_pending_chat_revision(
-                    strategy_id, note="replaced by a newer chat draft")
+                # Important 2: ADD before SUPERSEDE, not the reverse. The
+                # old ordering committed the supersede first, so an
+                # `add_strategy_revision` failure right after it left the
+                # prior draft marked superseded ("replaced by a newer chat
+                # draft") while Pending held nothing new -- a false audit
+                # note and a lost draft. Adding first means a failure here
+                # (the except below) never reaches supersede at all, so the
+                # prior draft stays exactly as it was. `exclude_id=rid`
+                # keeps the row just inserted (same strategy_id, same
+                # source='chat', already status='pending') from matching
+                # supersede's own WHERE clause and superseding itself; the
+                # note now names the real replacing id instead of a static
+                # string (closes the spec §③ resolution_note-names-new-id
+                # gap).
                 rid = queue.add_strategy_revision(
                     strategy_id=strategy_id, ticker=doc.position.ticker,
                     old_yaml=old_text, new_yaml=new_text, diff=diff,
                     rationale=reason, conversation_id=conversation_id,
                     source="chat", is_new=is_new)
+                superseded = queue.supersede_pending_chat_revision(
+                    strategy_id, note=f"replaced by #{rid}", exclude_id=rid)
             except Exception as exc:  # noqa: BLE001 — spec 降级: a queue
                 # failure must return an error string, not lose the drafted
                 # YAML (it's still right there in the conversation).

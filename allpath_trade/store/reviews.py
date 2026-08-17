@@ -182,7 +182,8 @@ class ReviewQueue:
         self._conn.commit()
         return ReviewHandle(cur.lastrowid, token)
 
-    def supersede_pending_chat_revision(self, strategy_id: str, note: str) -> int | None:
+    def supersede_pending_chat_revision(self, strategy_id: str, note: str, *,
+                                        exclude_id: int | None = None) -> int | None:
         """Spec §③: a same-`strategy_id` chat proposal replaces (rather
         than piling up alongside) any earlier chat proposal that's still
         pending -- "改两轮很常见" (revising twice in one conversation is
@@ -212,6 +213,15 @@ class ReviewQueue:
         row per strategy, since each new one supersedes the last), or
         `None` if there was nothing pending to supersede.
 
+        `exclude_id` (Important 2 fix, action_tools.py's `draft_strategy`):
+        the caller now inserts the replacing row via `add_strategy_revision`
+        BEFORE calling this (add-before-supersede, so a failed add never
+        leaves a superseded orphan with nothing new in Pending -- see the
+        comment at the call site). That just-inserted row is itself
+        `status='pending'`, `source='chat'`, same `strategy_id` -- it would
+        otherwise match this method's own WHERE clause and supersede
+        itself. Pass its id here to exclude it from the UPDATE.
+
         Single UPDATE, `status='pending'` in the WHERE clause, no
         SELECT-then-UPDATE: an earlier version selected the candidate ids
         first and updated them by id in a second step, which left a window
@@ -226,13 +236,16 @@ class ReviewQueue:
         sharing this connection can interleave between the UPDATE and the
         follow-up SELECT that recovers the max id it actually touched."""
         resolved_ts = datetime.now(UTC).isoformat()
+        exclude_clause = " AND id != ?" if exclude_id is not None else ""
+        params = ((resolved_ts, note, strategy_id)
+                 + ((exclude_id,) if exclude_id is not None else ()))
         with self._conn.transaction():
             cur = self._conn.execute(
                 "UPDATE pending_reviews SET status='superseded', resolved_ts=?,"
                 " resolution_note=?, approval_token_hash=NULL, token_expires_ts=NULL"
                 " WHERE kind='strategy_revision' AND source='chat'"
-                " AND strategy_id=? AND status='pending'",
-                (resolved_ts, note, strategy_id))
+                " AND strategy_id=? AND status='pending'" + exclude_clause,
+                params)
             if cur.rowcount == 0:
                 return None
             row = self._conn.execute(

@@ -567,3 +567,74 @@ def test_confirm_page_omits_status_warning_when_status_unchanged(client):
     rid = queue_revision(client)  # status: active on both sides
     body = client.get(approve_url(rid), params={"k": rid.token}).text
     assert "takes the strategy out of active" not in body
+
+
+def test_confirm_page_approve_form_confirms_when_proposal_flips_to_auto(client):
+    # Minor 3: same interaction weight as the in-app card's Approve button
+    # -- this unauthenticated one-click link needs it even more.
+    base = new_strategy_yaml(authorization="confirm", status="active")
+    new = new_strategy_yaml(authorization="auto", status="active")
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    strategies_dir.joinpath("s1.yaml").write_text(base)
+    rid = client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=base, new_yaml=new,
+        diff="d", rationale="r", source="chat")
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert (f'action="/a/{rid}/approve" onsubmit="return confirm(' in body)
+
+
+def test_confirm_page_approve_form_has_no_confirm_when_not_flipping_to_auto(client):
+    rid = queue_revision(client)  # neither side sets authorization: auto
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert f'action="/a/{rid}/approve">' in body
+
+
+def test_confirm_page_shows_stale_warning_when_file_changed(client):
+    # Minor 4: the route computes staleness itself now, the same
+    # current-file check the in-app card uses -- previously this page
+    # never told a link visitor their approval was about to fail
+    # re-validation.
+    rid = queue_revision(client)
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    strategies_dir.joinpath("s1.yaml").write_text(
+        CURRENT_S1_YAML.replace("target_weight: 15%", "target_weight: 20%"))
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "has changed since this proposal" in body
+
+
+def test_confirm_page_omits_stale_warning_when_file_unchanged(client):
+    rid = queue_revision(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "has changed since this proposal" not in body
+
+
+def test_confirm_page_shows_source_chip_for_an_unrecognized_source(client):
+    # Minor 6: the confirm page must not collapse a non-'chat' source to
+    # the literal string "reflection" either.
+    rid = client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=CURRENT_S1_YAML,
+        new_yaml=VALID_REVISION_YAML, diff="d", rationale="r", source="webhook")
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert '<span class="chip">webhook</span>' in body
+    assert '<span class="chip">reflection</span>' not in body
+
+
+DRAFT_HINT = "This strategy will be draft after approval"
+
+
+def test_confirm_page_shows_draft_status_hint(client):
+    base = new_strategy_yaml(status="active")
+    new = new_strategy_yaml(status="draft")
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    strategies_dir.joinpath("s1.yaml").write_text(base)
+    rid = client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=base, new_yaml=new,
+        diff="d", rationale="r", source="chat")
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert DRAFT_HINT in body
+
+
+def test_confirm_page_omits_draft_status_hint_when_landing_active(client):
+    rid = queue_revision(client)  # status: active on both sides
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert DRAFT_HINT not in body

@@ -202,7 +202,18 @@ def revision_view(source: str, snapshot: dict) -> dict:
     and the new status is a definite, successfully-parsed non-`active`
     value. A new-status parse failure intentionally does NOT count as a
     regression: this function only ever asserts what it could positively
-    confirm from the text."""
+    confirm from the text.
+
+    `lands_as_draft` (spec §②'s carried gap): the proposed `status` is
+    literally `draft` (its schema default -- see `_yaml_top_fields`'s
+    `.get("status", "draft")` above) -- true for BOTH a brand-new strategy
+    left at its default and an existing strategy explicitly proposed into
+    `draft`. Either way the strategy won't be monitored the moment this is
+    approved, which is easy to miss next to the diff -- the card/confirm
+    page render one hint line so the approver knows to go Activate it
+    afterward. Deliberately not gated on `is_new` (a landing existing
+    strategy needs the same hint) and, like the other two flags, silently
+    `False` on an unparseable `new_yaml` rather than guessing."""
     # Same fallback store/reviews.py's `_approve_revision` uses for a
     # pre-fix row that predates the `is_new` snapshot key: derive it from
     # `old_yaml == ""` rather than assuming False, so this stays consistent
@@ -224,13 +235,26 @@ def revision_view(source: str, snapshot: dict) -> dict:
     auth_becomes_auto = new_auth == "auto" and (is_new or base_auth != "auto")
     status_regresses = (not is_new and base_status == "active"
                         and new_status not in (None, "active"))
+    lands_as_draft = new_status == "draft"
 
     return {
         "proposer": source,
         "is_new": is_new,
         "auth_becomes_auto": bool(auth_becomes_auto),
         "status_regresses": bool(status_regresses),
+        "lands_as_draft": bool(lands_as_draft),
     }
+
+
+def current_strategy_yaml(c, strategy_id: str) -> str:
+    """The strategy file's CURRENT on-disk text (`""` if it doesn't exist),
+    read fresh at render time. Shared by `_revision_diff` below and by
+    web/routes/approve.py's confirm-page context, so the two surfaces
+    compute "does the file still match what this proposal was drafted
+    against" -- i.e. staleness -- against the exact same read, not two
+    independently-written file checks that could quietly drift apart."""
+    path = c.strategies.directory / f"{strategy_id}.yaml"
+    return path.read_text() if path.exists() else ""
 
 
 def _revision_diff(c, item: dict) -> dict:
@@ -250,12 +274,16 @@ def _revision_diff(c, item: dict) -> dict:
     is what's on disk right now, not a frozen snapshot."""
     snapshot = item["snapshot"]
     strategy_id = item["strategy_id"]
-    path = c.strategies.directory / f"{strategy_id}.yaml"
-    current_yaml = path.read_text() if path.exists() else ""
-    # A new-strategy proposal (spec §②) has no "current" file to speak of --
-    # "Current" would be a lie (there's nothing there yet) and the empty
-    # left column would look unlabeled/broken rather than intentional.
-    left_label = "— (new strategy)" if snapshot.get("is_new") else "Current"
+    current_yaml = current_strategy_yaml(c, strategy_id)
+    # Minor 1: labelled off the file's CURRENT reality (empty = nothing on
+    # disk right now), not off the proposal's own recorded `is_new` flag --
+    # `is_new` is frozen at proposal time and goes stale itself the moment
+    # some OTHER change (a sibling proposal, a manual write) creates the
+    # file afterward. Rendering "— (new strategy)" over rows that actually
+    # came from a real, now-existing file would bury that file's content
+    # under a label saying there's nothing there. The `stale` flag right
+    # below already tells the user their proposal's base has moved.
+    left_label = "— (new strategy)" if current_yaml == "" else "Current"
     return {
         "rows": split_diff_rows(current_yaml, snapshot["new_yaml"]),
         "stale": current_yaml != snapshot["old_yaml"],

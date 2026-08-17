@@ -27,7 +27,10 @@
     {% if kind == "strategy_revision" %}
     <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
       <div class="row" style="margin:4px 0 10px">
-        <span class="chip">{{ 'chat' if proposer == 'chat' else 'reflection' }}</span>
+        {# Minor 6: same as the in-app card -- render the row's own source
+           verbatim rather than collapsing every non-'chat' value to the
+           literal string "reflection". #}
+        <span class="chip">{{ proposer or '?' }}</span>
         {% if is_new %}<span class="badge">New strategy</span>{% endif %}
       </div>
       <p style="font-size:13px;margin:0 0 8px"><strong>Rationale:</strong> {{ rationale }}</p>
@@ -42,12 +45,27 @@
       {% if status_regresses %}
       <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
       {% endif %}
+      {% if stale %}
+      {# Minor 4: the route now computes this the same way the in-app
+         card's live diff does (reviews.py's current_strategy_yaml) --
+         previously this page never told a link visitor their approval
+         was about to fail re-validation. #}
+      <p class="warn" style="font-size:13px;margin:0 0 8px">The strategy file has changed since this proposal — approving will fail safely; re-propose or reject.</p>
+      {% endif %}
+      {% if lands_as_draft %}
+      <p class="muted" style="font-size:13px;margin:0 0 8px">This strategy will be draft after approval — activate it on the strategy page to arm its rules.</p>
+      {% endif %}
       {{ split_diff(diff_rows, diff_left_label, "Proposed") }}
     </div>
     {% endif %}
 
     <div class="row" style="margin-top:16px">
-      <form method="post" action="/a/{{ review_id }}/approve">
+      {# Minor 3: same interaction weight as the in-app card's Approve
+         button (and strategy_detail.html's Activate) for an auto-flipping
+         proposal -- this link is a one-click page, so the confirm()
+         dialog is the only friction standing between a click and hard
+         rules trading unattended. #}
+      <form method="post" action="/a/{{ review_id }}/approve"{% if auth_becomes_auto %} onsubmit="return confirm('This proposal sets authorization: auto — once approved, hard rules can place orders without asking you. Approve anyway?')"{% endif %}>
         <input type="hidden" name="k" value="{{ token }}" autocomplete="off">
         <button class="primary" type="submit">Confirm approve</button>
       </form>

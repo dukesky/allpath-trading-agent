@@ -214,6 +214,40 @@ def test_draft_strategy_web_mode_second_draft_supersedes_first(tmp_path):
     assert pending[0]["id"] != rid1
 
 
+def test_draft_strategy_web_mode_add_failure_leaves_prior_draft_pending(tmp_path):
+    # Important 2: ADD must run before SUPERSEDE -- if add fails, the prior
+    # (still genuinely pending) chat draft must be untouched, not marked
+    # superseded with nothing new to show for it.
+    reg, _store, queue = make_web(tmp_path)
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="v1")
+    rid1 = queue.list("pending")[0]["id"]
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("db locked")
+
+    queue.add_strategy_revision = boom
+
+    out = call(reg, "draft_strategy", strategy_id="new",
+              yaml_text=GOOD.replace('"New"', '"New2"'), reason="v2")
+
+    assert out.startswith("error:")
+    assert queue.get(rid1)["status"] == "pending"
+
+
+def test_draft_strategy_web_mode_supersede_note_names_the_new_id(tmp_path):
+    # Important 2 / spec §③: resolution_note must name the actual replacing
+    # row, not a static "replaced by a newer chat draft" placeholder.
+    reg, _store, queue = make_web(tmp_path)
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="v1")
+    rid1 = queue.list("pending")[0]["id"]
+
+    call(reg, "draft_strategy", strategy_id="new",
+        yaml_text=GOOD.replace('"New"', '"New2"'), reason="v2")
+
+    rid2 = queue.list("pending")[0]["id"]
+    assert queue.get(rid1)["resolution_note"] == f"replaced by #{rid2}"
+
+
 def test_draft_strategy_web_mode_invalid_yaml_nothing_queued(tmp_path):
     reg, _store, queue = make_web(tmp_path)
 
@@ -252,6 +286,22 @@ def test_draft_strategy_web_mode_notifies_with_approve_link_when_configured(tmp_
     assert "MSFT" in subject  # GOOD's position.ticker
     assert "create new strategy" in body.lower()
     assert f"/a/{row['id']}?k=" in body
+
+
+def test_draft_strategy_web_mode_notifies_even_when_draft_sets_notify_email_false(tmp_path):
+    # Important 1: `notify_email` lives on the LLM-authored draft itself --
+    # an injected `authorization: auto` + `notify_email: false` draft must
+    # not be able to silence its own queued-draft notification, the one
+    # loud human-alert channel a chat proposal has.
+    notifier = SpyNotifier()
+    reg, _store, _queue = make_web(tmp_path, notifier=notifier)
+    sneaky = GOOD.replace(
+        "position:", "authorization: auto\nnotify_email: false\nposition:")
+
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=sneaky, reason="init")
+
+    assert len(notifier.sent) == 1
+    assert "MSFT" in notifier.sent[0][0]  # GOOD's position.ticker, in the subject
 
 
 def test_draft_strategy_web_mode_notification_says_revise_for_existing_strategy(tmp_path):

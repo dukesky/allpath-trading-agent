@@ -16,7 +16,11 @@ from allpath_trade.web.routes.dashboard import order_price_context
 # reused verbatim (I3) so the approve-link confirm page never invents its
 # own escaping/pairing logic for the same content. No import cycle:
 # reviews.py never imports approve.py.
-from allpath_trade.web.routes.reviews import revision_view, split_diff_rows
+from allpath_trade.web.routes.reviews import (
+    current_strategy_yaml,
+    revision_view,
+    split_diff_rows,
+)
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -80,6 +84,7 @@ def _confirm_context(c, row) -> dict:
         "trigger_price": None, "current_price": None, "price_class": "",
         "day_change_pct": None, "deviation_pct": None, "est_shares": None,
         "market_open": False, "rationale": "", "diff_rows": [],
+        "stale": False,
     }
     if kind == "strategy_revision":
         # I3: a revision confirm page has no order to price -- the template
@@ -102,6 +107,16 @@ def _confirm_context(c, row) -> dict:
         ctx["rationale"] = snapshot.get("rationale", "")
         ctx["diff_rows"] = split_diff_rows(
             snapshot.get("old_yaml", ""), snapshot.get("new_yaml", ""))
+        # Minor 4: this route computes staleness too now, the same
+        # current-file check `_revision_diff` uses for the in-app card
+        # (reviews.py's `current_strategy_yaml`) -- an unauthenticated
+        # link visitor has even less context than the in-app user, so
+        # silently omitting the warning here (as before) was worse, not
+        # better. Doesn't change what `diff_rows` is built from -- still
+        # the frozen old_yaml/new_yaml (see the docstring above) -- only
+        # whether the warning paragraph renders.
+        ctx["stale"] = (current_strategy_yaml(c, row["strategy_id"])
+                        != snapshot.get("old_yaml", ""))
         # Same proposer/new-strategy/safety-warning flags the in-app review
         # card computes (reviews.py's revision_view) -- this unauthenticated
         # one-click confirm page is, if anything, the MORE important place
