@@ -16,7 +16,7 @@ from allpath_trade.web.routes.dashboard import order_price_context
 # reused verbatim (I3) so the approve-link confirm page never invents its
 # own escaping/pairing logic for the same content. No import cycle:
 # reviews.py never imports approve.py.
-from allpath_trade.web.routes.reviews import split_diff_rows
+from allpath_trade.web.routes.reviews import revision_view, split_diff_rows
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -102,6 +102,14 @@ def _confirm_context(c, row) -> dict:
         ctx["rationale"] = snapshot.get("rationale", "")
         ctx["diff_rows"] = split_diff_rows(
             snapshot.get("old_yaml", ""), snapshot.get("new_yaml", ""))
+        # Same proposer/new-strategy/safety-warning flags the in-app review
+        # card computes (reviews.py's revision_view) -- this unauthenticated
+        # one-click confirm page is, if anything, the MORE important place
+        # to show them: a visitor here may never have seen the in-app card
+        # at all.
+        ctx.update(revision_view(row["source"], snapshot))
+        ctx["diff_left_label"] = ("— (new strategy)" if ctx["is_new"]
+                                  else "Base (at proposal)")
         return ctx
 
     intent = json.loads(row["intent"]) if row["intent"] else None

@@ -139,13 +139,20 @@ def detail(request: Request, strategy_id: str) -> HTMLResponse:
     if doc is None:
         return _not_found(request, c, "Strategy not found")
     path = c.strategies.directory / f"{strategy_id}.yaml"
-    has_pending = any(row["strategy_id"] == strategy_id
-                      for row in c.queue.list("pending"))
+    # One query covers both: `has_pending` (any pending row at all, order or
+    # revision -- the existing "pending review" lifecycle chip) and
+    # `pending_revisions` (just the strategy_revision-kind rows, surfaced
+    # below as a source-aware "go approve this" line -- Task 4).
+    pending_rows = [row for row in c.queue.list("pending")
+                    if row["strategy_id"] == strategy_id]
+    pending_revisions = [{"id": row["id"], "source": row["source"]}
+                         for row in pending_rows if row["kind"] == "strategy_revision"]
     return templates.TemplateResponse(request, "strategy_detail.html", {
         "page": "strategies", "doc": doc,
-        "chips": _lifecycle_chips(doc, has_pending),
+        "chips": _lifecycle_chips(doc, bool(pending_rows)),
         "yaml_text": path.read_text() if path.exists() else "",
         "versions": c.strategies.versions(strategy_id)[:_MAX_VERSIONS_SHOWN],
+        "pending_revisions": pending_revisions,
         "error": request.query_params.get("error"), **nav_context(c)})
 
 

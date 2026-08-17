@@ -5,6 +5,7 @@ import itertools
 import json
 import time
 
+import yaml
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
@@ -151,6 +152,87 @@ def _collapse_context(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _yaml_top_fields(text: str) -> dict | None:
+    """Best-effort read of a strategy YAML document's top-level mapping,
+    used only by `revision_view` below to compute the safety-warning
+    flags -- never to validate the document (that's `parse_strategy_text`'s
+    job, already done before a chat/reflection proposal ever reaches the
+    queue). Returns the raw mapping on success, or `None` for anything that
+    doesn't cleanly parse as a mapping (empty text, a YAML syntax error, a
+    scalar/list document) -- `revision_view` treats `None` as "unknown", so
+    a proposal whose base/new text can't be read this way just skips the
+    flag it needs that text for, rather than crashing the page or claiming
+    a false positive/negative."""
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def revision_view(source: str, snapshot: dict) -> dict:
+    """Proposer/new-strategy/safety-warning flags shared by the in-app
+    review card (_review_card.html) and the unauthenticated approve-link
+    confirm page (approve_confirm.html) -- one function so the two surfaces
+    can never disagree about when a warning should show (imported by
+    web/routes/approve.py; see its own docstring for why that import
+    direction, not the reverse, is the one with no cycle).
+
+    Spec §① (2026-08-12-chat-strategy-proposals-design.md): a chat proposal
+    is not frozen out of touching `authorization`/`status` the way a
+    reflection proposal is (`apply_revision_factory` enforces that at
+    approval time) -- so a chat proposal that flips a strategy to
+    `authorization: auto`, or takes it out of `active`, must be flagged
+    loudly on the card *before* the human clicks Approve, not discovered
+    after. Both flags are computed by parsing YAML text (a plain
+    `yaml.safe_load` + dict lookup via `_yaml_top_fields`, deliberately NOT
+    a full `StrategyDoc` validation) so a proposal that fails full schema
+    validation for an unrelated reason still renders its diff with the
+    flags simply defaulting to `False` -- never a 500.
+
+    `auth_becomes_auto`: new `authorization` is `auto`, and either this is
+    a brand-new strategy (spec §②: no prior authorization to compare
+    against -- any new `auto` strategy is worth flagging) or the base
+    strategy's authorization wasn't already `auto` (approving a no-op
+    re-affirmation of an existing `auto` strategy isn't a new risk).
+
+    `status_regresses` (the Task 4 carried finding): only meaningful for an
+    existing strategy (a new strategy was never `active` to begin with, so
+    there's nothing to "take out of" it) -- the base status was `active`
+    and the new status is a definite, successfully-parsed non-`active`
+    value. A new-status parse failure intentionally does NOT count as a
+    regression: this function only ever asserts what it could positively
+    confirm from the text."""
+    # Same fallback store/reviews.py's `_approve_revision` uses for a
+    # pre-fix row that predates the `is_new` snapshot key: derive it from
+    # `old_yaml == ""` rather than assuming False, so this stays consistent
+    # with what approving the row would actually do.
+    old_yaml = snapshot.get("old_yaml", "")
+    is_new = bool(snapshot.get("is_new", old_yaml == ""))
+    new_fields = _yaml_top_fields(snapshot.get("new_yaml", ""))
+    new_auth = new_fields.get("authorization", "confirm") if new_fields else None
+    new_status = new_fields.get("status", "draft") if new_fields else None
+
+    base_auth = None
+    base_status = None
+    if not is_new:
+        base_fields = _yaml_top_fields(old_yaml)
+        if base_fields is not None:
+            base_auth = base_fields.get("authorization", "confirm")
+            base_status = base_fields.get("status", "draft")
+
+    auth_becomes_auto = new_auth == "auto" and (is_new or base_auth != "auto")
+    status_regresses = (not is_new and base_status == "active"
+                        and new_status not in (None, "active"))
+
+    return {
+        "proposer": source,
+        "is_new": is_new,
+        "auth_becomes_auto": bool(auth_becomes_auto),
+        "status_regresses": bool(status_regresses),
+    }
+
+
 def _revision_diff(c, item: dict) -> dict:
     """Regenerates a strategy_revision row's diff at render time against
     the file's CURRENT on-disk content, rather than trusting the diff
@@ -170,10 +252,14 @@ def _revision_diff(c, item: dict) -> dict:
     strategy_id = item["strategy_id"]
     path = c.strategies.directory / f"{strategy_id}.yaml"
     current_yaml = path.read_text() if path.exists() else ""
+    # A new-strategy proposal (spec §②) has no "current" file to speak of --
+    # "Current" would be a lie (there's nothing there yet) and the empty
+    # left column would look unlabeled/broken rather than intentional.
+    left_label = "— (new strategy)" if snapshot.get("is_new") else "Current"
     return {
         "rows": split_diff_rows(current_yaml, snapshot["new_yaml"]),
         "stale": current_yaml != snapshot["old_yaml"],
-        "left_label": "Current", "right_label": "Proposed",
+        "left_label": left_label, "right_label": "Proposed",
     }
 
 
@@ -181,6 +267,13 @@ def _attach_revision_diffs(c, items: list[dict]) -> None:
     for item in items:
         if item["kind"] != "strategy_revision":
             continue
+        # Proposer chip / New-strategy badge / auto+status warning flags --
+        # a pure function of the row's own source+snapshot, so it applies
+        # identically whether the row is still pending or already resolved
+        # (a resolved row's card only actually renders the warnings while
+        # pending -- see _review_card.html -- but the flags themselves are
+        # cheap and harmless to compute either way).
+        item.update(revision_view(item["source"], item["snapshot"]))
         if item["status"] == "pending":
             # Live re-check against the current file -- see _revision_diff.
             item["revision_diff"] = _revision_diff(c, item)
@@ -193,12 +286,16 @@ def _attach_revision_diffs(c, items: list[dict]) -> None:
             # this proposal). The frozen old/new the agent actually
             # proposed against is the honest thing to show for a resolved
             # row -- labelled `Base (at proposal)` so it doesn't read as
-            # "current", which it may no longer be.
+            # "current", which it may no longer be (or, for a new-strategy
+            # proposal, the same "— (new strategy)" label _revision_diff
+            # uses -- there was never a "base" to speak of).
             snapshot = item["snapshot"]
+            left_label = ("— (new strategy)" if snapshot.get("is_new")
+                         else "Base (at proposal)")
             item["revision_diff"] = {
                 "rows": split_diff_rows(snapshot["old_yaml"], snapshot["new_yaml"]),
                 "stale": False,
-                "left_label": "Base (at proposal)", "right_label": "Proposed",
+                "left_label": left_label, "right_label": "Proposed",
             }
 
 

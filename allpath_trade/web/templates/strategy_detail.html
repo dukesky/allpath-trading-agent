@@ -28,6 +28,9 @@
   {% endif %}
 </div>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% for pr in pending_revisions %}
+<p class="hint">{% if pr.source == 'chat' %}A chat draft{% else %}A reflection proposal{% endif %} (#{{ pr.id }}) is awaiting your approval — <a href="/reviews">Pending</a></p>
+{% endfor %}
 
 <h2>Rules</h2>
 <div class="table-scroll">

@@ -55,9 +55,9 @@
 - Modify: `strategy_detail.html` — if a pending chat proposal exists for this strategy, a line "A chat draft is awaiting your approval → Pending"
 - Test: `tests/test_web_reviews.py`, `tests/test_web_approve.py`, `tests/test_web_strategies.py`
 
-- [ ] Failing tests: chip text per source; New badge + left-column label; auto warning appears exactly when new authorization is auto and base isn't; superseded rows render as resolved with note; confirm page mirrors all three; English-only; escaping (yaml with `<script>`).
-- [ ] Implement; suite; ruff; commit `feat: proposal cards show proposer, new-strategy, and auto warnings`.
-- [ ] Carried from Task 1+2 review: a chat proposal that flips an existing strategy `active → draft` deserves the same card warning treatment as an `authorization: auto` flip (both are consequential, easy-to-miss changes a reviewer should be flagged about before approving) -- add a `status_becomes_draft`-style flag alongside `auth_becomes_auto`, computed the same way (parse new_yaml vs base), and show it on both the review card and the confirm page.
+- [x] Failing tests: chip text per source; New badge + left-column label; auto warning appears exactly when new authorization is auto and base isn't; superseded rows render as resolved with note; confirm page mirrors all three; English-only; escaping (yaml with `<script>`).
+- [x] Implement; suite; ruff; commit `feat: proposal cards show proposer, new-strategy, and auto warnings`.
+- [x] Carried from Task 1+2 review: a chat proposal that flips an existing strategy `active → draft` deserves the same card warning treatment as an `authorization: auto` flip (both are consequential, easy-to-miss changes a reviewer should be flagged about before approving) -- add a `status_becomes_draft`-style flag alongside `auth_becomes_auto`, computed the same way (parse new_yaml vs base), and show it on both the review card and the confirm page.
 
 ### Task 5: Docs + closeout
 

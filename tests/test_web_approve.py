@@ -491,3 +491,79 @@ def test_confirm_page_escapes_script_tags_in_revision_yaml(client):
     body = client.get(f"/a/{rid}?k={rid.token}").text
     assert "<script>alert(1)</script>" not in body
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+
+
+# --- Task 4: the confirm page mirrors the in-app card's proposer chip,
+# New-strategy badge, and auto/status warnings -- this is the unauthenticated
+# one-click surface, so getting this right here matters MORE, not less. -----
+
+def new_strategy_yaml(*, authorization=None, status="draft"):
+    lines = f'name: "New one"\nstatus: {status}\nversion: 1\n'
+    if authorization:
+        lines += f"authorization: {authorization}\n"
+    lines += ('position: {ticker: AAPL, target_weight: 5%}\n'
+             'rules:\n  - {id: r1, type: hard, condition: "price < 90", action: "sell all"}\n')
+    return lines
+
+
+def test_confirm_page_shows_reflection_chip(client):
+    rid = queue_revision(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert '<span class="chip">reflection</span>' in body
+
+
+def test_confirm_page_shows_chat_chip(client):
+    rid = client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=CURRENT_S1_YAML,
+        new_yaml=VALID_REVISION_YAML, diff="d", rationale="user asked",
+        source="chat")
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert '<span class="chip">chat</span>' in body
+
+
+def test_confirm_page_shows_new_strategy_badge_and_left_label(client):
+    rid = client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="brandnew", ticker="AAPL", old_yaml="",
+        new_yaml=new_strategy_yaml(), diff="d", rationale="brand new idea",
+        source="chat", is_new=True)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert '<span class="badge">New strategy</span>' in body
+    assert "— (new strategy)" in body
+
+
+def test_confirm_page_shows_auto_warning(client):
+    base = new_strategy_yaml(authorization="confirm", status="active")
+    new = new_strategy_yaml(authorization="auto", status="active")
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    strategies_dir.joinpath("s1.yaml").write_text(base)
+    rid = client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=base, new_yaml=new,
+        diff="d", rationale="r", source="chat")
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "sets authorization: auto" in body
+    assert_english_only(body)
+
+
+def test_confirm_page_omits_auto_warning_when_not_flipping_to_auto(client):
+    rid = queue_revision(client)  # neither side sets authorization: auto
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "sets authorization: auto" not in body
+
+
+def test_confirm_page_shows_status_warning(client):
+    base = new_strategy_yaml(status="active")
+    new = new_strategy_yaml(status="draft")
+    strategies_dir = client.app.state.holder.get().strategies.directory
+    strategies_dir.joinpath("s1.yaml").write_text(base)
+    rid = client.app.state.holder.get().queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml=base, new_yaml=new,
+        diff="d", rationale="r", source="chat")
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "takes the strategy out of active" in body
+    assert_english_only(body)
+
+
+def test_confirm_page_omits_status_warning_when_status_unchanged(client):
+    rid = queue_revision(client)  # status: active on both sides
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "takes the strategy out of active" not in body

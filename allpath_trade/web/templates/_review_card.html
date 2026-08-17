@@ -7,13 +7,28 @@
        oversized-bold-text card the "reason" text was meant to be quiet
        context, not a title (Part C, item 8). The full text still renders,
        just below at body size -- see the .review-reason block. #}
-    <strong>{% if item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}</strong>
+    <strong>{% if item['source'] == 'chat' and item['kind'] != 'strategy_revision' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}</strong>
     <span class="muted">#{{ item['id'] }}</span>
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
+  {% if item['kind'] == 'strategy_revision' %}
+  {# Proposer chip + New-strategy badge: who made this proposal, and
+     whether it's a brand-new strategy (spec §②) rather than a revision of
+     an existing one -- both apply to pending AND resolved rows alike (a
+     superseded/rejected chat draft is still worth labelling as such in
+     history). #}
+  <div class="row" style="margin:4px 0">
+    <span class="chip">{{ 'chat' if item['source'] == 'chat' else 'reflection' }}</span>
+    {% if item['is_new'] %}<span class="badge">New strategy</span>{% endif %}
+  </div>
+  {% endif %}
   <p class="muted" style="font-size:13px;margin:6px 0">
     {% if item['kind'] == 'strategy_revision' %}
+    {% if item['source'] == 'chat' %}
+    Strategy draft from your chat for {{ item['strategy_id'] }}
+    {% else %}
     Strategy revision proposed by reflection for {{ item['strategy_id'] }}
+    {% endif %}
     {% elif item['source'] == 'chat' %}
     From chat — triggered on <code>{{ item['condition'] }}</code>
     {% else %}
@@ -45,6 +60,12 @@
   {% if item['kind'] == 'strategy_revision' %}
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
     <p style="font-size:13px;margin:0 0 8px"><strong>Rationale:</strong> {{ item['snapshot']['rationale'] }}</p>
+    {% if item['status'] == 'pending' and item['auth_becomes_auto'] %}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal sets authorization: auto — once approved, hard rules can place orders without asking you.</p>
+    {% endif %}
+    {% if item['status'] == 'pending' and item['status_regresses'] %}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
+    {% endif %}
     {% if item['revision_diff']['stale'] %}
     <p class="warn" style="font-size:13px;margin:0 0 8px">The strategy file has changed since this proposal — approving will fail safely; re-propose or reject.</p>
     {% endif %}
@@ -93,6 +114,14 @@
   <p class="muted" style="font-size:13px;margin:10px 0 0">
     {% if item['status'] == 'rejected' %}
     Rejected{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
+    {% elif item['status'] == 'superseded' %}
+    {# Spec §③: a same-strategy_id chat proposal replaces an earlier
+       pending chat proposal rather than piling up alongside it --
+       store/reviews.py's supersede_pending_chat_revision leaves the old
+       row's status here, with resolution_note naming the replacement, so
+       history shows why it's gone from Pending without the user having
+       acted on it themselves. #}
+    Superseded{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
     {% elif item['kind'] == 'strategy_revision' %}
     {# Same minimal-honesty scope as the info line above: a revision has no
        order/risk-gate outcome, so the order branch's copy ("order status

@@ -26,8 +26,23 @@
     {% endif %}
     {% if kind == "strategy_revision" %}
     <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+      <div class="row" style="margin:4px 0 10px">
+        <span class="chip">{{ 'chat' if proposer == 'chat' else 'reflection' }}</span>
+        {% if is_new %}<span class="badge">New strategy</span>{% endif %}
+      </div>
       <p style="font-size:13px;margin:0 0 8px"><strong>Rationale:</strong> {{ rationale }}</p>
-      {{ split_diff(diff_rows, "Base (at proposal)", "Proposed") }}
+      {# This unauthenticated one-click link is, if anything, MORE
+         important to warn on than the in-app card -- a visitor here may
+         act without ever having seen /reviews at all. Same flags,
+         reviews.py's revision_view, so the two surfaces never disagree
+         about when to show them. #}
+      {% if auth_becomes_auto %}
+      <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal sets authorization: auto — once approved, hard rules can place orders without asking you.</p>
+      {% endif %}
+      {% if status_regresses %}
+      <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
+      {% endif %}
+      {{ split_diff(diff_rows, diff_left_label, "Proposed") }}
     </div>
     {% endif %}
 
