@@ -87,7 +87,7 @@ def test_chat_auto_flip_applies_without_error_warning_is_a_ui_concern(tmp_path):
 def test_chat_new_strategy_written_when_file_absent(tmp_path):
     store, _ = make(tmp_path)
     apply_fn = apply_revision_factory(store)
-    apply_fn("new-one", NEW_STRATEGY, "", "chat")
+    apply_fn("new-one", NEW_STRATEGY, "", "chat", is_new=True)
     assert (tmp_path / "strategies" / "new-one.yaml").read_text() == NEW_STRATEGY
     versions = store.versions("new-one")
     assert versions[0]["reason"] == "chat proposal approved via web"
@@ -99,7 +99,7 @@ def test_new_strategy_raises_when_file_already_exists(tmp_path):
     (store.directory / "new-one.yaml").write_text(NEW_STRATEGY)
     apply_fn = apply_revision_factory(store)
     with pytest.raises(RevisionValidationError, match="created after"):
-        apply_fn("new-one", NEW_STRATEGY, "", "chat")
+        apply_fn("new-one", NEW_STRATEGY, "", "chat", is_new=True)
 
 
 def test_new_strategy_base_empty_but_file_exists_leaves_row_pending_via_queue(tmp_path):
@@ -112,7 +112,8 @@ def test_new_strategy_base_empty_but_file_exists_leaves_row_pending_via_queue(tm
     queue.set_revision_applier(apply_fn)
     rid = queue.add_strategy_revision(
         strategy_id="new-one", ticker="NVDA", old_yaml="",
-        new_yaml=NEW_STRATEGY, diff="d", rationale="r", source="chat")
+        new_yaml=NEW_STRATEGY, diff="d", rationale="r", source="chat",
+        is_new=True)
 
     (store.directory / "new-one.yaml").write_text(NEW_STRATEGY)
 
@@ -130,8 +131,60 @@ def test_chat_new_strategy_missing_status_defaults_to_draft_not_rejected(tmp_pat
     store, _ = make(tmp_path)
     apply_fn = apply_revision_factory(store)
     no_status = NEW_STRATEGY.replace("status: draft\n", "")
-    apply_fn("new-two", no_status, "", "chat")
+    apply_fn("new-two", no_status, "", "chat", is_new=True)
     assert store.load("new-two").status.value == "draft"
+
+
+def test_new_strategy_negative_version_rejected(tmp_path):
+    # Minor: the applier must not trust proposers on the new-strategy path
+    # either -- there's no base version to bound it from below, so the
+    # applier floors it at a positive integer itself.
+    store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    bad_version = NEW_STRATEGY.replace("version: 1", "version: 0")
+    with pytest.raises(RevisionValidationError, match="positive integer"):
+        apply_fn("new-three", bad_version, "", "chat", is_new=True)
+    assert not (tmp_path / "strategies" / "new-three.yaml").exists()
+
+
+# --- Important 2: is_new is explicit, not derived from old_yaml=="" ------
+
+def test_empty_existing_file_repair_applies_when_is_new_false(tmp_path):
+    # A 0-byte (or otherwise unparseable) EXISTING strategy file also
+    # legitimately reads back as old_yaml=="" -- that used to collide with
+    # the new-strategy sentinel and make repair proposals against it bounce
+    # to pending forever (the applier demanded the file NOT exist, which
+    # was always false). is_new=False makes this an ordinary revision: the
+    # file must exist and match the recorded (empty) base byte-for-byte --
+    # which a genuinely empty file does.
+    store, _ = make(tmp_path)
+    (store.directory / "s1.yaml").write_text("")
+    apply_fn = apply_revision_factory(store)
+    apply_fn("s1", PROPOSED, "", "reflection", is_new=False)
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == PROPOSED
+    versions = store.versions("s1")
+    assert versions[0]["reason"] == "reflection revision approved via web"
+
+
+def test_empty_existing_file_repair_rejects_if_file_now_missing(tmp_path):
+    # Same repair scenario, but the file was deleted between propose and
+    # approve -- is_new=False means "must exist", so this must still raise
+    # rather than being treated as a new-strategy write.
+    store, _ = make(tmp_path)
+    (store.directory / "s1.yaml").unlink()
+    apply_fn = apply_revision_factory(store)
+    with pytest.raises(RevisionValidationError, match="no longer exists"):
+        apply_fn("s1", PROPOSED, "", "reflection", is_new=False)
+
+
+def test_is_new_true_still_rejects_when_expected_base_is_not_empty(tmp_path):
+    # is_new drives the check now, independent of expected_base_yaml's own
+    # content -- confirms the base check isn't secretly still keyed off
+    # `expected_base_yaml == ""` under the hood.
+    store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    with pytest.raises(RevisionValidationError, match="created after"):
+        apply_fn("s1", PROPOSED, CURRENT, "chat", is_new=True)
 
 
 # --- unknown source: fail closed by construction -------------------------

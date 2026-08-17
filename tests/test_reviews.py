@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -135,7 +136,8 @@ def test_add_strategy_revision_row_shape(queue):
     snapshot = json.loads(row["snapshot"])
     assert snapshot == {
         "old_yaml": "id: s1\n", "new_yaml": "id: s1\nx: 2\n",
-        "diff": "- x: 1\n+ x: 2\n", "rationale": "price broke the stop-loss assumption"}
+        "diff": "- x: 1\n+ x: 2\n", "rationale": "price broke the stop-loss assumption",
+        "is_new": False}
 
 
 def test_add_strategy_revision_condition_is_truncated_rationale(queue):
@@ -171,22 +173,79 @@ def test_add_strategy_revision_persists_chat_source(queue):
     assert row["source"] == "chat"
 
 
-def test_add_strategy_revision_empty_old_yaml_signals_new_strategy(queue):
-    # No schema flag for "is this a new strategy" -- the established
-    # convention (documented on `add_strategy_revision`) is old_yaml=="".
+def test_add_strategy_revision_records_is_new_flag(queue):
     rid = queue.add_strategy_revision(
         strategy_id="s2", ticker="AAPL", old_yaml="", new_yaml="id: s2\n",
-        diff="d", rationale="r", source="chat")
+        diff="d", rationale="r", source="chat", is_new=True)
     row = queue.get(rid)
     snapshot = json.loads(row["snapshot"])
     assert snapshot["old_yaml"] == ""
+    assert snapshot["is_new"] is True
+
+
+def test_add_strategy_revision_defaults_is_new_to_false(queue):
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="a", new_yaml="b",
+        diff="d", rationale="r")
+    row = queue.get(rid)
+    assert json.loads(row["snapshot"])["is_new"] is False
+
+
+def test_add_strategy_revision_empty_old_yaml_with_is_new_false_is_a_repair_not_new(queue):
+    # Important 2: a 0-byte (or otherwise unparseable) *existing* strategy
+    # file also legitimately reads back as old_yaml=="" -- that's a repair
+    # proposal, not a new-strategy one. is_new is the explicit signal now,
+    # independent of whether old_yaml happens to be empty.
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="", new_yaml="id: s1\n",
+        diff="d", rationale="r", is_new=False)
+    row = queue.get(rid)
+    snapshot = json.loads(row["snapshot"])
+    assert snapshot["old_yaml"] == ""
+    assert snapshot["is_new"] is False
+
+
+def test_approve_revision_threads_is_new_to_applier(queue):
+    calls = []
+    queue.set_revision_applier(
+        lambda strategy_id, new_yaml, old_yaml, source, is_new: calls.append(is_new))
+    rid = queue.add_strategy_revision(
+        strategy_id="s2", ticker="AAPL", old_yaml="", new_yaml="id: s2\n",
+        diff="d", rationale="r", source="chat", is_new=True)
+
+    queue.approve(rid)
+
+    assert calls == [True]
+
+
+def test_approve_revision_is_new_falls_back_to_old_sentinel_for_legacy_rows(queue):
+    # A row inserted before the `is_new` flag existed on the snapshot has no
+    # "is_new" key at all -- must still resolve using the retired
+    # old_yaml=="" convention rather than raising on a missing key.
+    calls = []
+    queue.set_revision_applier(
+        lambda strategy_id, new_yaml, old_yaml, source, is_new: calls.append(is_new))
+    rid = queue.add_strategy_revision(
+        strategy_id="s2", ticker="AAPL", old_yaml="", new_yaml="id: s2\n",
+        diff="d", rationale="r", source="chat", is_new=True)
+    # Simulate a pre-fix row: snapshot has old_yaml=="" but no is_new key.
+    row = queue.get(rid)
+    snapshot = json.loads(row["snapshot"])
+    del snapshot["is_new"]
+    queue._conn.execute("UPDATE pending_reviews SET snapshot=? WHERE id=?",
+                        (json.dumps(snapshot), rid))
+    queue._conn.commit()
+
+    queue.approve(rid)
+
+    assert calls == [True]
 
 
 def test_approve_revision_calls_applier_with_strategy_id_new_yaml_and_old_yaml(queue):
     calls = []
     queue.set_revision_applier(
-        lambda strategy_id, new_yaml, old_yaml, source: calls.append(
-            (strategy_id, new_yaml, old_yaml, source)))
+        lambda strategy_id, new_yaml, old_yaml, source, is_new: calls.append(
+            (strategy_id, new_yaml, old_yaml, source, is_new)))
     rid = queue.add_strategy_revision(
         strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
         diff="d", rationale="r")
@@ -197,8 +256,11 @@ def test_approve_revision_calls_applier_with_strategy_id_new_yaml_and_old_yaml(q
     # `old_yaml` (the proposal's recorded base) must be threaded through too
     # -- Finding 1: the applier needs it to detect staleness. `source`
     # (defaulting to "reflection") is threaded through as the 4th arg so
-    # the applier can branch its guards per proposer (Task 2).
-    assert calls == [("s1", "new", "old", "reflection")]
+    # the applier can branch its guards per proposer (Task 2). `is_new`
+    # (defaulting to False -- this proposal wasn't recorded with is_new=True)
+    # is the 5th arg (Important 2 fix): the applier's own base check, not
+    # this store layer, decides what it means.
+    assert calls == [("s1", "new", "old", "reflection", False)]
     row = queue.get(rid)
     assert row["status"] == "approved" and row["resolved_ts"]
     # order-kind executor must never be touched by a revision approval
@@ -208,7 +270,7 @@ def test_approve_revision_calls_applier_with_strategy_id_new_yaml_and_old_yaml(q
 def test_approve_revision_passes_chat_source_to_applier(queue):
     calls = []
     queue.set_revision_applier(
-        lambda strategy_id, new_yaml, old_yaml, source: calls.append(source))
+        lambda strategy_id, new_yaml, old_yaml, source, is_new: calls.append(source))
     rid = queue.add_strategy_revision(
         strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
         diff="d", rationale="r", source="chat")
@@ -229,7 +291,7 @@ def test_approve_revision_without_applier_raises_and_leaves_pending(queue):
 
 
 def test_approve_revision_applier_exception_recorded_and_reraised(queue):
-    def boom(strategy_id, new_yaml, old_yaml, source):
+    def boom(strategy_id, new_yaml, old_yaml, source, is_new):
         raise ValueError("bad yaml")
 
     queue.set_revision_applier(boom)
@@ -250,7 +312,8 @@ def test_approve_revision_applier_exception_recorded_and_reraised(queue):
 
 def test_approve_revision_twice_raises(queue):
     calls = []
-    queue.set_revision_applier(lambda strategy_id, new_yaml, old_yaml, source: calls.append(1))
+    queue.set_revision_applier(
+        lambda strategy_id, new_yaml, old_yaml, source, is_new: calls.append(1))
     rid = queue.add_strategy_revision(
         strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
         diff="d", rationale="r")
@@ -391,6 +454,126 @@ def test_supersede_ignores_already_resolved_chat_rows(queue):
     assert row["status"] == "rejected" and row["resolution_note"] == "no thanks"
 
 
+# --- Important 1: no SELECT-then-UPDATE race against a concurrent approve --
+
+def test_supersede_leaves_an_already_approved_row_untouched(queue):
+    # A row that resolved to "approved" (file written to disk, applier ran)
+    # before supersede runs must never be relabeled "superseded" -- that
+    # would make the audit trail lie about a live strategy change having
+    # been silently discarded.
+    apply_calls = []
+    queue.set_revision_applier(
+        lambda strategy_id, new_yaml, old_yaml, source, is_new:
+            apply_calls.append(strategy_id))
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r", source="chat")
+    queue.approve(rid)
+    assert apply_calls == ["s1"]
+
+    result = queue.supersede_pending_chat_revision("s1", "replaced by #99")
+
+    assert result is None
+    row = queue.get(rid)
+    assert row["status"] == "approved"
+    assert row["resolution_note"] is None
+
+
+def test_supersede_issues_a_single_atomic_update_gated_on_pending_status(queue, monkeypatch):
+    # Structural regression pin for the fix itself: the old implementation
+    # first SELECTed the candidate pending ids, then UPDATEd them by id in a
+    # second step -- leaving a window between the two statements where a
+    # concurrent approve() on the same row could claim it before the UPDATE
+    # ran, which would then blindly overwrite it back to "superseded"
+    # anyway (WHERE id=? alone, no status re-check). The fix folds
+    # selection and write into one UPDATE whose own WHERE clause re-checks
+    # status='pending', so there is no separate SELECT for a concurrent
+    # approve() to slip in behind. Pin that shape directly: exactly one
+    # UPDATE statement is issued (no preceding SELECT), and it carries both
+    # `status='pending'` in its WHERE clause and `status='superseded'` in
+    # its SET clause together.
+    rid = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r", source="chat")
+
+    statements = []
+    real_execute = queue._conn.execute
+
+    def spy(sql, parameters=()):
+        statements.append(sql)
+        return real_execute(sql, parameters)
+
+    monkeypatch.setattr(queue._conn, "execute", spy)
+
+    result = queue.supersede_pending_chat_revision("s1", "replaced by #99")
+
+    assert result == rid
+    updates = [sql for sql in statements if sql.strip().upper().startswith("UPDATE")]
+    selects = [sql for sql in statements if sql.strip().upper().startswith("SELECT")
+               and "MAX(id)" not in sql]
+    assert selects == []  # no SELECT ever gathers candidate ids up front
+    assert len(updates) == 1
+    assert "status='superseded'" in updates[0]
+    assert "status='pending'" in updates[0]
+
+
+def _race_supersede_against_approve(queue, strategy_id):
+    """One trial of the approve()-vs-supersede() race for `strategy_id`.
+    Returns (row, supersede_result, approve_errors, applied) so the caller
+    can check the cross-outcome invariant. Defined at module level (not
+    inside the loop below) so nothing here closes over a loop variable."""
+    apply_calls = []
+    queue.set_revision_applier(
+        lambda strategy_id, new_yaml, old_yaml, source, is_new:
+            apply_calls.append(strategy_id))
+    rid = queue.add_strategy_revision(
+        strategy_id=strategy_id, ticker="AAPL", old_yaml="old", new_yaml="new",
+        diff="d", rationale="r", source="chat")
+
+    barrier = threading.Barrier(2)
+    approve_errors = []
+
+    def do_approve():
+        barrier.wait()
+        try:
+            queue.approve(rid)
+        except ReviewError as exc:
+            approve_errors.append(exc)
+
+    thread = threading.Thread(target=do_approve)
+    thread.start()
+    barrier.wait()
+    result = queue.supersede_pending_chat_revision(strategy_id, "replaced by #99")
+    thread.join()
+
+    return queue.get(rid), result, approve_errors, bool(apply_calls)
+
+
+def test_supersede_and_concurrent_approve_are_mutually_exclusive(queue):
+    # Behavioral version of the same regression, under real thread
+    # scheduling rather than a hand-simulated interleaving: whichever of
+    # approve()/supersede() actually wins the race for a given row, the
+    # outcome must stay internally consistent -- a row the applier actually
+    # wrote to disk must end up "approved", never "superseded" out from
+    # under it, and vice versa. Looped to raise the odds of exercising both
+    # orderings; every iteration's invariant holds regardless of which one
+    # wins, so this is not a flaky/order-dependent assertion.
+    for i in range(20):
+        row, result, approve_errors, applied = _race_supersede_against_approve(
+            queue, f"race-{i}")
+        if applied:
+            # approve() won: the file-write outcome must stick.
+            assert row["status"] == "approved", i
+            assert result is None, i
+            assert approve_errors == [], i
+        else:
+            # supersede() won: approve() must have failed cleanly (the row
+            # was no longer pending by the time its own atomic claim ran).
+            assert row["status"] == "superseded", i
+            assert result == row["id"], i
+            assert len(approve_errors) == 1, i
+
+
 def test_supersede_marks_only_pending_chat_rows_and_returns_most_recent_id(queue):
     first = queue.add_strategy_revision(
         strategy_id="s1", ticker="AAPL", old_yaml="old", new_yaml="v1",
@@ -438,7 +621,7 @@ def test_approve_revision_validation_error_leaves_row_pending_and_rejectable(que
     # already changed the file must fail revalidation without getting
     # stuck "approved" -- the row must go back to "pending" so the user
     # can still reject it.
-    def boom(strategy_id, new_yaml, old_yaml, source):
+    def boom(strategy_id, new_yaml, old_yaml, source, is_new):
         raise RevisionValidationError("file changed underneath this proposal")
 
     queue.set_revision_applier(boom)
@@ -463,7 +646,7 @@ def test_approve_revision_runtime_error_recorded_and_reraised(queue):
     # Non-validation applier failures (e.g. a failed disk write AFTER
     # validation already passed) are NOT safely retryable, so the existing
     # approved+error behavior is pinned here.
-    def boom(strategy_id, new_yaml, old_yaml, source):
+    def boom(strategy_id, new_yaml, old_yaml, source, is_new):
         raise RuntimeError("os.replace failed")
 
     queue.set_revision_applier(boom)
@@ -596,7 +779,8 @@ def test_approve_order_does_not_call_revision_applier(queue):
     # Converse of the contamination test above `test_approve_revision_...`:
     # an order-kind row must never reach a configured revision applier.
     calls = []
-    queue.set_revision_applier(lambda strategy_id, new_yaml, old_yaml, source: calls.append(1))
+    queue.set_revision_applier(
+        lambda strategy_id, new_yaml, old_yaml, source, is_new: calls.append(1))
     rid = add(queue)
 
     result = queue.approve(rid)

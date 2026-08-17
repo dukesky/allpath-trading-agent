@@ -26,8 +26,8 @@
 
 **Interfaces produced:** `add_strategy_revision(..., source="reflection")`; applier signature `(sid, new_yaml, base_yaml, source)`; `supersede_pending_chat_revision`.
 
-- [ ] Failing tests: source persisted; supersede marks exactly the pending chat rows for that id (not reflection rows, not other ids), returns superseded id; applier receives source; `superseded` rows excluded from pending list + badge.
-- [ ] Implement; suite; ruff; commit `feat: source-aware strategy revision rows`.
+- [x] Failing tests: source persisted; supersede marks exactly the pending chat rows for that id (not reflection rows, not other ids), returns superseded id; applier receives source; `superseded` rows excluded from pending list + badge.
+- [x] Implement; suite; ruff; commit `feat: source-aware strategy revision rows`.
 
 ### Task 2: Applier — source-branched guards + new-strategy base
 
@@ -57,6 +57,7 @@
 
 - [ ] Failing tests: chip text per source; New badge + left-column label; auto warning appears exactly when new authorization is auto and base isn't; superseded rows render as resolved with note; confirm page mirrors all three; English-only; escaping (yaml with `<script>`).
 - [ ] Implement; suite; ruff; commit `feat: proposal cards show proposer, new-strategy, and auto warnings`.
+- [ ] Carried from Task 1+2 review: a chat proposal that flips an existing strategy `active → draft` deserves the same card warning treatment as an `authorization: auto` flip (both are consequential, easy-to-miss changes a reviewer should be flagged about before approving) -- add a `status_becomes_draft`-style flag alongside `auth_becomes_auto`, computed the same way (parse new_yaml vs base), and show it on both the review card and the confirm page.
 
 ### Task 5: Docs + closeout
 

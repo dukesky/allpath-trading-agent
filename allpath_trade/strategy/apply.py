@@ -11,7 +11,7 @@ from allpath_trade.strategy.loader import (
     is_valid_strategy_id,
     parse_strategy_text,
 )
-from allpath_trade.strategy.model import Authorization
+from allpath_trade.strategy.model import Authorization, StrategyDoc
 from allpath_trade.strategy.store import StrategyStore
 
 # Lives here (not agent/reflection_tools.py, where it used to live) because
@@ -22,7 +22,7 @@ from allpath_trade.strategy.store import StrategyStore
 # existing import (cli.py, app.py, tests) keeps working unchanged.
 
 
-def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str], None]:
+def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str, bool], None]:
     """Builds the applier `ReviewQueue.set_revision_applier` calls when a
     strategy_revision row is approved. Every strategy_revision row --
     whichever tool proposed it -- funnels through this one function, so this
@@ -31,7 +31,7 @@ def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str
     人工批准后的应用器")."""
 
     def apply(strategy_id: str, new_yaml: str, expected_base_yaml: str,
-              source: str = "reflection") -> None:
+              source: str = "reflection", is_new: bool = False) -> None:
         # Fail-closed source allowlist -- same precedent as `approve()`'s
         # kind allowlist in store/reviews.py: an unrecognized `source` must
         # never silently fall through to either guard branch below (neither
@@ -57,21 +57,37 @@ def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str
             raise RevisionValidationError(f"invalid strategy id {strategy_id!r}")
         path = store.directory / f"{strategy_id}.yaml"
 
-        # 2. Base check. `expected_base_yaml == ""` is the established
-        #    convention (store/reviews.py `add_strategy_revision`) for "this
-        #    proposes a BRAND NEW strategy, not a revision" (spec §②) --
-        #    staleness there means the opposite of the modify-path check:
-        #    the file must still NOT exist. If it now does, someone (a
-        #    second chat draft, a hand-added file) created it after this
-        #    proposal was made, so approving it here would clobber that file
-        #    -- same staleness semantics as the byte-exact check below, just
-        #    inverted. For a modify proposal, the file's CURRENT text must
-        #    match `expected_base_yaml` byte for byte -- see the original
-        #    Finding-1 comment history in git blame for why this is an exact
-        #    text comparison rather than a structural/version one (it also
-        #    catches an unrelated field toggled underneath a stale sibling
-        #    proposal).
-        is_new = expected_base_yaml == ""
+        # 2. Base check. `is_new` (an explicit flag threaded through from
+        #    the row's own `add_strategy_revision(is_new=...)`, NOT derived
+        #    from `expected_base_yaml == ""`) says whether this proposes a
+        #    BRAND NEW strategy (spec §②) or a revision of an existing one.
+        #    The two used to be conflated: an empty `expected_base_yaml`
+        #    was taken to mean "new strategy" outright, but a 0-byte (or
+        #    otherwise unparseable) *existing* file -- already off the
+        #    monitoring path, exactly the kind of thing a repair proposal
+        #    targets -- also legitimately reads back as `old_yaml == ""`,
+        #    and that is very much NOT a new-strategy proposal: the file is
+        #    real and must stay required. Conflating the two meant a repair
+        #    proposal against an empty file could never apply -- the
+        #    applier demanded the file NOT exist, which was always false,
+        #    so the row bounced back to pending forever. `is_new` decides
+        #    the check now; `expected_base_yaml` is only ever compared for
+        #    its own byte-exact staleness meaning below.
+        #
+        #    For a new-strategy proposal, staleness means the opposite of
+        #    the modify-path check: the file must still NOT exist. If it
+        #    now does, someone (a second chat draft, a hand-added file)
+        #    created it after this proposal was made, so approving it here
+        #    would clobber that file -- same staleness semantics as the
+        #    byte-exact check below, just inverted. For a modify proposal
+        #    (`is_new=False`, including the 0-byte-repair case above), the
+        #    file's CURRENT text must match `expected_base_yaml` byte for
+        #    byte -- see the original Finding-1 comment history in git
+        #    blame for why this is an exact text comparison rather than a
+        #    structural/version one (it also catches an unrelated field
+        #    toggled underneath a stale sibling proposal; for the repair
+        #    case an empty existing file correctly matches an empty
+        #    recorded base).
         if is_new:
             if path.exists():
                 raise RevisionValidationError(
@@ -118,9 +134,21 @@ def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str
         #    unparseable existing base has no version worth trusting either
         #    -- `base_doc` stays None in both cases and this check is
         #    skipped, same as the propose-time version gate's own repair-case
-        #    carve-out.
-        base_doc: object | None = None
-        if not is_new:
+        #    carve-out. For the new-strategy path specifically, there is no
+        #    base at all to bound the version from below, so the applier
+        #    must not simply trust whatever a proposer wrote: floor it at a
+        #    positive integer itself (mirrors the propose-time tool's own
+        #    `doc.version <= 0` repair-case guard in reflection_tools.py,
+        #    but re-checked here in the write path rather than assumed from
+        #    the proposer having already run it -- this applier is reachable
+        #    from more than one proposer and must not trust either).
+        base_doc: StrategyDoc | None = None
+        if is_new:
+            if doc.version < 1:
+                raise RevisionValidationError(
+                    f"invalid strategy revision for '{strategy_id}': "
+                    "version must be a positive integer")
+        else:
             try:
                 base_doc = parse_strategy_text(strategy_id, expected_base_yaml)
             except StrategyValidationError:

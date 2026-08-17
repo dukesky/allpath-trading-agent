@@ -81,20 +81,26 @@ class ReviewQueue:
         # (mirrors how `_executor` itself is threaded through app.py), so a
         # setter is needed too. None until set: revision approvals fail
         # loudly (see `approve`) rather than silently no-op-ing.
-        self._revision_applier: Callable[[str, str, str, str], None] | None = None
+        self._revision_applier: Callable[[str, str, str, str, bool], None] | None = None
 
-    def set_revision_applier(self, fn: Callable[[str, str, str, str], None]) -> None:
+    def set_revision_applier(self, fn: Callable[[str, str, str, str, bool], None]) -> None:
         """Wire up the function that actually applies an approved strategy
-        revision: `fn(strategy_id, new_yaml, expected_base_yaml, source)` --
-        `expected_base_yaml` is the file text the proposal was drafted
-        against (snapshot["old_yaml"]), which the applier compares to the
-        file's current-on-disk text to catch staleness (see
+        revision: `fn(strategy_id, new_yaml, expected_base_yaml, source,
+        is_new)` -- `expected_base_yaml` is the file text the proposal was
+        drafted against (snapshot["old_yaml"]), which the applier compares
+        to the file's current-on-disk text to catch staleness (see
         `apply_revision_factory`). `source` is the row's own `source`
         column ("reflection" or "chat", see `add_strategy_revision`) --
         threaded through so the applier can branch its guards by proposer
         (spec §①: reflection keeps its authorization/status freeze; a
-        user-initiated chat proposal doesn't). Task 3 calls this once at
-        startup with the real strategy-file writer."""
+        user-initiated chat proposal doesn't). `is_new` is the row's own
+        recorded `is_new` flag (see `add_strategy_revision`) -- threaded
+        through so the applier's base check knows whether "the file must
+        not exist" (a brand-new strategy) or "the file must exist and
+        match byte-exact" (a revision, including a repair of a 0-byte/
+        unparseable existing file, where `expected_base_yaml` is also `""`
+        but the file is very much supposed to already be there). Task 3
+        calls this once at startup with the real strategy-file writer."""
         self._revision_applier = fn
 
     def _issue_token(self) -> tuple[str, str, str]:
@@ -129,7 +135,8 @@ class ReviewQueue:
     def add_strategy_revision(self, *, strategy_id: str, ticker: str, old_yaml: str,
                               new_yaml: str, diff: str, rationale: str,
                               conversation_id: int | None = None,
-                              source: str = "reflection") -> ReviewHandle:
+                              source: str = "reflection",
+                              is_new: bool = False) -> ReviewHandle:
         """Queue a proposed strategy revision for human approval. Shares
         `pending_reviews` with order reviews (a unified inbox, see Phase 6
         design §④) rather than a separate table -- so it has to fill the
@@ -146,12 +153,20 @@ class ReviewQueue:
         exists on `pending_reviews`; `_approve_revision` threads it through
         to the revision applier so it can branch its guards accordingly.
 
-        There is no separate `is_new` column/flag. The established
-        convention -- honored by the applier (Task 2) and the UI (Task 4)
-        -- is `old_yaml == ""` meaning "this proposes a brand-new strategy,
-        not a revision of an existing one" (spec §②): the applier's base
-        check becomes "the file must not already exist" rather than a
-        byte-for-byte match against a non-empty base."""
+        `is_new` (default `False`) is an explicit flag for "this proposes a
+        brand-new strategy, not a revision of an existing one" (spec §②):
+        the applier's base check becomes "the file must not already exist"
+        rather than a byte-for-byte match against a non-empty base.
+        Deliberately its own flag rather than the earlier `old_yaml == ""`
+        sentinel convention: a 0-byte (or otherwise unparseable) *existing*
+        strategy file also legitimately reads back as `old_yaml == ""` --
+        that's a repair proposal against a real file the applier must still
+        require to be present, not a new-strategy proposal. Collapsing both
+        into one sentinel meant a repair proposal against an empty file
+        could never apply (the applier demanded the file NOT exist, forever
+        wrong). Persisted on the snapshot (there's no dedicated column,
+        same as every other revision field) so `_approve_revision` can read
+        it back and thread it to the applier alongside `old_yaml` itself."""
         token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
             "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
@@ -161,7 +176,7 @@ class ReviewQueue:
             (datetime.now(UTC).isoformat(), strategy_id, "reflection", ticker,
              "revision", rationale[:200], "revise strategy",
              json.dumps({"old_yaml": old_yaml, "new_yaml": new_yaml,
-                        "diff": diff, "rationale": rationale}),
+                        "diff": diff, "rationale": rationale, "is_new": is_new}),
              None, source, conversation_id, "strategy_revision",
              token_hash, expires))
         self._conn.commit()
@@ -195,22 +210,38 @@ class ReviewQueue:
         Returns the id of the most recently created row that was
         superseded (there should ordinarily be at most one pending chat
         row per strategy, since each new one supersedes the last), or
-        `None` if there was nothing pending to supersede."""
-        rows = list(self._conn.execute(
-            "SELECT id FROM pending_reviews WHERE kind='strategy_revision'"
-            " AND source='chat' AND strategy_id=? AND status='pending'"
-            " ORDER BY id DESC", (strategy_id,)))
-        if not rows:
-            return None
-        ids = [row["id"] for row in rows]
+        `None` if there was nothing pending to supersede.
+
+        Single UPDATE, `status='pending'` in the WHERE clause, no
+        SELECT-then-UPDATE: an earlier version selected the candidate ids
+        first and updated them by id in a second step, which left a window
+        between the two where a concurrent `approve()` on one of those same
+        ids could claim it (flip it to `approved`, run the applier, write
+        the file) before this method's UPDATE ran -- which would then still
+        relabel that row `superseded`, an audit trail that lies about a
+        live strategy change having been silently discarded. Gating the
+        UPDATE itself on `status='pending'` closes that window: rows an
+        `approve()` claimed first simply no longer match and are left
+        alone. The whole thing runs under `transaction()` so nothing else
+        sharing this connection can interleave between the UPDATE and the
+        follow-up SELECT that recovers the max id it actually touched."""
         resolved_ts = datetime.now(UTC).isoformat()
-        self._conn.executemany(
-            "UPDATE pending_reviews SET status='superseded', resolved_ts=?,"
-            " resolution_note=?, approval_token_hash=NULL, token_expires_ts=NULL"
-            " WHERE id=?",
-            [(resolved_ts, note, review_id) for review_id in ids])
-        self._conn.commit()
-        return ids[0]
+        with self._conn.transaction():
+            cur = self._conn.execute(
+                "UPDATE pending_reviews SET status='superseded', resolved_ts=?,"
+                " resolution_note=?, approval_token_hash=NULL, token_expires_ts=NULL"
+                " WHERE kind='strategy_revision' AND source='chat'"
+                " AND strategy_id=? AND status='pending'",
+                (resolved_ts, note, strategy_id))
+            if cur.rowcount == 0:
+                return None
+            row = self._conn.execute(
+                "SELECT MAX(id) AS max_id FROM pending_reviews"
+                " WHERE kind='strategy_revision' AND source='chat'"
+                " AND strategy_id=? AND status='superseded'"
+                " AND resolved_ts=? AND resolution_note=?",
+                (strategy_id, resolved_ts, note)).fetchone()
+        return row["max_id"]
 
     def list(self, status: str | None = "pending") -> list[sqlite3.Row]:
         if status is None:
@@ -386,6 +417,12 @@ class ReviewQueue:
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
             raise ReviewError(
                 f"review {review_id} has corrupt snapshot: {exc}") from exc
+        # `.get(..., old_yaml == "")` rather than a bare `["is_new"]`: rows
+        # inserted before `is_new` existed on the snapshot (pre-fix chat/
+        # reflection rows already sitting in `pending_reviews`) fall back to
+        # the old sentinel convention so they keep resolving exactly as they
+        # did before this fix, instead of raising on a missing key.
+        is_new = snapshot.get("is_new", old_yaml == "")
 
         # Atomically claim the review, same pattern as the order path
         # (including the M5 token-clearing -- see the comment there).
@@ -401,7 +438,8 @@ class ReviewQueue:
             raise ReviewError(f"review {review_id} is {row['status']}, not pending")
 
         try:
-            self._revision_applier(row["strategy_id"], new_yaml, old_yaml, row["source"])
+            self._revision_applier(
+                row["strategy_id"], new_yaml, old_yaml, row["source"], is_new)
         except RevisionValidationError:
             # Spec §④: a same-strategy proposal approved after an earlier
             # one already changed the file must fail revalidation without

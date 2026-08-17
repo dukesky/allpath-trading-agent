@@ -152,9 +152,18 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
             old_yaml.splitlines(), new_yaml.splitlines(),
             fromfile=f"{strategy_id} (current)", tofile=f"{strategy_id} (proposed)",
             lineterm=""))
+        # is_new=False always: this tool only ever revises an existing,
+        # already-`path.exists()`-checked file (see the guard at the top of
+        # this function) -- it never proposes a brand-new strategy. Passed
+        # explicitly (not left to the default) so a repair proposal against
+        # a 0-byte/unparseable file -- which also has `old_yaml == ""` --
+        # is recorded with the correct is_new flag rather than relying on
+        # the now-retired old_yaml=="" sentinel (see add_strategy_revision's
+        # docstring for why that sentinel was ambiguous).
         rid = queue.add_strategy_revision(
             strategy_id=strategy_id, ticker=doc.position.ticker,
-            old_yaml=old_yaml, new_yaml=new_yaml, diff=diff, rationale=rationale)
+            old_yaml=old_yaml, new_yaml=new_yaml, diff=diff, rationale=rationale,
+            is_new=False)
         return (f"Revision queued for user approval (#{rid}). It will not "
                 "take effect unless approved.")
 
