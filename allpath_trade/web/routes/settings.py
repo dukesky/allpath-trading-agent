@@ -38,6 +38,51 @@ SECRET_FIELDS = ["openrouter_api_key", "openai_api_key", "anthropic_api_key",
                  "alpaca_api_key", "alpaca_secret_key", "smtp_password",
                  "telegram_bot_token"]
 
+# The page's 7 sections, now tabs (see settings.html) -- ordered as they
+# appear left-to-right in the tab bar. Keys are also the `#hash` each tab's
+# link uses, so the client-side switcher script and this list must agree.
+TABS = [
+    ("model", "Model"),
+    ("brokerage", "Brokerage"),
+    ("email", "Email notifications"),
+    ("push", "Push notifications"),
+    ("telegram", "Telegram"),
+    ("sentinel", "Sentinel and memory"),
+    ("access", "Access"),
+]
+DEFAULT_TAB = TABS[0][0]
+
+# field name -> tab it lives on. Used only to pick which tab a validation
+# error should redisplay (see `_error_tab` below) -- every field across
+# PLAIN_FIELDS/BOOLEAN_FIELDS/SECRET_FIELDS must have an entry here, or a
+# failure on that field would silently fall back to the default tab instead
+# of opening the one the user actually needs to fix.
+FIELD_TO_TAB = {
+    "llm_provider": "model", "chat_model": "model", "review_model": "model",
+    "memory_model": "model", "openrouter_api_key": "model",
+    "openai_api_key": "model", "anthropic_api_key": "model",
+    "alpaca_api_key": "brokerage", "alpaca_secret_key": "brokerage",
+    "smtp_host": "email", "smtp_port": "email", "smtp_user": "email",
+    "smtp_from": "email", "notify_to": "email", "smtp_password": "email",
+    "ntfy_url": "push",
+    "telegram_bot_token": "telegram",
+    "sentinel_interval_minutes": "sentinel", "context_budget_tokens": "sentinel",
+    "daily_consolidation": "sentinel", "consolidate_after_chat": "sentinel",
+    "web_base_url": "access",
+}
+
+
+def _error_tab(exc: ValidationError) -> str:
+    """Which tab to reopen so the first validation error is actually
+    visible, rather than silently landing on a hidden panel. `exc.errors()`
+    is never empty for a raised ValidationError; falls back to the default
+    tab only if pydantic ever reports a field this map doesn't know about."""
+    errors = exc.errors()
+    if not errors:
+        return DEFAULT_TAB
+    field = str(errors[0]["loc"][0]) if errors[0].get("loc") else ""
+    return FIELD_TO_TAB.get(field, DEFAULT_TAB)
+
 # Gmail displays app passwords as "abcd efgh ijkl mnop"; pasting that
 # verbatim used to store the separators and fail SMTP auth. The separators
 # are not always plain spaces: Google's dialog copies U+00A0 (no-break
@@ -109,6 +154,7 @@ def settings_page(request: Request, saved: str = "") -> HTMLResponse:
         # makes a GET here hang or 500.
         "model_options": models_catalog.list_models(s.llm_provider),
         "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
+        "tabs": TABS, "active_tab": DEFAULT_TAB,
         **nav_context(c)})
 
 
@@ -170,6 +216,10 @@ async def save(request: Request) -> Response:
             # provider is actually selected on the redisplayed page.
             "model_options": models_catalog.list_models(display.llm_provider),
             "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
+            # Reopen the tab the first invalid field actually lives on --
+            # otherwise the error banner at the top of the page points at a
+            # hidden panel and the user has no idea what to fix.
+            "tabs": TABS, "active_tab": _error_tab(exc),
             **nav_context(c)}, status_code=400)
 
     old_interval = current.sentinel_interval_minutes

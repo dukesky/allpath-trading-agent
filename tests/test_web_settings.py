@@ -862,3 +862,89 @@ def test_push_test_button_scopes_via_hx_params_allowlist(client):
     assert 'hx-params="ntfy_url"' in body
     assert "topic name is effectively a password" in body
     assert "Self-hosted ntfy servers work too" in body
+
+
+# --- Item 2: settings page tabs --------------------------------------------
+
+def test_settings_tab_bar_renders_seven_tabs(client):
+    body = client.get("/settings").text
+    for label in ["Model", "Brokerage", "Email notifications",
+                  "Push notifications", "Telegram", "Sentinel and memory",
+                  "Access"]:
+        assert f">{label}</a>" in body
+    assert body.count('class="tab-link') == 7
+
+
+def test_settings_is_still_a_single_form_with_one_save_button(client):
+    # The hard product decision this whole feature must not violate: every
+    # section's fields live inside exactly one <form>, with exactly one
+    # submit button, regardless of how many tabs the page now has.
+    body = client.get("/settings").text
+    assert body.count('<form method="post" action="/settings">') == 1
+    assert body.count('type="submit"') >= 1
+    assert body.count('<button class="primary" type="submit">Save settings</button>') == 1
+
+
+def test_settings_all_seven_sections_present_in_the_one_form(client):
+    body = client.get("/settings").text
+    form_start = body.index('<form method="post" action="/settings">')
+    form_end = body.index("</form>", form_start)
+    form_body = body[form_start:form_end]
+    for name in ["llm_provider", "alpaca_api_key", "smtp_host", "ntfy_url",
+                 "telegram_bot_token", "sentinel_interval_minutes", "web_base_url"]:
+        assert f'name="{name}"' in form_body
+
+
+def test_settings_default_tab_is_model_and_others_start_hidden(client):
+    body = client.get("/settings").text
+    model_idx = body.index('data-panel="model"')
+    assert "hidden" not in body[model_idx:body.index(">", model_idx)]
+    for tab in ["brokerage", "email", "push", "telegram", "sentinel", "access"]:
+        idx = body.index(f'data-panel="{tab}"')
+        assert "hidden" in body[idx:body.index(">", idx)]
+
+
+def test_settings_default_tab_link_is_marked_on(client):
+    body = client.get("/settings").text
+    assert '<a href="#model" class="tab-link on" data-tab="model">Model</a>' in body
+
+
+def test_settings_validation_error_opens_the_tab_with_the_first_bad_field(client):
+    # sentinel_interval_minutes lives on the "sentinel" tab (config.py types
+    # it int) -- posting garbage must both keep the existing 400/error
+    # behavior and make that tab the one left visible, not "Model".
+    r = client.post("/settings", data={"sentinel_interval_minutes": "not-a-number"})
+    assert r.status_code == 400
+    body = r.text
+    sentinel_idx = body.index('data-panel="sentinel"')
+    assert "hidden" not in body[sentinel_idx:body.index(">", sentinel_idx)]
+    model_idx = body.index('data-panel="model"')
+    assert "hidden" in body[model_idx:body.index(">", model_idx)]
+    assert '<a href="#sentinel" class="tab-link on" data-tab="sentinel">' in body
+
+
+def test_settings_validation_error_on_web_base_url_opens_access_tab(client):
+    r = client.post("/settings", data={"web_base_url": "192.168.1.20:8791"})
+    assert r.status_code == 400
+    body = r.text
+    access_idx = body.index('data-panel="access"')
+    assert "hidden" not in body[access_idx:body.index(">", access_idx)]
+
+
+def test_settings_tabs_are_english_only(client):
+    assert_english_only(client.get("/settings").text)
+    r = client.post("/settings", data={"sentinel_interval_minutes": "not-a-number"})
+    assert_english_only(r.text)
+
+
+def test_settings_test_buttons_still_work_inside_their_hidden_panels(client, monkeypatch):
+    # htmx targets/params are unchanged by the tab work -- a Test click must
+    # still hit the same endpoint and swap the same result div even though
+    # its panel starts out hidden (a JS tab switch reveals it before any
+    # click can happen; the request itself doesn't care about visibility).
+    from allpath_trade.notify.email import EmailNotifier
+    monkeypatch.setattr(EmailNotifier, "send", lambda self, *a, **k: True)
+    r = client.post("/settings/test-email", data={
+        "smtp_host": "smtp.example.com", "notify_to": "me@example.com"})
+    assert r.status_code == 200
+    assert "Test email sent" in r.text

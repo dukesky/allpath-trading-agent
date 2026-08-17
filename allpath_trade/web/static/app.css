@@ -274,7 +274,13 @@ code { font-family:var(--mono); }
    underline on the active tab -- two cheap, complementary signals instead
    of the color-only distinction this replaces, so "which tab am I on"
    reads at a glance even at a glance. */
-.tabs { display:flex; gap:2px; border-bottom:1px solid var(--line); margin:22px 0 24px; }
+/* overflow-x:auto lets the settings page's 7-tab bar (added alongside
+   memory's original 5) scroll horizontally on a narrow phone instead of
+   wrapping or overflowing the viewport -- flex-wrap is deliberately not
+   used instead, since a wrapped second row would push the active-tab
+   underline out of the single-row baseline this bar is designed around. */
+.tabs { display:flex; gap:2px; border-bottom:1px solid var(--line); margin:22px 0 24px;
+  overflow-x:auto; -webkit-overflow-scrolling:touch; }
 .tab-link { flex:0 0 auto; padding:9px 14px; font-size:14px; font-weight:500;
   color:var(--muted); border-bottom:2px solid transparent; border-radius:var(--radius-sm) var(--radius-sm) 0 0;
   cursor:pointer; text-decoration:none; margin-bottom:-1px;
