@@ -17,9 +17,21 @@
 [安全模型](#安全模型) ·
 [路线图](#路线图) ·
 [参与贡献](#参与贡献) ·
-[English](README.md)
+[English](README.md) ·
+[**官网 →**](https://trading.all-path.com)
 
 </div>
+
+---
+
+<p align="center">
+  <img src="docs/images/dashboard-demo.png" alt="AllPath Trading Agent 仪表盘——资产曲线、持仓、策略卡片（演示数据）" width="900">
+</p>
+
+<p align="center"><b>一个只提案、不擅自行动的交易 agent。你来批准。</b><br>
+用 YAML 写策略，哨兵每小时巡检；和一个记得你思路的 agent 聊天（网页或 Telegram）；每一笔订单前面都有一道人工审批门。默认模拟盘；agent 没有任何直接下单或写策略文件的工具。</p>
+
+<p align="center"><sub>截图均为虚构演示数据，非真实账户。</sub></p>
 
 ---
 

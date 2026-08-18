@@ -17,9 +17,25 @@
 [Safety Model](#safety-model) ·
 [Roadmap](#roadmap) ·
 [Contributing](#contributing) ·
-[中文文档](README.zh-CN.md)
+[中文文档](README.zh-CN.md) ·
+[**Website →**](https://trading.all-path.com)
 
 </div>
+
+---
+
+<p align="center">
+  <img src="docs/images/dashboard-demo.png" alt="AllPath Trading Agent dashboard — equity curve, positions, strategy cards (demo data)" width="900">
+</p>
+
+<p align="center"><b>A trading agent that proposes. You approve.</b><br>
+Write strategies in plain YAML, let a sentinel watch them every hour, chat with an agent that remembers how you think (web or Telegram) — and keep a human approval gate in front of every single order. Paper trading by default; the agent has no tool that places an order or writes a strategy file.</p>
+
+<p align="center">
+  <code>rule fires → agent researches → proposal queued → <b>you approve</b> → risk gate → paper order</code>
+</p>
+
+<p align="center"><sub>Screenshots use fictional demo data — not a real account.</sub></p>
 
 ---
 
