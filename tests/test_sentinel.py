@@ -494,6 +494,98 @@ def test_notify_email_true_still_notifies(tmp_path):
     assert len(n.sent) == 1
 
 
+# ---------------------------------------------------------------------------
+# Telegram push (notify/dispatch.py) -- both the queued-review buttons leg
+# and the auto-executed order_result receipt leg.
+# ---------------------------------------------------------------------------
+
+class FakeTelegramAPI:
+    def __init__(self, token):
+        self.token = token
+        self.sent = []
+
+    def send_message(self, chat_id, html, reply_markup=None):
+        self.sent.append((chat_id, html, reply_markup))
+        return True
+
+
+def _paired_sentinel(tmp_path, yaml_text, *, price="200", qty="10", fail=False):
+    from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
+
+    s, store, ex, q, n = make(tmp_path, yaml_text, price=price, qty=qty, fail=fail)
+    app_state = AppState(q._conn)
+    app_state.set(TELEGRAM_CHAT_ID_KEY, "111")
+    s.app_state = app_state
+    s.telegram_bot_token = "fake-bot-token"
+    return s, store, ex, q, n
+
+
+def test_confirm_auth_queued_notification_pushes_telegram_buttons(tmp_path, monkeypatch):
+    instances = []
+
+    class RecordingAPI(FakeTelegramAPI):
+        def __init__(self, token):
+            super().__init__(token)
+            instances.append(self)
+
+    from allpath_trade.notify import dispatch
+
+    monkeypatch.setattr(dispatch, "TelegramAPI", RecordingAPI)
+    s, _store, _ex, q, _n = _paired_sentinel(tmp_path, strategy_yaml(auth="confirm"))
+
+    s.run_once()
+
+    [api] = instances
+    assert len(api.sent) == 1
+    chat_id, _html, markup = api.sent[0]
+    assert chat_id == "111"
+    review_id = q.list()[0]["id"]
+    [[approve, reject]] = markup["inline_keyboard"]
+    assert approve["callback_data"].startswith(f"rv:approve:{review_id}:")
+    assert reject["callback_data"].startswith(f"rv:reject:{review_id}:")
+
+
+def test_hard_auto_execution_receipt_pushes_telegram_no_buttons(tmp_path, monkeypatch):
+    instances = []
+
+    class RecordingAPI(FakeTelegramAPI):
+        def __init__(self, token):
+            super().__init__(token)
+            instances.append(self)
+
+    from allpath_trade.notify import dispatch
+
+    monkeypatch.setattr(dispatch, "TelegramAPI", RecordingAPI)
+    s, *_ = _paired_sentinel(tmp_path, strategy_yaml())
+
+    s.run_once()
+
+    [api] = instances
+    assert len(api.sent) == 1
+    chat_id, html, markup = api.sent[0]
+    assert chat_id == "111"
+    assert markup is None
+    assert "submitted" in html
+
+
+def test_telegram_push_noop_when_unpaired(tmp_path, monkeypatch):
+    instances = []
+
+    class RecordingAPI(FakeTelegramAPI):
+        def __init__(self, token):
+            super().__init__(token)
+            instances.append(self)
+
+    from allpath_trade.notify import dispatch
+
+    monkeypatch.setattr(dispatch, "TelegramAPI", RecordingAPI)
+    s, *_ = make(tmp_path, strategy_yaml())  # no app_state/telegram_bot_token set
+
+    s.run_once()  # must not raise
+
+    assert instances == []
+
+
 def test_hard_auto_gate_rejected_notification_uses_order_result_event(tmp_path):
     (tmp_path / "t.yaml").write_text(strategy_yaml())
     conn = connect(tmp_path / "db.sqlite")

@@ -25,6 +25,7 @@ import time
 import urllib.error
 from types import SimpleNamespace
 
+from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.store.app_state import (
     TELEGRAM_CHAT_ID_KEY,
     TELEGRAM_OFFSET_KEY,
@@ -32,7 +33,9 @@ from allpath_trade.store.app_state import (
     AppState,
 )
 from allpath_trade.store.db import connect
+from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.telegram import TelegramAPI, TelegramPoller
+from tests.test_sentinel import SpyExecutor
 
 WEB_TOKEN = "correct-horse-battery-staple"
 
@@ -51,13 +54,16 @@ class FakeHolder:
     instance must reject the old token and accept the new one the moment
     the holder starts returning it, no restart."""
 
-    def __init__(self, app_state: AppState, web_token: str) -> None:
+    def __init__(self, app_state: AppState, web_token: str, queue=None, strategies=None) -> None:
         self._app_state = app_state
         self._web_token = web_token
+        self._queue = queue
+        self._strategies = strategies
 
     def get(self) -> SimpleNamespace:
         return SimpleNamespace(app_state=self._app_state,
-                               settings=SimpleNamespace(web_token=self._web_token))
+                               settings=SimpleNamespace(web_token=self._web_token),
+                               queue=self._queue, strategies=self._strategies)
 
     def set_web_token(self, token: str) -> None:
         self._web_token = token
@@ -93,8 +99,11 @@ class FakeTelegramAPI:
         self.token = token
         self.get_updates_offsets: list[int] = []
         self.sent_messages: list[tuple[str, str]] = []
+        self.sent_markups: list[dict | None] = []
         self.typing_calls: list[str] = []
         self.deleted_messages: list[tuple[str, int]] = []
+        self.answered_callbacks: list[tuple[str, str]] = []
+        self.edited_markups: list[tuple[str, int, dict | None]] = []
 
     def get_updates(self, offset: int, timeout_s: int = 50):
         self.get_updates_offsets.append(offset)
@@ -104,8 +113,9 @@ class FakeTelegramAPI:
             return self._batches.pop(0)
         return []
 
-    def send_message(self, chat_id: str, html: str) -> bool:
+    def send_message(self, chat_id: str, html: str, reply_markup=None) -> bool:
         self.sent_messages.append((chat_id, html))
+        self.sent_markups.append(reply_markup)
         return True
 
     def send_typing(self, chat_id: str) -> None:
@@ -113,6 +123,12 @@ class FakeTelegramAPI:
 
     def delete_message(self, chat_id: str, message_id: int) -> None:
         self.deleted_messages.append((chat_id, message_id))
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        self.answered_callbacks.append((callback_query_id, text))
+
+    def edit_message_reply_markup(self, chat_id: str, message_id: int, reply_markup=None) -> None:
+        self.edited_markups.append((chat_id, message_id, reply_markup))
 
     def _scrub(self, text: str) -> str:
         if not self.token:
@@ -128,6 +144,7 @@ class FakeChatService:
     def __init__(self, reply="agent reply", log=None):
         self.reply = reply
         self.calls: list[dict] = []
+        self.resolutions: list[str] = []
         self._log = log
 
     def send(self, text: str, source: str = "web") -> str:
@@ -135,6 +152,9 @@ class FakeChatService:
         if self._log is not None:
             self._log.append(("chat_service.send", text))
         return self.reply
+
+    def note_resolution(self, line: str) -> None:
+        self.resolutions.append(line)
 
 
 class LoggingAppState:
@@ -932,6 +952,247 @@ def test_app_state_is_read_live_through_the_holder_not_captured_once(tmp_path):
 # while a long chat_service.send() call is still running, not just once at
 # the start of the turn.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Approve/Reject inline-button callbacks
+# ---------------------------------------------------------------------------
+
+class FakeStrategies:
+    """Stands in for `Components.strategies` -- `_resolve_review_callback`
+    only ever calls `.rearm_warning(strategy_id)` on a successful revision
+    approval."""
+
+    def rearm_warning(self, strategy_id: str) -> str:
+        return ""
+
+
+def make_order_queue(tmp_path, *, fail=False, raise_exc=None, reject_reasons=None):
+    conn = connect(tmp_path / "reviews.db")
+    executor = SpyExecutor(fail=fail, raise_exc=raise_exc, reject_reasons=reject_reasons)
+    return ReviewQueue(conn, executor)
+
+
+def queue_order_review(queue: ReviewQueue, *, source="chat") -> int:
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.BUY, qty="10", reason="test")
+    handle = queue.add(strategy_id="", rule_id="", ticker="AAPL", rule_type="chat",
+                       condition="proposed in conversation", action="buy 10 AAPL",
+                       snapshot={}, intent=intent, source=source)
+    return int(handle)
+
+
+def nonce_for(queue: ReviewQueue, review_id: int) -> str:
+    return queue.get(review_id)["approval_token_hash"][:16]
+
+
+def _callback_update(update_id, chat_id, from_id, data, message_id=1):
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"cb{update_id}",
+            "from": {"id": from_id},
+            "message": {"chat": {"id": chat_id}, "message_id": message_id},
+            "data": data,
+        },
+    }
+
+
+def make_review_poller(api, chat_service, app_state, queue, strategies=None,
+                       web_token=WEB_TOKEN):
+    holder = FakeHolder(app_state, web_token, queue=queue,
+                        strategies=strategies or FakeStrategies())
+    return TelegramPoller(api, chat_service, holder, threading.Event())
+
+
+def test_paired_approve_callback_approves_order_and_removes_buttons(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}", message_id=42)]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "approved"
+    assert api.edited_markups == [("111", 42, None)]
+    assert api.answered_callbacks == [("cb1", "Approved")]
+    assert any("order submitted" in html for _cid, html in api.sent_messages)
+    assert chat_service.resolutions == [
+        f"You resolved #{review_id}. Result: order submitted"]
+
+
+def test_paired_reject_callback_rejects_order(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:reject:{review_id}:{nonce}")]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    row = queue.get(review_id)
+    assert row["status"] == "rejected"
+    assert row["resolution_note"] == "rejected via Telegram"
+    assert any("Rejected" in html for _cid, html in api.sent_messages)
+    assert chat_service.resolutions == [
+        f"You resolved #{review_id}. Result: rejected (rejected via Telegram)"]
+
+
+def test_stranger_callback_is_silently_dropped(tmp_path, capsys):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111", user_id="999")
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 555, f"rv:approve:{review_id}:{nonce}")]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "pending"
+    assert api.sent_messages == []
+    assert api.answered_callbacks == []
+    assert api.edited_markups == []
+    err = capsys.readouterr().err.strip().splitlines()
+    assert any("dropped" in line for line in err)
+
+
+def test_unpaired_chat_callback_is_silently_dropped(tmp_path):
+    app_state = make_app_state(tmp_path)  # nobody paired
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    poller = make_review_poller(api, FakeChatService(), app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "pending"
+    assert api.sent_messages == []
+
+
+def test_wrong_nonce_is_ignored_review_stays_pending(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:0000000000000000")]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "pending"
+    assert api.answered_callbacks == [("cb1", "Already resolved")]
+    # No buttons removed, no chat receipt -- nothing was actually resolved.
+    assert api.edited_markups == []
+    assert chat_service.resolutions == []
+
+
+def test_non_pending_review_callback_is_ignored(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    queue.reject(review_id, note="already handled elsewhere")
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "rejected"  # unchanged
+    assert api.answered_callbacks == [("cb1", "Already resolved")]
+    assert chat_service.resolutions == []
+
+
+def test_execution_error_gives_honest_message(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path, fail=True)
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "approved"  # claimed before the failure
+    assert api.answered_callbacks == [("cb1", "Execution failed")]
+    assert any("execution failed" in html for _cid, html in api.sent_messages)
+    assert chat_service.resolutions == [
+        f"You resolved #{review_id}. Result: execution failed: boom"]
+
+
+def test_risk_gate_rejected_gives_honest_message(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path, reject_reasons=["exceeds max position size"])
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "approved"
+    assert any("risk gate" in html for _cid, html in api.sent_messages)
+    expected = (f"You resolved #{review_id}. Result: blocked by the risk "
+               "gate (exceeds max position size)")
+    assert chat_service.resolutions == [expected]
+
+
+def test_sentinel_sourced_review_does_not_echo_into_chat(tmp_path):
+    # Only chat-sourced reviews have a live conversation to report back into
+    # -- mirrors web/routes/reviews.py's own `_echo_resolution` gate.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue, source="sentinel")
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "approved"
+    assert chat_service.resolutions == []
+
+
+def test_callback_offset_advances(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue = make_order_queue(tmp_path)
+    review_id = queue_order_review(queue)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(7, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    poller = make_review_poller(api, FakeChatService(), app_state, queue)
+
+    poller.poll_once()
+
+    assert app_state.get(TELEGRAM_OFFSET_KEY) == "8"
+
 
 def test_typing_indicator_is_resent_during_a_slow_turn(tmp_path, monkeypatch):
     from allpath_trade import telegram as telegram_module

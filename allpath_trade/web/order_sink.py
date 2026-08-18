@@ -6,7 +6,11 @@ from decimal import Decimal
 
 from allpath_trade.broker.base import Broker, OrderIntent
 from allpath_trade.data.base import DataSource
+from allpath_trade.notify import events
+from allpath_trade.notify.base import Notifier
+from allpath_trade.notify.dispatch import notify_review_queued
 from allpath_trade.risk.gate import RiskGate
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.reviews import ReviewQueue
 
@@ -21,13 +25,29 @@ class QueueingOrderSink:
 
     def __init__(self, queue: ReviewQueue, gate: RiskGate, broker: Broker,
                  data: DataSource, journal: TradeJournal,
-                 conversation_id: int | None = None) -> None:
+                 conversation_id: int | None = None,
+                 notifier: Notifier | None = None,
+                 app_state: AppState | None = None,
+                 telegram_bot_token: str = "", web_base_url: str = "") -> None:
         self.queue = queue
         self.gate = gate
         self.broker = broker
         self.data = data
         self.journal = journal
         self.conversation_id = conversation_id
+        # Notification wiring (all optional, default off/None): a chat order
+        # proposal now goes through the same shared notify_review_queued
+        # choke point (notify/dispatch.py) as sentinel.py's soft-rule
+        # triggers and action_tools.py's chat strategy drafts, so it reaches
+        # email/ntfy (when a notifier is configured) and the paired
+        # Telegram chat with Approve/Reject buttons (when paired) --
+        # neither existed for this call site before. Every caller that
+        # doesn't pass these (every existing test) gets the exact same
+        # "no notification at all" behavior as before this feature existed.
+        self.notifier = notifier
+        self.app_state = app_state
+        self.telegram_bot_token = telegram_bot_token
+        self.web_base_url = web_base_url
 
     def propose(self, intent: OrderIntent) -> str:
         preview = self._preview(intent)
@@ -38,8 +58,30 @@ class QueueingOrderSink:
             snapshot={"proposed_ts": datetime.now(UTC).isoformat()},
             intent=intent, source="chat",
             conversation_id=self.conversation_id, risk_preview=preview)
+        self._notify_queued(review_id, intent)
         return (f"queued for the user's approval (#{review_id}). "
                 f"Risk pre-check: {preview}")
+
+    def _notify_queued(self, review_id: int, intent: OrderIntent) -> None:
+        # Best-effort, never breaks the proposal: the row above is already
+        # committed by the time this runs, same reasoning as
+        # action_tools.py's `_notify_chat_draft_queued`. Not gated on any
+        # per-strategy `notify_email` field -- there is no strategy doc here
+        # (this is a bare chat order proposal), so it always attempts the
+        # email/ntfy leg when a notifier is configured, matching
+        # action_tools.py's own "never silenceable" chat-draft notification.
+        try:
+            approve_url = events.approve_link(self.web_base_url, review_id)
+            subject, body = events.review_queued(
+                review_id=review_id, ticker=intent.ticker,
+                action=intent.reason, strategy_id="", approve_url=approve_url)
+            notify_review_queued(
+                queue=self.queue, notifier=self.notifier, app_state=self.app_state,
+                telegram_bot_token=self.telegram_bot_token, review_id=review_id,
+                subject=subject, body=body)
+        except Exception as exc:  # noqa: BLE001 — see docstring above
+            print(f"[order_sink] chat order notification failed: {exc}",
+                  file=sys.stderr)
 
     def _preview(self, intent: OrderIntent) -> str:
         """Dry-run the risk gate so the card can say whether this would pass.

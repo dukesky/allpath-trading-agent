@@ -14,6 +14,8 @@ from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
+from allpath_trade.notify.dispatch import notify_review_queued
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.loader import (
     StrategyValidationError,
@@ -39,7 +41,9 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                           queue: ReviewQueue | None = None,
                           conversation_id: int | None = None,
                           notifier: Notifier | None = None,
-                          web_base_url: str = "") -> None:
+                          web_base_url: str = "",
+                          app_state: AppState | None = None,
+                          telegram_bot_token: str = "") -> None:
 
     def _notify_chat_draft_queued(doc, review_id, *, is_new: bool) -> None:
         # Spec §④/降级: a notification failure must never affect queueing --
@@ -57,7 +61,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         # `notify_email: false` draft queue with ZERO human-visible signal.
         # Reflection's own notify path (sentinel.py) is untouched -- this
         # only covers chat-sourced drafts.
-        if notifier is None:
+        # `queue is not None` here whenever this callback can even fire (it's
+        # only invoked from the web-mode branch below, which requires
+        # `queue` in the first place) -- notify_review_queued still needs it
+        # explicitly since it reads the row back for the Telegram nonce.
+        if notifier is None and not telegram_bot_token:
             return
         try:
             action = (f"create new strategy '{doc.id}'" if is_new
@@ -66,7 +74,10 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             subject, body = events.review_queued(
                 review_id=review_id, ticker=doc.position.ticker, action=action,
                 strategy_id=doc.id, approve_url=approve_url)
-            notifier.send(subject, body)
+            notify_review_queued(
+                queue=queue, notifier=notifier, app_state=app_state,
+                telegram_bot_token=telegram_bot_token, review_id=review_id,
+                subject=subject, body=body)
         except Exception as exc:  # noqa: BLE001 — see docstring above
             print(f"[action_tools] chat draft notification failed: {exc}",
                   file=sys.stderr)

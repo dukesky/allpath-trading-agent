@@ -1,5 +1,6 @@
 import json
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 
@@ -351,6 +352,48 @@ def test_draft_strategy_web_mode_no_notifier_configured_still_queues(tmp_path):
 
     assert "Draft queued" in out
     assert len(queue.list("pending")) == 1
+
+
+class FakeTelegramAPI:
+    instances: ClassVar[list] = []
+
+    def __init__(self, token):
+        self.token = token
+        self.sent = []
+        FakeTelegramAPI.instances.append(self)
+
+    def send_message(self, chat_id, html, reply_markup=None):
+        self.sent.append((chat_id, html, reply_markup))
+        return True
+
+
+def test_draft_strategy_web_mode_notifies_telegram_when_paired(tmp_path, monkeypatch):
+    from allpath_trade.notify import dispatch
+    from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
+
+    FakeTelegramAPI.instances = []
+    monkeypatch.setattr(dispatch, "TelegramAPI", FakeTelegramAPI)
+
+    (tmp_path / "strategies").mkdir(exist_ok=True)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path / "strategies", conn)
+    queue = ReviewQueue(conn, executor=None)
+    app_state = AppState(conn)
+    app_state.set(TELEGRAM_CHAT_ID_KEY, "111")
+    reg = ToolRegistry()
+    register_action_tools(
+        reg, strategies=store, executor=SpyExecutor(),
+        confirm=lambda _prompt: pytest.fail("must not prompt in web mode"),
+        queue=queue, app_state=app_state, telegram_bot_token="fake-bot-token")
+
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=GOOD, reason="init")
+
+    [api] = FakeTelegramAPI.instances
+    assert len(api.sent) == 1
+    chat_id, _html, markup = api.sent[0]
+    assert chat_id == "111"
+    row = queue.list("pending")[0]
+    assert markup["inline_keyboard"][0][0]["callback_data"].startswith(f"rv:approve:{row['id']}:")
 
 
 def test_draft_strategy_web_mode_notify_failure_does_not_fail_the_tool(tmp_path):
