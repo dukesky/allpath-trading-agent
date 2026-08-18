@@ -484,16 +484,26 @@ class _StubAppState:
         return None
 
 
+class _StubLLMUsage:
+    def summary(self, days: int) -> list:
+        return []
+
+    def daily(self, days: int) -> list:
+        return []
+
+
 @dataclass
 class _StubComponents:
     settings: Settings
     conn: object = None
     queue: object = None
     app_state: object = None
+    llm_usage: object = None
 
     def __post_init__(self) -> None:
         self.queue = _StubQueue()
         self.app_state = _StubAppState()
+        self.llm_usage = _StubLLMUsage()
 
 
 def test_save_writes_through_the_holders_store_not_a_default_one(client, tmp_path):
@@ -866,13 +876,13 @@ def test_push_test_button_scopes_via_hx_params_allowlist(client):
 
 # --- Item 2: settings page tabs --------------------------------------------
 
-def test_settings_tab_bar_renders_seven_tabs(client):
+def test_settings_tab_bar_renders_eight_tabs(client):
     body = client.get("/settings").text
     for label in ["Model", "Brokerage", "Email notifications",
                   "Push notifications", "Telegram", "Sentinel and memory",
-                  "Access"]:
+                  "Access", "Usage"]:
         assert f">{label}</a>" in body
-    assert body.count('class="tab-link') == 7
+    assert body.count('class="tab-link') == 8
 
 
 def test_settings_is_still_a_single_form_with_one_save_button(client):
@@ -967,3 +977,52 @@ def test_field_to_tab_covers_exactly_every_plain_boolean_and_secret_field():
 def test_settings_page_wires_a_hashchange_listener_for_back_forward(client):
     body = client.get("/settings").text
     assert "addEventListener('hashchange'" in body
+
+
+# --- Usage tab (Item B) -----------------------------------------------------
+
+def test_usage_tab_with_no_calls_shows_no_usage_message(client):
+    body = client.get("/settings").text
+    idx = body.index('data-panel="usage"')
+    assert "hidden" in body[idx:body.index(">", idx)]
+    assert "No LLM calls recorded yet." in body
+
+
+def test_usage_tab_renders_recorded_tokens_and_estimated_cost(client):
+    usage = client.app.state.holder.get().llm_usage
+    usage.record(tier="chat", model="claude-sonnet-5", input_tokens=1_000_000,
+                output_tokens=1_000_000, purpose="chat")
+
+    body = client.get("/settings").text
+
+    assert "claude-sonnet-5" in body
+    assert "1,000,000" in body
+    # $3/1M in + $15/1M out = $18.00 for this one call.
+    assert "$18.00" in body
+
+
+def test_usage_tab_flags_unknown_model_as_an_estimate(client):
+    usage = client.app.state.holder.get().llm_usage
+    usage.record(tier="review", model="totally-unknown-model", input_tokens=100,
+                output_tokens=50, purpose="review")
+
+    body = client.get("/settings").text
+
+    assert "totally-unknown-model" in body
+    assert "(estimate)" in body
+
+
+def test_usage_tab_shows_the_price_table_update_date(client):
+    from allpath_trade.llm.prices import PRICES_UPDATED
+
+    body = client.get("/settings").text
+    assert PRICES_UPDATED in body
+    assert "built-in price table" in body
+
+
+def test_usage_tab_is_english_only(client):
+    usage = client.app.state.holder.get().llm_usage
+    usage.record(tier="memory", model="claude-opus-5", input_tokens=10,
+                output_tokens=5, purpose="memory")
+    body = client.get("/settings").text
+    assert_english_only(body)

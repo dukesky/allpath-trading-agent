@@ -79,11 +79,19 @@ def review_queued(*, review_id: int, ticker: str, action: str,
     return subject, body + FOOTER
 
 
-def daily_digest(*, triggers: int, trades: int, pending: int) -> tuple[str, str]:
+def daily_digest(*, triggers: int, trades: int, pending: int,
+                 llm_cost: str = "") -> tuple[str, str]:
+    """`llm_cost`, when non-empty, is one extra line naming today's
+    estimated LLM spend (store/llm_usage.py + llm/prices.py) -- the caller
+    (scheduler.py's `_send_daily_digest`) only ever passes a non-empty
+    string when there was actually usage to report, so this stays the same
+    silent no-op it always was on a day with no LLM calls at all."""
     subject = "[AllPath] Daily summary"
     body = (f"Today: {triggers} rule trigger(s), {trades} trade(s), "
-            f"{pending} item(s) still waiting for your approval." + FOOTER)
-    return subject, body
+            f"{pending} item(s) still waiting for your approval.")
+    if llm_cost:
+        body += f"\nEstimated LLM cost today: {llm_cost} (see Settings -> Usage)."
+    return subject, body + FOOTER
 
 
 def daily_report(*, date: str, summary: str, body: str) -> tuple[str, str]:

@@ -46,8 +46,16 @@ class AnthropicClient(LLMClient):
                                       arguments=dict(block.input)))
         stop = "tool_use" if calls else (
             "length" if resp.stop_reason == "max_tokens" else "end")
+        # `resp.usage` is present on every real Anthropic SDK response, but
+        # `getattr(..., None)` degrades gracefully for a test double or an
+        # unexpected future shape rather than raising -- see LLMResponse's
+        # own docstring on why usage is never load-bearing.
+        usage = getattr(resp, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
         return LLMResponse(text="".join(text_parts) or None, tool_calls=calls,
-                           stop_reason=stop)
+                           stop_reason=stop, input_tokens=input_tokens,
+                           output_tokens=output_tokens)
 
     @staticmethod
     def _convert(messages: list[dict]) -> tuple[str, list[dict]]:

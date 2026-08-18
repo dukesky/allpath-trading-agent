@@ -2,8 +2,11 @@ import pytest
 
 from allpath_trade.config import Settings
 from allpath_trade.llm.anthropic_client import AnthropicClient
-from allpath_trade.llm.factory import LLMConfigError, build_llm
+from allpath_trade.llm.base import LLMResponse
+from allpath_trade.llm.factory import LLMConfigError, _RecordingClient, build_llm
 from allpath_trade.llm.openai_compat import OpenAICompatClient
+from allpath_trade.store.db import connect
+from allpath_trade.store.llm_usage import LLMUsage
 
 
 def settings(**over):
@@ -96,3 +99,75 @@ def test_anthropic_client_is_built_with_configured_timeout(monkeypatch):
 
 def test_llm_timeout_defaults_to_180_seconds():
     assert settings().llm_timeout_seconds == 180
+
+
+# ---------------------------------------------------------------------------
+# usage_store / _RecordingClient -- the LLM Usage panel's one choke point.
+# ---------------------------------------------------------------------------
+
+def test_no_usage_store_returns_the_plain_client_unwrapped():
+    llm = build_llm(settings(), tier="chat")
+    # isinstance, not just behavior -- no usage_store passed must mean zero
+    # change from before this feature existed, unwrapped client and all.
+    assert isinstance(llm, OpenAICompatClient)
+    assert not isinstance(llm, _RecordingClient)
+
+
+def test_usage_store_wraps_the_client_in_a_recording_decorator(tmp_path):
+    usage = LLMUsage(connect(tmp_path / "t.db"))
+    llm = build_llm(settings(), tier="chat", usage_store=usage)
+    assert isinstance(llm, _RecordingClient)
+    assert llm.model == "m-chat"  # proxied through to the wrapped client
+
+
+class ScriptedInner:
+    model = "m-chat"
+
+    def __init__(self, response):
+        self._response = response
+        self.calls = 0
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        return self._response
+
+
+def test_recording_client_records_usage_and_returns_response_unchanged(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    usage = LLMUsage(conn)
+    inner = ScriptedInner(LLMResponse(text="hi", input_tokens=100, output_tokens=20))
+    client = _RecordingClient(inner, "chat", usage)
+
+    out = client.complete([{"role": "user", "content": "hello"}])
+
+    assert out.text == "hi"
+    [row] = usage.summary(1)
+    assert row["tier"] == "chat" and row["model"] == "m-chat"
+    assert row["input_tokens"] == 100 and row["output_tokens"] == 20
+    assert row["calls"] == 1
+
+
+def test_recording_client_purpose_matches_tier(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    usage = LLMUsage(conn)
+    inner = ScriptedInner(LLMResponse(text="ok"))
+    client = _RecordingClient(inner, "memory", usage)
+
+    client.complete([{"role": "user", "content": "x"}])
+
+    row = conn.execute("SELECT purpose FROM llm_usage").fetchone()
+    assert row["purpose"] == "memory"
+
+
+def test_recording_client_swallows_a_broken_usage_store(tmp_path):
+    class BoomUsage:
+        def record(self, **kwargs):
+            raise RuntimeError("disk full")
+
+    inner = ScriptedInner(LLMResponse(text="hi"))
+    client = _RecordingClient(inner, "chat", BoomUsage())
+
+    out = client.complete([{"role": "user", "content": "x"}])  # must not raise
+
+    assert out.text == "hi"
+    assert inner.calls == 1

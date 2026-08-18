@@ -121,15 +121,16 @@ class ChatService:
         # the older messages get summarized and dropped right after the
         # flush meant to preserve them just failed.
         compactor = Compactor(
-            build_llm(c.settings, tier="memory"), store,
+            build_llm(c.settings, tier="memory", usage_store=c.llm_usage), store,
             budget_tokens=c.settings.context_budget_tokens,
             on_before_compact=(
                 partial(c.consolidator.run_post_chat, propagate=True)
                 if c.consolidator is not None else None))
-        return AgentSession(build_llm(c.settings, tier="chat"), registry, prompt,
-                            store=store, conversation_id=conversation_id,
-                            compactor=compactor,
-                            on_tool=lambda call: self.activity.append(call.name))
+        return AgentSession(
+            build_llm(c.settings, tier="chat", usage_store=c.llm_usage),
+            registry, prompt, store=store, conversation_id=conversation_id,
+            compactor=compactor,
+            on_tool=lambda call: self.activity.append(call.name))
 
     def send(self, text: str, source: str = "web") -> str:
         with self._turn_lock:

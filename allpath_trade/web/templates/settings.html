@@ -222,6 +222,71 @@
   </div>
 </form>
 
+{# Usage is read-only -- no fields of its own, nothing to Save -- so it
+   lives outside the settings <form> entirely, same reasoning as the
+   Unpair Telegram / Reset access token divs just below. The generic
+   `[data-panel]` tab-switcher script toggles it the same way regardless of
+   where in the DOM it sits. #}
+<div data-panel="usage"{% if active_tab != 'usage' %} hidden{% endif %}>
+  <h2>Usage</h2>
+  {% for days in [7, 30] %}
+  {% set w = usage_windows[days] %}
+  <div class="card">
+    <h3 style="margin-top:0">Last {{ days }} days</h3>
+    {% if not w.has_usage %}
+    <p class="muted">No LLM calls recorded yet.</p>
+    {% else %}
+    <table>
+      <thead>
+        <tr><th>Tier</th><th>Model</th><th>Tokens in</th><th>Tokens out</th>
+            <th>Calls</th><th>Est. cost</th></tr>
+      </thead>
+      <tbody>
+        {% for tier, t in w.tiers.items() %}
+        {% for m in t.models %}
+        <tr>
+          <td>{{ tier if loop.first else '' }}</td>
+          <td>{{ m.model }}{% if m.is_default_rate %} <span class="muted">(estimate)</span>{% endif %}</td>
+          <td>{{ '{:,}'.format(m.input_tokens) }}</td>
+          <td>{{ '{:,}'.format(m.output_tokens) }}</td>
+          <td>{{ m.calls }}</td>
+          <td>{{ m.cost }}</td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="hint" style="margin-top:10px">
+      Total: {{ '{:,}'.format(w.total_input_tokens) }} tokens in,
+      {{ '{:,}'.format(w.total_output_tokens) }} tokens out ·
+      estimated <strong>{{ w.total_cost }}</strong></p>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <h3 style="margin-top:0">Daily tokens (last 14 days)</h3>
+    {% if not usage_daily %}
+    <p class="muted">No LLM calls recorded yet.</p>
+    {% else %}
+    <table>
+      <thead><tr><th>Day</th><th>Tokens in</th><th>Tokens out</th></tr></thead>
+      <tbody>
+        {% for row in usage_daily %}
+        <tr><td>{{ row.day }}</td>
+            <td>{{ '{:,}'.format(row.input_tokens) }}</td>
+            <td>{{ '{:,}'.format(row.output_tokens) }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+
+  <p class="hint">Estimates from a built-in price table (updated
+  {{ prices_updated }}); check your provider's dashboard for billed
+  amounts. Unknown models use a conservative default rate.</p>
+</div>
+
 {# Reset token / Unpair Telegram are deliberately their own <form>s, outside
    the settings form above -- neither is part of "Save settings" (each POSTs
    its own endpoint immediately, no draft state to lose), and a <form>

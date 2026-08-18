@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, time
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -188,6 +189,29 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
 DIGEST_LAST_DATE_KEY = "digest_last_date"
 
 
+def _llm_cost_line(components) -> str:
+    """The digest's one-line "estimated LLM cost today" mention -- `""`
+    (no line at all, per `events.daily_digest`'s own contract) whenever
+    there was no LLM usage in the last 24h, so a day with an LLM
+    unconfigured or simply unused stays exactly as silent about cost as
+    the digest always was before this feature existed.
+
+    Sums `estimate_cost` (llm/prices.py) per (tier, model) row from
+    `LLMUsage.summary(1)` rather than reading a single pre-computed total,
+    since cost genuinely depends on which model each row's tokens ran
+    against -- `llm_usage.total_tokens_since` alone can't price a mix of
+    models correctly."""
+    from allpath_trade.llm.prices import estimate_cost
+    from allpath_trade.web.format import money
+
+    total = Decimal(0)
+    for row in components.llm_usage.summary(1):
+        cost, _is_default = estimate_cost(row["model"], row["input_tokens"],
+                                          row["output_tokens"])
+        total += cost
+    return money(total) if total > 0 else ""
+
+
 def _send_daily_digest(components) -> None:
     """Count today's activity and email a summary, at most once per ET
     calendar day.
@@ -219,7 +243,7 @@ def _send_daily_digest(components) -> None:
         since_iso=since_iso, limit=10_000) if row["source"] == "sentinel")
     subject, body = events.daily_digest(
         triggers=triggers, trades=components.journal.trades_today(),
-        pending=len(components.queue.list()))
+        pending=len(components.queue.list()), llm_cost=_llm_cost_line(components))
     components.notifier.send(subject, body)
     components.app_state.set(DIGEST_LAST_DATE_KEY, today)
 

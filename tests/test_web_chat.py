@@ -38,7 +38,7 @@ def make_client(tmp_path, monkeypatch, responses):
                         openrouter_api_key="k")
     llm = ScriptedLLM(responses)
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
-                        lambda settings, tier="chat": llm)
+                        lambda settings, tier="chat", usage_store=None: llm)
     client = TestClient(create_app(settings, broker=FakeBroker()))
     client.post("/login", data={"token": "secret"})
     return client
@@ -591,7 +591,7 @@ def test_a_second_send_waits_for_the_first_turn_to_finish(tmp_path, monkeypatch)
                         memory_dir=tmp_path / "memory", web_token="secret",
                         openrouter_api_key="k")
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
-                        lambda settings, tier="chat": llm)
+                        lambda settings, tier="chat", usage_store=None: llm)
     client = TestClient(create_app(settings, broker=FakeBroker()))
     client.post("/login", data={"token": "secret"})
 

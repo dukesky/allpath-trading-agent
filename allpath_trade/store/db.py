@@ -115,6 +115,19 @@ CREATE TABLE IF NOT EXISTS reports (
     status TEXT NOT NULL DEFAULT 'ok',
     created_at TEXT NOT NULL
 );
+
+-- LLM usage + cost-estimate panel (store/llm_usage.py). One row per
+-- completed LLM call, written from the single `_RecordingClient` choke
+-- point in llm/factory.py's `build_llm` -- see that module's docstring.
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    purpose TEXT NOT NULL DEFAULT ''
+);
 """
 
 
