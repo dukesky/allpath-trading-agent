@@ -2,6 +2,24 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Telegram approvals + LLM usage panel — 2026-08-19
+
+- Queued reviews (sentinel soft-rule triggers, chat order proposals,
+  chat/reflection strategy proposals) now reach the paired Telegram chat
+  with inline **Approve / Reject** buttons — one tap resolves through the
+  exact same kind-aware paths the web uses; the callback is bound to the
+  paired chat and user, carries a per-review single-use nonce, and the
+  message is edited in place with the outcome. Auto-executed hard rules
+  push a receipt to Telegram too. A single `notify_review_queued` now
+  fans out email / ntfy / Telegram from every queue site.
+- Settings → **Usage** tab: per-tier input/output tokens and an estimated
+  cost for the last 7 and 30 days, plus a per-day table. Estimates come
+  from a built-in price table (unknown models priced at the table maximum
+  and flagged); the daily digest gains a best-effort "estimated LLM cost
+  today" line (UTC calendar day).
+- Known limitation: the terminal chat's LLM calls are not yet recorded in
+  the usage table (see `docs/TODO.md`).
+
 ## UI round 3 — 2026-08-17
 
 - Dashboard **equity chart**: a server-rendered SVG line of account equity
