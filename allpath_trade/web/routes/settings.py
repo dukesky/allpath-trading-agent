@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import secrets
 import sys
+from decimal import Decimal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -10,12 +11,14 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from allpath_trade.config import Settings, describe_validation_error
+from allpath_trade.llm.prices import PRICES_UPDATED, estimate_cost
 from allpath_trade.notify.email import EmailNotifier
 from allpath_trade.notify.ntfy import NtfyNotifier
 from allpath_trade.scheduler import reschedule_sentinel_job
 from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, TELEGRAM_USER_ID_KEY
 from allpath_trade.web import models_catalog
 from allpath_trade.web.auth import COOKIE
+from allpath_trade.web.format import money
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
 
@@ -49,6 +52,10 @@ TABS = [
     ("telegram", "Telegram"),
     ("sentinel", "Sentinel and memory"),
     ("access", "Access"),
+    # Read-only -- no fields of its own, so unlike every other tab it has no
+    # entries to add to PLAIN_FIELDS/BOOLEAN_FIELDS/SECRET_FIELDS/
+    # FIELD_TO_TAB below (nothing here is ever posted back).
+    ("usage", "Usage"),
 ]
 DEFAULT_TAB = TABS[0][0]
 
@@ -140,6 +147,73 @@ def _telegram_status(chat_id: str | None) -> str:
     return f"Paired (chat …{tail})"
 
 
+# Usage panel windows (Settings -> Usage, read-only): the two headline
+# summary windows plus how many days of the per-day mini table to show.
+# 14 days of daily rows is enough to see a trend without turning the tab
+# into an ever-growing table.
+_USAGE_SUMMARY_WINDOWS = (7, 30)
+_USAGE_DAILY_DAYS = 14
+
+
+def _usage_window(rows) -> dict:
+    """One `summary(days)` result -> the per-tier breakdown + grand total
+    the Usage panel renders for that window. `is_default_rate` on a tier
+    means at least one of its rows priced against `prices.DEFAULT_PRICE`
+    (an unknown model) rather than a real catalog entry -- surfaced so the
+    panel can flag which numbers are the least trustworthy."""
+    tiers: dict[str, dict] = {}
+    total_cost = Decimal(0)
+    total_input = 0
+    total_output = 0
+    for row in rows:
+        cost, is_default = estimate_cost(row["model"], row["input_tokens"], row["output_tokens"])
+        tier = tiers.setdefault(row["tier"], {
+            "input_tokens": 0, "output_tokens": 0, "cost": Decimal(0),
+            "is_default_rate": False, "models": [],
+        })
+        tier["input_tokens"] += row["input_tokens"]
+        tier["output_tokens"] += row["output_tokens"]
+        tier["cost"] += cost
+        tier["is_default_rate"] = tier["is_default_rate"] or is_default
+        tier["models"].append({
+            "model": row["model"], "calls": row["calls"],
+            "input_tokens": row["input_tokens"], "output_tokens": row["output_tokens"],
+            "cost": money(cost), "is_default_rate": is_default,
+        })
+        total_cost += cost
+        total_input += row["input_tokens"]
+        total_output += row["output_tokens"]
+    for tier in tiers.values():
+        tier["cost"] = money(tier["cost"])
+    return {
+        "tiers": tiers, "total_cost": money(total_cost),
+        "total_input_tokens": total_input, "total_output_tokens": total_output,
+        "has_usage": bool(rows),
+    }
+
+
+def _usage_context(c) -> dict:
+    """Settings -> Usage tab context: `windows` keyed by the number of days
+    (7/30, matching `_USAGE_SUMMARY_WINDOWS`) plus a per-day token table for
+    the last `_USAGE_DAILY_DAYS` days. Read-only -- nothing here is ever
+    posted back, so unlike every other tab this needs no PLAIN_FIELDS/
+    FIELD_TO_TAB entries at all."""
+    return {
+        "usage_windows": {days: _usage_window(c.llm_usage.summary(days))
+                         for days in _USAGE_SUMMARY_WINDOWS},
+        # The template iterates windows in a fixed order to render the tab
+        # buttons/panels -- passed explicitly rather than hardcoded as
+        # `[7, 30]` in settings.html, so a future change to
+        # `_USAGE_SUMMARY_WINDOWS` (e.g. adding a 90-day window) can't
+        # silently drift out of sync with what the template renders.
+        "usage_windows_order": list(_USAGE_SUMMARY_WINDOWS),
+        "usage_daily": [{"day": row["day"], "input_tokens": row["input_tokens"],
+                         "output_tokens": row["output_tokens"]}
+                       for row in c.llm_usage.daily(_USAGE_DAILY_DAYS)],
+        "prices_updated": PRICES_UPDATED,
+    }
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, saved: str = "") -> HTMLResponse:
     c = request.app.state.holder.get()
@@ -155,7 +229,7 @@ def settings_page(request: Request, saved: str = "") -> HTMLResponse:
         "model_options": models_catalog.list_models(s.llm_provider),
         "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
         "tabs": TABS, "active_tab": DEFAULT_TAB,
-        **nav_context(c)})
+        **_usage_context(c), **nav_context(c)})
 
 
 @router.post("/settings")
@@ -220,7 +294,7 @@ async def save(request: Request) -> Response:
             # otherwise the error banner at the top of the page points at a
             # hidden panel and the user has no idea what to fix.
             "tabs": TABS, "active_tab": _error_tab(exc),
-            **nav_context(c)}, status_code=400)
+            **_usage_context(c), **nav_context(c)}, status_code=400)
 
     old_interval = current.sentinel_interval_minutes
     store = holder.store()

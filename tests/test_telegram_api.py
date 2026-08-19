@@ -225,6 +225,48 @@ def test_send_message_ok_false_body_returns_false():
     assert api.send_message("42", "<b>hi</b>") is False
 
 
+def test_send_message_passes_reply_markup_through():
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(json.loads(req.data))
+        return _FakeResponse(_ok_body({"message_id": 1}))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    markup = {"inline_keyboard": [[{"text": "OK", "callback_data": "x"}]]}
+    assert api.send_message("42", "hi", reply_markup=markup) is True
+    assert calls[0]["reply_markup"] == markup
+
+
+def test_send_message_with_no_reply_markup_omits_the_field():
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(json.loads(req.data))
+        return _FakeResponse(_ok_body({"message_id": 1}))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    api.send_message("42", "hi")
+    assert "reply_markup" not in calls[0]
+
+
+def test_send_message_400_retry_still_carries_reply_markup():
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        payload = json.loads(req.data)
+        calls.append(payload)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
+        return _FakeResponse(_ok_body({"message_id": 2}))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    markup = {"inline_keyboard": [[{"text": "OK", "callback_data": "x"}]]}
+    assert api.send_message("42", "<b>hi</b>", reply_markup=markup) is True
+    assert calls[0]["reply_markup"] == markup
+    assert calls[1]["reply_markup"] == markup
+
+
 # ---------------------------------------------------------------------------
 # send_typing
 # ---------------------------------------------------------------------------
@@ -295,6 +337,86 @@ def test_delete_message_never_raises_on_garbage_response():
 
     api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
     assert api.delete_message("42", 7) is None
+
+
+# ---------------------------------------------------------------------------
+# answer_callback_query
+# ---------------------------------------------------------------------------
+
+def test_answer_callback_query_success_hits_answercallbackquery():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse(_ok_body(True))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.answer_callback_query("cb1", "Approved") is None
+    assert captured["url"] == f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
+    assert captured["body"] == {"callback_query_id": "cb1", "text": "Approved"}
+
+
+def test_answer_callback_query_with_no_text_omits_the_field():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse(_ok_body(True))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    api.answer_callback_query("cb1")
+    assert captured["body"] == {"callback_query_id": "cb1"}
+
+
+def test_answer_callback_query_swallows_every_failure_mode(capsys):
+    def raise_error(req, timeout=None):
+        raise urllib.error.URLError("nope")
+
+    api = TelegramAPI(TOKEN, urlopen=raise_error)
+    assert api.answer_callback_query("cb1") is None
+    assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------------------
+# edit_message_reply_markup
+# ---------------------------------------------------------------------------
+
+def test_edit_message_reply_markup_removes_buttons_by_default():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse(_ok_body(True))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.edit_message_reply_markup("42", 7) is None
+    assert captured["url"] == f"https://api.telegram.org/bot{TOKEN}/editMessageReplyMarkup"
+    assert captured["body"] == {"chat_id": "42", "message_id": 7,
+                                "reply_markup": {"inline_keyboard": []}}
+
+
+def test_edit_message_reply_markup_passes_a_given_markup():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse(_ok_body(True))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    markup = {"inline_keyboard": [[{"text": "OK", "callback_data": "x"}]]}
+    api.edit_message_reply_markup("42", 7, reply_markup=markup)
+    assert captured["body"]["reply_markup"] == markup
+
+
+def test_edit_message_reply_markup_swallows_every_failure_mode(capsys):
+    def raise_error(req, timeout=None):
+        raise urllib.error.URLError("nope")
+
+    api = TelegramAPI(TOKEN, urlopen=raise_error)
+    assert api.edit_message_reply_markup("42", 7) is None
+    assert capsys.readouterr().err == ""
 
 
 # ---------------------------------------------------------------------------

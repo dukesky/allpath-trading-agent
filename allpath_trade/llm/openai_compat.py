@@ -48,7 +48,15 @@ class OpenAICompatClient(LLMClient):
             calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
         stop = "tool_use" if calls else (
             "length" if choice.finish_reason == "length" else "end")
-        return LLMResponse(text=msg.content, tool_calls=calls, stop_reason=stop)
+        # `resp.usage` is present on every real OpenAI-compatible response
+        # (OpenAI, OpenRouter), but degrades to 0 via `getattr` for a test
+        # double or a provider that omits it -- see LLMResponse's own
+        # docstring on why usage is never load-bearing.
+        usage = getattr(resp, "usage", None)
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        return LLMResponse(text=msg.content, tool_calls=calls, stop_reason=stop,
+                           input_tokens=input_tokens, output_tokens=output_tokens)
 
     @staticmethod
     def _to_openai(messages: list[dict]) -> list[dict]:

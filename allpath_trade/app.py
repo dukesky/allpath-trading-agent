@@ -21,6 +21,7 @@ from allpath_trade.store.app_state import AppState
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
+from allpath_trade.store.llm_usage import LLMUsage
 from allpath_trade.store.reports import ReportStore
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.store import StrategyStore
@@ -43,6 +44,7 @@ class Components:
     memory: MemoryStore
     app_state: AppState
     reports: ReportStore
+    llm_usage: LLMUsage
     consolidator: Consolidator | None = None
     reflector: Reflector | None = None
 
@@ -73,8 +75,10 @@ def build_components(settings: Settings, broker: Broker | None = None,
     memory = MemoryStore(settings.memory_dir, conn)
     app_state = AppState(conn)
     reports = ReportStore(conn)
+    llm_usage = LLMUsage(conn)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
-                       observations=observations, web_base_url=settings.web_base_url)
+                       observations=observations, web_base_url=settings.web_base_url,
+                       app_state=app_state, telegram_bot_token=settings.telegram_bot_token)
     consolidator: Consolidator | None = None
     try:
         from allpath_trade.agent.readonly_tools import register_readonly_tools
@@ -82,16 +86,17 @@ def build_components(settings: Settings, broker: Broker | None = None,
         from allpath_trade.agent.tools import ToolRegistry
         from allpath_trade.llm.factory import LLMConfigError, build_llm
 
-        review_llm = build_llm(settings, tier="review")
+        review_llm = build_llm(settings, tier="review", usage_store=llm_usage)
         review_registry = ToolRegistry()
         register_readonly_tools(review_registry, data=data, broker=broker,
                                 journal=journal, strategies=strategies,
                                 queue=queue)
         sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
-        consolidator = Consolidator(build_llm(settings, tier="memory"), memory,
-                                    observations, journal, conn,
-                                    conversations=ConversationStore(conn),
-                                    app_state=app_state)
+        consolidator = Consolidator(
+            build_llm(settings, tier="memory", usage_store=llm_usage), memory,
+            observations, journal, conn,
+            conversations=ConversationStore(conn),
+            app_state=app_state)
     except LLMConfigError:
         pass  # no LLM configured: Phase 2 behavior
 
@@ -100,7 +105,8 @@ def build_components(settings: Settings, broker: Broker | None = None,
         gate=gate, executor=executor, queue=queue,
         strategies=strategies, notifier=notifier, sentinel=sentinel,
         conn=conn, observations=observations, memory=memory,
-        app_state=app_state, reports=reports, consolidator=consolidator)
+        app_state=app_state, reports=reports, llm_usage=llm_usage,
+        consolidator=consolidator)
 
     if consolidator is not None:
         # Reflector needs the whole component bag (reports/conn/journal/
@@ -116,6 +122,6 @@ def build_components(settings: Settings, broker: Broker | None = None,
         from allpath_trade.llm.factory import build_llm
 
         components.reflector = Reflector(
-            llm=build_llm(settings, tier="memory"), components=components,
-            settings=settings, notifier=notifier)
+            llm=build_llm(settings, tier="memory", usage_store=llm_usage),
+            components=components, settings=settings, notifier=notifier)
     return components

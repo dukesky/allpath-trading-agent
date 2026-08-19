@@ -88,8 +88,11 @@ class ChatService:
         register_action_tools(
             registry, strategies=c.strategies, executor=c.executor,
             confirm=lambda _prompt: False,
-            order_sink=QueueingOrderSink(c.queue, c.gate, c.broker, c.data,
-                                         c.journal, conversation_id),
+            order_sink=QueueingOrderSink(
+                c.queue, c.gate, c.broker, c.data, c.journal, conversation_id,
+                notifier=c.notifier, app_state=c.app_state,
+                telegram_bot_token=c.settings.telegram_bot_token,
+                web_base_url=c.settings.web_base_url),
             # `queue` (not `order_sink`) is draft_strategy's own web-mode
             # discriminator -- see action_tools.py's register_action_tools
             # docstring comment for why the two tools don't share one
@@ -99,7 +102,8 @@ class ChatService:
             # site, so passing it directly here is as fresh as a callable
             # indirection would be, with none of the extra machinery.
             queue=c.queue, conversation_id=conversation_id,
-            notifier=c.notifier, web_base_url=c.settings.web_base_url)
+            notifier=c.notifier, web_base_url=c.settings.web_base_url,
+            app_state=c.app_state, telegram_bot_token=c.settings.telegram_bot_token)
 
         prompt = build_system_prompt(
             identity=load_identity(), broker=c.broker, journal=c.journal,
@@ -117,15 +121,16 @@ class ChatService:
         # the older messages get summarized and dropped right after the
         # flush meant to preserve them just failed.
         compactor = Compactor(
-            build_llm(c.settings, tier="memory"), store,
+            build_llm(c.settings, tier="memory", usage_store=c.llm_usage), store,
             budget_tokens=c.settings.context_budget_tokens,
             on_before_compact=(
                 partial(c.consolidator.run_post_chat, propagate=True)
                 if c.consolidator is not None else None))
-        return AgentSession(build_llm(c.settings, tier="chat"), registry, prompt,
-                            store=store, conversation_id=conversation_id,
-                            compactor=compactor,
-                            on_tool=lambda call: self.activity.append(call.name))
+        return AgentSession(
+            build_llm(c.settings, tier="chat", usage_store=c.llm_usage),
+            registry, prompt, store=store, conversation_id=conversation_id,
+            compactor=compactor,
+            on_tool=lambda call: self.activity.append(call.name))
 
     def send(self, text: str, source: str = "web") -> str:
         with self._turn_lock:
@@ -166,7 +171,7 @@ class ChatService:
     def messages(self) -> list[dict]:
         return list(self.session().history)
 
-    def note_resolution(self, line: str) -> None:
+    def note_resolution(self, line: str, source: str = "web") -> None:
         """Record an out-of-band event (an approval, a fill) in the transcript
         so the agent sees it on its next turn.
 
@@ -201,9 +206,14 @@ class ChatService:
             session._append({"role": "user", "content": fence_external(line),
                              "kind": "system_note", "display": line})
         # An approval receipt is part of the full record the user chose to
-        # mirror (spec §④) -- same hook as send(), fired after the lock for
-        # the same reason, source="web" since this only ever happens from
-        # the web reviews flow. No agent reply accompanies a resolution
-        # note, so `reply` is the empty string; the mirror fn decides what
-        # (if anything) to do with that.
-        self._call_mirror("web", line, "")
+        # mirror (spec §④) -- same hook as send(), fired after the lock.
+        # `source` defaults to "web" (the web reviews flow, the original and
+        # still most common caller) but a Telegram button-tap resolution
+        # (telegram.py's `_resolve_review_callback`) passes source="telegram"
+        # so the mirror's direction policy (`_mirror_to_telegram`, which
+        # no-ops for source != "web") doesn't push a second, redundant copy
+        # of the outcome back into the same Telegram chat that already got
+        # the immediate in-channel tap feedback. No agent reply accompanies
+        # a resolution note, so `reply` is the empty string; the mirror fn
+        # decides what (if anything) to do with that.
+        self._call_mirror(source, line, "")

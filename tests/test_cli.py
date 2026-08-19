@@ -290,6 +290,10 @@ def _fake_run_components(reflector=None, consolidator=None, daily_reflection=Tru
         app_state=app_state if app_state is not None else FakeAppState(),
         notifier=notifier if notifier is not None else DigestNotifier(),
         observations=observations if observations is not None else FakeObservations(),
+        # `_llm_cost_line`'s only touch point -- empty by default (no LLM
+        # usage recorded), same as every test here before this feature
+        # existed (no cost line in the digest).
+        llm_usage=SimpleNamespace(summary=lambda days: []),
         reflector=reflector, consolidator=consolidator,
         settings=SimpleNamespace(daily_reflection=daily_reflection,
                                  daily_consolidation=daily_consolidation))
@@ -452,7 +456,7 @@ def test_chat_wires_a_compactor_from_the_configured_context_budget(tmp_path, mon
     settings.strategies_dir.mkdir()
     llm = ScriptedLLM([LLMResponse(text="hi there")])
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
-                        lambda settings, tier="chat": llm)
+                        lambda settings, tier="chat", usage_store=None: llm)
     components = build_components(settings, broker=FakeBroker())
 
     inputs = iter(["hello", "/exit"])
@@ -490,7 +494,7 @@ def test_chat_wires_the_consolidator_flush_hook_into_the_compactor(tmp_path, mon
     settings.strategies_dir.mkdir()
     llm = ScriptedLLM([LLMResponse(text="hi there")])
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
-                        lambda settings, tier="chat": llm)
+                        lambda settings, tier="chat", usage_store=None: llm)
     components = build_components(settings, broker=FakeBroker())
     assert components.consolidator is not None  # sanity: the hook has something to bind to
 
@@ -551,7 +555,7 @@ def test_chat_consolidation_survives_a_mid_session_compaction(tmp_path, monkeypa
     # consolidator (not cmd_chat's `memory_llm` argument, which is separate
     # and injected below) uses the scripted client.
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
-                        lambda settings, tier="chat": consolidate_llm)
+                        lambda settings, tier="chat", usage_store=None: consolidate_llm)
 
     settings = SettingsStore().load()
     components = build_components(settings, broker=FakeBroker())

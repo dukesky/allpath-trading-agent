@@ -96,3 +96,24 @@ def test_approve_link_empty_when_no_token():
 def test_approve_link_built_when_both_present():
     url = events.approve_link("http://192.168.1.20:8791", _Handle(12, "abc123"))
     assert url == "http://192.168.1.20:8791/a/12?k=abc123"
+
+
+# ---------------------------------------------------------------------------
+# daily_digest -- LLM cost line (Item B)
+# ---------------------------------------------------------------------------
+
+def test_daily_digest_omits_cost_line_by_default():
+    _subject, body = events.daily_digest(triggers=1, trades=0, pending=0)
+    assert "LLM cost" not in body
+
+
+def test_daily_digest_includes_cost_line_when_given():
+    _subject, body = events.daily_digest(
+        triggers=1, trades=0, pending=0, llm_cost="$0.42")
+    assert "Estimated LLM cost today: $0.42" in body
+
+
+def test_daily_digest_with_cost_line_is_english_only():
+    _subject, body = events.daily_digest(
+        triggers=1, trades=0, pending=0, llm_cost="$0.42")
+    assert_english_only(body)

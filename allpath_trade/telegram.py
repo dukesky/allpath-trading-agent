@@ -33,11 +33,13 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from allpath_trade.execution import ExecutionError
 from allpath_trade.store.app_state import (
     TELEGRAM_CHAT_ID_KEY,
     TELEGRAM_OFFSET_KEY,
     TELEGRAM_USER_ID_KEY,
 )
+from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.web.markdown import (
     MAX_TELEGRAM_REPLY_CHUNKS,
     split_for_telegram,
@@ -136,7 +138,8 @@ class TelegramAPI:
             return None
         return result
 
-    def _send_once(self, chat_id: str, text: str, parse_mode: str | None) -> str:
+    def _send_once(self, chat_id: str, text: str, parse_mode: str | None,
+                   reply_markup: dict[str, Any] | None = None) -> str:
         """One sendMessage attempt. Returns "ok", "http400" (so the caller
         can retry as plain text -- a 400 from Telegram's sendMessage is how
         an entity-parse failure surfaces), or "fail" for anything else.
@@ -144,6 +147,8 @@ class TelegramAPI:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         req = self._request("sendMessage", payload)
         try:
             with self._urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp:
@@ -160,18 +165,25 @@ class TelegramAPI:
             return "fail"
         return "ok"
 
-    def send_message(self, chat_id: str, html: str) -> bool:
+    def send_message(self, chat_id: str, html: str,
+                     reply_markup: dict[str, Any] | None = None) -> bool:
         """Send `html` with `parse_mode=HTML`. On a Telegram 400 (entity
         parse failure -- e.g. an unbalanced tag slipped past
         `to_telegram_html`), retries EXACTLY ONCE as plain text via
         `strip_telegram_html_to_plain`. Never raises; returns whether the
-        message was ultimately delivered."""
-        status = self._send_once(chat_id, html, "HTML")
+        message was ultimately delivered.
+
+        `reply_markup` (Approve/Reject inline keyboards on a queued-review
+        push, see notify/dispatch.py) is passed through verbatim on BOTH the
+        HTML attempt and the plain-text fallback -- the 400 that triggers
+        the fallback is about the HTML entities in `text`, never about
+        `reply_markup`, so there is no reason to drop the buttons on retry."""
+        status = self._send_once(chat_id, html, "HTML", reply_markup)
         if status == "ok":
             return True
         if status == "http400":
             plain = strip_telegram_html_to_plain(html)
-            return self._send_once(chat_id, plain, None) == "ok"
+            return self._send_once(chat_id, plain, None, reply_markup) == "ok"
         return False
 
     def send_typing(self, chat_id: str) -> None:
@@ -200,6 +212,45 @@ class TelegramAPI:
         except Exception:  # noqa: BLE001, S110 — best-effort, swallow everything
             pass
 
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        """Best-effort `answerCallbackQuery` -- clears the button's loading
+        spinner and, when `text` is non-empty, shows Telegram's small toast
+        popup over the chat. Used after a Approve/Reject inline-button tap
+        (`TelegramPoller._handle_callback_query`) to give the presser
+        immediate feedback. Swallows everything, same as `send_typing`/
+        `delete_message`: a missing toast is never worth risking the poller
+        loop on."""
+        try:
+            payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+            if text:
+                payload["text"] = text
+            req = self._request("answerCallbackQuery", payload)
+            with self._urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp:
+                resp.read()
+        except Exception:  # noqa: BLE001, S110 — best-effort, swallow everything
+            pass
+
+    def edit_message_reply_markup(self, chat_id: str, message_id: int,
+                                  reply_markup: dict[str, Any] | None = None) -> None:
+        """Best-effort `editMessageReplyMarkup`. Used right after a
+        review's Approve/Reject callback is resolved to remove the buttons
+        from the original message -- a resolved review must not still show
+        tappable buttons that would just fail (or double-resolve) on a
+        second tap. `reply_markup=None` (the default) explicitly sends an
+        empty inline keyboard rather than omitting the field, so this always
+        removes buttons rather than leaving Telegram's own "no change"
+        default ambiguous. Swallows everything, same as every other
+        best-effort call in this class."""
+        try:
+            req = self._request("editMessageReplyMarkup", {
+                "chat_id": chat_id, "message_id": message_id,
+                "reply_markup": reply_markup or {"inline_keyboard": []},
+            })
+            with self._urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp:
+                resp.read()
+        except Exception:  # noqa: BLE001, S110 — best-effort, swallow everything
+            pass
+
 
 # Backoff for `TelegramPoller.run_forever`'s retry loop: 5s to start, doubling
 # on each consecutive failure, capped at 60s -- reset to the base the moment a
@@ -218,6 +269,14 @@ _STDERR_TRUNCATE_LENGTH = 200
 # comfortably inside Telegram's own few-second expiry for a single
 # `sendChatAction` call.
 _TYPING_RESEND_SECONDS = 4
+
+# `rv:<approve|reject>:<review_id>:<nonce>` -- the exact `callback_data`
+# shape notify/dispatch.py's `push_telegram_review_queued` mints. `nonce` is
+# always exactly 16 lowercase hex characters (the first 16 of a sha256
+# hexdigest, see that module) -- requiring the exact length here means a
+# truncated/garbled callback_data simply fails to match rather than being
+# compared against a wrong-length slice of the stored hash.
+_CALLBACK_RE = re.compile(r"^rv:(approve|reject):(\d+):([0-9a-f]{16})\Z")
 
 
 class TelegramPoller:
@@ -369,12 +428,17 @@ class TelegramPoller:
         return False
 
     def _handle_update(self, update: dict[str, Any]) -> str | None:
-        """Returns `"dropped"` when the update was a text message from an
-        unpaired/unmatched sender, or a failed `/start` pairing attempt (so
-        `poll_once` can count it for its one stderr line), `None` otherwise
-        -- including every non-text update shape (photos, stickers,
-        `edited_message`, `callback_query`, ...), which are simply ignored:
-        this bot only ever understands plain text."""
+        """Returns `"dropped"` when the update was a text message (or an
+        Approve/Reject button tap) from an unpaired/unmatched sender, or a
+        failed `/start` pairing attempt (so `poll_once` can count it for its
+        one stderr line), `None` otherwise -- including every other
+        non-text update shape (photos, stickers, `edited_message`, ...),
+        which are simply ignored: this bot only ever understands plain text
+        and its own review-approval callback buttons."""
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            return None if self._handle_callback_query(callback) else "dropped"
+
         message = update.get("message")
         if not isinstance(message, dict):
             return None
@@ -463,6 +527,176 @@ class TelegramPoller:
         if isinstance(message_id, int):
             self.api.delete_message(chat_id, message_id)
         return True
+
+    # -- Approve/Reject inline-button callbacks --------------------------
+
+    def _handle_callback_query(self, callback: dict[str, Any]) -> bool:
+        """A tap on one of the Approve/Reject buttons
+        `notify/dispatch.py`'s `push_telegram_review_queued` attaches to a
+        queued-review push. Returns whether the callback was handled (i.e.
+        came from the paired chat+user) -- `False` means `poll_once` counts
+        it toward the batch's dropped total, same silent-drop policy the
+        text-message branch above already follows: a stranger's tap gets NO
+        reply of any kind, not even Telegram's own loading-spinner toast.
+
+        The chat/user binding check is IDENTICAL to the text-message path
+        (`_handle_update` above): both the chat id (read off
+        `callback.message.chat.id` -- the chat the ORIGINAL button message
+        lives in) and the presser's own id (`callback.from.id`) must match
+        what `/start` recorded. This is the actual authorization boundary --
+        `callback_data`'s nonce (checked once a callback clears this gate,
+        see `_resolve_review_callback`) is only a belt on top of it, not a
+        substitute for it."""
+        callback_id = callback.get("id")
+        message = callback.get("message")
+        chat = message.get("chat") if isinstance(message, dict) else None
+        chat_id = chat.get("id") if isinstance(chat, dict) else None
+        message_id = message.get("message_id") if isinstance(message, dict) else None
+        from_ = callback.get("from")
+        from_id = from_.get("id") if isinstance(from_, dict) else None
+        data = callback.get("data")
+
+        if chat_id is None or from_id is None or not isinstance(data, str):
+            return False
+        chat_id = str(chat_id)
+        paired_chat_id = self.app_state.get(TELEGRAM_CHAT_ID_KEY)
+        paired_user_id = self.app_state.get(TELEGRAM_USER_ID_KEY)
+        if (paired_chat_id is None or chat_id != paired_chat_id
+                or paired_user_id is None or str(from_id) != paired_user_id):
+            return False
+
+        match = _CALLBACK_RE.match(data)
+        if not match:
+            # Malformed/unrecognized callback_data from an otherwise
+            # legitimately-paired sender (e.g. a stale button from before a
+            # format change) -- answer so the spinner clears, but this is
+            # still a HANDLED update, not a dropped one: the sender is who
+            # they say they are, there's just nothing to act on.
+            if isinstance(callback_id, str):
+                self.api.answer_callback_query(callback_id, "Unrecognized action.")
+            return True
+
+        action, review_id_raw, nonce = match.groups()
+        outcome_line, toast, acted = self._resolve_review_callback(
+            int(review_id_raw), nonce, action)
+        if isinstance(callback_id, str):
+            self.api.answer_callback_query(callback_id, toast)
+        if not acted:
+            # Nothing changed (bad/expired nonce, already resolved
+            # elsewhere, unknown review): leave the original message and its
+            # buttons exactly as they were -- there is nothing to report and
+            # removing live buttons here would be actively wrong for the
+            # "already resolved elsewhere" case, where a SECOND tap should
+            # still surface the same "already resolved" toast rather than
+            # silently doing nothing with no buttons left to explain why.
+            return True
+        if isinstance(message_id, int):
+            self.api.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+        self.api.send_message(chat_id, to_telegram_html(outcome_line))
+        return True
+
+    def _resolve_review_callback(self, review_id: int, nonce: str,
+                                  action: str) -> tuple[str, str, bool]:
+        """Approve/reject `review_id` through the exact same
+        `ReviewQueue.approve()`/`reject()` the web reviews page uses (see
+        `web/routes/reviews.py`'s `approve`/`reject` handlers, which this
+        mirrors kind-for-kind: `strategy_revision` vs `order`,
+        `RevisionValidationError` left pending, `ExecutionError` claimed-but-
+        failed). Returns `(outcome_line, toast, acted)`:
+
+          * `outcome_line` is sent back to Telegram as a follow-up message
+            once the original message's buttons are removed, AND fed to
+            `ChatService.note_resolution` (for `source == "chat"` rows
+            only, matching `web/routes/reviews.py`'s own `_echo_resolution`
+            gate -- a sentinel-triggered row has no live conversation to
+            report back into) so the web chat shows the same receipt.
+          * `toast` is the short string `answerCallbackQuery` pops up.
+          * `acted` is whether the row was actually touched (a real
+            approve/reject attempt ran, even one that failed) -- `False` for
+            the "nothing to do" cases (missing row, wrong/expired nonce,
+            already resolved), which `_handle_callback_query` uses to decide
+            whether to remove the buttons/send a follow-up message at all.
+
+        The nonce check happens here, AFTER the chat/user binding
+        `_handle_callback_query` already verified -- see that method's
+        docstring for why the binding, not this nonce, is the real
+        authorization boundary."""
+        c = self.holder.get()
+        queue = c.queue
+        try:
+            row = queue.get(review_id)
+        except ReviewError:
+            return "That review no longer exists.", "Not found", False
+
+        stored_nonce = (row["approval_token_hash"] or "")[:16]
+        if row["status"] != "pending" or not hmac.compare_digest(stored_nonce, nonce):
+            message = "That item is no longer pending, or this button has expired."
+            return message, "Already resolved", False
+
+        row_source = row["source"]
+
+        def _echo(summary: str) -> None:
+            if row_source == "chat":
+                # source="telegram": this resolution originated from a
+                # button tap in THIS chat, which already gets its own
+                # immediate outcome message right after `_resolve_review_
+                # callback` returns (see `_handle_callback_query`'s
+                # `send_message(chat_id, ...)` call). `note_resolution`'s
+                # mirror hook defaults to source="web" (the web reviews
+                # flow); passing "telegram" here tells `_mirror_to_telegram`
+                # not to push a second, redundant copy of the same outcome
+                # back into this chat -- the web conversation still gets the
+                # receipt row either way, since that append happens before
+                # the mirror decision.
+                self.chat_service.note_resolution(
+                    f"You resolved #{review_id}. Result: {summary}",
+                    source="telegram")
+
+        if action == "reject":
+            try:
+                queue.reject(review_id, note="rejected via Telegram")
+            except ReviewError as exc:
+                return f"Not processed: {exc}", "Not processed", True
+            _echo("rejected (rejected via Telegram)")
+            return f"❌ Rejected #{review_id}.", "Rejected", True
+
+        # action == "approve"
+        try:
+            result = queue.approve(review_id)
+        except RevisionValidationError as exc:
+            _echo(f"revision left pending: re-validation failed ({exc})")
+            # `acted=True` here already makes `_handle_callback_query` strip
+            # this message's buttons -- but they can't just be left off
+            # silently: a re-validation failure burns `consume_token`'s
+            # single-use nonce (see that function's own docstring) on the
+            # way to raising this, so the row is back to "pending" with no
+            # way to re-arm a fresh pair of buttons on THIS message. Saying
+            # so explicitly, rather than just "left pending", is the honest
+            # version -- a bare "left pending" with no live buttons and no
+            # explanation reads as a stuck bot, not a stuck review.
+            message = (f"⚠️ Revision #{review_id} failed re-validation "
+                      f"({exc}) and stayed pending — reopen from the app.")
+            return message, "Left pending: re-validation failed", True
+        except ReviewError as exc:
+            return f"Not processed: {exc}", "Not processed", True
+        except ExecutionError as exc:
+            _echo(f"execution failed: {exc}")
+            message = f"⚠️ Review #{review_id} claimed, but execution failed: {exc}"
+            return message, "Execution failed", True
+
+        if row["kind"] == "strategy_revision":
+            message = (f"Revision applied to {row['strategy_id']}."
+                      + c.strategies.rearm_warning(row['strategy_id']))
+            _echo(f"revision applied to {row['strategy_id']}")
+            return f"✅ Approved #{review_id} — {message}", "Approved", True
+
+        if not result.submitted:
+            reasons = "; ".join(result.decision.reasons)
+            _echo(f"blocked by the risk gate ({reasons})")
+            return (f"⚠️ #{review_id} rejected by the risk gate: {reasons}",
+                    "Blocked by risk gate", True)
+        _echo("order submitted")
+        return f"✅ Approved #{review_id} — order submitted.", "Approved", True
 
     def _handle_chat_text(self, chat_id: str, text: str) -> None:
         stop_typing = threading.Event()

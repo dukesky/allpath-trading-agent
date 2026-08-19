@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, time
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -188,6 +189,58 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
 DIGEST_LAST_DATE_KEY = "digest_last_date"
 
 
+def _llm_cost_line(components) -> str:
+    """The digest's one-line "estimated LLM cost today" mention -- `""`
+    (no line at all, per `events.daily_digest`'s own contract) whenever
+    there was no LLM usage today, so a day with an LLM unconfigured or
+    simply unused stays exactly as silent about cost as the digest always
+    was before this feature existed.
+
+    Sums `estimate_cost` (llm/prices.py) per (tier, model) row from
+    `LLMUsage.summary_for_day()` -- the UTC-calendar-day cut, matching
+    `trades_today`'s and this same digest's `triggers` count's own "today"
+    convention (see `_send_daily_digest`'s docstring) -- rather than
+    `summary(1)`'s rolling 24h window, which would mislabel part of
+    yesterday's (or a slice of tonight's not-yet-"today") usage as
+    "today". Cost genuinely depends on which model each row's tokens ran
+    against, so this sums per-row rather than pricing one pre-aggregated
+    total.
+
+    Never raises: reading usage is best-effort here, the same way
+    recording it already is (`LLMUsage.record`'s own docstring) -- this
+    runs synchronously before `notifier.send` inside `_send_daily_digest`,
+    which already marks `digest_last_date` done regardless of outcome, so
+    an unhandled exception here would silently cancel the ENTIRE digest for
+    the day (trigger/trade/pending counts included) over what's ultimately
+    just one optional line."""
+    try:
+        from allpath_trade.llm.prices import estimate_cost
+        from allpath_trade.web.format import money
+
+        total = Decimal(0)
+        any_default_rate = False
+        for row in components.llm_usage.summary_for_day():
+            cost, is_default = estimate_cost(row["model"], row["input_tokens"],
+                                              row["output_tokens"])
+            total += cost
+            any_default_rate = any_default_rate or is_default
+        if total <= 0:
+            return ""
+        formatted = money(total)
+        if formatted == "$0.00":
+            # A real, nonzero cost that `money`'s 2-decimal rounding would
+            # otherwise silently present as "$0.00" -- e.g. a handful of
+            # haiku-tier calls costing a fraction of a cent. 4 decimals
+            # keeps it honest instead of implying there was no cost at all.
+            formatted = f"${total:.4f}"
+        if any_default_rate:
+            formatted += " (some rates estimated)"
+        return formatted
+    except Exception as exc:  # noqa: BLE001 — see docstring: must never cancel the digest
+        print(f"[digest] llm cost line failed: {exc}", file=sys.stderr)
+        return ""
+
+
 def _send_daily_digest(components) -> None:
     """Count today's activity and email a summary, at most once per ET
     calendar day.
@@ -219,7 +272,7 @@ def _send_daily_digest(components) -> None:
         since_iso=since_iso, limit=10_000) if row["source"] == "sentinel")
     subject, body = events.daily_digest(
         triggers=triggers, trades=components.journal.trades_today(),
-        pending=len(components.queue.list()))
+        pending=len(components.queue.list()), llm_cost=_llm_cost_line(components))
     components.notifier.send(subject, body)
     components.app_state.set(DIGEST_LAST_DATE_KEY, today)
 

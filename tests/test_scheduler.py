@@ -1,5 +1,5 @@
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from allpath_trade.scheduler import (
@@ -11,6 +11,8 @@ from allpath_trade.scheduler import (
     run_daemon,
     run_daily_jobs,
 )
+from allpath_trade.store.db import connect
+from allpath_trade.store.llm_usage import LLMUsage
 from tests.test_sentinel import make, strategy_yaml
 
 # 2026-07-29 is a Wednesday. 15:00 UTC = 11:00 ET (EDT, UTC-4).
@@ -244,7 +246,8 @@ class DigestNotifier:
 
 def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5,
                 journal=None, queue=None, notifier=None, observations=None,
-                app_state=None, reflector=None, daily_reflection=True, broker=None):
+                app_state=None, reflector=None, daily_reflection=True, broker=None,
+                llm_usage=None):
     return SimpleNamespace(
         sentinel=sentinel,
         consolidator=consolidator,
@@ -255,6 +258,12 @@ def _components(sentinel, consolidator=None, daily_consolidation=True, interval=
         notifier=notifier if notifier is not None else DigestNotifier(),
         observations=observations if observations is not None else FakeObservations(),
         app_state=app_state if app_state is not None else FakeAppState(),
+        # `_llm_cost_line`'s only touch point: `.summary_for_day()` -- empty
+        # by default, matching "no LLM usage recorded" (no cost line in the
+        # digest), same as every test in this file before this feature
+        # existed.
+        llm_usage=llm_usage if llm_usage is not None
+        else SimpleNamespace(summary_for_day=lambda date_utc=None: []),
         settings=SimpleNamespace(daily_consolidation=daily_consolidation,
                                  daily_reflection=daily_reflection,
                                  sentinel_interval_minutes=interval),
@@ -439,6 +448,106 @@ def test_build_jobs_sends_daily_digest_once_per_day_after_close(monkeypatch):
     assert "3 trade(s)" in body
     assert "2 item(s) still waiting" in body
     assert "http" not in body.lower() and "<" not in body
+
+
+def test_build_jobs_daily_digest_mentions_llm_cost_when_usage_recorded(monkeypatch, tmp_path):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    llm_usage = LLMUsage(connect(tmp_path / "t.db"))
+    llm_usage.record(tier="chat", model="claude-sonnet-5", input_tokens=1_000_000,
+                     output_tokens=1_000_000, purpose="chat")
+    components = _components(sentinel=FakeSentinel(), notifier=notifier,
+                             llm_usage=llm_usage)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    [(_subject, body)] = notifier.sent
+    assert "Estimated LLM cost today: $18.00" in body
+
+
+def test_build_jobs_daily_digest_omits_cost_line_when_no_usage(monkeypatch, tmp_path):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    llm_usage = LLMUsage(connect(tmp_path / "t.db"))
+    components = _components(sentinel=FakeSentinel(), notifier=notifier,
+                             llm_usage=llm_usage)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    [(_subject, body)] = notifier.sent
+    assert "LLM cost" not in body
+
+
+def test_build_jobs_daily_digest_cost_line_excludes_yesterdays_utc_usage(monkeypatch, tmp_path):
+    # Important 2: the cost line is a UTC-calendar-day cut, not a rolling
+    # 24h window -- a row from late yesterday (UTC) must not bleed into
+    # "today"'s figure just because it's still within the last 24h.
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    conn = connect(tmp_path / "t.db")
+    llm_usage = LLMUsage(conn)
+    today = datetime.now(UTC).date().isoformat()
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+    # Late yesterday: within the last 24h from "now", but not today's
+    # calendar day -- must be excluded.
+    conn.execute(
+        "INSERT INTO llm_usage (ts, tier, model, input_tokens, output_tokens, purpose)"
+        " VALUES (?, 'chat', 'claude-sonnet-5', 1000000, 0, 'chat')",
+        (f"{yesterday}T23:00:00+00:00",))
+    conn.commit()
+    components = _components(sentinel=FakeSentinel(), notifier=notifier, llm_usage=llm_usage)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    [(_subject, body)] = notifier.sent
+    assert "LLM cost" not in body  # yesterday's usage must not count as "today"
+    assert today  # sanity: today's date was computable in this environment
+
+
+def test_build_jobs_daily_digest_survives_a_broken_usage_store(monkeypatch, capsys):
+    # Important 3: a usage-store read failure must not take down the whole
+    # digest -- it runs before notifier.send inside _send_daily_digest,
+    # which already marks digest_last_date done regardless, so an
+    # unswallowed exception here would silently cancel the digest for the
+    # entire day (trigger/trade/pending counts included).
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+
+    class BrokenLLMUsage:
+        def summary_for_day(self, date_utc=None):
+            raise RuntimeError("usage store is on fire")
+
+    components = _components(sentinel=FakeSentinel(), notifier=notifier,
+                             journal=FakeJournal(trades=3), queue=FakeQueue(pending=[1]),
+                             llm_usage=BrokenLLMUsage())
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()  # must not raise
+
+    assert len(notifier.sent) == 1  # the digest itself still went out
+    [(_subject, body)] = notifier.sent
+    assert "LLM cost" not in body
+    assert "3 trade(s)" in body
+    assert "usage store is on fire" in capsys.readouterr().err
 
 
 def test_build_jobs_digest_is_not_resent_after_a_simulated_restart(monkeypatch):

@@ -111,3 +111,21 @@ def test_sdk_call_raising_any_exception_becomes_llm_error():
     with pytest.raises(LLMError) as ei:
         c.complete([{"role": "user", "content": "x"}])
     assert "upstream hung" in str(ei.value)
+
+
+# -- Token usage (LLM Usage panel, store/llm_usage.py) -----------------------
+
+def test_usage_populated_from_response():
+    resp = _resp(content="hi")
+    resp.usage = SimpleNamespace(prompt_tokens=88, completion_tokens=22)
+    c, _ = make([resp])
+    out = c.complete([{"role": "user", "content": "hello"}])
+    assert out.input_tokens == 88
+    assert out.output_tokens == 22
+
+
+def test_missing_usage_defaults_to_zero_never_raises():
+    c, _ = make([_resp(content="hi")])  # no `.usage` attribute at all
+    out = c.complete([{"role": "user", "content": "hello"}])
+    assert out.input_tokens == 0
+    assert out.output_tokens == 0

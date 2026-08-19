@@ -104,7 +104,7 @@ def test_chat_eof_runs_same_post_chat_consolidation_as_exit(tmp_path, capsys, mo
         LLMResponse(text="noted 1 preference"),
     ])
 
-    def fake_build_llm(settings, tier):
+    def fake_build_llm(settings, tier, usage_store=None):
         # consolidation runs on the memory tier, not the sentinel review tier
         return memory_llm if tier == "memory" else chat_llm
 
@@ -139,7 +139,7 @@ def test_chat_finish_skips_consolidation_when_the_setting_is_disabled(
     memory_llm = ScriptedLLM([LLMResponse(text="should never be reached")])
 
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
-                        lambda settings, tier: memory_llm)
+                        lambda settings, tier, usage_store=None: memory_llm)
 
     lines = iter(["remember I prefer dividends"])
 

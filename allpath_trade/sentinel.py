@@ -10,6 +10,8 @@ from allpath_trade.data.base import DataSource
 from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
+from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, ReviewQueue
 from allpath_trade.strategy.actions import parse_action, to_order_intent
 from allpath_trade.strategy.conditions import evaluate_condition
@@ -42,7 +44,8 @@ class Sentinel:
     def __init__(self, strategies: StrategyStore, data: DataSource,
                  broker: Broker, executor: Executor, queue: ReviewQueue,
                  notifier: Notifier, review_agent=None, observations=None,
-                 web_base_url: str = "") -> None:
+                 web_base_url: str = "", app_state: AppState | None = None,
+                 telegram_bot_token: str = "") -> None:
         self.strategies = strategies
         self.data = data
         self.broker = broker
@@ -55,6 +58,15 @@ class Sentinel:
         # `_notify_queued` call below builds no link at all, same behavior
         # as before this feature existed. See config.py's Settings.web_base_url.
         self.web_base_url = web_base_url
+        # Telegram push (both optional, default off): a queued review also
+        # reaches the paired chat with Approve/Reject buttons, and an
+        # auto-executed hard rule's order_result receipt also reaches it
+        # (no buttons) -- see notify/dispatch.py. `app_state` is None and
+        # `telegram_bot_token` is "" in every test that doesn't care about
+        # Telegram, which is exactly the "Telegram is off" state
+        # `notify.dispatch`'s push functions already no-op on.
+        self.app_state = app_state
+        self.telegram_bot_token = telegram_bot_token
 
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
@@ -258,6 +270,15 @@ class Sentinel:
         subject, body = events.order_result(
             ticker=ticker, side=side, submitted=submitted, detail=detail)
         self._send(doc, subject, body)
+        # "自动执行了也要通知我" -- the order_result receipt (auto-executed hard
+        # rule, and every other order outcome that flows through this same
+        # method) also reaches the paired Telegram chat, no buttons since
+        # there's nothing left to approve/reject. Independent of
+        # doc.notify_email (see notify_review_queued's docstring for why the
+        # Telegram leg is never gated by that email-only preference) and of
+        # `self.web_base_url` (no link involved here at all). One message.
+        push_telegram_receipt(app_state=self.app_state,
+                              telegram_bot_token=self.telegram_bot_token, body=body)
 
     def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
                        recommendation: str, *, price: Decimal | None = None,
@@ -283,7 +304,16 @@ class Sentinel:
             strategy_id=doc.id, recommendation=recommendation,
             trigger_price=trigger_price, est_shares=est_shares,
             approve_url=approve_url)
-        self._send(doc, subject, body)
+        # notify_email gates the email/ntfy leg only (see _send's own
+        # docstring) -- notify_review_queued (notify/dispatch.py) is the
+        # shared choke point this method now shares with order_sink.py's
+        # chat order proposals and action_tools.py's chat strategy drafts;
+        # its Telegram leg (buttons) is unconditional whenever a chat is
+        # paired, same reasoning as _notify_order's receipt push above.
+        notify_review_queued(
+            queue=self.queue, notifier=self.notifier, app_state=self.app_state,
+            telegram_bot_token=self.telegram_bot_token, review_id=review_id,
+            subject=subject, body=body, notify_email=doc.notify_email)
 
     def _send(self, doc: StrategyDoc, subject: str, body: str) -> None:
         # notify_email is a notification preference, not a trading
