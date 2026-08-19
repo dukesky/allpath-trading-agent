@@ -201,6 +201,12 @@ def _usage_context(c) -> dict:
     return {
         "usage_windows": {days: _usage_window(c.llm_usage.summary(days))
                          for days in _USAGE_SUMMARY_WINDOWS},
+        # The template iterates windows in a fixed order to render the tab
+        # buttons/panels -- passed explicitly rather than hardcoded as
+        # `[7, 30]` in settings.html, so a future change to
+        # `_USAGE_SUMMARY_WINDOWS` (e.g. adding a 90-day window) can't
+        # silently drift out of sync with what the template renders.
+        "usage_windows_order": list(_USAGE_SUMMARY_WINDOWS),
         "usage_daily": [{"day": row["day"], "input_tokens": row["input_tokens"],
                          "output_tokens": row["output_tokens"]}
                        for row in c.llm_usage.daily(_USAGE_DAILY_DAYS)],

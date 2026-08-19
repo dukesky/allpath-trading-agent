@@ -41,16 +41,29 @@ _PRICES: dict[str, tuple[Decimal, Decimal]] = {
 # Conservative (deliberately on the HIGH side, so an estimate never
 # understates cost) default rate for any model not in `_PRICES` above --
 # marked with `is_default=True` by `price_for`/`estimate_cost` so the panel
-# can flag which rows are a real lookup vs this fallback.
-DEFAULT_PRICE: tuple[Decimal, Decimal] = (Decimal(10), Decimal(30))
+# can flag which rows are a real lookup vs this fallback. Computed as the
+# max input/output price actually present in `_PRICES` (rather than a
+# hand-picked number that can silently fall behind as the table grows) --
+# a hardcoded (10, 30) once undercut claude-opus-5's real (15, 75), which
+# made the "never understates" claim above false for exactly the model most
+# likely to need the fallback (a new, presumably-premium model slug).
+DEFAULT_PRICE: tuple[Decimal, Decimal] = (
+    max(input_price for input_price, _output_price in _PRICES.values()),
+    max(output_price for _input_price, output_price in _PRICES.values()),
+)
 
 
 def price_for(model: str) -> tuple[Decimal, Decimal, bool]:
     """`(input_price_per_1m, output_price_per_1m, is_default)` for `model`.
     `is_default` is `True` whenever `model` isn't in `_PRICES` and the
     conservative `DEFAULT_PRICE` was used instead -- the caller uses this to
-    mark an estimate row as such rather than presenting a guess as fact."""
-    slug = model.rsplit("/", 1)[-1] if model else ""
+    mark an estimate row as such rather than presenting a guess as fact.
+
+    The slug is lowercased before lookup -- `_PRICES` keys are all
+    lowercase, and a provider can report a model slug in a different case
+    (e.g. a settings page selection round-tripped through an API that
+    title-cases it) without that being a genuinely different model."""
+    slug = model.rsplit("/", 1)[-1].lower() if model else ""
     if slug in _PRICES:
         input_price, output_price = _PRICES[slug]
         return input_price, output_price, False

@@ -276,7 +276,7 @@ _TYPING_RESEND_SECONDS = 4
 # hexdigest, see that module) -- requiring the exact length here means a
 # truncated/garbled callback_data simply fails to match rather than being
 # compared against a wrong-length slice of the stored hash.
-_CALLBACK_RE = re.compile(r"^rv:(approve|reject):(\d+):([0-9a-f]{16})$")
+_CALLBACK_RE = re.compile(r"^rv:(approve|reject):(\d+):([0-9a-f]{16})\Z")
 
 
 class TelegramPoller:
@@ -637,8 +637,20 @@ class TelegramPoller:
 
         def _echo(summary: str) -> None:
             if row_source == "chat":
+                # source="telegram": this resolution originated from a
+                # button tap in THIS chat, which already gets its own
+                # immediate outcome message right after `_resolve_review_
+                # callback` returns (see `_handle_callback_query`'s
+                # `send_message(chat_id, ...)` call). `note_resolution`'s
+                # mirror hook defaults to source="web" (the web reviews
+                # flow); passing "telegram" here tells `_mirror_to_telegram`
+                # not to push a second, redundant copy of the same outcome
+                # back into this chat -- the web conversation still gets the
+                # receipt row either way, since that append happens before
+                # the mirror decision.
                 self.chat_service.note_resolution(
-                    f"You resolved #{review_id}. Result: {summary}")
+                    f"You resolved #{review_id}. Result: {summary}",
+                    source="telegram")
 
         if action == "reject":
             try:
@@ -653,8 +665,17 @@ class TelegramPoller:
             result = queue.approve(review_id)
         except RevisionValidationError as exc:
             _echo(f"revision left pending: re-validation failed ({exc})")
-            message = (f"⚠️ Revision #{review_id} failed re-validation and "
-                      f"was left pending: {exc}")
+            # `acted=True` here already makes `_handle_callback_query` strip
+            # this message's buttons -- but they can't just be left off
+            # silently: a re-validation failure burns `consume_token`'s
+            # single-use nonce (see that function's own docstring) on the
+            # way to raising this, so the row is back to "pending" with no
+            # way to re-arm a fresh pair of buttons on THIS message. Saying
+            # so explicitly, rather than just "left pending", is the honest
+            # version -- a bare "left pending" with no live buttons and no
+            # explanation reads as a stuck bot, not a stuck review.
+            message = (f"⚠️ Revision #{review_id} failed re-validation "
+                      f"({exc}) and stayed pending — reopen from the app.")
             return message, "Left pending: re-validation failed", True
         except ReviewError as exc:
             return f"Not processed: {exc}", "Not processed", True

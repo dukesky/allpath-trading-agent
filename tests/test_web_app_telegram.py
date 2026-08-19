@@ -21,9 +21,11 @@ Two things live here:
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
+from functools import partial
 from typing import ClassVar
 
 from fastapi.testclient import TestClient
@@ -33,6 +35,7 @@ from allpath_trade.config import Settings
 from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
 from allpath_trade.store.db import connect
 from allpath_trade.web.app import _mirror_to_telegram, create_app
+from tests.test_agent_loop import ScriptedLLM
 from tests.test_sentinel import FakeBroker
 
 
@@ -264,6 +267,72 @@ def test_paired_chat_id_is_re_read_on_every_call_not_captured_once(tmp_path):
     _mirror_to_telegram("web", "second", "", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
     assert [chat_id for chat_id, _ in api.sent] == ["111", "222"]
+
+
+# ---------------------------------------------------------------------------
+# Important 1: a Telegram button-resolve must not produce a SECOND, mirrored
+# message back into the same chat. `ChatService.note_resolution` now takes a
+# `source` kwarg (default "web", unchanged for the web reviews flow) that it
+# threads straight into the mirror hook -- these two tests exercise a REAL
+# ChatService (not the FakeChatService used elsewhere in this suite) wired
+# to the real `_mirror_to_telegram` direction policy, proving the fix at the
+# only layer where the bug actually lived: `note_resolution` hard-coding
+# source="web" regardless of who called it.
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _real_chat_service(tmp_path, monkeypatch):
+    """Builds a real `ChatService` (via `create_app`, same as the actual
+    server wiring) with a `ScriptedLLM` swapped in for `build_llm` so
+    `session()`/`_build()` succeed without a real provider key. Yields
+    `(chat_service, app_state)` paired to chat id "555" -- `note_resolution`
+    never turns the LLM, so an empty response script is fine."""
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=(tmp_path / "strategies"),
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        openrouter_api_key="k")
+    (tmp_path / "strategies").mkdir(exist_ok=True)
+    llm = ScriptedLLM([])
+    monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
+                        lambda settings, tier="chat", usage_store=None: llm)
+    app = create_app(settings, broker=FakeBroker(), telegram_poller_cls=SpyPoller)
+    with TestClient(app):
+        chat_service = app.state.chat_service
+        app_state = app.state.holder.get().app_state
+        app_state.set(TELEGRAM_CHAT_ID_KEY, "555")
+        yield chat_service, app_state
+
+
+def test_telegram_sourced_resolution_lands_in_conversation_but_mirror_is_not_called(
+        tmp_path, monkeypatch):
+    with _real_chat_service(tmp_path, monkeypatch) as (chat_service, app_state):
+        fake_api = FakeMirrorAPI()
+        chat_service.set_mirror(
+            partial(_mirror_to_telegram, api=fake_api, app_state=app_state,
+                   mirror_queue=ImmediateExecutor()))
+
+        chat_service.note_resolution(
+            "You resolved #1. Result: order submitted", source="telegram")
+
+        # The conversation still gets the receipt row (the shared record) --
+        # only the redundant Telegram push is skipped.
+        assert chat_service.messages()[-1]["display"] == (
+            "You resolved #1. Result: order submitted")
+        assert fake_api.sent == []
+
+
+def test_web_sourced_resolution_still_mirrors_to_telegram_unchanged(
+        tmp_path, monkeypatch):
+    with _real_chat_service(tmp_path, monkeypatch) as (chat_service, app_state):
+        fake_api = FakeMirrorAPI()
+        chat_service.set_mirror(
+            partial(_mirror_to_telegram, api=fake_api, app_state=app_state,
+                   mirror_queue=ImmediateExecutor()))
+
+        chat_service.note_resolution("You resolved #2. Result: rejected")  # default source="web"
+
+        assert chat_service.messages()[-1]["display"] == "You resolved #2. Result: rejected"
+        assert fake_api.sent == [("555", "You resolved #2. Result: rejected")]
 
 
 # ---------------------------------------------------------------------------

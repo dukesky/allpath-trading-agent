@@ -51,12 +51,52 @@ def test_daily_groups_by_utc_calendar_day(tmp_path):
     assert rows[0]["output_tokens"] == 13
 
 
-def test_total_tokens_since_sums_input_and_output(tmp_path):
+def test_summary_for_day_defaults_to_today_utc(tmp_path):
     usage = make(tmp_path)
-    assert usage.total_tokens_since(7) == 0
     usage.record(tier="chat", model="m", input_tokens=10, output_tokens=5, purpose="chat")
-    usage.record(tier="chat", model="m", input_tokens=3, output_tokens=2, purpose="chat")
-    assert usage.total_tokens_since(7) == 20
+    usage.record(tier="review", model="m2", input_tokens=20, output_tokens=8, purpose="review")
+
+    rows = usage.summary_for_day()
+
+    assert {(r["tier"], r["model"], r["input_tokens"], r["output_tokens"]) for r in rows} == {
+        ("chat", "m", 10, 5), ("review", "m2", 20, 8)}
+
+
+def test_summary_for_day_excludes_rows_from_other_utc_calendar_days(tmp_path):
+    # The whole point of `summary_for_day` over `summary(1)`: a row from
+    # yesterday (UTC) must never bleed into "today"'s total, even though a
+    # rolling 24h window from "now" would still include most of it.
+    conn = connect(tmp_path / "t.db")
+    usage = LLMUsage(conn)
+    today = datetime.now(UTC).date().isoformat()
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+    conn.execute(
+        "INSERT INTO llm_usage (ts, tier, model, input_tokens, output_tokens, purpose)"
+        " VALUES (?, 'chat', 'm', 100, 100, 'chat')", (f"{yesterday}T23:59:00+00:00",))
+    conn.execute(
+        "INSERT INTO llm_usage (ts, tier, model, input_tokens, output_tokens, purpose)"
+        " VALUES (?, 'chat', 'm', 7, 3, 'chat')", (f"{today}T00:00:01+00:00",))
+    conn.commit()
+
+    rows = usage.summary_for_day(today)
+
+    assert len(rows) == 1
+    assert rows[0]["input_tokens"] == 7
+    assert rows[0]["output_tokens"] == 3
+
+
+def test_summary_for_day_accepts_an_explicit_date(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    usage = LLMUsage(conn)
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
+    conn.execute(
+        "INSERT INTO llm_usage (ts, tier, model, input_tokens, output_tokens, purpose)"
+        " VALUES (?, 'chat', 'm', 5, 1, 'chat')", (f"{yesterday}T12:00:00+00:00",))
+    conn.commit()
+
+    assert usage.summary_for_day() == []  # nothing today
+    rows = usage.summary_for_day(yesterday)
+    assert len(rows) == 1 and rows[0]["input_tokens"] == 5
 
 
 def test_record_never_raises_on_negative_or_odd_inputs(tmp_path):

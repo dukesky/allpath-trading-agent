@@ -296,7 +296,8 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> i
     if memory_llm is None:
         from allpath_trade.llm.factory import build_llm
 
-        memory_llm = build_llm(components.settings, tier="memory")
+        memory_llm = build_llm(components.settings, tier="memory",
+                              usage_store=components.llm_usage)
     # Finding 8: flush durable preferences to curated memory before the
     # older half of the conversation is dropped from context -- see
     # Compactor's docstring on on_before_compact. Without this the only
@@ -595,6 +596,19 @@ def main(argv: list[str] | None = None,
 
         factory = llm_factory or build_llm
         try:
+            # TODO: neither call below passes usage_store=components.
+            # llm_usage the way cmd_chat's own internal build_llm call does
+            # (see that function's `if memory_llm is None` branch) -- this
+            # `factory` indirection's signature is `Callable[[Settings,
+            # str], LLMClient]` (2 positional args, no usage_store), shared
+            # with every test's injected `llm_factory`, so widening it here
+            # would mean updating every one of those fakes too. Left
+            # unwired for now: `cli chat` calls made through THIS factory
+            # simply go unrecorded in the Usage panel/daily-digest cost
+            # line (llm/factory.py's `_RecordingClient` is the only thing
+            # that ever writes to `LLMUsage`, and nothing here constructs
+            # one) -- not a correctness bug, just an undercount for this
+            # one entry point.
             llm = factory(settings, "chat")
             # Same factory (real or injected) as the chat-tier client, so a
             # test that scripts one scripts the other: the Compactor's LLM

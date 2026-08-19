@@ -45,6 +45,28 @@ class LLMUsage:
             " FROM llm_usage WHERE ts >= ? GROUP BY tier, model"
             " ORDER BY tier, model", (self._since(days),)))
 
+    def summary_for_day(self, date_utc: str | None = None) -> list[sqlite3.Row]:
+        """One row per (tier, model) combination used on `date_utc`
+        (`YYYY-MM-DD`, UTC calendar day; defaults to today), with summed
+        input/output tokens and a call count.
+
+        This is the daily digest's "LLM cost today" source, and deliberately
+        NOT `summary(1)` (a rolling 24h window from the instant it's called)
+        -- `TradeJournal.trades_today` and the digest's own `triggers` count
+        both use a UTC-calendar-day cut (see `_send_daily_digest`'s
+        docstring), and a "today" label on a rolling-24h number would show
+        yesterday evening's usage as part of "today" for anyone running the
+        digest job before midnight UTC, or double up across midnight for
+        anyone running it after. `substr(ts, 1, 10)` reads the `YYYY-MM-DD`
+        prefix off the ISO-8601 timestamp `record` writes, same convention
+        `daily` above already uses."""
+        day = date_utc or datetime.now(UTC).date().isoformat()
+        return list(self._conn.execute(
+            "SELECT tier, model, SUM(input_tokens) AS input_tokens,"
+            " SUM(output_tokens) AS output_tokens, COUNT(*) AS calls"
+            " FROM llm_usage WHERE substr(ts, 1, 10) = ? GROUP BY tier, model"
+            " ORDER BY tier, model", (day,)))
+
     def daily(self, days: int) -> list[sqlite3.Row]:
         """One row per UTC calendar day with any usage in the last `days`
         days, with summed input/output tokens across every tier/model --
@@ -58,11 +80,3 @@ class LLMUsage:
             " SUM(output_tokens) AS output_tokens FROM llm_usage WHERE ts >= ?"
             " GROUP BY day ORDER BY day DESC", (self._since(days),)))
 
-    def total_tokens_since(self, days: int) -> int:
-        """Total input+output tokens across every tier/model in the last
-        `days` days -- used by the daily digest's one-line cost mention to
-        decide whether there's anything to say at all (`> 0`)."""
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0)"
-            " AS total FROM llm_usage WHERE ts >= ?", (self._since(days),)).fetchone()
-        return int(row["total"]) if row else 0

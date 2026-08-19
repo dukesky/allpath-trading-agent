@@ -229,7 +229,7 @@
    where in the DOM it sits. #}
 <div data-panel="usage"{% if active_tab != 'usage' %} hidden{% endif %}>
   <h2>Usage</h2>
-  {% for days in [7, 30] %}
+  {% for days in usage_windows_order %}
   {% set w = usage_windows[days] %}
   <div class="card">
     <h3 style="margin-top:0">Last {{ days }} days</h3>
@@ -270,7 +270,7 @@
     <p class="muted">No LLM calls recorded yet.</p>
     {% else %}
     <table>
-      <thead><tr><th>Day</th><th>Tokens in</th><th>Tokens out</th></tr></thead>
+      <thead><tr><th>Day (UTC)</th><th>Tokens in</th><th>Tokens out</th></tr></thead>
       <tbody>
         {% for row in usage_daily %}
         <tr><td>{{ row.day }}</td>

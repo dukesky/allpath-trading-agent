@@ -171,7 +171,7 @@ class ChatService:
     def messages(self) -> list[dict]:
         return list(self.session().history)
 
-    def note_resolution(self, line: str) -> None:
+    def note_resolution(self, line: str, source: str = "web") -> None:
         """Record an out-of-band event (an approval, a fill) in the transcript
         so the agent sees it on its next turn.
 
@@ -206,9 +206,14 @@ class ChatService:
             session._append({"role": "user", "content": fence_external(line),
                              "kind": "system_note", "display": line})
         # An approval receipt is part of the full record the user chose to
-        # mirror (spec §④) -- same hook as send(), fired after the lock for
-        # the same reason, source="web" since this only ever happens from
-        # the web reviews flow. No agent reply accompanies a resolution
-        # note, so `reply` is the empty string; the mirror fn decides what
-        # (if anything) to do with that.
-        self._call_mirror("web", line, "")
+        # mirror (spec §④) -- same hook as send(), fired after the lock.
+        # `source` defaults to "web" (the web reviews flow, the original and
+        # still most common caller) but a Telegram button-tap resolution
+        # (telegram.py's `_resolve_review_callback`) passes source="telegram"
+        # so the mirror's direction policy (`_mirror_to_telegram`, which
+        # no-ops for source != "web") doesn't push a second, redundant copy
+        # of the outcome back into the same Telegram chat that already got
+        # the immediate in-channel tap feedback. No agent reply accompanies
+        # a resolution note, so `reply` is the empty string; the mirror fn
+        # decides what (if anything) to do with that.
+        self._call_mirror(source, line, "")

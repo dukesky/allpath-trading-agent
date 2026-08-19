@@ -33,7 +33,7 @@ from allpath_trade.store.app_state import (
     AppState,
 )
 from allpath_trade.store.db import connect
-from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.store.reviews import ReviewQueue, RevisionValidationError
 from allpath_trade.telegram import TelegramAPI, TelegramPoller
 from tests.test_sentinel import SpyExecutor
 
@@ -144,7 +144,7 @@ class FakeChatService:
     def __init__(self, reply="agent reply", log=None):
         self.reply = reply
         self.calls: list[dict] = []
-        self.resolutions: list[str] = []
+        self.resolutions: list[dict] = []
         self._log = log
 
     def send(self, text: str, source: str = "web") -> str:
@@ -153,8 +153,8 @@ class FakeChatService:
             self._log.append(("chat_service.send", text))
         return self.reply
 
-    def note_resolution(self, line: str) -> None:
-        self.resolutions.append(line)
+    def note_resolution(self, line: str, source: str = "web") -> None:
+        self.resolutions.append({"line": line, "source": source})
 
 
 class LoggingAppState:
@@ -593,7 +593,14 @@ def test_edited_message_update_is_ignored(tmp_path):
     assert api.sent_messages == []
 
 
-def test_callback_query_update_is_ignored(tmp_path):
+def test_callback_query_missing_message_is_dropped(tmp_path):
+    # Callback queries are NOT globally ignored anymore -- `_handle_callback_
+    # query` (Task 3's inline Approve/Reject buttons) processes them. This
+    # particular update has no `message` field at all (chat id/message id
+    # both unrecoverable), so the chat/user binding check in `_handle_
+    # callback_query` can never even run -- it's dropped as malformed, same
+    # as any other update missing fields the handler needs, not "ignored"
+    # because it's a callback_query.
     app_state = make_app_state(tmp_path)
     pair(app_state, "111")
     update = {"update_id": 1, "callback_query": {"id": "cb1", "from": {"id": 111}, "data": "x"}}
@@ -605,6 +612,7 @@ def test_callback_query_update_is_ignored(tmp_path):
 
     assert chat_service.calls == []
     assert api.sent_messages == []
+    assert api.answered_callbacks == []  # never even reached answer_callback_query
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1030,8 @@ def test_paired_approve_callback_approves_order_and_removes_buttons(tmp_path):
     assert api.answered_callbacks == [("cb1", "Approved")]
     assert any("order submitted" in html for _cid, html in api.sent_messages)
     assert chat_service.resolutions == [
-        f"You resolved #{review_id}. Result: order submitted"]
+        {"line": f"You resolved #{review_id}. Result: order submitted",
+         "source": "telegram"}]
 
 
 def test_paired_reject_callback_rejects_order(tmp_path):
@@ -1043,7 +1052,8 @@ def test_paired_reject_callback_rejects_order(tmp_path):
     assert row["resolution_note"] == "rejected via Telegram"
     assert any("Rejected" in html for _cid, html in api.sent_messages)
     assert chat_service.resolutions == [
-        f"You resolved #{review_id}. Result: rejected (rejected via Telegram)"]
+        {"line": f"You resolved #{review_id}. Result: rejected (rejected via Telegram)",
+         "source": "telegram"}]
 
 
 def test_stranger_callback_is_silently_dropped(tmp_path, capsys):
@@ -1137,7 +1147,8 @@ def test_execution_error_gives_honest_message(tmp_path):
     assert api.answered_callbacks == [("cb1", "Execution failed")]
     assert any("execution failed" in html for _cid, html in api.sent_messages)
     assert chat_service.resolutions == [
-        f"You resolved #{review_id}. Result: execution failed: boom"]
+        {"line": f"You resolved #{review_id}. Result: execution failed: boom",
+         "source": "telegram"}]
 
 
 def test_risk_gate_rejected_gives_honest_message(tmp_path):
@@ -1157,7 +1168,45 @@ def test_risk_gate_rejected_gives_honest_message(tmp_path):
     assert any("risk gate" in html for _cid, html in api.sent_messages)
     expected = (f"You resolved #{review_id}. Result: blocked by the risk "
                "gate (exceeds max position size)")
-    assert chat_service.resolutions == [expected]
+    assert chat_service.resolutions == [{"line": expected, "source": "telegram"}]
+
+
+def test_revalidation_failure_removes_buttons_and_says_reopen_from_the_app(tmp_path):
+    # Minor 6: RevisionValidationError rolls the row back to "pending" (see
+    # store/reviews.py's `_approve_revision`), but the token that gated
+    # THIS message's buttons was already burned by `consume_token` on the
+    # way there -- a fresh tap can't re-arm them. The buttons must come off
+    # (acted=True already drives that generically) and the outcome text
+    # must say so honestly rather than reading as a stuck bot.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    conn = connect(tmp_path / "reviews.db")
+    queue = ReviewQueue(conn, SpyExecutor())
+
+    def _always_fails_revalidation(*_args, **_kwargs):
+        raise RevisionValidationError("strategy file changed underneath this proposal")
+
+    queue.set_revision_applier(_always_fails_revalidation)
+    handle = queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="a: 1", new_yaml="a: 2",
+        diff="- a: 1\n+ a: 2", rationale="test", source="chat")
+    review_id = int(handle)
+    nonce = nonce_for(queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}", message_id=42)]])
+    chat_service = FakeChatService()
+    poller = make_review_poller(api, chat_service, app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(review_id)["status"] == "pending"  # rolled back, not stuck "approved"
+    assert api.edited_markups == [("111", 42, None)]  # buttons removed
+    assert any("stayed pending" in html and "reopen from the app" in html
+              for _cid, html in api.sent_messages)
+    assert chat_service.resolutions == [
+        {"line": f"You resolved #{review_id}. Result: revision left pending: "
+                "re-validation failed (strategy file changed underneath this proposal)",
+         "source": "telegram"}]
 
 
 def test_sentinel_sourced_review_does_not_echo_into_chat(tmp_path):
