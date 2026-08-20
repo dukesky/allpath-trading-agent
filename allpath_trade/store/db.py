@@ -8,6 +8,7 @@ from pathlib import Path
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1: which pipeline
     ts TEXT NOT NULL,                -- UTC ISO-8601
     ticker TEXT NOT NULL,
     side TEXT NOT NULL,
@@ -29,16 +30,24 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
     content TEXT NOT NULL
 );
 
+-- shadow-dual-active T1: PK includes `account` so the same (strategy_id,
+-- rule_id) can be independently armed/triggered per account -- paper and
+-- shadow strategy dirs can both define a strategy called e.g. "growth"
+-- (Task 2: strategies/{account}/) with rules that must not share state.
+-- Legacy on-disk DBs still have the old 2-column PK; `_rebuild_rule_states`
+-- below rebuilds them into this shape (SQLite can't ALTER a PRIMARY KEY).
 CREATE TABLE IF NOT EXISTS rule_states (
+    account TEXT NOT NULL DEFAULT 'paper',
     strategy_id TEXT NOT NULL,
     rule_id TEXT NOT NULL,
     state TEXT NOT NULL,
     updated_ts TEXT NOT NULL,
-    PRIMARY KEY (strategy_id, rule_id)
+    PRIMARY KEY (account, strategy_id, rule_id)
 );
 
 CREATE TABLE IF NOT EXISTS pending_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1
     ts TEXT NOT NULL,
     strategy_id TEXT NOT NULL,
     rule_id TEXT NOT NULL,
@@ -57,6 +66,7 @@ CREATE TABLE IF NOT EXISTS pending_reviews (
 
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1
     started_ts TEXT NOT NULL,
     title TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT 'chat'  -- 'chat' | 'reflection' (Phase 6)
@@ -101,19 +111,25 @@ CREATE TABLE IF NOT EXISTS app_state (
     value TEXT
 );
 
--- Daily reflection reports (Phase 6). One row per ET trading day; the
--- `date` UNIQUE constraint is also how the reflection scheduler stays
--- idempotent across process restarts -- see ReportStore.
+-- Daily reflection reports (Phase 6). One row per (account, ET trading day);
+-- the UNIQUE(account, date) constraint is also how the reflection scheduler
+-- stays idempotent across process restarts -- see ReportStore. Was
+-- UNIQUE(date) alone before shadow-dual-active T1 -- `_rebuild_reports`
+-- below migrates a legacy on-disk table into this shape (SQLite can't ALTER
+-- a UNIQUE constraint in place); a fresh install gets this shape directly
+-- via CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL UNIQUE,
+    account TEXT NOT NULL DEFAULT 'paper',
+    date TEXT NOT NULL,
     body TEXT NOT NULL,
     summary TEXT NOT NULL,
     conversation_id INTEGER,
     model TEXT NOT NULL DEFAULT '',
     tokens_used INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'ok',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE (account, date)
 );
 
 -- LLM usage + cost-estimate panel (store/llm_usage.py). One row per
@@ -150,6 +166,19 @@ _MIGRATIONS = [
     # that must always fail closed in ReviewQueue._token_ok.
     "ALTER TABLE pending_reviews ADD COLUMN approval_token_hash TEXT",
     "ALTER TABLE pending_reviews ADD COLUMN token_expires_ts TEXT",
+    # shadow-dual-active T1: account dimension. Plain ALTER + DEFAULT is
+    # enough for these four -- legacy rows (all pre-dating the shadow
+    # account) backfill 'paper' for free via the column default, exactly
+    # like the `kind` backfills above. `reports` and `rule_states` ALSO
+    # need a constraint that SQLite can't ALTER in place (a UNIQUE key and
+    # a PRIMARY KEY respectively) -- those columns are added here too, but
+    # the constraint fix is a separate table-rebuild step; see
+    # `_rebuild_reports`/`_rebuild_rule_states` below.
+    "ALTER TABLE trades ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE pending_reviews ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE conversations ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE reports ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE rule_states ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
 ]
 
 
@@ -288,12 +317,95 @@ class _Rows:
         return iter(self._rows)
 
 
+def _table_sql(conn: LockedConnection, table: str) -> str | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,)).fetchone()
+    return row["sql"] if row is not None else None
+
+
+def _rebuild_reports(conn: LockedConnection) -> None:
+    """Table-rebuild for `reports`: SQLite has no `ALTER TABLE ... ADD
+    CONSTRAINT`, so the old UNIQUE(date) key can't become UNIQUE(account,
+    date) in place. Guarded by inspecting the table's own stored CREATE
+    TABLE text (`sqlite_master.sql`) for the new constraint, rather than a
+    sentinel row or a PRAGMA count, because that text is unambiguous and
+    can't drift out of sync with what's actually enforced -- if it's
+    there, the rebuild already happened (or this is a fresh install, where
+    `CREATE TABLE IF NOT EXISTS` above created the new shape directly and
+    this is a genuine no-op). Idempotent across restarts: run once on a
+    legacy DB, forever a no-op after.
+
+    Must run AFTER the `account` column ALTER above (also idempotent) --
+    the copy step below reads that column, so on a legacy DB it needs to
+    already exist (backfilled 'paper' by the ALTER's DEFAULT)."""
+    sql = _table_sql(conn, "reports")
+    if sql is None or "UNIQUE (account, date)" in sql:
+        return
+    with conn.transaction():
+        conn.execute(
+            "CREATE TABLE reports_v2 ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " account TEXT NOT NULL DEFAULT 'paper',"
+            " date TEXT NOT NULL,"
+            " body TEXT NOT NULL,"
+            " summary TEXT NOT NULL,"
+            " conversation_id INTEGER,"
+            " model TEXT NOT NULL DEFAULT '',"
+            " tokens_used INTEGER NOT NULL DEFAULT 0,"
+            " status TEXT NOT NULL DEFAULT 'ok',"
+            " created_at TEXT NOT NULL,"
+            " UNIQUE (account, date))")
+        conn.execute(
+            "INSERT INTO reports_v2 (id, account, date, body, summary,"
+            " conversation_id, model, tokens_used, status, created_at)"
+            " SELECT id, account, date, body, summary, conversation_id,"
+            " model, tokens_used, status, created_at FROM reports")
+        conn.execute("DROP TABLE reports")
+        conn.execute("ALTER TABLE reports_v2 RENAME TO reports")
+
+
+def _rebuild_rule_states(conn: LockedConnection) -> None:
+    """Table-rebuild for `rule_states`: the PRIMARY KEY must become
+    (account, strategy_id, rule_id) so the same strategy/rule id armed in
+    both `paper` and `shadow` (Task 2: each account gets its own strategy
+    directory, so ids CAN collide) tracks independent state instead of one
+    account's ON CONFLICT upsert silently overwriting the other's row.
+    SQLite can't ALTER a PRIMARY KEY in place, hence the rebuild. Same
+    guard shape as `_rebuild_reports` -- inspect the stored CREATE TABLE
+    text, no-op if already the new shape (rebuilt already, or a fresh
+    install that got it directly from SCHEMA)."""
+    sql = _table_sql(conn, "rule_states")
+    if sql is None or "PRIMARY KEY (account, strategy_id, rule_id)" in sql:
+        return
+    with conn.transaction():
+        conn.execute(
+            "CREATE TABLE rule_states_v2 ("
+            " account TEXT NOT NULL DEFAULT 'paper',"
+            " strategy_id TEXT NOT NULL,"
+            " rule_id TEXT NOT NULL,"
+            " state TEXT NOT NULL,"
+            " updated_ts TEXT NOT NULL,"
+            " PRIMARY KEY (account, strategy_id, rule_id))")
+        conn.execute(
+            "INSERT INTO rule_states_v2 (account, strategy_id, rule_id,"
+            " state, updated_ts)"
+            " SELECT account, strategy_id, rule_id, state, updated_ts"
+            " FROM rule_states")
+        conn.execute("DROP TABLE rule_states")
+        conn.execute("ALTER TABLE rule_states_v2 RENAME TO rule_states")
+
+
 def _migrate(conn: LockedConnection) -> None:
     for stmt in _MIGRATIONS:
         try:
             conn.execute(stmt)
         except sqlite3.OperationalError:
             pass  # column already exists
+    # Constraint rebuilds run after the plain ALTERs above so the `account`
+    # column they depend on is already backfilled on a legacy DB.
+    _rebuild_reports(conn)
+    _rebuild_rule_states(conn)
 
 
 def connect(path: Path | str) -> LockedConnection:

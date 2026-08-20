@@ -813,3 +813,94 @@ def test_review_handle_survives_deepcopy(queue):
     cloned = copy.deepcopy(rid)
     assert cloned == rid
     assert isinstance(cloned, ReviewHandle)
+
+
+# --- shadow-dual-active T1: account scoping ---------------------------------
+
+def test_two_account_interleave_isolated(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, StubExecutor())
+    shadow = ReviewQueue(conn, StubExecutor(), account="shadow")
+
+    prid = add(paper)
+    srid = add(shadow)
+
+    [prow] = paper.list()
+    assert prow["id"] == prid and prow["account"] == "paper"
+    [srow] = shadow.list()
+    assert srow["id"] == srid and srow["account"] == "shadow"
+
+    # Cross-account get() must read back as "not found", not the other
+    # account's row.
+    with pytest.raises(ReviewError):
+        paper.get(srid)
+    with pytest.raises(ReviewError):
+        shadow.get(prid)
+
+
+def test_approve_does_not_cross_accounts(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, StubExecutor())
+    shadow = ReviewQueue(conn, StubExecutor(), account="shadow")
+    srid = add(shadow)
+
+    # paper's instance must not be able to approve shadow's row via its id.
+    with pytest.raises(ReviewError):
+        paper.approve(srid)
+    assert shadow.get(srid)["status"] == "pending"
+
+    shadow.approve(srid)
+    assert shadow.get(srid)["status"] == "approved"
+
+
+def test_supersede_pending_chat_revision_scoped_to_account(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, None)
+    shadow = ReviewQueue(conn, None, account="shadow")
+
+    # Same strategy_id in both accounts (legitimate: Task 2 gives each
+    # account its own strategy directory, so ids can collide).
+    prid = paper.add_strategy_revision(strategy_id="s1", ticker="AAPL",
+                                       old_yaml="old", new_yaml="new-p",
+                                       diff="d", rationale="r", source="chat")
+    srid = shadow.add_strategy_revision(strategy_id="s1", ticker="AAPL",
+                                        old_yaml="old", new_yaml="new-s",
+                                        diff="d", rationale="r", source="chat")
+
+    # A second paper proposal for the same strategy_id must supersede only
+    # the paper row, never shadow's.
+    prid2 = paper.add_strategy_revision(strategy_id="s1", ticker="AAPL",
+                                        old_yaml="old", new_yaml="new-p2",
+                                        diff="d", rationale="r", source="chat")
+    superseded = paper.supersede_pending_chat_revision(
+        "s1", f"replaced by #{prid2}", exclude_id=prid2)
+    assert superseded == prid
+    assert paper.get(prid)["status"] == "superseded"
+    assert shadow.get(srid)["status"] == "pending"
+
+
+def test_legacy_pending_reviews_row_defaults_account_paper_after_migration(tmp_path):
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE pending_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts TEXT NOT NULL, strategy_id TEXT NOT NULL, rule_id TEXT NOT NULL,"
+        " ticker TEXT NOT NULL, rule_type TEXT NOT NULL, condition TEXT NOT NULL,"
+        " action TEXT NOT NULL, snapshot TEXT NOT NULL, intent TEXT,"
+        " status TEXT NOT NULL DEFAULT 'pending', resolved_ts TEXT,"
+        " resolution_note TEXT, execution_result TEXT,"
+        " kind TEXT NOT NULL DEFAULT 'order')")
+    raw.execute(
+        "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker, rule_type,"
+        " condition, action, snapshot) VALUES ('t', 's1', 'r1', 'AAPL', 'soft',"
+        " 'c', 'a', '{}')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT account FROM pending_reviews").fetchone()
+    assert row["account"] == "paper"
+
+    paper = ReviewQueue(conn, None)
+    [prow] = paper.list(status=None)
+    assert prow["account"] == "paper"

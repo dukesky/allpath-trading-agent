@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -272,3 +273,83 @@ def test_refresh_fill_writes_terminal_canceled_status_with_null_fills(tmp_path):
     assert row["filled_avg_price"] is None
     # Converged: no longer in the still-unresolved set.
     assert j.unfilled_recent() == []
+
+
+# --- shadow-dual-active T1: account scoping -------------------------------
+
+def test_two_account_interleave_isolated(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = TradeJournal(conn)
+    shadow = TradeJournal(conn, account="shadow")
+
+    paper.record(INTENT, RiskDecision(approved=True), ORDER)
+    shadow_intent = OrderIntent(ticker="MSFT", side=OrderSide.BUY, notional=Decimal(300),
+                                reason="shadow buy", strategy_id="msft-long")
+    shadow_order = Order(id="o2", ticker="MSFT", side=OrderSide.BUY, qty=None,
+                         notional=Decimal(300), status=OrderStatus.FILLED,
+                         filled_qty=Decimal(1), filled_avg_price=Decimal(300),
+                         submitted_at=datetime(2026, 7, 30, 15, 0, tzinfo=UTC),
+                         filled_at=datetime(2026, 7, 30, 15, 0, tzinfo=UTC))
+    shadow.record(shadow_intent, RiskDecision(approved=True), shadow_order)
+
+    [prow] = paper.recent()
+    assert prow["ticker"] == "AAPL"
+    assert prow["account"] == "paper"
+    [srow] = shadow.recent()
+    assert srow["ticker"] == "MSFT"
+    assert srow["account"] == "shadow"
+
+    assert paper.trades_today() == 1
+    assert shadow.trades_today() == 1
+
+
+def test_refresh_fill_does_not_cross_accounts(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = TradeJournal(conn)
+    shadow = TradeJournal(conn, account="shadow")
+    trade_id = paper.record(INTENT, RiskDecision(approved=True), Order(
+        id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None, notional=Decimal(500),
+        status=OrderStatus.SUBMITTED, filled_qty=Decimal(0), filled_avg_price=None,
+        submitted_at=datetime(2026, 8, 2, 14, 0, tzinfo=UTC)))
+
+    filled = Order(id="o1", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                   notional=Decimal(500), status=OrderStatus.FILLED,
+                   filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                   submitted_at=datetime(2026, 8, 2, 14, 0, tzinfo=UTC),
+                   filled_at=datetime(2026, 8, 2, 14, 5, tzinfo=UTC))
+    # shadow's journal instance must not be able to touch paper's row even
+    # if handed its id.
+    shadow.refresh_fill(trade_id, filled)
+    [prow] = paper.recent()
+    assert prow["status"] == "submitted"
+
+    paper.refresh_fill(trade_id, filled)
+    [prow] = paper.recent()
+    assert prow["status"] == "filled"
+
+
+def test_legacy_trades_row_defaults_account_paper_after_migration(tmp_path):
+    # Simulate a pre-shadow-dual-active database: `trades` exists without an
+    # `account` column. CREATE TABLE IF NOT EXISTS won't touch an existing
+    # table, so the ALTER TABLE migration must add + backfill it.
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL,"
+        " qty TEXT, notional TEXT, status TEXT NOT NULL, reason TEXT NOT NULL,"
+        " strategy_id TEXT, risk_reasons TEXT NOT NULL DEFAULT '[]',"
+        " broker_order_id TEXT)")
+    raw.execute(
+        "INSERT INTO trades (ts, ticker, side, status, reason)"
+        " VALUES ('2020-01-01T00:00:00+00:00', 'AAPL', 'buy', 'filled', 'legacy')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT account FROM trades").fetchone()
+    assert row["account"] == "paper"
+
+    j = TradeJournal(conn)
+    [row] = j.recent()
+    assert row["account"] == "paper"

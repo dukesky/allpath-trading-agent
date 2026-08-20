@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.strategy.loader import StrategyValidationError, load_strategy
 from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
 
@@ -13,11 +14,19 @@ from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
 class StrategyStore:
     """Strategies live as YAML files (source of truth for definitions).
     Runtime rule state and version snapshots live in SQLite — the sentinel
-    never rewrites the user's YAML."""
+    never rewrites the user's YAML.
 
-    def __init__(self, directory: Path, conn: sqlite3.Connection) -> None:
+    `account` scopes `rule_states` only (shadow-dual-active T1): the same
+    strategy/rule id can independently arm/trigger per account (Task 2 moves
+    `directory` itself under `strategies/{account}/`, so ids can genuinely
+    collide between accounts). `directory` is passed by the caller as-is and
+    untouched here -- that per-account directory split is Task 2's job."""
+
+    def __init__(self, directory: Path, conn: sqlite3.Connection,
+                account: str = DEFAULT_ACCOUNT) -> None:
         self.directory = directory
         self._conn = conn
+        self._account = account
 
     def load_all(self, status: StrategyStatus | None = StrategyStatus.ACTIVE,
                  errors: list[str] | None = None) -> list[StrategyDoc]:
@@ -42,8 +51,8 @@ class StrategyStore:
 
     def _merge_states(self, doc: StrategyDoc) -> StrategyDoc:
         rows = self._conn.execute(
-            "SELECT rule_id, state FROM rule_states WHERE strategy_id = ?",
-            (doc.id,)).fetchall()
+            "SELECT rule_id, state FROM rule_states WHERE strategy_id = ? AND account = ?",
+            (doc.id, self._account)).fetchall()
         states = {r["rule_id"]: RuleState(r["state"]) for r in rows}
         for rule in doc.rules:
             if rule.id in states:
@@ -52,11 +61,11 @@ class StrategyStore:
 
     def set_rule_state(self, strategy_id: str, rule_id: str, state: RuleState) -> None:
         self._conn.execute(
-            "INSERT INTO rule_states (strategy_id, rule_id, state, updated_ts)"
-            " VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(strategy_id, rule_id) DO UPDATE SET state=excluded.state,"
-            " updated_ts=excluded.updated_ts",
-            (strategy_id, rule_id, state.value,
+            "INSERT INTO rule_states (account, strategy_id, rule_id, state, updated_ts)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(account, strategy_id, rule_id) DO UPDATE SET"
+            " state=excluded.state, updated_ts=excluded.updated_ts",
+            (self._account, strategy_id, rule_id, state.value,
              datetime.now(UTC).isoformat()))
         self._conn.commit()
 

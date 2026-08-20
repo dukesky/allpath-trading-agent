@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from allpath_trade.broker.base import OrderIntent
 from allpath_trade.execution import ExecutionError, ExecutionResult, Executor
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 
 # Approve-by-link token lifetime (Part A): 24h from issue, per row.
 TOKEN_TTL_SECONDS = 24 * 3600
@@ -70,11 +71,13 @@ class ReviewQueue:
     """Service API for pending trigger reviews. The CLI today, the Web UI
     (Phase 5) and the agent (Phase 3) all operate this same interface."""
 
-    def __init__(self, conn: sqlite3.Connection, executor: Executor | None) -> None:
+    def __init__(self, conn: sqlite3.Connection, executor: Executor | None,
+                account: str = DEFAULT_ACCOUNT) -> None:
         # executor may be None for read-only usage (list/reject);
         # approve() requires one for order-kind rows.
         self._conn = conn
         self._executor = executor
+        self._account = account
         # Phase 6: injected the same way as `executor` -- construction-time
         # for the common case, but strategy-revision approval is wired up
         # by Task 3's reflection machinery after the queue already exists
@@ -120,11 +123,11 @@ class ReviewQueue:
             risk_preview: str | None = None) -> ReviewHandle:
         token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
-            "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
+            "INSERT INTO pending_reviews (account, ts, strategy_id, rule_id, ticker,"
             " rule_type, condition, action, snapshot, intent, source,"
             " conversation_id, risk_preview, approval_token_hash, token_expires_ts)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (datetime.now(UTC).isoformat(), strategy_id, rule_id, ticker,
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._account, datetime.now(UTC).isoformat(), strategy_id, rule_id, ticker,
              rule_type, condition, action,
              json.dumps(snapshot, default=_json_default),
              intent.model_dump_json() if intent else None, source,
@@ -169,11 +172,11 @@ class ReviewQueue:
         it back and thread it to the applier alongside `old_yaml` itself."""
         token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
-            "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
+            "INSERT INTO pending_reviews (account, ts, strategy_id, rule_id, ticker,"
             " rule_type, condition, action, snapshot, intent, source,"
             " conversation_id, kind, approval_token_hash, token_expires_ts)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (datetime.now(UTC).isoformat(), strategy_id, "reflection", ticker,
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._account, datetime.now(UTC).isoformat(), strategy_id, "reflection", ticker,
              "revision", rationale[:200], "revise strategy",
              json.dumps({"old_yaml": old_yaml, "new_yaml": new_yaml,
                         "diff": diff, "rationale": rationale, "is_new": is_new}),
@@ -235,38 +238,51 @@ class ReviewQueue:
         alone. The whole thing runs under `transaction()` so nothing else
         sharing this connection can interleave between the UPDATE and the
         follow-up SELECT that recovers the max id it actually touched."""
+        # `strategy_id` is scoped per-account (Task 2: strategies/{account}/
+        # directories), so the same id can legitimately exist in both
+        # accounts -- the WHERE clauses below filter on `account` as well so
+        # a chat proposal in one account never supersedes a same-named
+        # strategy's pending proposal in the other.
         resolved_ts = datetime.now(UTC).isoformat()
         exclude_clause = " AND id != ?" if exclude_id is not None else ""
-        params = ((resolved_ts, note, strategy_id)
+        params = ((resolved_ts, note, self._account, strategy_id)
                  + ((exclude_id,) if exclude_id is not None else ()))
         with self._conn.transaction():
             cur = self._conn.execute(
                 "UPDATE pending_reviews SET status='superseded', resolved_ts=?,"
                 " resolution_note=?, approval_token_hash=NULL, token_expires_ts=NULL"
                 " WHERE kind='strategy_revision' AND source='chat'"
-                " AND strategy_id=? AND status='pending'" + exclude_clause,
+                " AND account=? AND strategy_id=? AND status='pending'" + exclude_clause,
                 params)
             if cur.rowcount == 0:
                 return None
             row = self._conn.execute(
                 "SELECT MAX(id) AS max_id FROM pending_reviews"
                 " WHERE kind='strategy_revision' AND source='chat'"
-                " AND strategy_id=? AND status='superseded'"
+                " AND account=? AND strategy_id=? AND status='superseded'"
                 " AND resolved_ts=? AND resolution_note=?",
-                (strategy_id, resolved_ts, note)).fetchone()
+                (self._account, strategy_id, resolved_ts, note)).fetchone()
         return row["max_id"]
 
     def list(self, status: str | None = "pending") -> list[sqlite3.Row]:
         if status is None:
             return list(self._conn.execute(
-                "SELECT * FROM pending_reviews ORDER BY id DESC"))
+                "SELECT * FROM pending_reviews WHERE account = ? ORDER BY id DESC",
+                (self._account,)))
         return list(self._conn.execute(
-            "SELECT * FROM pending_reviews WHERE status = ? ORDER BY id DESC",
-            (status,)))
+            "SELECT * FROM pending_reviews WHERE status = ? AND account = ?"
+            " ORDER BY id DESC",
+            (status, self._account)))
 
     def get(self, review_id: int) -> sqlite3.Row:
+        # Filtered by account: Task 1 keeps every store instance scoped to
+        # its own account, so a foreign-account id reads back as "not
+        # found" here -- same as it not existing at all. Row-bound approval
+        # across the CURRENT view (spec: "批准永远作用于该行的账户") is
+        # Task 5's job, via a lookup that isn't scoped to one instance.
         row = self._conn.execute(
-            "SELECT * FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+            "SELECT * FROM pending_reviews WHERE id = ? AND account = ?",
+            (review_id, self._account)).fetchone()
         if row is None:
             raise ReviewError(f"review {review_id} not found")
         return row
@@ -329,8 +345,8 @@ class ReviewQueue:
             return None
         cur = self._conn.execute(
             "UPDATE pending_reviews SET approval_token_hash=NULL"
-            " WHERE id=? AND approval_token_hash=? AND status='pending'",
-            (review_id, row["approval_token_hash"]))
+            " WHERE id=? AND approval_token_hash=? AND status='pending' AND account=?",
+            (review_id, row["approval_token_hash"], self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             return None
@@ -379,8 +395,8 @@ class ReviewQueue:
         cur = self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?,"
             " approval_token_hash=NULL, token_expires_ts=NULL "
-            "WHERE id=? AND status=?",
-            ("approved", resolved_ts, review_id, "pending"))
+            "WHERE id=? AND status=? AND account=?",
+            ("approved", resolved_ts, review_id, "pending", self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             # Someone else already claimed this review
@@ -392,13 +408,13 @@ class ReviewQueue:
             result = self._executor.execute(intent)
         except ExecutionError as exc:
             self._conn.execute(
-                "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-                (json.dumps({"error": str(exc)}), review_id))
+                "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+                (json.dumps({"error": str(exc)}), review_id, self._account))
             self._conn.commit()
             raise
         self._conn.execute(
-            "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-            (result.model_dump_json(), review_id))
+            "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+            (result.model_dump_json(), review_id, self._account))
         self._conn.commit()
         return result
 
@@ -443,8 +459,8 @@ class ReviewQueue:
         cur = self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?,"
             " approval_token_hash=NULL, token_expires_ts=NULL "
-            "WHERE id=? AND status=?",
-            ("approved", resolved_ts, review_id, "pending"))
+            "WHERE id=? AND status=? AND account=?",
+            ("approved", resolved_ts, review_id, "pending", self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             row = self.get(review_id)
@@ -466,8 +482,9 @@ class ReviewQueue:
             # undo. If the applier is ever changed to validate *after*
             # writing, this rollback becomes unsafe and must be revisited.
             self._conn.execute(
-                "UPDATE pending_reviews SET status=?, resolved_ts=? WHERE id=?",
-                ("pending", None, review_id))
+                "UPDATE pending_reviews SET status=?, resolved_ts=?"
+                " WHERE id=? AND account=?",
+                ("pending", None, review_id, self._account))
             self._conn.commit()
             raise
         except Exception as exc:
@@ -479,8 +496,8 @@ class ReviewQueue:
             # an auditable trail, mirroring the order path's
             # ExecutionError handling.
             self._conn.execute(
-                "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-                (json.dumps({"error": str(exc)}), review_id))
+                "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+                (json.dumps({"error": str(exc)}), review_id, self._account))
             self._conn.commit()
             raise
         # Success: a small non-null marker, not the order path's full
@@ -488,14 +505,14 @@ class ReviewQueue:
         # write) -- keeps `execution_result` a reliable "has this row been
         # acted on" signal rather than leaving it ambiguously NULL.
         self._conn.execute(
-            "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-            (json.dumps({"applied": True}), review_id))
+            "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+            (json.dumps({"applied": True}), review_id, self._account))
         self._conn.commit()
 
     def attach_analysis(self, review_id: int, analysis_json: str) -> None:
         self._conn.execute(
-            "UPDATE pending_reviews SET agent_analysis = ? WHERE id = ?",
-            (analysis_json, review_id))
+            "UPDATE pending_reviews SET agent_analysis = ? WHERE id = ? AND account = ?",
+            (analysis_json, review_id, self._account))
         self._conn.commit()
 
     def reject(self, review_id: int, note: str = "") -> None:
@@ -510,8 +527,8 @@ class ReviewQueue:
         cur = self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?, resolution_note=?,"
             " approval_token_hash=NULL, token_expires_ts=NULL "
-            "WHERE id=? AND status=?",
-            ("rejected", resolved_ts, note, review_id, "pending"))
+            "WHERE id=? AND status=? AND account=?",
+            ("rejected", resolved_ts, note, review_id, "pending", self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             # Someone else already claimed this review
