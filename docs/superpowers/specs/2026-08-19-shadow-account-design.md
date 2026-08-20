@@ -1,149 +1,137 @@
-# 影子账户(Shadow Account)设计
+# 影子账户(Shadow Account)设计 — v2:双活并行
 
-日期:2026-08-19 · 状态:spec 待用户过目
+日期:2026-08-19(v2,按用户反馈重写:两账户**同时活跃**,非二选一)
+状态:spec 待用户过目
 
 ## 要解决的问题
 
-现在 agent 只服务 Alpaca 模拟盘——一个从零开始、和用户真实财务无关的沙盒。
-用户真正的钱在 Robinhood 这类**没有正规 API** 的券商里。用户想要的是:
-**以我真实账户的持仓为基准,agent 给我建议,我自己去券商手动执行**——
-把系统从"玩沙盒"升级成"管我真钱的顾问",同时**绝不触碰真实券商的登录
-凭证**(逆向工程的非官方库不安全、违反条款、随时被封)。
+用户的真钱在没有正规 API 的券商(Robinhood)里。目标:**以真实持仓为基准
+的建议引擎**——agent 按用户真实仓位分析、建议,用户手动去券商执行;同时
+**保留** Alpaca 模拟盘作为策略验证沙盒。两者**并行运行、互不干扰**,绝不
+触碰真实券商凭证。
 
-## 核心思路
+## 核心架构:账户是第一维度
 
-影子账户是 `Broker` 接口的**第二个实现**:一个本地记账本。持仓由用户导入;
-`submit_order` 只记账、不外发;估值用行情源;权益历史自己每日落点。
-**上层(哨兵、风控闸门、审批队列、通知、反思、agent 工具、Dashboard)一行
-不改**——它们从第一天起就只认 `Broker` 接口,`build_components` 是唯一构造
-点。这是整个方案最重要的一句话。
+`ACCOUNTS = ("paper", "shadow")`。每个账户拥有**独立的一整套 pipeline**:
 
-## 用户决定(本 spec 替用户先定,请过目)
+| 独立(按账户隔离) | 共享 |
+|---|---|
+| Broker(Alpaca / ShadowLedger) | LLM 配置与用量记录 |
+| 策略目录 `strategies/{account}/`(用户决定:各一套) | **个人画像记忆**(profile 层) |
+| 记忆的策略/个股/教训层 `memory/{account}/…`(用户决定) | 通知通道(SMTP/ntfy/Telegram 绑定) |
+| 交易日志、待确认队列、规则触发状态 | 登录/令牌、Web 服务进程 |
+| 反思报告、权益曲线、聊天对话与上下文 | 风控闸门代码(参数将来可分,先共享) |
+| 哨兵巡检(每 tick 依次跑两账户,互相隔离) | |
+
+**实现骨架**:`Components` 变为 per-account 束(`components.for_account(a)`
+或 `AccountComponents` 字典),同一 SQLite 连接;所有账户级表加 `account`
+列(迁移:存量行全部回填 `paper`——现有历史本来就是 paper 的);
+`ChatService`、`Reflector`、`Sentinel` 各两实例。构造点仍唯一(`build_components`)。
+
+## 用户已定的决定
+
+1. **双活**:两套 pipeline 同时跑;
+2. **通知都发**,标题前缀 `[Paper]` / `[Shadow]`;
+3. **记忆**:profile 共享,策略/个股/教训层按账户分;
+4. **策略各一套**(策略目录按账户分;聊天里让 agent 起草时落到当前账户)。
+
+## 本 spec 补充敲定(请过目)
 
 | 决定 | 选择 | 理由 |
 |---|---|---|
-| 两账户关系 | **并存,Active 二选一** | 同一时刻 agent 服务一个账户;切换不丢另一个的数据 |
-| 默认 Active | **切到 shadow 后即 shadow;首次安装仍是 paper** | 真钱账户才是用户关心的;但不改变新用户的开箱路径 |
-| 持仓导入 | **聊天为主,CSV 为辅** | "我 Robinhood 里有 50 股 AAPL 成本 180"最自然;CSV 给持仓多的人 |
-| 成交价回填 | **允许、不强制** | 默认按 approve 时市价记;用户可事后说"那笔实际 332.5" |
-| 影子账户的 hard 规则 | **照常"执行"(记账)并通知,通知明确写"请手动执行"** | 影子账户没有真自动化;hard 规则的语义变成"到点立即提醒你执行" |
-| 风控闸门 | **照常生效** | 建议也该守纪律;闸门参数对影子账户同样有意义 |
+| 网页账户切换 | 顶部全局切换器,cookie 记住;**整站**(Dashboard/Chat/Pending/Memory/Reports/Strategies)跟随 | 用户的心智模型:切系统 |
+| Telegram 的当前账户 | 独立于网页 cookie:`/account` 命令切换(回复 inline 按钮 Paper/Shadow),默认 shadow;每条 bot 消息带账户前缀 | 手机和电脑各自有上下文 |
+| 审批的账户绑定 | 每条待确认行带 `account`,批准永远作用于**该行的账户**,与当前界面选择无关;卡片/按钮/链接都显示账户 | 点错账户在结构上不可能 |
+| 夜间任务 | digest/反思/整合按账户各跑一遍(顺序:paper 后 shadow,逐任务隔离);**反思仅在该账户有 active 策略时跑**(空账户不烧 Opus) | 成本自然门控 |
+| shadow 下的 hard 规则 | 立即记账 + 通知 "**place this order in your brokerage now**" | 影子无真自动化,hard = 到点即提醒 |
+| 成交价回填 | 默认按记账时市价;`shadow_record_fill` 工具可修正,不强制 | |
+| 风控闸门 | 两账户都生效(参数暂共享) | 建议也守纪律 |
 
 ## 组件设计
 
-### ① `ShadowBroker`(新 `allpath_trade/broker/shadow.py`)
+### ① ShadowLedger broker(`broker/shadow.py`)
 
-实现全部 `Broker` 方法,`name="shadow"`,`is_paper=True`(它不是真钱执行——
-这个标志下游用来决定文案"paper/LIVE",影子显示为 `shadow`,见 ⑤)。
+实现全部 `Broker` 方法,`name="shadow"`。SQLite 表:`shadow_positions`
+(ticker, qty, avg_cost, last_price, last_price_ts)、`shadow_cash`(单行)、
+`shadow_orders`、`shadow_equity_daily`。`submit_order`:取现价即时"成交"
+记账(碎股支持、超卖→REJECTED、无价→拒绝);`get_account/positions`:现价
+估值,行情失败用最后已知价并标注"price as of …";`get_equity_history`:
+读每日落点(挂在夜间任务,另外每次 get_account upsert 当天点)。
+这是记账不是交易——所有文案讲透。
 
-- 数据全部在 SQLite 新表(同一个 DB):
-  - `shadow_positions(ticker PK, qty, avg_cost, updated_ts)`
-  - `shadow_cash(id=1, cash, updated_ts)`——单行
-  - `shadow_orders(id, ts, ticker, side, qty, notional, status, fill_price, filled_at, note)`
-  - `shadow_equity_daily(date PK, equity, cash)`——每日收盘落点,给权益曲线
-- `submit_order(intent)`:取行情当前价(`DataSource.get_quote`)→ 立即"成交":
-  买入减现金加持仓(按加权平均更新成本)、卖出反之(不允许卖空/超卖→
-  `OrderStatus.REJECTED` + 原因);`notional` 按现价折算股数(支持碎股——
-  Robinhood 支持);返回 `Order(status=FILLED, filled_avg_price=现价,
-  filled_at=now)`。**这是记账,不是交易**——文档和通知都要把这点说透。
-- `get_account()`:equity = cash + Σ(qty × 现价);buying_power = cash(无杠杆)。
-- `get_positions()`:每持仓估值,`unrealized_pl = (现价 − avg_cost) × qty`。
-- `get_equity_history(days)`:读 `shadow_equity_daily`。每日收盘落点挂在
-  现有 `run_daily_jobs`(digest 之前,独立 try/except),此外**每次
-  `get_account()` 也顺手 upsert 当天点**(让当天曲线不空)。
-- 行情失败:估值用**最后已知价**(持仓表存 `last_price`/`last_price_ts`),
-  并在 Dashboard 标注"价格截至 …";从未有价的新持仓 → 该仓 `market_value`
-  按成本计、标注。永不抛异常到上层。
+### ② 账户维度落库与迁移
 
-### ② 持仓导入与修正
+- `trades`、`pending_reviews`、`rule_states`、`reports`、`conversations`
+  加 `account TEXT NOT NULL DEFAULT 'paper'`(`_MIGRATIONS`);存量即 paper;
+- `reports` 唯一键变 `(account, date)`;
+- 记忆:`memory/profile.md` 留在根(共享);其余层迁移到 `memory/paper/…`
+  (一次性启动迁移,幂等,迁移前备份目录);`memory/shadow/…` 从空开始;
+- 策略:`strategies/*.yaml` 启动迁移到 `strategies/paper/`;`strategies/
+  shadow/` 从空开始。`.gitignore` 已覆盖(整个目录未跟踪)。
 
-- **聊天工具**(`register_action_tools` 增,仅 active=shadow 时注册):
-  `shadow_set_position(ticker, qty, avg_cost)`、`shadow_set_cash(amount)`、
-  `shadow_remove_position(ticker)`、`shadow_record_fill(order_id, price)`
-  (成交价回填:按新价重算该笔成交与持仓均价)。**全部走现有确认流**:
-  终端阻塞 confirm;网页/Telegram 进 Pending 队列(新 kind=`shadow_edit`,
-  卡片显示 before → after,批准即写)。导入本质是改"真钱账本",和改策略
-  同级,必须人批。
-- **CSV 导入**:Settings → Brokerage(shadow 区)上传,列 `ticker,qty,avg_cost`
-  (+可选 `cash` 行);解析预览 → 确认 → 作为一条 `shadow_edit` 提案入队
-  (同一条审批路径,避免两套写逻辑)。
-- 每次写账本都落一条 `shadow_orders`(side=`import`/`adjust`)留痕,反思和
-  复盘看得到"哪天用户手动改了账本"。
+### ③ 调度:两套并行
 
-### ③ Active 账户切换
+- 哨兵每 tick:`for account in ACCOUNTS: run_pass(account)`,各自 try/except,
+  各自心跳键(`sentinel_last_pass:{account}`);Dashboard 心跳行显示当前
+  账户的;
+- 夜间链:`for account: digest → reflection(若有 active 策略) → consolidation`,
+  每步隔离;两账户共 4-6 个 LLM 调用/晚,Usage 面板照记;
+- 成本提示写进文档:双账户反思 ≈ 每晚两次 Opus 调用。
 
-- `Settings.active_broker: str = "paper"`(`paper` | `shadow`),Brokerage tab
-  一个单选 + 说明;保存即 `holder.rebuild()`,`build_components` 据此构造
-  `AlpacaBroker` 或 `ShadowBroker`(**都构造**——影子账本的读路径和 Alpaca
-  的行情路径并不互斥;但 `components.broker` 只指向 active 的那个)。
-- **切换时的安全措施**:Pending 队列里未处理的订单提案是针对旧账户的——
-  切换时这些 pending 订单行自动标记 `superseded`(note:"account switched
-  to shadow")并通知用户;策略文件不变(策略是意图,两边通用),但规则的
-  触发状态(armed/triggered)按账户隔离:`rule_states` 加 `broker_name`
-  维度,否则 paper 里触发过的止损在 shadow 里永远不响。
-- 哨兵、反思、digest 全部对 active 账户工作;journal 的 `trades` 行加
-  `broker_name` 列(迁移,默认回填 `alpaca`),Dashboard/反思只看 active 的。
+### ④ 聊天与 agent
 
-### ④ 通知文案
+- 每账户独立 `ChatService`(各自对话历史、各自记忆上下文、各自策略目录、
+  各自队列);网页按 cookie 路由到对应实例;Telegram 按 `/account` 状态路由;
+- agent 系统提示注明当前账户及其性质(paper = Alpaca 沙盒真执行 /
+  shadow = 镜像真钱的记账本,订单需用户手动去券商执行);
+- 影子账户聊天新增账本工具:`shadow_set_position` / `shadow_set_cash` /
+  `shadow_remove_position` / `shadow_record_fill`——网页/TG 走 Pending
+  审批(kind=`shadow_edit`,before→after 卡片),终端阻塞确认;CSV 导入在
+  Settings,同样生成 `shadow_edit` 提案;
+- profile 记忆两边可读可写(同一文件);个股/教训写入落当前账户目录。
 
-影子账户下所有订单通知文案变为**建议语气并要求动作**:
-- hard 规则执行 → "📌 Shadow: recorded BUY 4.5 TSLA @ $332.01 — **place this
-  order in your brokerage now**"(ntfy/邮件/Telegram 同款);
-- soft 规则 → 现有 Approve/Reject 按钮/链接,批准后同上文案;
-- 反思种子简报与 agent 系统提示里注明 "active account is a SHADOW ledger
-  mirroring the user's real brokerage; orders are recorded, not routed —
-  the user executes them manually"。
+### ⑤ 通知
 
-### ⑤ 界面
+- 所有事件(触发/成交/入队/反思摘要/digest)主题加前缀 `[Paper]`/`[Shadow]`;
+- Telegram 按钮消息同样前缀;审批动作绑定行内 account;
+- shadow 的订单文案 = 建议语气 + "place this order in your brokerage now"。
 
-- Dashboard 顶部一个账户 chip:`PAPER · Alpaca` / `SHADOW · mirrors your
-  brokerage`(点击跳 Settings 切换);权益卡、持仓表、曲线都是 active 账户的;
-  影子模式下每行持仓多一列"价格截至"(行情失败时)。
-- Strategies 页无变化(策略通用);Pending 页的 `shadow_edit` 卡片(before→after
-  表);Reports/反思自然跟随。
-- Settings → Brokerage:Active account 单选;shadow 区:当前账本摘要(现金、
-  N 个持仓)、CSV 导入、"Reset shadow ledger"(危险按钮,二次确认,清空表)。
+### ⑥ 界面
 
-### ⑥ 安全不变量
+- 全站顶部账户切换器(chip:`PAPER` 蓝边 / `SHADOW` 琥珀边,点击切换,
+  cookie 记住,默认 paper 直到用户首次切换);每页标题旁重复当前账户 chip;
+- Pending 卡片带账户 chip(即使在对侧视图也能从通知链接直达并正确处理);
+- Settings → Brokerage:Alpaca 区(现状)+ Shadow 区(账本摘要、CSV 导入、
+  Reset ledger 危险按钮);
+- Dashboard 空影子账本 → 引导文案("Import your positions — tell the agent
+  in Chat or upload a CSV")。
 
-- **零真实券商凭证**:影子账户不连任何外部账户,代码里不出现任何券商登录;
-- 账本写入只经两条路:人工批准的 `shadow_edit` 提案,或经风控闸门的
-  `submit_order`(它本身只在 hard 规则/人工批准后被调用)——与现有"agent 无
-  直接写能力"模型完全一致;
-- 切换账户不跨账户泄漏:pending 订单作废、rule_states 隔离、journal 打标;
-- 风控闸门、审批队列、通知失败隔离、反思守卫:全部原样。
+### ⑦ 安全不变量
 
-### ⑦ 降级
+- 零真实券商凭证;
+- 账本唯一写路径:人批的 `shadow_edit` 提案 或 经风控闸门的 submit_order;
+- 账户间零串扰:所有查询带 account 过滤(评审重点);审批按行内 account
+  执行;记忆写入落对应目录(profile 除外,设计如此);
+- 反思守卫、审批守卫、注入防护:原样,两套各自生效。
 
-- 行情源挂 → 最后已知价估值 + 标注,`submit_order` 在无价时 **拒绝**(不能
-  按未知价记账)并通知;
-- 账本为空(刚切换未导入)→ Dashboard 显示引导:"Import your positions —
-  tell the agent in Chat or upload a CSV";哨兵照跑(策略的仓位条件对空账本
-  求值为 0);
-- DB 写失败 → `submit_order` 抛 `ExecutionError`(现有执行器捕获路径)。
+### ⑧ 降级与已知限制
 
-### ⑧ 非目标
-
-- 连接任何真实券商 API(后续若有正规 API 的券商,是 Broker 再加一个适配器,
-  与本 spec 正交);
-- 两账户同时被 agent 服务/对比;
-- 税务批次、股息、拆股自动处理(用户通过 `shadow_set_position` 手动修正,
-  记录为已知限制);
-- 期权/加密资产。
+- 行情失败:最后已知价 + 标注;无价拒绝记账;
+- 空 shadow:哨兵照跑(仓位条件求值 0),反思跳过(无 active 策略);
+- 股息/拆股/税批次:手动修正,记为限制;期权/加密不做;
+- 双活使夜间 LLM 成本约翻倍(Usage 面板可见,反思有 active-策略门控)。
 
 ### ⑨ 测试要点
 
-- `ShadowBroker` 纯账本逻辑:买/卖/碎股/超卖拒绝/加权均价/估值/权益落点/
-  无价拒绝/最后已知价回退;
-- 切换:pending 作废 + 通知、rule_states 隔离、journal 打标、rebuild 后
-  components.broker 类型正确;
-- 导入工具:终端 confirm / 网页入队 / 卡片 before→after / 批准写账本 / CSV
-  解析预览;
-- 文案:影子模式通知含"place this order"、chip、agent 系统提示注明;
-- 哨兵/反思/digest 在 shadow 下端到端(ScriptedLLM);English-only。
+- ShadowLedger 账本全逻辑;迁移幂等 + 存量回填 paper + 记忆/策略目录搬迁;
+- 账户串扰矩阵:A 账户触发/入队/批准/反思绝不读写 B 的表行、记忆目录、
+  策略目录(评审必须逐项攻击);
+- 切换器 cookie、TG /account 路由、审批跨视图按行内账户执行;
+- 通知前缀全事件覆盖;shadow 文案;English-only;
+- 夜间链两账户隔离(A 失败 B 照跑)、反思门控、心跳分键。
 
-## 实现顺序建议
+## 实现顺序建议(约 7 任务)
 
-账本表 + `ShadowBroker`(①)→ journal/rule_states 按账户隔离 + active 切换
-(③)→ 导入工具与 `shadow_edit` 审批(②)→ 通知文案 + 系统提示(④)→
-Dashboard/Settings 界面(⑤)→ 文档。
+账户维度迁移+存量回填(②)→ ShadowLedger(①)→ Components/调度双活
+(③)→ 聊天/agent 双实例 + 账本工具(④)→ 通知前缀 + 审批账户绑定(⑤)
+→ 界面切换器 + Settings/引导(⑥)→ 文档与成本说明。
