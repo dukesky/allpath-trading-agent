@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from allpath_trade.broker.base import Order, OrderIntent, OrderStatus
 from allpath_trade.risk.gate import RiskDecision
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 # Fill-honesty round (I2): how long a still-'submitted' row is presented as
 # "fill pending" before rendering degrades to "status unconfirmed" instead.
@@ -38,6 +38,13 @@ def is_recent_submission(ts: str, *, now: datetime | None = None,
 
 class TradeJournal:
     def __init__(self, conn: sqlite3.Connection, account: str = DEFAULT_ACCOUNT) -> None:
+        # shadow-dual-active T5 carry (from T1's review): external boundaries
+        # (the web account cookie, the Telegram /account command, the CLI
+        # --account flag) now pass non-literal account strings through to
+        # store constructors -- gate here so an invalid value can never
+        # silently open a third, unscoped partition of this table.
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self._conn = conn
         self._account = account
 

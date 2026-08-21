@@ -638,3 +638,60 @@ def test_confirm_page_omits_draft_status_hint_when_landing_active(client):
     rid = queue_revision(client)  # status: active on both sides
     body = client.get(approve_url(rid), params={"k": rid.token}).text
     assert DRAFT_HINT not in body
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T5 (row-bound, CARRIED from T4's review): a shadow
+# row's /a/ link must resolve through SHADOW's own queue/executor, not
+# paper's -- the approve-link surface has no session/cookie at all, so
+# there is no "current view" to accidentally fall back to; this is exactly
+# the bug T4's review flagged as blocking merge until T5 landed.
+# ---------------------------------------------------------------------------
+
+def queue_shadow_order(client, **over):
+    q = client.app.state.holder.get().accounts["shadow"].queue
+    kwargs = {"strategy_id": "s1", "rule_id": "r1", "ticker": "AAPL",
+              "rule_type": "soft", "condition": "price < 100",
+              "action": "sell all", "snapshot": {"price": "99"},
+              "intent": OrderIntent(ticker="AAPL", side=OrderSide.SELL,
+                                    qty="1", reason="rule r1")}
+    kwargs.update(over)
+    return q.add(**kwargs)
+
+
+def test_confirm_page_shows_the_rows_own_account_chip(client):
+    rid = queue_shadow_order(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert 'class="chip chip-shadow"' in body
+    assert ">Shadow<" in body
+
+
+def test_approve_link_for_a_shadow_row_resolves_through_shadow_queue(client, monkeypatch):
+    from unittest.mock import Mock
+
+    from allpath_trade.store.reviews import ReviewError
+
+    shadow_bundle = client.app.state.holder.get().accounts["shadow"]
+    result = ExecutionResult(submitted=True, decision=RiskDecision(approved=True), order=None)
+    spy = Mock(return_value=result)
+    monkeypatch.setattr(shadow_bundle.executor, "execute", spy)
+
+    rid = queue_shadow_order(client)
+    r = client.post(f"/a/{rid}/approve", data={"k": rid.token})
+
+    assert r.status_code == 200
+    assert "Order submitted" in r.text
+    spy.assert_called_once()
+    assert shadow_bundle.queue.get(rid)["status"] == "approved"
+    # Paper's own queue never saw this id at all -- it belongs to shadow.
+    with pytest.raises(ReviewError):
+        client.app.state.holder.get().queue.get(rid)
+
+
+def test_approve_link_for_a_paper_row_still_works_unchanged(client):
+    # Symmetric sanity check: the row-bound rewrite must not have broken
+    # the ordinary (paper) case every other test in this file exercises.
+    rid = queue_one(client)
+    r = client.post(f"/a/{rid}/approve", data={"k": rid.token})
+    assert r.status_code == 200
+    assert client.app.state.holder.get().queue.get(rid)["status"] == "approved"

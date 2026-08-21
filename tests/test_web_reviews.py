@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.agent.review import ReviewAnalysis
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.config import Settings
+from allpath_trade.store.reviews import ReviewError
 from allpath_trade.web.app import create_app
 from allpath_trade.web.routes import dashboard as dashboard_route
 from allpath_trade.web.routes.reviews import split_diff_rows
@@ -92,6 +93,42 @@ def test_approve_executes_through_the_queue(client):
     assert r.status_code in (200, 303)
     row = client.app.state.holder.get().queue.get(rid)
     assert row["status"] == "approved"
+
+
+def test_approve_of_a_shadow_row_resolves_from_a_paper_cookie(client):
+    # shadow-dual-active T5 (row-bound, CARRIED from T4's review): the
+    # browser is viewing paper (the default, cookie-less account) but the
+    # review id being POSTed to belongs to shadow -- the in-app approve
+    # route must resolve it through SHADOW's own queue, not paper's.
+    comp = client.app.state.holder.get()
+    shadow_queue = comp.accounts["shadow"].queue
+    rid = shadow_queue.add(
+        strategy_id="s1", rule_id="r1", ticker="AAPL", rule_type="soft",
+        condition="price < 100", action="sell all", snapshot={"price": "99"},
+        intent=OrderIntent(ticker="AAPL", side=OrderSide.SELL, qty="1", reason="r1"))
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert r.status_code in (200, 303)
+    assert shadow_queue.get(rid)["status"] == "approved"
+    # Paper's own queue never had this id at all.
+    with pytest.raises(ReviewError):
+        comp.queue.get(rid)
+
+
+def test_reject_of_a_shadow_row_resolves_from_a_paper_cookie(client):
+    comp = client.app.state.holder.get()
+    shadow_queue = comp.accounts["shadow"].queue
+    rid = shadow_queue.add(
+        strategy_id="s1", rule_id="r1", ticker="AAPL", rule_type="soft",
+        condition="price < 100", action="sell all", snapshot={"price": "99"},
+        intent=OrderIntent(ticker="AAPL", side=OrderSide.SELL, qty="1", reason="r1"))
+
+    client.post(f"/reviews/{rid}/reject", data={"note": "no thanks"})
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "rejected"
+    assert row["resolution_note"] == "no thanks"
 
 
 def test_reject_records_the_decision(client):

@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings
+from allpath_trade.store.accounts import ACCOUNTS, DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
 from allpath_trade.telegram import TelegramAPI, TelegramPoller
 from allpath_trade.web.auth import install_auth
@@ -152,7 +153,8 @@ def _send_mirror_text(api: TelegramAPI, app_state: AppState, text: str) -> None:
 
 def _mirror_to_telegram(source: str, text: str, reply: str, *,
                         api: TelegramAPI, app_state: AppState,
-                        mirror_queue: _MirrorQueue) -> None:
+                        mirror_queue: _MirrorQueue,
+                        account: str = DEFAULT_ACCOUNT) -> None:
     """The direction policy for spec §④'s full mirroring: ChatService fires
     this hook for every turn/note regardless of source (see
     `chat_service.py`'s `set_mirror` docstring); direction is this
@@ -173,14 +175,27 @@ def _mirror_to_telegram(source: str, text: str, reply: str, *,
     `reply=""` -- `text` there is already the complete record line (e.g.
     "You resolved #1. Result: order submitted"), so it's sent verbatim with
     no "You (web):" prefix, which would be redundant framing on a line that
-    already reads as a record, not a chat message."""
+    already reads as a record, not a chat message.
+
+    `account` (shadow-dual-active T5): with two web-side ChatServices now
+    mirroring into the SAME single paired Telegram chat, a mirrored line
+    with no account marker would be ambiguous about which pipeline's turn
+    it records -- every mirrored message is prefixed `[Paper]`/`[Shadow]`
+    accordingly. `_start_telegram` binds this to each ChatService's own
+    account via `functools.partial` at registration time (one partial per
+    instance), so this function itself never has to look the account up;
+    it defaults to `DEFAULT_ACCOUNT` only so direct callers that predate
+    this parameter (existing tests) keep compiling -- every real caller
+    always passes it explicitly."""
     if source != "web":
         return
+    prefix = f"[{account.capitalize()}] "
     if reply:
-        mirror_queue.submit(_send_mirror_text, api, app_state, f"You (web): {text}")
-        mirror_queue.submit(_send_mirror_text, api, app_state, reply)
+        mirror_queue.submit(_send_mirror_text, api, app_state,
+                            f"{prefix}You (web): {text}")
+        mirror_queue.submit(_send_mirror_text, api, app_state, f"{prefix}{reply}")
     else:
-        mirror_queue.submit(_send_mirror_text, api, app_state, text)
+        mirror_queue.submit(_send_mirror_text, api, app_state, f"{prefix}{text}")
 
 
 def static_content_hash(path: Path) -> str:
@@ -250,7 +265,16 @@ def _start_telegram(app: FastAPI, poller_cls: type) -> None:
 
     The mirror queue (`_MirrorQueue`, Finding 3) is created and started
     here too, one per app instance, and stored on `app.state.mirror_queue`
-    so `_stop_telegram` can shut it down."""
+    so `_stop_telegram` can shut it down.
+
+    shadow-dual-active T5: the poller is handed `app.state.chat_services`
+    (the whole `{account: ChatService}` dict, not just paper's instance) so
+    it can route paired-chat text to whichever account the chat is
+    currently talking to (`/account`, defaulting to shadow -- see
+    `telegram.py`). The mirror hook is registered on EVERY account's
+    ChatService, each bound (via its own `functools.partial`) to that
+    ChatService's own `account` -- a shadow web-chat turn must mirror into
+    Telegram labelled `[Shadow]`, not silently only mirror paper's."""
     holder = app.state.holder
     c = holder.get()
     token = c.settings.telegram_bot_token
@@ -258,7 +282,7 @@ def _start_telegram(app: FastAPI, poller_cls: type) -> None:
         return
     api = TelegramAPI(token)
     stop = threading.Event()
-    poller = poller_cls(api, app.state.chat_service, holder, stop)
+    poller = poller_cls(api, app.state.chat_services, holder, stop)
     thread = threading.Thread(target=poller.run_forever, daemon=True,
                               name="telegram-poller")
     thread.start()
@@ -267,9 +291,10 @@ def _start_telegram(app: FastAPI, poller_cls: type) -> None:
     mirror_queue = _MirrorQueue()
     mirror_queue.start()
     app.state.mirror_queue = mirror_queue
-    app.state.chat_service.set_mirror(
-        partial(_mirror_to_telegram, api=api, app_state=c.app_state,
-               mirror_queue=mirror_queue))
+    for account, service in app.state.chat_services.items():
+        service.set_mirror(
+            partial(_mirror_to_telegram, api=api, app_state=c.app_state,
+                   mirror_queue=mirror_queue, account=account))
 
 
 def _stop_telegram(app: FastAPI) -> None:
@@ -293,7 +318,8 @@ def _stop_telegram(app: FastAPI) -> None:
         return
     stop.set()
     app.state.telegram_thread.join(timeout=2)
-    app.state.chat_service.set_mirror(None)
+    for service in app.state.chat_services.values():
+        service.set_mirror(None)
     mirror_queue = getattr(app.state, "mirror_queue", None)
     if mirror_queue is not None:
         mirror_queue.shutdown(wait=False, cancel_futures=True)
@@ -329,10 +355,22 @@ def create_app(settings: Settings, broker: Broker | None = None,
     # `_turn_lock` and conversation; a settings save invalidates its cached
     # session (ChatService.invalidate(), called from settings.py) rather than
     # replacing the object, which would silently split the two.
-    # `app.state.chat` is kept as an alias to the same instance -- existing
-    # tests reach the service through that name; new code should use
-    # `app.state.chat_service`.
-    app.state.chat_service = ChatService(app.state.holder)
+    #
+    # shadow-dual-active T5: one ChatService per account, keyed by
+    # `store.accounts.ACCOUNTS`. `app.state.chat_service` (singular) is kept
+    # as an alias to the PAPER instance -- exactly the same "legacy alias"
+    # shape `app.py`'s `Components` uses for its own paper-only fields --
+    # so every pre-existing caller that reaches the service through that
+    # name (the whole test suite predates account-awareness) keeps working
+    # unchanged; new account-aware code (web/routes/chat.py, telegram.py)
+    # goes through `app.state.chat_services[account]` instead.
+    # `app.state.chat` is kept as a second alias to the same paper instance,
+    # for the same reason.
+    app.state.chat_services = {
+        account: ChatService(app.state.holder, account=account)
+        for account in ACCOUNTS
+    }
+    app.state.chat_service = app.state.chat_services[DEFAULT_ACCOUNT]
     app.state.chat = app.state.chat_service
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -349,6 +387,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
 
     # Aliased: `settings` is already this function's own Settings parameter --
     # importing the routes module under that name would shadow it.
+    from allpath_trade.web import account_ctx
     from allpath_trade.web.routes import (
         approve,
         chat,
@@ -360,6 +399,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
     )
     from allpath_trade.web.routes import settings as settings_routes
 
+    app.include_router(account_ctx.router)
     app.include_router(dashboard.router)
     app.include_router(reviews.router)
     app.include_router(approve.router)

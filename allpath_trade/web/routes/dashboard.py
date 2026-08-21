@@ -10,13 +10,15 @@ from urllib.parse import quote
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from allpath_trade.app import Components
 from allpath_trade.broker.base import Broker, Position
 from allpath_trade.data.base import DataSource, Quote
 from allpath_trade.scheduler import is_market_hours, today_et_date
+from allpath_trade.store.accounts import ACCOUNTS
 from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
+from allpath_trade.web.account_ctx import bundle, bundle_for, current_account
 from allpath_trade.web.charts import equity_since_caption, equity_svg, signed_money, signed_pct
+from allpath_trade.web.deps import components
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -46,8 +48,32 @@ _broker_pool = concurrent.futures.ThreadPoolExecutor(
 QUOTES_BUDGET_SECONDS = 10
 
 
-def nav_context(components: Components) -> dict:
-    return {"pending_count": len(components.queue.list())}
+def nav_context(request: Request) -> dict:
+    """Nav-chrome context shared by every page: the current account's own
+    pending count (drives the badge on the "Pending" nav link, as before
+    shadow-dual-active), PLUS the account switcher's own state.
+
+    Pending-badge decision (shadow-dual-active T5): the badge counts ONLY
+    the CURRENT account's pending reviews, not both accounts' combined --
+    switching accounts is cheap (one click) and the badge is meant to answer
+    "does the account I'm LOOKING AT need me", not "does anything anywhere
+    need me" (which would make the badge number disagree with what's
+    actually listed on the /reviews page the badge links to). The OTHER
+    account not being silently invisible is handled separately: the
+    switcher chip for the account you're NOT on gets a small dot
+    (`other_account_pending`) when IT has pending rows, so nothing is ever
+    truly hidden -- just not double-counted into one badge."""
+    c = components(request)
+    current = current_account(request)
+    pending_count = len(bundle_for(c, current).queue.list())
+    other = next(a for a in ACCOUNTS if a != current)
+    other_pending = bool(bundle_for(c, other).queue.list())
+    return {
+        "pending_count": pending_count,
+        "current_account": current,
+        "other_account": other,
+        "other_account_pending": other_pending,
+    }
 
 
 def _with_timeout(fn):
@@ -408,7 +434,13 @@ def dashboard(request: Request,
     # Renamed from the query param's own name (`range`) -- that shadows the
     # `range` builtin for the whole function body; `alias="range"` keeps the
     # `?range=` URL contract unchanged while the Python-side name doesn't.
-    c = request.app.state.holder.get()
+    c = components(request)
+    # shadow-dual-active T5: `b` is the CURRENT account's bundle (broker,
+    # strategies, queue, journal, sentinel heartbeat) -- for paper (the
+    # default, cookie-less view) this is `c` itself, so nothing about the
+    # pre-existing single-account dashboard changes. `c` stays in scope for
+    # genuinely shared reads: settings, app_state, the data source.
+    b = bundle(request)
 
     # Whitelist, not a 400 -- an unrecognized `?range=` (a stale bookmark, a
     # hand-edited URL) just falls back to the default tab rather than
@@ -420,8 +452,15 @@ def dashboard(request: Request,
     # loop below -- this line's entire purpose is answering "is my system
     # wedged?", so it must never wait behind up to 2 * BROKER_TIMEOUT_SECONDS
     # of broker calls plus the quote budget below to reach the page.
+    #
+    # shadow-dual-active T5: reads `sentinel_last_pass:{account}` -- the
+    # per-account heartbeat key scheduler.py's `_run_sentinel_pass` writes
+    # (T4) -- not the bare legacy key, so the dashboard's heartbeat line
+    # always reflects the account currently being viewed, not always
+    # paper's own pass regardless of which account is on screen.
     sentinel_status = sentinel_heartbeat_status(
-        c.app_state.get(SENTINEL_HEARTBEAT_KEY), c.settings.sentinel_interval_minutes,
+        c.app_state.get(f"{SENTINEL_HEARTBEAT_KEY}:{b.account}"),
+        c.settings.sentinel_interval_minutes,
         market_open_raw=c.app_state.get(SENTINEL_MARKET_OPEN_KEY))
 
     # Same is_market_hours the scheduler/sentinel gate their pass on (see
@@ -436,15 +475,15 @@ def dashboard(request: Request,
     positions: list = []
     broker_error = ""
     try:
-        account = _with_timeout(c.broker.get_account)
-        positions = _with_timeout(c.broker.get_positions)
+        account = _with_timeout(b.broker.get_account)
+        positions = _with_timeout(b.broker.get_positions)
     except concurrent.futures.TimeoutError:
         broker_error = f"Broker unavailable: timed out after {BROKER_TIMEOUT_SECONDS}s"
     except Exception as exc:  # noqa: BLE001 — a broker outage must not blank the page
         broker_error = f"Broker unavailable: {exc}"
 
     days = _range_days(range_key, _utcnow())
-    equity_history = _cached_equity_history(c.broker, range_key, days)
+    equity_history = _cached_equity_history(b.broker, range_key, days)
     equity_summary = equity_period_summary(
         equity_history, account.equity if account is not None else None)
     # None (not a plain bool) when there's no headline to show at all
@@ -458,9 +497,9 @@ def dashboard(request: Request,
                            else equity_summary["change"] >= 0)
 
     errors: list[str] = []
-    strategies = c.strategies.load_all(status=None, errors=errors)
+    strategies = b.strategies.load_all(status=None, errors=errors)
     positions_by_ticker = {p.ticker: p for p in positions}
-    pending_strategy_ids = {row["strategy_id"] for row in c.queue.list("pending")}
+    pending_strategy_ids = {row["strategy_id"] for row in b.queue.list("pending")}
     equity = account.equity if account is not None else None
 
     # One shared QUOTES_BUDGET_SECONDS deadline for the whole loop, not a
@@ -483,7 +522,7 @@ def dashboard(request: Request,
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
         "broker_error": broker_error, "strategy_cards": strategy_cards,
-        "strategy_errors": errors, "trades": c.journal.recent(limit=8),
+        "strategy_errors": errors, "trades": b.journal.recent(limit=8),
         "sentinel_status": sentinel_status, "market_open": market_open,
         "range": range_key, "range_labels": _RANGE_LABELS,
         "equity_svg_markup": equity_svg(equity_history, up=equity_up_for_chart),
@@ -494,4 +533,4 @@ def dashboard(request: Request,
         "equity_change_pct_str": (signed_pct(equity_summary["change_pct"])
                                   if equity_summary["change_pct"] is not None else None),
         "equity_up": bool(equity_summary["change"] is not None and equity_summary["change"] >= 0),
-        **nav_context(c)})
+        **nav_context(request)})

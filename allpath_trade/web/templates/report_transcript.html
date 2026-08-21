@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Reasoning · {{ report['date'] }} · AllPath Trade{% endblock %}
 {% block content %}
-<h1>Reasoning — {{ report['date'] }}</h1>
+<h1>Reasoning — {{ report['date'] }} {% include "_account_chip.html" %}</h1>
 <p class="muted"><a href="/reports/{{ report['date'] }}">&larr; Back to report</a></p>
 
 <div class="transcript">

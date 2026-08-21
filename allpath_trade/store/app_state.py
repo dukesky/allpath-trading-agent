@@ -25,6 +25,16 @@ TELEGRAM_OFFSET_KEY = "telegram_update_offset"
 # right chat but from the wrong sender.
 TELEGRAM_USER_ID_KEY = "telegram_user_id"
 
+# shadow-dual-active T5: which account ("paper"/"shadow") the ONE paired
+# Telegram chat currently talks to -- switched via the `/account` command
+# (inline Paper/Shadow buttons), independent of the web UI's own `account`
+# cookie (spec: "手机和电脑各自有上下文"). Unset (a fresh pairing, or a
+# pre-T5 pairing that predates this key) reads as "shadow" -- the spec's
+# chosen default for the Telegram surface -- via TelegramPoller's own
+# fallback, not a default baked in here, since this module has no opinion on
+# which account string is valid (that's store/accounts.py's job).
+TELEGRAM_ACCOUNT_KEY = "telegram_account"
+
 
 class AppState:
     """Get/set access to the `app_state` key-value table.

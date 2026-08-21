@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ doc.name }} · AllPath Trade{% endblock %}
 {% block content %}
-<h1>{{ doc.name }}</h1>
+<h1>{{ doc.name }} {% include "_account_chip.html" %}</h1>
 <p class="muted">{{ doc.id }} · v{{ doc.version }} · {{ doc.authorization.value }}</p>
 <div class="row" style="margin-top:6px;margin-bottom:16px">
   <span class="chip">{{ doc.status.value }}</span>

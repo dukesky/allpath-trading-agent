@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -499,11 +500,19 @@ class _StubComponents:
     queue: object = None
     app_state: object = None
     llm_usage: object = None
+    account: str = "paper"
+    accounts: object = None
 
     def __post_init__(self) -> None:
         self.queue = _StubQueue()
         self.app_state = _StubAppState()
         self.llm_usage = _StubLLMUsage()
+        # shadow-dual-active T5: nav_context (dashboard.py) reads BOTH
+        # accounts' pending counts for the switcher chip on every page,
+        # settings included -- a stub Components needs a matching stub
+        # "shadow" bundle for account_ctx.bundle_for to resolve, same
+        # shape (just `.queue`) as this object itself provides for paper.
+        self.accounts = {"paper": self, "shadow": SimpleNamespace(queue=_StubQueue())}
 
 
 def test_save_writes_through_the_holders_store_not_a_default_one(client, tmp_path):

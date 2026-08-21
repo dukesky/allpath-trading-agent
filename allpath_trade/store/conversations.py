@@ -4,11 +4,14 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 
 class ConversationStore:
     def __init__(self, conn: sqlite3.Connection, account: str = DEFAULT_ACCOUNT) -> None:
+        # shadow-dual-active T5 carry: see TradeJournal's identical gate.
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self._conn = conn
         self._account = account
 

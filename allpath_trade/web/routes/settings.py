@@ -229,7 +229,7 @@ def settings_page(request: Request, saved: str = "") -> HTMLResponse:
         "model_options": models_catalog.list_models(s.llm_provider),
         "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
         "tabs": TABS, "active_tab": DEFAULT_TAB,
-        **_usage_context(c), **nav_context(c)})
+        **_usage_context(c), **nav_context(request)})
 
 
 @router.post("/settings")
@@ -294,7 +294,7 @@ async def save(request: Request) -> Response:
             # otherwise the error banner at the top of the page points at a
             # hidden panel and the user has no idea what to fix.
             "tabs": TABS, "active_tab": _error_tab(exc),
-            **_usage_context(c), **nav_context(c)}, status_code=400)
+            **_usage_context(c), **nav_context(request)}, status_code=400)
 
     old_interval = current.sentinel_interval_minutes
     store = holder.store()

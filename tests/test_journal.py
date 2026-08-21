@@ -353,3 +353,13 @@ def test_legacy_trades_row_defaults_account_paper_after_migration(tmp_path):
     j = TradeJournal(conn)
     [row] = j.recent()
     assert row["account"] == "paper"
+
+
+def test_constructor_rejects_invalid_account(tmp_path):
+    # shadow-dual-active T5 carry: external boundaries (the web account
+    # cookie, the Telegram /account command, the CLI --account flag) now
+    # pass non-literal account strings through to store constructors.
+    import pytest
+
+    with pytest.raises(ValueError, match="invalid account"):
+        TradeJournal(connect(tmp_path / "t.db"), account="evil")

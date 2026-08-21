@@ -704,7 +704,7 @@ def test_dashboard_sentinel_heartbeat_shows_minutes_ago(client, monkeypatch):
     frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
                     (frozen_now - timedelta(minutes=12)).isoformat())
 
     body = client.get("/").text
@@ -719,7 +719,7 @@ def test_dashboard_sentinel_heartbeat_stale_carries_the_warn_class(client, monke
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
     # Default interval is 60min, so 2x is 120min -- 200min is well past it.
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
                     (frozen_now - timedelta(minutes=200)).isoformat())
 
     body = client.get("/").text
@@ -732,7 +732,7 @@ def test_dashboard_sentinel_heartbeat_recent_does_not_carry_the_warn_class(clien
     frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
                     (frozen_now - timedelta(minutes=12)).isoformat())
 
     body = client.get("/").text
@@ -748,7 +748,7 @@ def test_dashboard_sentinel_heartbeat_shows_paused_copy_when_market_was_closed(
     frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)  # 2026-08-09 is a Sunday
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
                     (frozen_now - timedelta(minutes=5)).isoformat())
     c.app_state.set(SENTINEL_MARKET_OPEN_KEY, "false")
 

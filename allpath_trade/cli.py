@@ -24,7 +24,7 @@ def _default_broker(settings: Settings) -> Broker:
                         paper=settings.alpaca_paper)
 
 
-def cmd_status(settings: Settings, broker: Broker) -> int:
+def cmd_status(settings: Settings, broker: Broker, account: str = "paper") -> int:
     try:
         acct = broker.get_account()
         mode = "PAPER" if broker.is_paper else "LIVE"
@@ -44,7 +44,12 @@ def cmd_status(settings: Settings, broker: Broker) -> int:
     else:
         print("\nno open positions")
 
-    journal = TradeJournal(connect(settings.db_path))
+    # shadow-dual-active T5: `account` (default "paper", matching this
+    # function's pre-T5 hardcoded behavior exactly) scopes the journal read
+    # to the account `status` was invoked for -- otherwise `--account
+    # shadow status` would print paper's trade history under a shadow
+    # broker summary.
+    journal = TradeJournal(connect(settings.db_path), account=account)
     rows = journal.recent(limit=5)
     if rows:
         print("\nrecent trades:")
@@ -139,7 +144,7 @@ def cmd_rearm(store, strategy_id: str, rule_id: str) -> int:
     return 0
 
 
-def _approve_needs_broker(settings: Settings, review_id: int) -> bool:
+def _approve_needs_broker(settings: Settings, review_id: int, account: str) -> bool:
     """`reviews approve` on a strategy_revision row is pure file I/O -- no
     broker/executor is ever touched (see ReviewQueue._approve_revision:
     strategy_revision rows never reach `_executor`). Finding 6: the old
@@ -150,7 +155,15 @@ def _approve_needs_broker(settings: Settings, review_id: int) -> bool:
     is trying to avoid entering. Missing/unreadable rows keep the old
     conservative default (broker required) so `cmd_reviews` still gets to
     report its own "review not found" error rather than this silently
-    swallowing it."""
+    swallowing it.
+
+    shadow-dual-active T5 carry (from T1's review): the query now also
+    filters on `account` -- `cmd_reviews`'s own `queue` is built scoped to
+    `--account` (default paper) below, so an id that exists but belongs to
+    the OTHER account must read the same as "not found" here too (that
+    queue's own `.get`/`.approve` already treat it that way -- see
+    ReviewQueue.get's docstring), not accidentally match a stray row and
+    make the wrong claim about whether a broker is needed."""
     # F6: this throwaway connection was never closed -- every `reviews
     # approve` invocation (the common case, not just this function's own
     # narrow strategy_revision check) leaked one sqlite connection for the
@@ -160,7 +173,8 @@ def _approve_needs_broker(settings: Settings, review_id: int) -> bool:
     conn = connect(settings.db_path)
     try:
         row = conn.execute(
-            "SELECT kind FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+            "SELECT kind FROM pending_reviews WHERE id = ? AND account = ?",
+            (review_id, account)).fetchone()
         return row is None or row["kind"] != "strategy_revision"
     finally:
         conn.close()
@@ -241,6 +255,30 @@ CHAT_BANNER = r"""
        \_________/
     ~ ~ ~ ~ ~ ~ ~ ~
 """
+
+
+def _cli_chat_bundle(components, account: str):
+    """See the call site's comment (`main`'s "chat" branch) for why this
+    exists: `cmd_chat` below reads account-scoped stores AND shared
+    settings/llm_usage off one object. For paper this is `components`
+    itself (unchanged pre-T5 behavior, zero risk to the existing terminal
+    chat test suite, which never passes `--account`); for shadow it's a
+    thin `SimpleNamespace` bridging `components.accounts["shadow"]`'s own
+    stores with `components`'s shared settings/llm_usage -- built fresh on
+    every call rather than cached anywhere, since it's cheap and only ever
+    used once per `cli chat` invocation."""
+    from types import SimpleNamespace
+
+    from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+
+    if account == DEFAULT_ACCOUNT:
+        return components
+    b = components.accounts[account]
+    return SimpleNamespace(
+        conn=b.conn, data=b.data, broker=b.broker, journal=b.journal,
+        strategies=b.strategies, queue=b.queue, executor=b.executor,
+        memory=b.memory, consolidator=b.consolidator,
+        settings=components.settings, llm_usage=components.llm_usage)
 
 
 def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> int:
@@ -418,6 +456,19 @@ reviews list/reject, memory show) work without any keys.
 """
 
 
+def _add_account_arg(p: argparse.ArgumentParser) -> None:
+    """shadow-dual-active T5: `--account paper|shadow` on every command
+    that's scoped to one account (default paper, matching every other
+    account-less boundary in this app -- store/accounts.DEFAULT_ACCOUNT).
+    `run`/`serve` deliberately do NOT get this: both already run BOTH
+    accounts' pipelines at once (scheduler.py's `run_daemon`/`build_jobs`),
+    so there is no single account for a flag to select there."""
+    from allpath_trade.store.accounts import ACCOUNTS, DEFAULT_ACCOUNT
+
+    p.add_argument("--account", choices=ACCOUNTS, default=DEFAULT_ACCOUNT,
+                   help=f"which account to operate on (default: {DEFAULT_ACCOUNT})")
+
+
 def main(argv: list[str] | None = None,
          broker_factory: Callable[[Settings], Broker] | None = None,
          llm_factory: Callable[[Settings, str], LLMClient] | None = None) -> int:
@@ -426,37 +477,43 @@ def main(argv: list[str] | None = None,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True,
                                 metavar="<command>")
-    sub.add_parser(
+    p_status = sub.add_parser(
         "status", help="show account, positions, recent trades",
         description="Show brokerage account (equity/cash/buying power), open "
                     "positions, and the last 5 journaled trades. "
                     "Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in .env.")
-    sub.add_parser(
+    _add_account_arg(p_status)
+    p_check = sub.add_parser(
         "check", help="run one sentinel pass now",
         description="Evaluate every armed rule of every active strategy once, "
                     "right now — useful for testing a strategy you just wrote. "
                     "Hard rules on auto-strategies may EXECUTE (paper) trades.")
+    _add_account_arg(p_check)
     sub.add_parser(
         "run", help="run the monitoring daemon",
         description="Long-running daemon: sentinel pass every "
                     "SENTINEL_INTERVAL_MINUTES (default 60) during US market "
-                    "hours, plus the daily memory consolidation after close.")
-    sub.add_parser(
+                    "hours, plus the daily memory consolidation after close. "
+                    "Runs BOTH accounts -- no --account flag, see 'serve'.")
+    p_strategies = sub.add_parser(
         "strategies", help="list strategies and rule states",
-        description="List every strategy YAML in strategies/ with its status, "
-                    "authorization level, and each rule's armed/triggered state. "
-                    "Works without any keys.")
+        description="List every strategy YAML in strategies/{account}/ with "
+                    "its status, authorization level, and each rule's "
+                    "armed/triggered state. Works without any keys.")
+    _add_account_arg(p_strategies)
     p_rearm = sub.add_parser(
         "rearm", help="re-arm a triggered rule",
         description="Rules fire once, then stay 'triggered' until re-armed. "
                     "Example: allpath-trade rearm aapl-long stop-loss")
     p_rearm.add_argument("strategy_id", help="strategy file name without .yaml")
     p_rearm.add_argument("rule_id", help="rule id inside the strategy")
+    _add_account_arg(p_rearm)
     p_reviews = sub.add_parser(
         "reviews", help="approve/reject triggers awaiting review",
         description="Soft-rule triggers (and everything on confirm-level "
                     "strategies) queue here with the agent's analysis attached. "
                     "Approving executes through the risk gate.")
+    _add_account_arg(p_reviews)
     rsub = p_reviews.add_subparsers(dest="reviews_command", required=True,
                                     metavar="<action>")
     rsub.add_parser("list", help="list pending reviews")
@@ -474,11 +531,13 @@ def main(argv: list[str] | None = None,
                     "Exit with /exit, ctrl+d, or ctrl+c twice.")
     p_chat.add_argument("--new", action="store_true",
                         help="start a new conversation instead of resuming the last")
+    _add_account_arg(p_chat)
     p_mem = sub.add_parser(
         "memory", help="inspect or consolidate the agent's memory",
         description="The agent's curated memory lives in memory/ as plain "
                     "markdown you can read and edit. Layers: profile, strategy, "
                     "stock, lesson.")
+    _add_account_arg(p_mem)
     msub = p_mem.add_subparsers(dest="memory_command", required=True,
                                 metavar="<action>")
     m_show = msub.add_parser(
@@ -498,7 +557,9 @@ def main(argv: list[str] | None = None,
     p_serve = sub.add_parser(
         "serve", help="run the web interface and sentinel",
         description="Run the FastAPI web UI and the sentinel scheduler in one "
-                    "process. Requires Alpaca keys in .env.")
+                    "process. Requires Alpaca keys in .env. Serves BOTH "
+                    "accounts -- no --account flag, the web UI's own "
+                    "switcher picks the account per browser session.")
     p_serve.add_argument("--host", default=None, help="bind address")
     p_serve.add_argument("--port", type=int, default=None, help="port")
 
@@ -536,14 +597,36 @@ def main(argv: list[str] | None = None,
     # not a double-migration.
     migrate_files(settings)
 
+    # shadow-dual-active T5: which account THIS invocation is scoped to.
+    # `getattr` with a default rather than `args.account` directly -- "run"
+    # and "serve" never get the `--account` flag at all (see
+    # `_add_account_arg`'s docstring: both already run every account), so
+    # `args` has no such attribute for those two commands.
+    from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+
+    account = getattr(args, "account", DEFAULT_ACCOUNT)
+
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work
     # without. `reviews approve` only needs one when the row being approved
     # is order-kind -- a strategy_revision approval is pure file I/O (see
     # `_approve_needs_broker`).
+    #
+    # shadow-dual-active T5 note: this stays UNCHANGED from before this task
+    # (no `account`-conditional relaxation for shadow) even though shadow's
+    # own ShadowLedger broker never touches Alpaca -- `build_components`
+    # (below) unconditionally constructs BOTH accounts' bundles in one call
+    # (Task 4's dual-active design: one process, both pipelines always
+    # live), so reaching it AT ALL still needs real Alpaca credentials for
+    # paper's own AlpacaBroker construction, regardless of which account
+    # `--account` ultimately selects. A shadow-only CLI invocation that
+    # never needs `build_components` at all -- "strategies", "rearm", plain
+    # "reviews list"/"reject" -- has no such requirement (see the `else`
+    # branch below, which builds a bare per-account store/queue with no
+    # broker anywhere in the picture).
     needs_broker = args.command in {"status", "check", "run", "chat", "serve"} or (
         args.command == "reviews" and getattr(args, "reviews_command", None) == "approve"
-        and _approve_needs_broker(settings, args.review_id)) or (
+        and _approve_needs_broker(settings, args.review_id, account)) or (
         args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
     broker: Broker | None = None
@@ -556,9 +639,6 @@ def main(argv: list[str] | None = None,
             return 2
         broker = _default_broker(settings)
 
-    if args.command == "status":
-        return cmd_status(settings, broker)
-
     if args.command == "serve":
         return cmd_serve(settings, args.host, args.port)
 
@@ -566,11 +646,11 @@ def main(argv: list[str] | None = None,
         from allpath_trade.app import build_components
 
         components = build_components(settings, broker=broker)
-        store = components.strategies
-        queue = components.queue
-        sentinel = components.sentinel
+        bundle = components.accounts[account]
+        store = bundle.strategies
+        queue = bundle.queue
+        sentinel = bundle.sentinel
     else:
-        from allpath_trade.store.accounts import DEFAULT_ACCOUNT
         from allpath_trade.store.reviews import ReviewQueue
         from allpath_trade.strategy.store import StrategyStore
 
@@ -581,15 +661,27 @@ def main(argv: list[str] | None = None,
         # build_components call, or a fresh install with nothing to
         # migrate, is what put it there; see migrate_files.py's docstring).
         # Use classmethod for account validation (T4 shadow-bundle gate).
+        # shadow-dual-active T5: this branch (broker is None) is reached
+        # for EITHER account -- "strategies"/"rearm"/plain "reviews
+        # list"/"reject" never need a broker/executor/sentinel regardless of
+        # which account they're scoped to, so `account` here can genuinely
+        # be "shadow", not just the "paper" this comment used to assume.
         store = StrategyStore.for_account(settings.strategies_dir, conn,
-                                          account=DEFAULT_ACCOUNT)
-        queue = ReviewQueue(conn, executor=None)
+                                          account=account)
+        queue = ReviewQueue(conn, executor=None, account=account)
         # Wired unconditionally, same as build_components does for the
         # broker branch: approving a strategy_revision row is plain file
         # I/O, not broker-dependent, so it must work in this no-broker path
         # too (that's the whole point of Finding 6's fix above).
         queue.set_revision_applier(apply_revision_factory(store))
         sentinel = None
+
+    if args.command == "status":
+        # "status" is always in `needs_broker` (see above), so `broker`
+        # is never None here and `bundle` -- the right broker instance for
+        # THIS account (Alpaca for paper, ShadowLedger for shadow) -- is
+        # always defined.
+        return cmd_status(settings, bundle.broker, account=account)
 
     if args.command == "check":
         return cmd_check(sentinel)
@@ -646,19 +738,34 @@ def main(argv: list[str] | None = None,
         except LLMConfigError as exc:
             print(f"LLM not configured: {exc}", file=sys.stderr)
             return 2
-        return cmd_chat(components, llm, new=args.new, memory_llm=memory_llm)
+        # shadow-dual-active T5: `cmd_chat` reads a flat object's
+        # `.conn`/`.data`/`.broker`/`.journal`/`.strategies`/`.queue`/
+        # `.executor`/`.memory`/`.consolidator` (account-scoped) AND
+        # `.settings`/`.llm_usage` (shared) off the SAME argument -- for
+        # paper, `components` already carries all of those (the legacy
+        # alias surface, see app.py's `Components` docstring), unchanged
+        # from before this task. For shadow, `components.accounts["shadow"]`
+        # (`AccountComponents`) has the first group but not `.settings`/
+        # `.llm_usage` by design (Task 4: those stay shared, off the parent
+        # `Components` only) -- `_cli_chat_bundle` below bridges the two
+        # into one object `cmd_chat` can read from either account without
+        # `cmd_chat` itself needing to know about accounts at all.
+        return cmd_chat(_cli_chat_bundle(components, account), llm,
+                        new=args.new, memory_llm=memory_llm)
     if args.command == "memory":
         if args.memory_command == "show":
             from allpath_trade.memory.store import MemoryStore
 
-            memory = MemoryStore(settings.memory_dir, connect(settings.db_path))
+            memory = MemoryStore(settings.memory_dir, connect(settings.db_path),
+                                 account=account)
             return cmd_memory_show(memory, args.layer, args.key)
         if args.memory_command == "consolidate":
-            if components.consolidator is None:
+            consolidator = components.accounts[account].consolidator
+            if consolidator is None:
                 print("LLM not configured: set OPENROUTER_API_KEY "
                       "(or provider key) in .env", file=sys.stderr)
                 return 2
-            print(components.consolidator.run_daily())
+            print(consolidator.run_daily())
             return 0
     return 1
 

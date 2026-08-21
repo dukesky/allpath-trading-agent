@@ -1,0 +1,8 @@
+{# shadow-dual-active T5: the current account, echoed next to every page's
+   own <h1> (spec §⑥) -- accent for paper, amber for shadow, same "PAPER
+   blue / SHADOW amber" language the global switcher (base.html) uses, so a
+   reader never has to cross-reference the nav to know which account's data
+   a page is showing. `current_account` is always present in context: every
+   route merges `**nav_context(request)` (web/routes/dashboard.py) into its
+   template context. #}
+<span class="chip account-chip {{ 'chip-shadow' if current_account == 'shadow' else 'chip-paper' }}">{{ current_account | capitalize }}</span>

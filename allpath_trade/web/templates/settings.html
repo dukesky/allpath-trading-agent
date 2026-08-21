@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Settings · AllPath Trade{% endblock %}
 {% block content %}
-<h1>Settings</h1>
+<h1>Settings {% include "_account_chip.html" %}</h1>
 {% if saved %}<p class="muted">Saved. New conversations use the updated configuration.</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 

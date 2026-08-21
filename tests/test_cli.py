@@ -658,3 +658,118 @@ def test_chat_consolidation_survives_a_mid_session_compaction(tmp_path, monkeypa
         "post-chat consolidation never ran -- the stale initial_len slice "
         "silently dropped this session's only new turn")
     assert "dividends" in memory_file.read_text()
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T5: `--account paper|shadow` on account-scoped commands.
+# ---------------------------------------------------------------------------
+
+PAPER_STRAT = """
+name: "Paper strat PAPRSTRATMARK"
+status: active
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+SHADOW_STRAT = """
+name: "Shadow strat SHDWSTRATMARK"
+status: active
+position: {ticker: TSLA, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 50", action: "sell all"}
+"""
+
+
+def test_account_flag_defaults_to_paper(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    (tmp_path / "strategies" / "paper" / "p.yaml").write_text(PAPER_STRAT)
+
+    code = main(["strategies"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "PAPRSTRATMARK" in out
+
+
+def test_account_flag_scopes_strategies_command(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    (tmp_path / "strategies" / "shadow").mkdir(parents=True)
+    (tmp_path / "strategies" / "paper" / "p.yaml").write_text(PAPER_STRAT)
+    (tmp_path / "strategies" / "shadow" / "s.yaml").write_text(SHADOW_STRAT)
+
+    code = main(["strategies", "--account", "shadow"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "SHDWSTRATMARK" in out
+    assert "PAPRSTRATMARK" not in out
+
+    code = main(["strategies", "--account", "paper"])
+    out = capsys.readouterr().out
+    assert "PAPRSTRATMARK" in out
+    assert "SHDWSTRATMARK" not in out
+
+
+def test_account_flag_scopes_reviews_list(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    conn = connect(tmp_path / "allpath-trade.db")
+    paper_q = ReviewQueue(conn, None)
+    shadow_q = ReviewQueue(conn, None, account="shadow")
+    paper_q.add(strategy_id="s1", rule_id="r1", ticker="AAPL", rule_type="soft",
+               condition="c", action="PAPRACTIONMARK", snapshot={}, intent=None)
+    shadow_q.add(strategy_id="s2", rule_id="r2", ticker="TSLA", rule_type="soft",
+                condition="c", action="SHDWACTIONMARK", snapshot={}, intent=None)
+    conn.close()
+
+    code = main(["reviews", "--account", "shadow", "list"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "SHDWACTIONMARK" in out
+    assert "PAPRACTIONMARK" not in out
+
+    code = main(["reviews", "list"])
+    out = capsys.readouterr().out
+    assert "PAPRACTIONMARK" in out
+    assert "SHDWACTIONMARK" not in out
+
+
+def test_status_account_flag_shows_shadow_ledger_not_paper_broker(tmp_path, capsys, monkeypatch):
+    # `broker_factory` always stands in for PAPER's own broker construction
+    # (see `_build_broker`) -- `--account shadow` must still report the
+    # real ShadowLedger (name="shadow"), never the injected fake.
+    monkeypatch.chdir(tmp_path)
+    code = main(["status", "--account", "shadow"],
+               broker_factory=lambda settings: FakeBroker())
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "[shadow" in out
+    assert "[fake" not in out
+
+
+def test_status_account_flag_paper_still_uses_the_injected_broker(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    code = main(["status"], broker_factory=lambda settings: FakeBroker())
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "[fake" in out
+
+
+def test_account_flag_scopes_rearm(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    (tmp_path / "strategies" / "shadow").mkdir(parents=True)
+    (tmp_path / "strategies" / "shadow" / "s.yaml").write_text(SHADOW_STRAT)
+
+    code = main(["rearm", "--account", "shadow", "s", "r1"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "re-armed" in out
+
+    # The same strategy id doesn't exist on paper's own side.
+    code = main(["rearm", "--account", "paper", "s", "r1"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "not found" in err

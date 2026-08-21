@@ -8,6 +8,8 @@ from fastapi.responses import HTMLResponse
 
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
+from allpath_trade.web.account_ctx import bundle_for
+from allpath_trade.web.deps import components
 from allpath_trade.web.routes.dashboard import order_price_context
 
 # `split_diff_rows` is the same server-side diff-pairing helper the in-app
@@ -57,14 +59,20 @@ def _invalid_page(request: Request) -> HTMLResponse:
 
 
 def _result_page(request: Request, *, ok: bool, message: str,
-                 burned: bool = True) -> HTMLResponse:
+                 burned: bool = True, account: str | None = None) -> HTMLResponse:
     # `burned` controls the closing hint's claim about the link itself
     # (approve_result.html): true for every normal resolution (the token
     # was consumed on the way in), false only for the M6 case below, where
     # nothing was claimed and the link is deliberately still live.
+    #
+    # `account` (shadow-dual-active T5): the ROW's own account, shown as a
+    # chip so a shadow-account resolution never looks indistinguishable
+    # from a paper one on this unauthenticated page -- `None` (the
+    # `_invalid_page` uniform-failure case, which never reaches this far)
+    # renders no chip at all.
     return templates.TemplateResponse(
         request, "approve_result.html",
-        {"ok": ok, "message": message, "burned": burned},
+        {"ok": ok, "message": message, "burned": burned, "account": account},
         headers=_SECURITY_HEADERS)
 
 
@@ -158,25 +166,58 @@ def _parse_review_id(review_id: str) -> int | None:
         return None
 
 
+def _bundle_for_review(request: Request, review_id: int):
+    """Row-bound resolution for the approve-link surface (shadow-dual-active
+    T5, CARRIED from T4's review: "until this task's row-bound lookup
+    lands, shadow's approve links... resolve through the paper queue").
+
+    This whole surface is UNAUTHENTICATED (no session cookie -- it's the
+    tap-from-notification-link path, exempt from `install_auth`'s gate, see
+    that module's docstring) -- there is no browser "current account" to
+    speak of here at all, only the review id embedded in the link itself.
+    So unlike the in-app pages (which read `account_ctx.bundle(request)`,
+    the COOKIE's account), this always locates the row's OWN account via
+    `ReviewQueue.locate` (an unscoped, whole-table lookup) and acts through
+    THAT account's bundle -- a shadow row's link must resolve against
+    shadow's queue/executor regardless of which account's link template
+    happened to render it from.
+
+    Returns `None` when the id doesn't exist at all -- callers degrade to
+    the same uniform `_invalid_page`/`_result_page` "not processed" outcome
+    that a bad token already produces (see this module's own "no oracle"
+    design note on `_invalid_page`)."""
+    c = components(request)
+    located = c.queue.locate(review_id)
+    if located is None:
+        return None
+    account, _row = located
+    return bundle_for(c, account)
+
+
 @router.get(PREFIX + "/{review_id}", response_class=HTMLResponse)
 def confirm(request: Request, review_id: str, k: str = "") -> HTMLResponse:
-    c = request.app.state.holder.get()
     rid = _parse_review_id(review_id)
     if rid is None:
         return _invalid_page(request)
-    row = c.queue.validate_token(rid, k)
+    b = _bundle_for_review(request, rid)
+    if b is None:
+        return _invalid_page(request)
+    row = b.queue.validate_token(rid, k)
     if row is None:
         return _invalid_page(request)
-    context = _confirm_context(c, row)
+    context = _confirm_context(b, row)
     context["token"] = k
+    context["account"] = row["account"]
     return templates.TemplateResponse(
         request, "approve_confirm.html", context, headers=_SECURITY_HEADERS)
 
 
 def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> HTMLResponse:
-    c = request.app.state.holder.get()
     rid = _parse_review_id(review_id)
     if rid is None:
+        return _invalid_page(request)
+    b = _bundle_for_review(request, rid)
+    if b is None:
         return _invalid_page(request)
 
     # M6: an order-kind row with no executable intent (a malformed row --
@@ -190,10 +231,10 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
     # proceed normally. Read-only (validate_token, not consume_token) --
     # nothing is claimed or acted on by this check.
     if not reject:
-        preview = c.queue.validate_token(rid, token)
+        preview = b.queue.validate_token(rid, token)
         if preview is not None and preview["kind"] == "order" and not preview["intent"]:
             return _result_page(
-                request, ok=False, burned=False,
+                request, ok=False, burned=False, account=b.account,
                 message=(f"Review #{rid} has no executable order attached; "
                          "nothing was done. Resolve it from the app."))
 
@@ -202,40 +243,45 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
     # RevisionValidationError case below): whatever happens next, this
     # link is dead the moment it's submitted -- a failed execution must
     # push the user back into the app, not invite a retry via the same link.
-    row = c.queue.consume_token(rid, token)
+    row = b.queue.consume_token(rid, token)
     if row is None:
         return _invalid_page(request)
     review_id = rid
 
     if reject:
         try:
-            c.queue.reject(review_id)
+            b.queue.reject(review_id)
         except ReviewError as exc:
-            return _result_page(request, ok=False, message=f"Not processed: {exc}")
-        return _result_page(request, ok=True, message=f"Rejected #{review_id}.")
+            return _result_page(request, ok=False, account=b.account,
+                                message=f"Not processed: {exc}")
+        return _result_page(request, ok=True, account=b.account,
+                            message=f"Rejected #{review_id}.")
 
     try:
-        result = c.queue.approve(review_id)
+        result = b.queue.approve(review_id)
     except RevisionValidationError as exc:
         return _result_page(
-            request, ok=False,
+            request, ok=False, account=b.account,
             message=(f"Revision failed re-validation and was left pending "
                      f"for you to retry or reject in the app: {exc}"))
     except ExecutionError as exc:
         return _result_page(
-            request, ok=False,
+            request, ok=False, account=b.account,
             message=f"Approved, but execution failed: {exc}")
     except ReviewError as exc:
-        return _result_page(request, ok=False, message=f"Not processed: {exc}")
+        return _result_page(request, ok=False, account=b.account,
+                            message=f"Not processed: {exc}")
 
     if row["kind"] == "strategy_revision":
         return _result_page(
-            request, ok=True, message=f"Revision applied to {row['strategy_id']}.")
+            request, ok=True, account=b.account,
+            message=f"Revision applied to {row['strategy_id']}.")
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
-        return _result_page(request, ok=False,
+        return _result_page(request, ok=False, account=b.account,
                             message=f"Rejected by the risk gate: {reasons}")
-    return _result_page(request, ok=True, message="Order submitted.")
+    return _result_page(request, ok=True, account=b.account,
+                        message="Order submitted.")
 
 
 @router.post(PREFIX + "/{review_id}/approve", response_class=HTMLResponse)

@@ -105,8 +105,27 @@ class Components:
     reports: ReportStore
     observations: ObservationLog
     sentinel: Sentinel
+
+    # shadow-dual-active T5 addition to the legacy alias surface above:
+    # `conversations`/`search`/`account` complete the set of fields
+    # `AccountComponents` also carries, so `Components` is structurally a
+    # drop-in stand-in for `accounts["paper"]` -- not just for the fields
+    # that happened to already be here. This is what lets
+    # `web/account_ctx.py`'s `bundle_for(components, "paper")` return
+    # `components` itself rather than `components.accounts["paper"]` (a
+    # DIFFERENT object, whose fields a test's `monkeypatch.setattr(holder.
+    # get(), "broker", ...)` would never reach): every existing test that
+    # monkeypatches an attribute directly on `holder.get()` -- and the whole
+    # suite predates account-awareness, so none of them touch the cookie --
+    # keeps working unchanged, because for the paper account (the default,
+    # cookie-less view) "the current account's bundle" and "the shared
+    # Components object" are the exact same object, by construction, not by
+    # convention.
+    conversations: ConversationStore
+    search: SessionSearch
     consolidator: Consolidator | None = None
     reflector: Reflector | None = None
+    account: str = DEFAULT_ACCOUNT
 
 
 def _build_broker(account: str, settings: Settings, conn: sqlite3.Connection,
@@ -254,4 +273,5 @@ def build_components(settings: Settings, broker: Broker | None = None,
         executor=paper.executor, queue=paper.queue, strategies=paper.strategies,
         memory=paper.memory, reports=paper.reports, observations=paper.observations,
         sentinel=paper.sentinel, consolidator=paper.consolidator,
-        reflector=paper.reflector)
+        reflector=paper.reflector, conversations=paper.conversations,
+        search=paper.search, account=paper.account)

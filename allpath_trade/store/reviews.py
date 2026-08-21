@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from allpath_trade.broker.base import OrderIntent
 from allpath_trade.execution import ExecutionError, ExecutionResult, Executor
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 # Approve-by-link token lifetime (Part A): 24h from issue, per row.
 TOKEN_TTL_SECONDS = 24 * 3600
@@ -73,6 +73,12 @@ class ReviewQueue:
 
     def __init__(self, conn: sqlite3.Connection, executor: Executor | None,
                 account: str = DEFAULT_ACCOUNT) -> None:
+        # shadow-dual-active T5 carry: see TradeJournal's identical gate --
+        # the web account cookie / Telegram /account command / CLI --account
+        # flag now pass non-literal account strings through to this
+        # constructor too.
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         # executor may be None for read-only usage (list/reject);
         # approve() requires one for order-kind rows.
         self._conn = conn
@@ -286,6 +292,34 @@ class ReviewQueue:
         if row is None:
             raise ReviewError(f"review {review_id} not found")
         return row
+
+    def locate(self, review_id: int) -> tuple[str, sqlite3.Row] | None:
+        """Find `review_id` regardless of which account it belongs to --
+        deliberately UNSCOPED by `self._account` (`pending_reviews` is one
+        shared table across both accounts, see `store/db.py`'s schema).
+
+        This is the row-bound approval primitive (shadow-dual-active T5,
+        spec: "批准永远作用于该行的账户,与当前界面选择无关"): every entry
+        point that resolves a review by id from OUTSIDE its own account's
+        context -- the web reviews page (any row could belong to either
+        account once resolved actions are shown together), an `/a/<id>`
+        approve-link click, a Telegram Approve/Reject button tap -- must
+        call this FIRST to discover which account the row actually belongs
+        to, then act through THAT account's own `ReviewQueue` instance (its
+        own `.get`/`.approve`/`.reject`, still scoped by `account` as a
+        second, belt-and-suspenders filter). Never act on a row through
+        `self` here: this instance's own `_account` is irrelevant to what
+        `locate` returns and must not be used to resolve it.
+
+        Callable on ANY `ReviewQueue` instance regardless of that
+        instance's own `account` -- the query below never references
+        `self._account`. Returns `(account, row)`, or `None` if no row
+        with this id exists at all."""
+        row = self._conn.execute(
+            "SELECT * FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+        if row is None:
+            return None
+        return row["account"], row
 
     def _token_ok(self, row: sqlite3.Row, token: str) -> bool:
         """No-oracle check: every failure mode (missing row handled by the

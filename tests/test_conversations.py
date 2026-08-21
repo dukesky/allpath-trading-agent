@@ -235,3 +235,8 @@ def test_legacy_conversations_row_defaults_account_paper_after_migration(tmp_pat
 
     store = ConversationStore(conn)
     assert store.latest() is not None
+
+
+def test_constructor_rejects_invalid_account(tmp_path):
+    with pytest.raises(ValueError, match="invalid account"):
+        ConversationStore(connect(tmp_path / "t.db"), account="evil")

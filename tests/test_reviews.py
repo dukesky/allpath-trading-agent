@@ -904,3 +904,47 @@ def test_legacy_pending_reviews_row_defaults_account_paper_after_migration(tmp_p
     paper = ReviewQueue(conn, None)
     [prow] = paper.list(status=None)
     assert prow["account"] == "paper"
+
+
+def test_constructor_rejects_invalid_account(tmp_path):
+    with pytest.raises(ValueError, match="invalid account"):
+        ReviewQueue(connect(tmp_path / "t.db"), None, account="evil")
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T5: ReviewQueue.locate -- the row-bound approval
+# primitive every web/TG/approve-link entry point uses to find which
+# account a review actually belongs to, regardless of the caller's own
+# `_account` or the current view/chat's selected account.
+# ---------------------------------------------------------------------------
+
+def test_locate_finds_a_row_regardless_of_which_instance_asks(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, None)
+    shadow = ReviewQueue(conn, None, account="shadow")
+    shadow_id = shadow.add(strategy_id="s1", rule_id="r1", ticker="AAPL",
+                           rule_type="soft", condition="c", action="a",
+                           snapshot={}, intent=None)
+
+    # Asked via the PAPER instance -- locate is unscoped by self._account,
+    # unlike .get(), which would raise "not found" for a foreign-account id.
+    located = paper.locate(shadow_id)
+    assert located is not None
+    account, row = located
+    assert account == "shadow"
+    assert row["id"] == shadow_id
+    assert row["ticker"] == "AAPL"
+
+    # And the reverse: a paper row located via the shadow instance.
+    paper_id = paper.add(strategy_id="s2", rule_id="r2", ticker="TSLA",
+                         rule_type="soft", condition="c", action="a",
+                         snapshot={}, intent=None)
+    account2, row2 = shadow.locate(paper_id)
+    assert account2 == "paper"
+    assert row2["id"] == paper_id
+
+
+def test_locate_returns_none_for_a_missing_id(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    queue = ReviewQueue(conn, None)
+    assert queue.locate(999999) is None

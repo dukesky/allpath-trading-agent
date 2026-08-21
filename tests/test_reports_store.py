@@ -164,3 +164,8 @@ def test_legacy_reports_row_defaults_account_paper_after_migration(tmp_path):
     row2 = conn2.execute("SELECT account FROM reports WHERE date = ?",
                          ("2026-08-01",)).fetchone()
     assert row2["account"] == "paper"
+
+
+def test_constructor_rejects_invalid_account(tmp_path):
+    with pytest.raises(ValueError, match="invalid account"):
+        ReportStore(connect(tmp_path / "t.db"), account="evil")

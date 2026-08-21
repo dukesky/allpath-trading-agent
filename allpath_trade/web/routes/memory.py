@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from allpath_trade.memory.store import LAYER_BUDGETS, MemoryStoreError
+from allpath_trade.web.account_ctx import bundle
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
 
@@ -52,7 +53,12 @@ def _layer_sections(c, layer: str | None = None) -> list[dict]:
 
 @router.get("/memory", response_class=HTMLResponse)
 def memory(request: Request) -> HTMLResponse:
-    c = request.app.state.holder.get()
+    # shadow-dual-active T5: `bundle(request)` gives this account's own
+    # MemoryStore -- `.account` scopes the strategy/stock/lesson layers to
+    # this account's subdirectory (memory/{account}/...), while `.read
+    # ("profile")` still resolves to the shared root file regardless of
+    # account (MemoryStore.path_for, per spec: profile stays shared).
+    b = bundle(request)
     tab = request.query_params.get("tab", "profile")
 
     # Unknown tabs fall back to profile
@@ -62,9 +68,9 @@ def memory(request: Request) -> HTMLResponse:
     # Build layers based on active tab
     if tab == "changes":
         layers = []
-        log = c.memory.recent_log(limit=30)
+        log = b.memory.recent_log(limit=30)
     else:
-        layers = _layer_sections(c, tab)
+        layers = _layer_sections(b, tab)
         log = []
 
     return templates.TemplateResponse(request, "memory.html", {
@@ -72,5 +78,5 @@ def memory(request: Request) -> HTMLResponse:
         "layers": layers,
         "log": log,
         "active_tab": tab,
-        **nav_context(c),
+        **nav_context(request),
     })

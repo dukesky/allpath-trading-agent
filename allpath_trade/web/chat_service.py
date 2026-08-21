@@ -13,15 +13,14 @@ from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
-from allpath_trade.memory.search import SessionSearch
-from allpath_trade.store.conversations import ConversationStore
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.web.order_sink import QueueingOrderSink
 
 SNAPSHOT_TTL_SECONDS = 30 * 60
 
 
 class ChatService:
-    """One conversation, forever.
+    """One conversation, forever -- for ONE account.
 
     The user never picks or creates a session — the process resumes the latest
     conversation and the Compactor keeps it inside the context budget. The
@@ -29,14 +28,29 @@ class ChatService:
     it is older than SNAPSHOT_TTL_SECONDS; a long-lived server would otherwise
     reason about yesterday's positions.
 
-    This object is shared by every request in the process. `_turn_lock`
-    serializes anything that mutates the underlying AgentSession's history
-    (a chat turn, or an out-of-band note like an approval) so two concurrent
-    requests can never interleave writes to the same in-memory list — the
-    second waits for the first to finish rather than racing it."""
+    This object is shared by every request in the process FOR ITS ACCOUNT --
+    shadow-dual-active T5: `web/app.py`'s `create_app` builds one instance per
+    entry in `store.accounts.ACCOUNTS` (`app.state.chat_services`), each
+    reading its account's own bundle (queue/strategies/memory/conversations)
+    through `self.holder.get()` + `account_ctx.bundle_for` at `_build()` time
+    -- separate conversation history, separate memory context, separate
+    pending queue, per account; the personal-profile memory layer and every
+    genuinely process-wide object (LLM client config, notifier, app_state)
+    are still shared, since `bundle_for` returns the SAME `Components` object
+    for the paper account and `MemoryStore.path_for("profile", ...)` always
+    resolves to the shared root file regardless of account (see
+    `memory/store.py`). `_turn_lock` serializes anything that mutates the
+    underlying AgentSession's history (a chat turn, or an out-of-band note
+    like an approval) so two concurrent requests can never interleave writes
+    to the same in-memory list — the second waits for the first to finish
+    rather than racing it. Each account's ChatService has its OWN
+    `_turn_lock`/`_session` -- a long-running shadow turn never blocks a
+    concurrent paper one, matching the two pipelines' general "own everything,
+    isolated" design."""
 
-    def __init__(self, holder) -> None:
+    def __init__(self, holder, account: str = DEFAULT_ACCOUNT) -> None:
         self.holder = holder
+        self.account = account
         self._lock = threading.Lock()
         self._turn_lock = threading.Lock()
         self._session: AgentSession | None = None
@@ -75,21 +89,30 @@ class ChatService:
 
     def _build(self) -> AgentSession:
         from allpath_trade.llm.factory import build_llm
+        from allpath_trade.web.account_ctx import bundle_for
 
         c = self.holder.get()
-        store = ConversationStore(c.conn)
+        # `b` is this ChatService's own account bundle -- for the paper
+        # account this IS `c` itself (see account_ctx.bundle_for's
+        # docstring), so nothing about paper's existing single-account
+        # behavior changes. `store`/`registry`/the system prompt below all
+        # read from `b`, not `c`, for every account-scoped store -- LLM
+        # client config, the notifier, and app_state are still read off `c`
+        # (genuinely process-wide, shared by both accounts' pipelines).
+        b = bundle_for(c, self.account)
+        store = b.conversations
         conversation_id = store.latest() or store.start()
 
         registry = ToolRegistry()
-        register_readonly_tools(registry, data=c.data, broker=c.broker,
-                                journal=c.journal, strategies=c.strategies,
-                                queue=c.queue)
-        register_memory_tools(registry, memory=c.memory, search=SessionSearch(c.conn))
+        register_readonly_tools(registry, data=c.data, broker=b.broker,
+                                journal=b.journal, strategies=b.strategies,
+                                queue=b.queue)
+        register_memory_tools(registry, memory=b.memory, search=b.search)
         register_action_tools(
-            registry, strategies=c.strategies, executor=c.executor,
+            registry, strategies=b.strategies, executor=b.executor,
             confirm=lambda _prompt: False,
             order_sink=QueueingOrderSink(
-                c.queue, c.gate, c.broker, c.data, c.journal, conversation_id,
+                b.queue, b.gate, b.broker, c.data, b.journal, conversation_id,
                 notifier=c.notifier, app_state=c.app_state,
                 telegram_bot_token=c.settings.telegram_bot_token,
                 web_base_url=c.settings.web_base_url),
@@ -101,13 +124,14 @@ class ChatService:
             # lines up); this is the ChatService's ONE per-request build
             # site, so passing it directly here is as fresh as a callable
             # indirection would be, with none of the extra machinery.
-            queue=c.queue, conversation_id=conversation_id,
+            queue=b.queue, conversation_id=conversation_id,
             notifier=c.notifier, web_base_url=c.settings.web_base_url,
             app_state=c.app_state, telegram_bot_token=c.settings.telegram_bot_token)
 
         prompt = build_system_prompt(
-            identity=load_identity(), broker=c.broker, journal=c.journal,
-            strategies=c.strategies, queue=c.queue, memory=c.memory)
+            identity=load_identity(), broker=b.broker, journal=b.journal,
+            strategies=b.strategies, queue=b.queue, memory=b.memory,
+            account=self.account)
         # Finding 8: flush durable preferences to curated memory before the
         # older half of the conversation is dropped from context (see
         # Compactor's docstring on on_before_compact). Under Phase 5's
@@ -115,7 +139,8 @@ class ChatService:
         # hang consolidation off of the way cli.py's cmd_chat does -- this
         # hook is the only backstop against losing a preference the user
         # stated once and never repeated. No-op when no LLM is configured
-        # (c.consolidator is None in that case).
+        # (b.consolidator is None in that case) -- this account's own
+        # consolidator, not the other account's.
         # F2: `propagate=True` -- see cli.py's cmd_chat for why. Without it,
         # a failed flush here reads to Compactor as an ordinary success and
         # the older messages get summarized and dropped right after the
@@ -124,8 +149,8 @@ class ChatService:
             build_llm(c.settings, tier="memory", usage_store=c.llm_usage), store,
             budget_tokens=c.settings.context_budget_tokens,
             on_before_compact=(
-                partial(c.consolidator.run_post_chat, propagate=True)
-                if c.consolidator is not None else None))
+                partial(b.consolidator.run_post_chat, propagate=True)
+                if b.consolidator is not None else None))
         return AgentSession(
             build_llm(c.settings, tier="chat", usage_store=c.llm_usage),
             registry, prompt, store=store, conversation_id=conversation_id,

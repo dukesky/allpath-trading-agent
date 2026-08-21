@@ -10,6 +10,9 @@
 <body class="centered">
   <div class="card" style="max-width:420px;width:100%">
     <h1>Review #{{ review_id }}</h1>
+    <p class="row" style="margin:0 0 6px">
+      <span class="chip {{ 'chip-shadow' if account == 'shadow' else 'chip-paper' }}">{{ account | capitalize }}</span>
+    </p>
     <p><strong>{{ side }} {{ ticker }}</strong>{% if amount_label %} · {{ amount_label }}{% endif %}</p>
     {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}
 

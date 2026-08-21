@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from allpath_trade.scheduler import today_et_date, ts_to_et_date
-from allpath_trade.store.conversations import ConversationStore
+from allpath_trade.web.account_ctx import bundle
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.templating import templates
 
@@ -88,25 +88,25 @@ def _proposal_counts(c) -> dict[str, int]:
     return counts
 
 
-def _not_found(request: Request, c, message: str) -> HTMLResponse:
+def _not_found(request: Request, b, message: str) -> HTMLResponse:
     # Same idiom as strategies.py's `_not_found`: render the index page
     # (with real data, so there's still somewhere to go) at a genuine 404
     # status, rather than a bare HTTPException dropping out of the app
     # chrome.
-    reports = c.reports.list()
+    reports = b.reports.list()
     return templates.TemplateResponse(request, "reports.html", {
         "page": "reports", "reports": reports,
         "summaries": {r["date"]: _first_sentence(r["summary"]) for r in reports},
-        "proposal_counts": _proposal_counts(c),
+        "proposal_counts": _proposal_counts(b),
         "error": message, "notice": None,
         "date_filter": "", "from_filter": "", "to_filter": "",
-        **_chip_dates(c), **nav_context(c)}, status_code=404)
+        **_chip_dates(b), **nav_context(request)}, status_code=404)
 
 
 @router.get("/reports", response_class=HTMLResponse)
 def index(request: Request, date: str = "",
           from_: str = Query("", alias="from"), to: str = "") -> HTMLResponse:
-    c = request.app.state.holder.get()
+    b = bundle(request)
     notice = None
     status_code = 200
 
@@ -119,16 +119,16 @@ def index(request: Request, date: str = "",
         if not _is_valid_date(date):
             notice = f"Invalid date: {date}"
             status_code = 400
-        elif c.reports.exists(date):
+        elif b.reports.exists(date):
             return RedirectResponse(f"/reports/{date}", status_code=303)
         else:
             notice = f"No report for {date}"
-        reports = c.reports.list()
+        reports = b.reports.list()
     elif from_ or to:
         if not _valid_or_blank(from_) or not _valid_or_blank(to):
             notice = "Invalid date range"
             status_code = 400
-            reports = c.reports.list()
+            reports = b.reports.list()
         else:
             start, end = from_ or "0000-01-01", to or "9999-12-31"
             if from_ and to and start > end:
@@ -137,7 +137,7 @@ def index(request: Request, date: str = "",
                 # shows the user their own range instead of bouncing a plain
                 # typo back with an error.
                 start, end = end, start
-            reports = c.reports.list_between(start, end)
+            reports = b.reports.list_between(start, end)
             if not reports:
                 # Distinct from the "No reports yet" copy reports.html shows
                 # on a genuinely fresh install (its empty-loop fallback) --
@@ -151,30 +151,30 @@ def index(request: Request, date: str = "",
                 else:
                     notice = f"No reports on or before {to}"
     else:
-        reports = c.reports.list()
+        reports = b.reports.list()
 
     return templates.TemplateResponse(request, "reports.html", {
         "page": "reports", "reports": reports,
         "summaries": {r["date"]: _first_sentence(r["summary"]) for r in reports},
-        "proposal_counts": _proposal_counts(c),
+        "proposal_counts": _proposal_counts(b),
         "error": request.query_params.get("error"), "notice": notice,
         "date_filter": date, "from_filter": from_, "to_filter": to,
-        **_chip_dates(c), **nav_context(c)}, status_code=status_code)
+        **_chip_dates(b), **nav_context(request)}, status_code=status_code)
 
 
 @router.get("/reports/{date}", response_class=HTMLResponse)
 def detail(request: Request, date: str) -> HTMLResponse:
-    c = request.app.state.holder.get()
+    b = bundle(request)
     if not _is_valid_date(date):
-        return _not_found(request, c, "Report not found")
-    report = c.reports.get(date)
+        return _not_found(request, b, "Report not found")
+    report = b.reports.get(date)
     if report is None:
-        return _not_found(request, c, "Report not found")
-    proposals = [dict(r) for r in c.queue.list(None)
+        return _not_found(request, b, "Report not found")
+    proposals = [dict(r) for r in b.queue.list(None)
                 if r["kind"] == "strategy_revision" and ts_to_et_date(r["ts"]) == date]
     return templates.TemplateResponse(request, "report_detail.html", {
         "page": "reports", "report": report, "proposals": proposals,
-        "error": request.query_params.get("error"), **nav_context(c)})
+        "error": request.query_params.get("error"), **nav_context(request)})
 
 
 def _format_tool_args(arguments: dict) -> str:
@@ -228,15 +228,15 @@ def _render_turns(messages: list[dict]) -> list[dict]:
 
 @router.get("/reports/{date}/transcript", response_class=HTMLResponse)
 def transcript(request: Request, date: str) -> HTMLResponse:
-    c = request.app.state.holder.get()
+    b = bundle(request)
     if not _is_valid_date(date):
-        return _not_found(request, c, "Report not found")
-    report = c.reports.get(date)
+        return _not_found(request, b, "Report not found")
+    report = b.reports.get(date)
     if report is None:
-        return _not_found(request, c, "Report not found")
+        return _not_found(request, b, "Report not found")
     turns: list[dict] = []
     if report["conversation_id"] is not None:
-        conversations = ConversationStore(c.conn)
-        turns = _render_turns(conversations.history(report["conversation_id"]))
+        turns = _render_turns(b.conversations.history(report["conversation_id"]))
     return templates.TemplateResponse(request, "report_transcript.html", {
-        "page": "reports", "report": report, "turns": turns, **nav_context(c)})
+        "page": "reports", "report": report, "turns": turns,
+        **nav_context(request)})

@@ -25,15 +25,18 @@ import time
 import urllib.error
 from types import SimpleNamespace
 
+import pytest
+
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.store.app_state import (
+    TELEGRAM_ACCOUNT_KEY,
     TELEGRAM_CHAT_ID_KEY,
     TELEGRAM_OFFSET_KEY,
     TELEGRAM_USER_ID_KEY,
     AppState,
 )
 from allpath_trade.store.db import connect
-from allpath_trade.store.reviews import ReviewQueue, RevisionValidationError
+from allpath_trade.store.reviews import ReviewError, ReviewQueue, RevisionValidationError
 from allpath_trade.telegram import TelegramAPI, TelegramPoller
 from tests.test_sentinel import SpyExecutor
 
@@ -54,16 +57,33 @@ class FakeHolder:
     instance must reject the old token and accept the new one the moment
     the holder starts returning it, no restart."""
 
-    def __init__(self, app_state: AppState, web_token: str, queue=None, strategies=None) -> None:
+    def __init__(self, app_state: AppState, web_token: str, queue=None, strategies=None,
+                shadow_queue=None, shadow_strategies=None) -> None:
         self._app_state = app_state
         self._web_token = web_token
         self._queue = queue
         self._strategies = strategies
+        # shadow-dual-active T5: `.accounts` mirrors the real `Components`
+        # shape (`{"paper": ..., "shadow": ...}`) that row-bound resolution
+        # (`ReviewQueue.locate` + `TelegramPoller._resolve_review_callback`)
+        # reads through. Every pre-T5 test's fixture is single-account
+        # (`ReviewQueue(conn, executor)` defaults to "paper" -- see
+        # `make_order_queue`), so `locate()` always resolves those rows to
+        # "paper" and this dict's "shadow" entry is never touched by them --
+        # only the new row-bound tests below pass distinct
+        # `shadow_queue`/`shadow_strategies` to prove real cross-account
+        # isolation.
+        self._shadow_queue = shadow_queue if shadow_queue is not None else queue
+        self._shadow_strategies = (shadow_strategies if shadow_strategies is not None
+                                   else strategies)
 
     def get(self) -> SimpleNamespace:
+        paper = SimpleNamespace(queue=self._queue, strategies=self._strategies)
+        shadow = SimpleNamespace(queue=self._shadow_queue, strategies=self._shadow_strategies)
         return SimpleNamespace(app_state=self._app_state,
                                settings=SimpleNamespace(web_token=self._web_token),
-                               queue=self._queue, strategies=self._strategies)
+                               queue=self._queue, strategies=self._strategies,
+                               accounts={"paper": paper, "shadow": shadow})
 
     def set_web_token(self, token: str) -> None:
         self._web_token = token
@@ -518,7 +538,7 @@ def test_paired_text_sends_typing_then_calls_chat_service_with_telegram_source(t
 
     assert api.typing_calls == ["111"]
     assert chat_service.calls == [{"text": "what's my position", "source": "telegram"}]
-    assert api.sent_messages == [("111", "you own 10 AAPL")]
+    assert api.sent_messages == [("111", "[Shadow] you own 10 AAPL")]
 
 
 def test_reply_is_formatted_through_to_telegram_html(tmp_path):
@@ -530,7 +550,7 @@ def test_reply_is_formatted_through_to_telegram_html(tmp_path):
 
     poller.poll_once()
 
-    assert api.sent_messages == [("111", "<b>bold</b> reply")]
+    assert api.sent_messages == [("111", "[Shadow] <b>bold</b> reply")]
 
 
 def test_long_reply_is_split_into_multiple_send_message_calls(tmp_path):
@@ -557,7 +577,7 @@ def test_empty_agent_reply_sends_fallback_chunk(tmp_path):
 
     poller.poll_once()
 
-    assert api.sent_messages == [("111", "(empty reply)")]
+    assert api.sent_messages == [("111", "[Shadow] (empty reply)")]
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +652,7 @@ def test_one_malformed_update_does_not_stop_the_rest_of_the_batch(tmp_path, caps
     poller.poll_once()  # must not raise
 
     assert chat_service.calls == [{"text": "hello for real", "source": "telegram"}]
-    assert api.sent_messages == [("111", "hi back")]
+    assert api.sent_messages == [("111", "[Shadow] hi back")]
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) >= 1
 
@@ -975,10 +995,15 @@ class FakeStrategies:
         return ""
 
 
-def make_order_queue(tmp_path, *, fail=False, raise_exc=None, reject_reasons=None):
-    conn = connect(tmp_path / "reviews.db")
+def make_order_queue(tmp_path, *, fail=False, raise_exc=None, reject_reasons=None,
+                     account="paper", conn=None):
+    # `conn` is injectable (shadow-dual-active T5): row-bound tests need TWO
+    # `ReviewQueue`s -- one per account -- sharing the SAME sqlite
+    # connection/file, exactly like `pending_reviews` is one real shared
+    # table across both accounts in production (store/db.py's schema).
+    conn = conn or connect(tmp_path / "reviews.db")
     executor = SpyExecutor(fail=fail, raise_exc=raise_exc, reject_reasons=reject_reasons)
-    return ReviewQueue(conn, executor)
+    return ReviewQueue(conn, executor, account=account)
 
 
 def queue_order_review(queue: ReviewQueue, *, source="chat") -> int:
@@ -1006,9 +1031,11 @@ def _callback_update(update_id, chat_id, from_id, data, message_id=1):
 
 
 def make_review_poller(api, chat_service, app_state, queue, strategies=None,
-                       web_token=WEB_TOKEN):
+                       web_token=WEB_TOKEN, shadow_queue=None, shadow_strategies=None):
     holder = FakeHolder(app_state, web_token, queue=queue,
-                        strategies=strategies or FakeStrategies())
+                        strategies=strategies or FakeStrategies(),
+                        shadow_queue=shadow_queue,
+                        shadow_strategies=shadow_strategies or FakeStrategies())
     return TelegramPoller(api, chat_service, holder, threading.Event())
 
 
@@ -1262,3 +1289,153 @@ def test_typing_indicator_is_resent_during_a_slow_turn(tmp_path, monkeypatch):
 
     # One immediate call plus at least one resend during the ~0.2s turn.
     assert len(api.typing_calls) >= 2
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T5: /account command, Paper/Shadow switching, and
+# row-bound review resolution (a review is acted through the ROW's own
+# account, never whichever account this chat happens to be on).
+# ---------------------------------------------------------------------------
+
+def test_default_telegram_account_is_shadow(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    api = FakeTelegramAPI(batches=[[_update(1, 111, "hi")]])
+    chat_service = FakeChatService(reply="hello")
+    poller = make_poller(api, chat_service, app_state)
+
+    poller.poll_once()
+
+    # No /account switch has ever run -- spec's chosen default is shadow,
+    # not store.accounts.DEFAULT_ACCOUNT ("paper").
+    assert api.sent_messages == [("111", "[Shadow] hello")]
+
+
+def test_account_command_shows_inline_paper_shadow_buttons(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    api = FakeTelegramAPI(batches=[[_update(1, 111, "/account")]])
+    poller = make_poller(api, FakeChatService(), app_state)
+
+    poller.poll_once()
+
+    assert len(api.sent_messages) == 1
+    chat_id, text = api.sent_messages[0]
+    assert chat_id == "111"
+    assert "Shadow" in text  # tells the user the CURRENT account, not blind
+    markup = api.sent_markups[0]
+    buttons = markup["inline_keyboard"][0]
+    assert [b["callback_data"] for b in buttons] == ["acct:paper", "acct:shadow"]
+
+
+def test_account_switch_callback_persists_and_confirms(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, "acct:paper", message_id=9)]])
+    poller = make_poller(api, FakeChatService(), app_state)
+
+    poller.poll_once()
+
+    assert app_state.get(TELEGRAM_ACCOUNT_KEY) == "paper"
+    assert api.answered_callbacks == [("cb1", "Switched to Paper")]
+    assert api.edited_markups == [("111", 9, None)]
+    assert any("Switched to <b>Paper</b>" in html for _cid, html in api.sent_messages)
+
+
+def test_account_switch_routes_subsequent_chat_text_to_that_account(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    app_state.set(TELEGRAM_ACCOUNT_KEY, "paper")
+    paper_chat = FakeChatService(reply="paper says hi")
+    shadow_chat = FakeChatService(reply="shadow says hi")
+    api = FakeTelegramAPI(batches=[[_update(1, 111, "what's my position")]])
+    poller = make_poller(api, {"paper": paper_chat, "shadow": shadow_chat}, app_state)
+
+    poller.poll_once()
+
+    assert paper_chat.calls == [{"text": "what's my position", "source": "telegram"}]
+    assert shadow_chat.calls == []
+    assert api.sent_messages == [("111", "[Paper] paper says hi")]
+
+
+def test_row_bound_shadow_review_resolves_through_shadow_queue_while_telegram_on_paper(
+        tmp_path):
+    # The CARRIED T4 finding this task exists to close: a shadow-account
+    # review must resolve against shadow's own queue/executor, never
+    # paper's -- REGARDLESS of which account this Telegram chat is
+    # currently on (here: explicitly paper).
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    app_state.set(TELEGRAM_ACCOUNT_KEY, "paper")
+    conn = connect(tmp_path / "reviews.db")
+    paper_queue = make_order_queue(tmp_path, conn=conn, account="paper")
+    shadow_queue = make_order_queue(tmp_path, conn=conn, account="shadow")
+    review_id = queue_order_review(shadow_queue)
+    nonce = nonce_for(shadow_queue, review_id)
+    paper_chat = FakeChatService()
+    shadow_chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    poller = make_review_poller(
+        api, {"paper": paper_chat, "shadow": shadow_chat}, app_state, paper_queue,
+        shadow_queue=shadow_queue)
+
+    poller.poll_once()
+
+    assert shadow_queue.get(review_id)["status"] == "approved"
+    with pytest.raises(ReviewError):
+        paper_queue.get(review_id)  # never existed in paper's own view
+    # Outcome message is labelled for the ROW's account (shadow), not the
+    # chat's current account (paper).
+    assert any("[Shadow]" in html and "order submitted" in html
+              for _cid, html in api.sent_messages)
+    # The receipt lands in shadow's own conversation, never paper's.
+    assert shadow_chat.resolutions
+    assert paper_chat.resolutions == []
+
+
+def test_row_bound_paper_review_resolves_through_paper_queue_while_telegram_on_shadow(
+        tmp_path):
+    # Symmetric case: telegram is on shadow, but the row being resolved is
+    # paper's -- must still act through paper's own queue.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    app_state.set(TELEGRAM_ACCOUNT_KEY, "shadow")
+    conn = connect(tmp_path / "reviews.db")
+    paper_queue = make_order_queue(tmp_path, conn=conn, account="paper")
+    shadow_queue = make_order_queue(tmp_path, conn=conn, account="shadow")
+    review_id = queue_order_review(paper_queue)
+    nonce = nonce_for(paper_queue, review_id)
+    paper_chat = FakeChatService()
+    shadow_chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    poller = make_review_poller(
+        api, {"paper": paper_chat, "shadow": shadow_chat}, app_state, paper_queue,
+        shadow_queue=shadow_queue)
+
+    poller.poll_once()
+
+    assert paper_queue.get(review_id)["status"] == "approved"
+    with pytest.raises(ReviewError):
+        shadow_queue.get(review_id)
+    assert any("[Paper]" in html and "order submitted" in html
+              for _cid, html in api.sent_messages)
+    assert paper_chat.resolutions
+    assert shadow_chat.resolutions == []
+
+
+def test_unrecognized_account_callback_data_falls_through_to_review_regex(tmp_path):
+    # "acct:bogus" matches neither _ACCOUNT_CALLBACK_RE nor _CALLBACK_RE --
+    # must land on the existing "Unrecognized action" path, not raise.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, "acct:bogus")]])
+    poller = make_poller(api, FakeChatService(), app_state)
+
+    poller.poll_once()
+
+    assert app_state.get(TELEGRAM_ACCOUNT_KEY) is None  # nothing persisted
+    assert api.answered_callbacks == [("cb1", "Unrecognized action.")]

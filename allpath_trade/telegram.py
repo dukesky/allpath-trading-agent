@@ -34,7 +34,9 @@ from collections.abc import Callable
 from typing import Any
 
 from allpath_trade.execution import ExecutionError
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.store.app_state import (
+    TELEGRAM_ACCOUNT_KEY,
     TELEGRAM_CHAT_ID_KEY,
     TELEGRAM_OFFSET_KEY,
     TELEGRAM_USER_ID_KEY,
@@ -278,6 +280,21 @@ _TYPING_RESEND_SECONDS = 4
 # compared against a wrong-length slice of the stored hash.
 _CALLBACK_RE = re.compile(r"^rv:(approve|reject):(\d+):([0-9a-f]{16})\Z")
 
+# `acct:<paper|shadow>` -- the `/account` command's own inline-button
+# callback_data (shadow-dual-active T5). No nonce: unlike an approve/reject
+# button (which authorizes a real trading action and so needs the
+# single-use-token belt described on `_resolve_review_callback`), switching
+# which account THIS chat talks to is not itself a sensitive action -- the
+# chat/user binding check every callback already goes through
+# (`_handle_callback_query`) is the only gate this needs.
+_ACCOUNT_CALLBACK_RE = re.compile(r"^acct:(paper|shadow)\Z")
+
+# The account a fresh (or pre-T5) pairing's chat talks to before anyone has
+# ever run `/account` -- the spec's chosen default for the Telegram surface,
+# independent of the web UI's own default (`store.accounts.DEFAULT_ACCOUNT`,
+# "paper" -- spec: "手机和电脑各自有上下文").
+_DEFAULT_TELEGRAM_ACCOUNT = "shadow"
+
 
 class TelegramPoller:
     """Long-polls Telegram's `getUpdates`, pairs a single chat via `/start
@@ -289,10 +306,20 @@ class TelegramPoller:
     `serve` runs on a daemon thread -- call `poll_once` forever, backing off
     on repeated failure, until `stop` is set.
 
-    `chat_service` is duck-typed as `send(text: str, source: str = "web") ->
-    str` -- that `source` keyword is `ChatService`'s (Task 4 in the design
-    plan); this class only ever needs the interface, not the concrete type,
-    so it has no import-time dependency on `chat_service.py`.
+    `chat_service` (shadow-dual-active T5) is duck-typed as `send(text: str,
+    source: str = "web") -> str` -- that `source` keyword is `ChatService`'s
+    (Task 4 in the design plan); this class only ever needs the interface,
+    not the concrete type, so it has no import-time dependency on
+    `chat_service.py`. As of T5 the constructor also accepts a `{account:
+    chat_service}` MAPPING -- production (`web/app.py`'s `_start_telegram`)
+    always passes `app.state.chat_services`, routing paired-chat text to
+    whichever account this chat is currently talking to (the `/account`
+    command, defaulting to shadow -- see `_telegram_account`). A bare
+    single object (every pre-T5 test's `FakeChatService()`) is wrapped
+    transparently into `{"paper": obj, "shadow": obj}` by `__init__` -- both
+    "accounts" resolve to the exact same object, so single-account test
+    behavior is completely unchanged; only real, dict-based multi-account
+    callers see any different routing.
 
     `holder` is duck-typed as `get() -> object` where the returned object
     exposes `.app_state` and `.settings.web_token` (the shape
@@ -320,9 +347,35 @@ class TelegramPoller:
     def __init__(self, api: TelegramAPI, chat_service: Any, holder: Any,
                  stop: threading.Event) -> None:
         self.api = api
-        self.chat_service = chat_service
+        self._chat_services: dict[str, Any] = (
+            chat_service if isinstance(chat_service, dict)
+            else {"paper": chat_service, "shadow": chat_service})
         self.holder = holder
         self.stop = stop
+
+    @property
+    def chat_service(self) -> Any:
+        """The ChatService for whichever account THIS chat is currently
+        talking to (`_telegram_account`) -- see `__init__`'s docstring for
+        why this is a property (account-routed) rather than the plain
+        attribute it used to be. Falls back to whatever `"paper"` maps to
+        if the current account key is somehow missing from the dict (should
+        never happen in production -- `_chat_services` is always seeded
+        with both `store.accounts.ACCOUNTS` entries -- but a partial/custom
+        test double is not required to provide both keys)."""
+        services = self._chat_services
+        return services.get(self._telegram_account(), services.get(DEFAULT_ACCOUNT))
+
+    def _telegram_account(self) -> str:
+        """Which account (`paper`/`shadow`) THIS paired chat currently
+        talks to -- independent of the web UI's own `account` cookie (spec:
+        "手机和电脑各自有上下文"). Unset (a fresh pairing, or a pre-T5
+        pairing predating `TELEGRAM_ACCOUNT_KEY`) or an unrecognized stored
+        value both read as `_DEFAULT_TELEGRAM_ACCOUNT` ("shadow") -- same
+        "never resolve to an unscoped/third partition, degrade to a known
+        value instead" posture as `web/account_ctx.py`'s `current_account`."""
+        raw = self.app_state.get(TELEGRAM_ACCOUNT_KEY)
+        return raw if raw and is_valid_account(raw) else _DEFAULT_TELEGRAM_ACCOUNT
 
     @property
     def app_state(self) -> Any:
@@ -483,8 +536,32 @@ class TelegramPoller:
             # Counted by the caller, not logged per-message.
             return "dropped"
 
+        # shadow-dual-active T5: "/account" (paired chats only -- checked
+        # above, same gate every other paired-chat command goes through)
+        # offers the inline Paper/Shadow switcher. Exact command match, same
+        # "@botname"-suffix stripping as "/start" above.
+        if command == "/account":
+            self._handle_account_command(chat_id)
+            return None
+
         self._handle_chat_text(chat_id, text)
         return None
+
+    def _handle_account_command(self, chat_id: str) -> None:
+        """`/account` reply: an inline Paper/Shadow keyboard
+        (`callback_data` `acct:<name>`, handled by `_handle_callback_query`
+        below). Tells the user which account this chat is on right now, not
+        just offering the choice blind."""
+        current = self._telegram_account()
+        keyboard = {"inline_keyboard": [[
+            {"text": "Paper", "callback_data": "acct:paper"},
+            {"text": "Shadow", "callback_data": "acct:shadow"},
+        ]]}
+        self.api.send_message(
+            chat_id,
+            f"This chat is currently on <b>{current.capitalize()}</b>. "
+            "Choose which account it talks to:",
+            reply_markup=keyboard)
 
     def _handle_pairing(self, chat_id: str, chat_type: Any, from_id: Any,
                          token: str, message_id: Any) -> bool:
@@ -565,6 +642,12 @@ class TelegramPoller:
                 or paired_user_id is None or str(from_id) != paired_user_id):
             return False
 
+        account_match = _ACCOUNT_CALLBACK_RE.match(data)
+        if account_match:
+            self._handle_account_callback(
+                account_match.group(1), chat_id, message_id, callback_id)
+            return True
+
         match = _CALLBACK_RE.match(data)
         if not match:
             # Malformed/unrecognized callback_data from an otherwise
@@ -595,6 +678,23 @@ class TelegramPoller:
         self.api.send_message(chat_id, to_telegram_html(outcome_line))
         return True
 
+    def _handle_account_callback(self, account: str, chat_id: str,
+                                 message_id: Any, callback_id: Any) -> None:
+        """A tap on the `/account` command's Paper/Shadow inline button.
+        Persists the choice (`TELEGRAM_ACCOUNT_KEY`), removes the buttons
+        (a resolved choice, same "no live buttons on a settled action"
+        pattern the review Approve/Reject buttons follow), and confirms in
+        chat -- so switching is never silent."""
+        self.app_state.set(TELEGRAM_ACCOUNT_KEY, account)
+        if isinstance(callback_id, str):
+            self.api.answer_callback_query(callback_id, f"Switched to {account.capitalize()}")
+        if isinstance(message_id, int):
+            self.api.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+        self.api.send_message(
+            chat_id,
+            f"Switched to <b>{account.capitalize()}</b>. "
+            f"This chat now talks to your {account} account.")
+
     def _resolve_review_callback(self, review_id: int, nonce: str,
                                   action: str) -> tuple[str, str, bool]:
         """Approve/reject `review_id` through the exact same
@@ -620,9 +720,25 @@ class TelegramPoller:
         The nonce check happens here, AFTER the chat/user binding
         `_handle_callback_query` already verified -- see that method's
         docstring for why the binding, not this nonce, is the real
-        authorization boundary."""
+        authorization boundary.
+
+        shadow-dual-active T5 (row-bound, CARRIED from T4's review: "until
+        this task's row-bound lookup lands, shadow's... Telegram approval
+        buttons resolve through the paper queue"): resolves `review_id` to
+        its OWN account via `ReviewQueue.locate` FIRST, then acts through
+        THAT account's own bundle -- never `self.holder.get()`'s bare
+        `.queue`/`.strategies` (the paper-only legacy alias), regardless of
+        which account this Telegram chat is currently on. `outcome_line` is
+        prefixed `[Paper]`/`[Shadow]` for the ROW's account -- the account
+        concerned, which may differ from `self._telegram_account()`."""
         c = self.holder.get()
-        queue = c.queue
+        located = c.queue.locate(review_id)
+        if located is None:
+            return "That review no longer exists.", "Not found", False
+        account = located[0]
+        bundle = c.accounts[account] if account != DEFAULT_ACCOUNT else c
+        queue = bundle.queue
+        prefix = f"[{account.capitalize()}] "
         try:
             row = queue.get(review_id)
         except ReviewError:
@@ -648,17 +764,25 @@ class TelegramPoller:
                 # back into this chat -- the web conversation still gets the
                 # receipt row either way, since that append happens before
                 # the mirror decision.
-                self.chat_service.note_resolution(
-                    f"You resolved #{review_id}. Result: {summary}",
-                    source="telegram")
+                #
+                # Row-bound: the receipt goes into the ROW's OWN account's
+                # ChatService (`account`), not `self.chat_service` (the
+                # CURRENT telegram account's) -- a shadow row resolved while
+                # this chat happens to be on paper must echo into shadow's
+                # own conversation, not paper's.
+                service = self._chat_services.get(account)
+                if service is not None:
+                    service.note_resolution(
+                        f"You resolved #{review_id}. Result: {summary}",
+                        source="telegram")
 
         if action == "reject":
             try:
                 queue.reject(review_id, note="rejected via Telegram")
             except ReviewError as exc:
-                return f"Not processed: {exc}", "Not processed", True
+                return f"{prefix}Not processed: {exc}", "Not processed", True
             _echo("rejected (rejected via Telegram)")
-            return f"❌ Rejected #{review_id}.", "Rejected", True
+            return f"{prefix}❌ Rejected #{review_id}.", "Rejected", True
 
         # action == "approve"
         try:
@@ -674,31 +798,38 @@ class TelegramPoller:
             # so explicitly, rather than just "left pending", is the honest
             # version -- a bare "left pending" with no live buttons and no
             # explanation reads as a stuck bot, not a stuck review.
-            message = (f"⚠️ Revision #{review_id} failed re-validation "
+            message = (f"{prefix}⚠️ Revision #{review_id} failed re-validation "
                       f"({exc}) and stayed pending — reopen from the app.")
             return message, "Left pending: re-validation failed", True
         except ReviewError as exc:
-            return f"Not processed: {exc}", "Not processed", True
+            return f"{prefix}Not processed: {exc}", "Not processed", True
         except ExecutionError as exc:
             _echo(f"execution failed: {exc}")
-            message = f"⚠️ Review #{review_id} claimed, but execution failed: {exc}"
+            message = f"{prefix}⚠️ Review #{review_id} claimed, but execution failed: {exc}"
             return message, "Execution failed", True
 
         if row["kind"] == "strategy_revision":
             message = (f"Revision applied to {row['strategy_id']}."
-                      + c.strategies.rearm_warning(row['strategy_id']))
+                      + bundle.strategies.rearm_warning(row['strategy_id']))
             _echo(f"revision applied to {row['strategy_id']}")
-            return f"✅ Approved #{review_id} — {message}", "Approved", True
+            return f"{prefix}✅ Approved #{review_id} — {message}", "Approved", True
 
         if not result.submitted:
             reasons = "; ".join(result.decision.reasons)
             _echo(f"blocked by the risk gate ({reasons})")
-            return (f"⚠️ #{review_id} rejected by the risk gate: {reasons}",
+            return (f"{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
                     "Blocked by risk gate", True)
         _echo("order submitted")
-        return f"✅ Approved #{review_id} — order submitted.", "Approved", True
+        return f"{prefix}✅ Approved #{review_id} — order submitted.", "Approved", True
 
     def _handle_chat_text(self, chat_id: str, text: str) -> None:
+        # Captured once, up front: this chat's account decides BOTH which
+        # ChatService the text is routed to (`self.chat_service`, a
+        # property reading the same thing) AND which prefix the reply
+        # carries -- reading it twice (once here, once implicitly inside
+        # the property) could theoretically disagree if `/account` raced
+        # this turn, which prefixing off this one captured value rules out.
+        account = self._telegram_account()
         stop_typing = threading.Event()
 
         def _keep_typing() -> None:
@@ -718,8 +849,12 @@ class TelegramPoller:
         ticker = threading.Thread(target=_keep_typing, daemon=True,
                                   name="telegram-typing")
         ticker.start()
+        # The captured `account`'s own service, not the `self.chat_service`
+        # property (which would re-read `_telegram_account()` fresh) -- see
+        # the comment above `account = self._telegram_account()`.
+        service = self._chat_services.get(account, self._chat_services.get(DEFAULT_ACCOUNT))
         try:
-            reply = self.chat_service.send(text, source="telegram")
+            reply = service.send(text, source="telegram")
         finally:
             stop_typing.set()
             ticker.join(timeout=1)
@@ -742,6 +877,12 @@ class TelegramPoller:
                 f"reply split into {len(chunks)} chunks (cap "
                 f"{MAX_TELEGRAM_REPLY_CHUNKS}); truncating")
             chunks = [*chunks[:MAX_TELEGRAM_REPLY_CHUNKS], "(reply truncated: too long for Telegram)"]
+        # shadow-dual-active T5: every bot message concerning one account
+        # carries its `[Paper]`/`[Shadow]` prefix -- applied to the FIRST
+        # chunk only (not every split chunk of one logical reply, which
+        # would read as noisy repetition) -- the account concerned is
+        # whichever this turn was routed to.
+        chunks[0] = f"[{account.capitalize()}] {chunks[0]}"
         for chunk in chunks:
             self.api.send_message(chat_id, chunk)
 
