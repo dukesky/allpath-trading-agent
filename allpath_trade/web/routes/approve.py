@@ -92,8 +92,19 @@ def _confirm_context(c, row) -> dict:
         "trigger_price": None, "current_price": None, "price_class": "",
         "day_change_pct": None, "deviation_pct": None, "est_shares": None,
         "market_open": False, "rationale": "", "diff_rows": [],
-        "stale": False,
+        "stale": False, "shadow_before": None, "shadow_after": None,
     }
+    if kind == "shadow_edit":
+        # shadow-dual-active T6: no order to price and no strategy diff --
+        # just the before/after ledger snapshot the tool recorded, rendered
+        # by the shared `shadow_before_after` macro (_shadow_diff.html), the
+        # same one the in-app review card uses (approve_confirm.html.
+        ctx["side"] = "Ledger edit"
+        ctx["amount_label"] = row["action"]
+        snapshot = json.loads(row["snapshot"]) if row["snapshot"] else {}
+        ctx["shadow_before"] = snapshot.get("before")
+        ctx["shadow_after"] = snapshot.get("after")
+        return ctx
     if kind == "strategy_revision":
         # I3: a revision confirm page has no order to price -- the template
         # gates the whole price/market block on `kind == "order"` (see
@@ -276,6 +287,10 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
         return _result_page(
             request, ok=True, account=b.account,
             message=f"Revision applied to {row['strategy_id']}.")
+    if row["kind"] == "shadow_edit":
+        return _result_page(
+            request, ok=True, account=b.account,
+            message=f"{row['action']} applied to the shadow ledger.")
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
         return _result_page(request, ok=False, account=b.account,

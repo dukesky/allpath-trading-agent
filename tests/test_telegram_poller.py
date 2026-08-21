@@ -1439,3 +1439,68 @@ def test_unrecognized_account_callback_data_falls_through_to_review_regex(tmp_pa
 
     assert app_state.get(TELEGRAM_ACCOUNT_KEY) is None  # nothing persisted
     assert api.answered_callbacks == [("cb1", "Unrecognized action.")]
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: shadow_edit callback resolution -- approve()
+# returns None for this kind too (mirrors strategy_revision), same
+# "outcome + toast + acted" contract, row-bound just like every other kind.
+# ---------------------------------------------------------------------------
+
+def test_paired_approve_callback_applies_a_shadow_edit(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    conn = connect(tmp_path / "reviews.db")
+    paper_queue = make_order_queue(tmp_path, conn=conn, account="paper")
+    shadow_queue = make_order_queue(tmp_path, conn=conn, account="shadow")
+    applied = []
+    shadow_queue.set_shadow_edit_applier(
+        lambda op, args, before: applied.append((op, args, before)))
+    review_id = int(shadow_queue.add_shadow_edit(
+        op="set_cash", ticker="", action="Set cash", args={"amount": "1"},
+        before={"cash": "0"}, after={"cash": "1"}))
+    nonce = nonce_for(shadow_queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}", message_id=42)]])
+    shadow_chat = FakeChatService()
+    poller = make_review_poller(
+        api, {"paper": FakeChatService(), "shadow": shadow_chat}, app_state,
+        paper_queue, shadow_queue=shadow_queue)
+
+    poller.poll_once()
+
+    assert applied == [("set_cash", {"amount": "1"}, {"cash": "0"})]
+    assert shadow_queue.get(review_id)["status"] == "approved"
+    assert api.edited_markups == [("111", 42, None)]
+    assert any("Set cash applied to the shadow ledger" in html
+              for _cid, html in api.sent_messages)
+    assert shadow_chat.resolutions == [
+        {"line": f"You resolved #{review_id}. Result: Set cash applied",
+         "source": "telegram"}]
+
+
+def test_paired_approve_callback_shadow_edit_stale_stays_pending(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    conn = connect(tmp_path / "reviews.db")
+    paper_queue = make_order_queue(tmp_path, conn=conn, account="paper")
+    shadow_queue = make_order_queue(tmp_path, conn=conn, account="shadow")
+
+    def boom(op, args, before):
+        raise RevisionValidationError("ledger changed since this proposal")
+
+    shadow_queue.set_shadow_edit_applier(boom)
+    review_id = int(shadow_queue.add_shadow_edit(
+        op="set_cash", ticker="", action="Set cash", args={"amount": "1"},
+        before={"cash": "0"}, after={"cash": "1"}))
+    nonce = nonce_for(shadow_queue, review_id)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    poller = make_review_poller(
+        api, {"paper": FakeChatService(), "shadow": FakeChatService()}, app_state,
+        paper_queue, shadow_queue=shadow_queue)
+
+    poller.poll_once()
+
+    assert shadow_queue.get(review_id)["status"] == "pending"
+    assert any("failed re-validation" in html for _cid, html in api.sent_messages)

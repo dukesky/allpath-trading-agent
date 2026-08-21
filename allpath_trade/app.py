@@ -168,6 +168,19 @@ def _build_account_components(account: str, *, settings: Settings,
     # review approved via the web/CLI must work even when no LLM is
     # configured, for either account.
     queue.set_revision_applier(apply_revision_factory(strategies))
+    if account == "shadow":
+        # shadow-dual-active T6: the ledger-edit applier is only ever
+        # meaningful on the shadow account (there is no ledger to edit on
+        # paper) -- `ReviewQueue.add_shadow_edit` already refuses to queue a
+        # row on any other account's instance, so leaving this unset for
+        # paper is a second, structural belt on the same invariant. `broker`
+        # here IS the ShadowLedger instance for this account (see
+        # `_build_broker`); `conn` is the exact same connection object it was
+        # constructed with, which `apply_shadow_edit_factory`'s docstring
+        # depends on for its nested-transaction atomicity.
+        from allpath_trade.agent.shadow_tools import apply_shadow_edit_factory
+
+        queue.set_shadow_edit_applier(apply_shadow_edit_factory(broker, conn))
     conversations = ConversationStore(conn, account=account)
     reports = ReportStore(conn, account=account)
     memory = MemoryStore(settings.memory_dir, conn, account=account)

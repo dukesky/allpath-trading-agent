@@ -971,3 +971,142 @@ def test_locate_returns_none_for_a_row_with_a_corrupted_account_column(tmp_path)
     conn.commit()
 
     assert queue.locate(rid) is None
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: shadow_edit kind -- add_shadow_edit/
+# _approve_shadow_edit. `apply_shadow_edit_factory` (agent/shadow_tools.py)
+# has its own thorough test suite (tests/test_shadow_tools.py) for the
+# staleness/atomicity math; these tests exercise the store-layer contract
+# only -- claim discipline, rollback-to-pending, applier injection.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def shadow_queue(tmp_path):
+    return ReviewQueue(connect(tmp_path / "s.db"), None, account="shadow")
+
+
+def add_shadow_edit(queue, **over):
+    kwargs = {"op": "set_cash", "ticker": "", "action": "Set cash",
+              "args": {"amount": "500"}, "before": {"cash": "0"},
+              "after": {"cash": "500"}}
+    kwargs.update(over)
+    return queue.add_shadow_edit(**kwargs)
+
+
+def test_add_shadow_edit_row_shape(shadow_queue):
+    rid = add_shadow_edit(shadow_queue, action="Set cash")
+    row = shadow_queue.get(rid)
+    assert row["kind"] == "shadow_edit"
+    assert row["account"] == "shadow"
+    assert row["action"] == "Set cash"
+    assert row["strategy_id"] == ""
+    assert row["rule_id"] == "shadow_edit"
+    assert row["rule_type"] == "shadow_edit"
+    assert row["condition"] == "set_cash"
+    assert row["status"] == "pending"
+    assert row["source"] == "chat"
+    snapshot = json.loads(row["snapshot"])
+    assert snapshot == {"op": "set_cash", "args": {"amount": "500"},
+                        "before": {"cash": "0"}, "after": {"cash": "500"}}
+
+
+def test_add_shadow_edit_rejected_on_a_non_shadow_account(tmp_path):
+    paper_queue = ReviewQueue(connect(tmp_path / "t.db"), None)
+    with pytest.raises(ReviewError, match="shadow account"):
+        add_shadow_edit(paper_queue)
+
+
+def test_approve_shadow_edit_calls_applier_and_marks_applied(shadow_queue):
+    calls = []
+
+    def applier(op, args, before):
+        calls.append((op, args, before))
+
+    shadow_queue.set_shadow_edit_applier(applier)
+    rid = add_shadow_edit(shadow_queue)
+
+    result = shadow_queue.approve(rid)
+
+    assert result is None
+    assert calls == [("set_cash", {"amount": "500"}, {"cash": "0"})]
+    row = shadow_queue.get(rid)
+    assert row["status"] == "approved"
+    assert json.loads(row["execution_result"]) == {"applied": True}
+
+
+def test_approve_shadow_edit_without_applier_raises_and_leaves_pending(shadow_queue):
+    rid = add_shadow_edit(shadow_queue)
+    with pytest.raises(ReviewError):
+        shadow_queue.approve(rid)
+    assert shadow_queue.get(rid)["status"] == "pending"
+
+
+def test_approve_shadow_edit_validation_error_leaves_row_pending(shadow_queue):
+    def boom(op, args, before):
+        raise RevisionValidationError("ledger changed since this proposal")
+
+    shadow_queue.set_shadow_edit_applier(boom)
+    rid = add_shadow_edit(shadow_queue)
+
+    with pytest.raises(RevisionValidationError):
+        shadow_queue.approve(rid)
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "pending"
+    assert row["resolved_ts"] is None
+    # still rejectable
+    shadow_queue.reject(rid, note="stale")
+    assert shadow_queue.get(rid)["status"] == "rejected"
+
+
+def test_approve_shadow_edit_runtime_error_recorded_and_reraised(shadow_queue):
+    def boom(op, args, before):
+        raise RuntimeError("disk full")
+
+    shadow_queue.set_shadow_edit_applier(boom)
+    rid = add_shadow_edit(shadow_queue)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        shadow_queue.approve(rid)
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "approved"
+    assert json.loads(row["execution_result"]) == {"error": "disk full"}
+
+
+def test_approve_shadow_edit_twice_raises(shadow_queue):
+    calls = []
+    shadow_queue.set_shadow_edit_applier(lambda op, args, before: calls.append(1))
+    rid = add_shadow_edit(shadow_queue)
+    shadow_queue.approve(rid)
+    with pytest.raises(ReviewError):
+        shadow_queue.approve(rid)
+    assert calls == [1]
+
+
+def test_approve_shadow_edit_with_corrupt_snapshot_raises_and_leaves_pending(shadow_queue):
+    shadow_queue.set_shadow_edit_applier(lambda op, args, before: None)
+    rid = add_shadow_edit(shadow_queue)
+    shadow_queue._conn.execute(
+        "UPDATE pending_reviews SET snapshot=? WHERE id=?", ("not json", rid))
+    shadow_queue._conn.commit()
+
+    with pytest.raises(ReviewError):
+        shadow_queue.approve(rid)
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "pending"
+    assert row["execution_result"] is None
+
+
+def test_reject_shadow_edit_never_calls_applier(shadow_queue):
+    calls = []
+    shadow_queue.set_shadow_edit_applier(lambda op, args, before: calls.append(1))
+    rid = add_shadow_edit(shadow_queue)
+
+    shadow_queue.reject(rid, note="no")
+
+    assert calls == []
+    row = shadow_queue.get(rid)
+    assert row["status"] == "rejected" and row["resolution_note"] == "no"

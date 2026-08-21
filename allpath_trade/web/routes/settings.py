@@ -4,14 +4,22 @@ import re
 import secrets
 import sys
 from decimal import Decimal
+from urllib.parse import quote
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from allpath_trade.agent.shadow_tools import (
+    full_snapshot,
+    parse_shadow_csv,
+    preview_import,
+)
 from allpath_trade.config import Settings, describe_validation_error
 from allpath_trade.llm.prices import PRICES_UPDATED, estimate_cost
+from allpath_trade.notify import events
+from allpath_trade.notify.dispatch import notify_review_queued
 from allpath_trade.notify.email import EmailNotifier
 from allpath_trade.notify.ntfy import NtfyNotifier
 from allpath_trade.scheduler import reschedule_sentinel_job
@@ -214,12 +222,65 @@ def _usage_context(c) -> dict:
     }
 
 
+# --- Shadow ledger (Settings -> Brokerage), shadow-dual-active T6 ----------
+
+def _shadow_ledger_summary(b) -> dict:
+    """Ledger summary card context: cash, N positions, last audit ts, and
+    the oldest `last_price_ts` among current positions (the staleness
+    signal the deliverable calls "price as of ..." -- `None` when there are
+    no positions, or none have ever been priced yet). Reads `b.broker`
+    (the shadow bundle's `ShadowLedger`) through its public `Broker`
+    interface only, plus one raw read of `shadow_orders` for the audit
+    trail's own timestamp -- there is no dedicated accessor for "the most
+    recent audit row" on `ShadowLedger` itself, and this is read-only."""
+    ledger = b.broker
+    account = ledger.get_account()
+    positions = ledger.get_positions()
+    last_audit = b.conn.execute(
+        "SELECT ts FROM shadow_orders ORDER BY id DESC LIMIT 1").fetchone()
+    oldest_price = b.conn.execute(
+        "SELECT MIN(last_price_ts) AS ts FROM shadow_positions"
+        " WHERE last_price_ts IS NOT NULL").fetchone()
+    return {
+        "cash": account.cash, "position_count": len(positions),
+        "last_audit_ts": last_audit["ts"] if last_audit else None,
+        "oldest_price_ts": oldest_price["ts"] if oldest_price else None,
+    }
+
+
+def _shadow_context(c) -> dict:
+    return {"shadow": _shadow_ledger_summary(c.accounts["shadow"])}
+
+
+def _notify_shadow_edit_queued(c, b, review_id: int, action_title: str) -> None:
+    # Best-effort, never breaks the proposal -- same reasoning as
+    # agent/shadow_tools.py's own `_notify_queued` (the CSV/reset routes
+    # queue directly through `add_shadow_edit` rather than through a chat
+    # tool call, so they need their own copy of this one-line wiring rather
+    # than reusing a closure built for a registered tool). `c` (the shared
+    # `Components`) carries the process-wide notifier/app_state/settings;
+    # `b` (the shadow bundle) carries the queue this review was just added to.
+    try:
+        approve_url = events.approve_link(c.settings.web_base_url, review_id)
+        subject, body = events.review_queued(
+            review_id=review_id, ticker="", action=action_title,
+            strategy_id="", approve_url=approve_url)
+        notify_review_queued(
+            queue=b.queue, notifier=c.notifier, app_state=c.app_state,
+            telegram_bot_token=c.settings.telegram_bot_token, review_id=review_id,
+            subject=subject, body=body)
+    except Exception as exc:  # noqa: BLE001 — see docstring above
+        print(f"[settings] shadow edit notification failed: {exc}", file=sys.stderr)
+
+
 @router.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request, saved: str = "") -> HTMLResponse:
+def settings_page(request: Request, saved: str = "", notice: str = "",
+                  error: str = "") -> HTMLResponse:
     c = request.app.state.holder.get()
     s = c.settings
     return templates.TemplateResponse(request, "settings.html", {
-        "page": "settings", "s": s, "saved": bool(saved), "error": "",
+        "page": "settings", "s": s, "saved": bool(saved), "error": error,
+        "notice": notice,
         "masks": {f: _mask(str(getattr(s, f, ""))) for f in SECRET_FIELDS},
         # Fetched (or served from cache/fallback) for the *active* provider
         # only -- all three model fields share one provider, so one catalog
@@ -229,7 +290,7 @@ def settings_page(request: Request, saved: str = "") -> HTMLResponse:
         "model_options": models_catalog.list_models(s.llm_provider),
         "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
         "tabs": TABS, "active_tab": DEFAULT_TAB,
-        **_usage_context(c), **nav_context(request)})
+        **_usage_context(c), **_shadow_context(c), **nav_context(request)})
 
 
 @router.post("/settings")
@@ -294,7 +355,8 @@ async def save(request: Request) -> Response:
             # otherwise the error banner at the top of the page points at a
             # hidden panel and the user has no idea what to fix.
             "tabs": TABS, "active_tab": _error_tab(exc),
-            **_usage_context(c), **nav_context(request)}, status_code=400)
+            **_usage_context(c), **_shadow_context(c), **nav_context(request)},
+            status_code=400)
 
     old_interval = current.sentinel_interval_minutes
     store = holder.store()
@@ -456,3 +518,104 @@ def reset_token(request: Request) -> Response:
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(COOKIE)
     return response
+
+
+# --- Shadow ledger: CSV import + reset (Settings -> Brokerage) -------------
+#
+# Both routes below queue a `shadow_edit` proposal through the exact same
+# `ReviewQueue.add_shadow_edit`/approval pipeline the chat tools use
+# (agent/shadow_tools.py) -- there is no second write path here, only a
+# second way to REACH the one write path (spec: "Everything through the
+# SAME approval kind — one write path"). Redirects carry `#brokerage` so the
+# tab-switcher script (settings.html's inline <script>) reopens the right
+# tab -- built by hand (not `dashboard.error_redirect`/`notice_redirect`,
+# which append `?...` AFTER whatever `target` string they're given) since a
+# query string must precede a URL fragment, never follow it.
+
+def _shadow_redirect(*, notice: str = "", error: str = "") -> RedirectResponse:
+    param = f"notice={quote(notice)}" if notice else f"error={quote(error)}"
+    return RedirectResponse(f"/settings?{param}#brokerage", status_code=303)
+
+
+@router.post("/settings/shadow/csv-preview", response_class=HTMLResponse)
+async def shadow_csv_preview(request: Request) -> HTMLResponse:
+    """Parses+validates an uploaded CSV and renders a preview fragment
+    (htmx-swapped into `#shadow-csv-result`, settings.html) -- queues
+    NOTHING. `csv_text` is round-tripped back to the browser inside the
+    preview's hidden field so `shadow_csv_confirm` below can re-parse the
+    exact same text server-side (one parser, one source of truth, rather
+    than trusting a pre-parsed row list a client could have tampered with
+    between the two requests). Reads the upload via `request.form()` (same
+    idiom as this module's `save`/`test_email` routes) rather than a typed
+    `UploadFile = File(...)` default -- avoids a mutable-default-argument
+    lint finding for no behavior difference."""
+    form = await request.form()
+    upload = form.get("csv_file")
+    if upload is None or not hasattr(upload, "read"):
+        return templates.TemplateResponse(request, "_shadow_csv_result.html", {
+            "errors": ["Choose a CSV file first."], "rows": [],
+            "cash": None, "csv_text": ""})
+    raw = await upload.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return templates.TemplateResponse(request, "_shadow_csv_result.html", {
+            "errors": ["File is not valid UTF-8 text."], "rows": [],
+            "cash": None, "csv_text": ""})
+    rows, cash, errors = parse_shadow_csv(text)
+    return templates.TemplateResponse(request, "_shadow_csv_result.html", {
+        "errors": errors, "rows": rows if not errors else [],
+        "cash": cash if not errors else None,
+        "csv_text": text if not errors else ""})
+
+
+@router.post("/settings/shadow/csv-confirm")
+def shadow_csv_confirm(request: Request, csv_text: str = Form(...)) -> Response:
+    """Re-parses `csv_text` (never trusts the preview step's own output) and,
+    only if it's still clean, queues ONE bulk `shadow_edit` proposal
+    (`op="import"`) covering every row -- the approval applier
+    (`agent.shadow_tools.apply_shadow_edit_factory`) applies them all inside
+    one transaction, so a failure partway through leaves none of them
+    applied (spec: atomic)."""
+    rows, cash, errors = parse_shadow_csv(csv_text)
+    if errors:
+        return _shadow_redirect(
+            error="CSV import failed validation — re-upload and preview again.")
+    c = request.app.state.holder.get()
+    b = c.accounts["shadow"]
+    before = full_snapshot(b.broker)
+    after = preview_import(before, rows, cash)
+    title = f"Import {len(rows)} position(s) from CSV"
+    if cash is not None:
+        title += " (cash included)"
+    try:
+        rid = b.queue.add_shadow_edit(
+            op="import", ticker="", action=title,
+            args={"rows": rows, "cash": (str(cash) if cash is not None else None)},
+            before=before, after=after, source="chat")
+    except Exception as exc:  # noqa: BLE001 — a queue failure must not 500
+        return _shadow_redirect(error=f"Could not queue import: {exc}")
+    _notify_shadow_edit_queued(c, b, rid, title)
+    return _shadow_redirect(
+        notice=f"Ledger import queued for your approval as #{rid}.")
+
+
+@router.post("/settings/shadow/reset")
+def shadow_reset(request: Request) -> Response:
+    """Queues a `shadow_edit` proposal (`op="reset"`) that, on approval,
+    empties every position and zeroes cash -- same one write path as every
+    other shadow edit. The confirm() dialog guarding this button lives in
+    settings.html; this route itself has no further gate beyond that."""
+    c = request.app.state.holder.get()
+    b = c.accounts["shadow"]
+    before = full_snapshot(b.broker)
+    after = {"positions": {}, "cash": "0"}
+    try:
+        rid = b.queue.add_shadow_edit(
+            op="reset", ticker="", action="Reset ledger", args={},
+            before=before, after=after, source="chat")
+    except Exception as exc:  # noqa: BLE001 — a queue failure must not 500
+        return _shadow_redirect(error=f"Could not queue reset: {exc}")
+    _notify_shadow_edit_queued(c, b, rid, "Reset ledger")
+    return _shadow_redirect(
+        notice=f"Ledger reset queued for your approval as #{rid}.")

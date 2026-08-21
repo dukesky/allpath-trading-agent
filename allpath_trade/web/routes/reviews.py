@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import itertools
 import json
+import sys
 import time
 
 import yaml
@@ -389,7 +390,23 @@ def _echo_resolution(request: Request, account: str, review_id: int,
     services = getattr(request.app.state, "chat_services", None)
     service = services.get(account) if services else None
     if service is not None and row_source == "chat":
-        service.note_resolution(f"You resolved #{review_id}. Result: {summary}")
+        # shadow-dual-active T6: `note_resolution` rebuilds the ChatService's
+        # session when its cache is empty/stale (ChatService.session's own
+        # `_stale()` check), which needs an LLM configured -- true for the
+        # existing order/strategy_revision chat rows too, but never actually
+        # exercised by a real approve() POST until this task's shadow_edit
+        # rows (source="chat" always, by design: a shadow edit is always
+        # user-initiated) started hitting it in an unconfigured-LLM
+        # environment. Echoing the outcome into chat is a courtesy, not part
+        # of the approval itself (the row is already resolved by the time
+        # this runs) -- same "must never break the caller" posture as every
+        # other notification path in this codebase (see `ChatService.
+        # _call_mirror`'s identical guard, or notify/dispatch.py's module
+        # docstring).
+        try:
+            service.note_resolution(f"You resolved #{review_id}. Result: {summary}")
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            print(f"[reviews] chat echo failed: {exc}", file=sys.stderr)
 
 
 def _locate_or_404(request: Request, review_id: int):
@@ -470,6 +487,17 @@ def approve(request: Request, review_id: int) -> Response:
                   + b.strategies.rearm_warning(row['strategy_id']))
         _echo_resolution(request, account, review_id, row_source,
                          f"revision applied to {row['strategy_id']}")
+        return _back_to_reviews_ok(message)
+
+    if kind == "shadow_edit":
+        # shadow-dual-active T6: approve() returns None for shadow_edit rows
+        # too (mirrors strategy_revision above) -- there is no
+        # ExecutionResult, just the ledger write the applier already made.
+        # `row['action']` is the human title the tool built at propose time
+        # ("Set position AAPL", "Correct fill #12", ...).
+        message = f"{row['action']} applied to the shadow ledger."
+        _echo_resolution(request, account, review_id, row_source,
+                         f"{row['action']} applied")
         return _back_to_reviews_ok(message)
 
     if not result.submitted:

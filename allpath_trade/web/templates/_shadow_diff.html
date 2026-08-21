@@ -1,0 +1,40 @@
+{# Shared before/after mini-table for a `shadow_edit` review row -- used by
+   both the in-app review card (_review_card.html) and the unauthenticated
+   approve-link confirm page (approve_confirm.html), so the two surfaces can
+   never render a ledger edit's before/after differently.
+
+   Two shapes: a flat op (set_position/set_cash/remove_position/record_fill)
+   snapshots a handful of scalar fields (qty/avg_cost/cash/fill_price/...);
+   a bulk op (import/reset) snapshots the WHOLE book (`{"positions": {...},
+   "cash": ...}`), which would be an unreadable wall of rows if flattened
+   the same way -- rendered instead as position-count + cash summary rows.
+   Detected by the presence of a `positions` key rather than by op name, so
+   this macro stays correct even if a future op reuses either shape. #}
+{% macro shadow_before_after(before, after) %}
+{% set is_bulk = (before is mapping and 'positions' in before) or (after is mapping and 'positions' in after) %}
+<div class="table-scroll">
+<table class="shadow-edit-table">
+  <thead><tr><th></th><th>Before</th><th>After</th></tr></thead>
+  <tbody>
+  {% if is_bulk %}
+    {% set b = before if before is mapping else {'positions': {}, 'cash': '0'} %}
+    {% set a = after if after is mapping else {'positions': {}, 'cash': '0'} %}
+    <tr><td>Positions</td><td>{{ b.positions | length }}</td><td>{{ a.positions | length }}</td></tr>
+    <tr><td>Cash</td><td>{{ b.cash | money }}</td><td>{{ a.cash | money }}</td></tr>
+  {% else %}
+    {% set fields = ['ticker', 'side', 'qty', 'avg_cost', 'cash', 'fill_price'] %}
+    {% for k in fields %}
+    {% if (before and k in before) or (after and k in after) %}
+    <tr><td>{{ k }}</td>
+        <td>{{ before[k] if before and k in before else '—' }}</td>
+        <td>{{ after[k] if after and k in after else '—' }}</td></tr>
+    {% endif %}
+    {% endfor %}
+    {% if not before and not after %}
+    <tr><td colspan="3" class="muted">No position before; none after.</td></tr>
+    {% endif %}
+  {% endif %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -513,6 +514,41 @@ class _StubLLMUsage:
         return []
 
 
+class _StubAccount:
+    cash = Decimal(0)
+
+
+class _StubShadowBroker:
+    """shadow-dual-active T6: the settings page's ledger-summary card
+    (web/routes/settings.py's `_shadow_ledger_summary`) reads the shadow
+    bundle's `.broker` through the same `Broker.get_account`/`get_positions`
+    interface a real `ShadowLedger` exposes -- this stub answers "empty
+    ledger" without needing a real one."""
+
+    def get_account(self) -> _StubAccount:
+        return _StubAccount()
+
+    def get_positions(self) -> list:
+        return []
+
+
+class _StubRow:
+    def __getitem__(self, key: str) -> None:
+        return None
+
+
+class _StubConn:
+    """Stands in for the shadow bundle's `.conn` -- `_shadow_ledger_summary`
+    does one raw read each for the last audit row and the oldest
+    `last_price_ts`; both read back as "none yet" here."""
+
+    def execute(self, sql: str, params: tuple = ()) -> _StubConn:
+        return self
+
+    def fetchone(self) -> _StubRow:
+        return _StubRow()
+
+
 @dataclass
 class _StubComponents:
     settings: Settings
@@ -532,7 +568,15 @@ class _StubComponents:
         # settings included -- a stub Components needs a matching stub
         # "shadow" bundle for account_ctx.bundle_for to resolve, same
         # shape (just `.queue`) as this object itself provides for paper.
-        self.accounts = {"paper": self, "shadow": SimpleNamespace(queue=_StubQueue())}
+        # T6 adds `.broker`/`.conn` -- the settings page's own shadow-ledger
+        # summary card (web/routes/settings.py's `_shadow_context`) reads
+        # both directly off `c.accounts["shadow"]`, unconditionally, on
+        # every GET/POST /settings render.
+        self.accounts = {
+            "paper": self,
+            "shadow": SimpleNamespace(
+                queue=_StubQueue(), broker=_StubShadowBroker(), conn=_StubConn()),
+        }
 
 
 def test_save_writes_through_the_holders_store_not_a_default_one(client, tmp_path):
@@ -1055,3 +1099,110 @@ def test_usage_tab_is_english_only(client):
                 output_tokens=5, purpose="memory")
     body = client.get("/settings").text
     assert_english_only(body)
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: Settings -> Brokerage -> shadow ledger (summary,
+# CSV import preview/confirm, reset) -- uses the top-level `client` fixture
+# (real build_components, so `accounts["shadow"]` is a real ShadowLedger +
+# ReviewQueue with the applier already wired, see app.py).
+# ---------------------------------------------------------------------------
+
+def test_shadow_ledger_summary_renders_on_brokerage_tab(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    b.broker.set_cash(Decimal(5000))
+
+    body = client.get("/settings").text
+
+    assert "$5,000.00" in body
+    assert "1 position" in body
+
+
+def test_shadow_csv_preview_reports_errors_and_queues_nothing(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    r = client.post("/settings/shadow/csv-preview",
+                    files={"csv_file": ("p.csv", b"AAPL,10,150\nBAD,-1,1\n", "text/csv")})
+    assert r.status_code == 200
+    assert "line 2" in r.text
+    assert "nothing was queued" in r.text
+    assert b.queue.list() == []
+
+
+def test_shadow_csv_preview_shows_a_clean_preview_table(client):
+    r = client.post("/settings/shadow/csv-preview",
+                    files={"csv_file": ("p.csv", b"AAPL,10,150\nCASH,1000\n", "text/csv")})
+    assert r.status_code == 200
+    assert "AAPL" in r.text and "10" in r.text
+    assert "Queue import for approval" in r.text
+    assert_english_only(r.text)
+
+
+def test_shadow_csv_confirm_queues_one_bulk_shadow_edit(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    r = client.post("/settings/shadow/csv-confirm",
+                    data={"csv_text": "AAPL,10,150\nMSFT,5,300\nCASH,1000\n"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    [row] = b.queue.list()
+    assert row["kind"] == "shadow_edit"
+    snapshot = row["snapshot"]
+    import json as _json
+    snapshot = _json.loads(snapshot)
+    assert snapshot["op"] == "import"
+    assert len(snapshot["args"]["rows"]) == 2
+    assert snapshot["args"]["cash"] == "1000"
+
+
+def test_shadow_csv_confirm_with_errors_queues_nothing(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    client.post("/settings/shadow/csv-confirm",
+               data={"csv_text": "AAPL,-1,150\n"}, follow_redirects=False)
+    assert b.queue.list() == []
+
+
+def test_shadow_csv_import_applies_atomically_on_approve(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    client.post("/settings/shadow/csv-confirm",
+               data={"csv_text": "AAPL,10,150\nMSFT,5,300\nCASH,2500\n"},
+               follow_redirects=False)
+    [row] = b.queue.list()
+
+    r = client.post(f"/reviews/{row['id']}/approve", follow_redirects=False)
+
+    assert r.status_code in (200, 303)
+    tickers = {p.ticker: p for p in b.broker.get_positions()}
+    assert set(tickers) == {"AAPL", "MSFT"}
+    assert tickers["AAPL"].qty == Decimal(10)
+    assert b.broker.get_account().cash == Decimal(2500)
+
+
+def test_shadow_reset_queues_a_reset_proposal(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+
+    r = client.post("/settings/shadow/reset", follow_redirects=False)
+
+    assert r.status_code == 303
+    [row] = b.queue.list()
+    assert row["action"] == "Reset ledger"
+    assert b.broker.get_positions()  # not applied yet -- still pending
+
+
+def test_shadow_reset_applies_on_approve(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    b.broker.set_cash(Decimal(9999))
+    client.post("/settings/shadow/reset", follow_redirects=False)
+    [row] = b.queue.list()
+
+    client.post(f"/reviews/{row['id']}/approve", follow_redirects=False)
+
+    assert b.broker.get_positions() == []
+    assert b.broker.get_account().cash == Decimal(0)
+
+
+def test_shadow_settings_notice_is_shown_and_english_only(client):
+    r = client.post("/settings/shadow/reset", follow_redirects=True)
+    assert "queued for your approval" in r.text
+    assert_english_only(r.text)

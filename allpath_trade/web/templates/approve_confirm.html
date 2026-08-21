@@ -1,4 +1,5 @@
 {% from "_split_diff.html" import split_diff %}
+{% from "_shadow_diff.html" import shadow_before_after %}
 <!doctype html>
 <html lang="en">
 <head>
@@ -16,6 +17,11 @@
     <p><strong>{{ side }} {{ ticker }}</strong>{% if amount_label %} · {{ amount_label }}{% endif %}</p>
     {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}
 
+    {% if kind == "shadow_edit" %}
+    <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+      {{ shadow_before_after(shadow_before, shadow_after) }}
+    </div>
+    {% endif %}
     {% if kind == "order" %}
     <div class="review-price-context" style="margin:10px 0">
       {% if trigger_price is not none %}<span class="muted">Triggered at {{ trigger_price | money }}</span>{% endif %}

@@ -772,9 +772,21 @@ class TelegramPoller:
                 # own conversation, not paper's.
                 service = self._chat_services.get(account)
                 if service is not None:
-                    service.note_resolution(
-                        f"You resolved #{review_id}. Result: {summary}",
-                        source="telegram")
+                    # shadow-dual-active T6: best-effort, same reasoning as
+                    # web/routes/reviews.py's `_echo_resolution` -- rebuilding
+                    # a stale/absent session needs an LLM configured, and the
+                    # approval/reject this echoes has already succeeded by
+                    # the time this runs. A raised LLMConfigError here must
+                    # not skip `_handle_callback_query`'s own
+                    # `answer_callback_query` call below (a stuck loading
+                    # spinner on a tap that actually worked).
+                    try:
+                        service.note_resolution(
+                            f"You resolved #{review_id}. Result: {summary}",
+                            source="telegram")
+                    except Exception as exc:  # noqa: BLE001 — see comment above
+                        print(f"[telegram] chat echo failed: {self.api._scrub(str(exc))}",
+                             file=sys.stderr)
 
         if action == "reject":
             try:
@@ -813,6 +825,14 @@ class TelegramPoller:
                       + bundle.strategies.rearm_warning(row['strategy_id']))
             _echo(f"revision applied to {row['strategy_id']}")
             return f"{prefix}✅ Approved #{review_id} — {message}", "Approved", True
+
+        if row["kind"] == "shadow_edit":
+            # shadow-dual-active T6: mirrors the strategy_revision branch
+            # above -- approve() returns None here too, just the ledger
+            # write the applier already made.
+            _echo(f"{row['action']} applied")
+            message = f"{prefix}✅ Approved #{review_id} — {row['action']} applied to the shadow ledger."
+            return message, "Approved", True
 
         if not result.submitted:
             reasons = "; ".join(result.decision.reasons)

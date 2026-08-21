@@ -338,6 +338,19 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None,
                           executor=components.executor, confirm=confirm)
     register_memory_tools(registry, memory=components.memory,
                           search=SessionSearch(components.conn, account=account))
+    if account == "shadow":
+        # shadow-dual-active T6: registered ONLY for `cli chat --account
+        # shadow` -- the default (paper) terminal session never reaches this
+        # branch, so its registry has no ledger-editing tools at all.
+        # `components.broker` here is the shadow bundle's ShadowLedger (see
+        # `_cli_chat_bundle` above); `queue=None` selects the terminal
+        # blocking-`confirm()` path (mirrors `register_action_tools` above,
+        # which is also given the same `confirm` and no `queue`/`order_sink`
+        # for this terminal session).
+        from allpath_trade.agent.shadow_tools import register_shadow_tools
+
+        register_shadow_tools(registry, ledger=components.broker, queue=None,
+                              conversation_id_fn=lambda: cid, confirm=confirm)
     # Important 3 (T5 review): the terminal agent must know which account
     # it serves, matching ChatService._build's own `account=self.account`
     # -- otherwise the shadow terminal session's system prompt renders no

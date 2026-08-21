@@ -1,4 +1,5 @@
 {% from "_split_diff.html" import split_diff %}
+{% from "_shadow_diff.html" import shadow_before_after %}
 <div class="card" id="review-{{ item['id'] }}" style="margin-bottom:12px">
   <div class="row">
     {# A chat-sourced row's `action` is the LLM's free-text reason (see
@@ -14,10 +15,26 @@
        proposal "revise strategy · TICKER". The headline for a revision
        row is now derived from the row's own `is_new` flag instead of
        echoing that sentinel. #}
-    <strong>{% if item['kind'] == 'strategy_revision' %}{{ 'new strategy' if item['is_new'] else 'revise strategy' }}{% elif item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}</strong>
+    {# shadow_edit's own `action` IS the human title (store/reviews.py's
+       add_shadow_edit, built by agent/shadow_tools.py) -- rendered
+       verbatim, same as an order row's free-text reason, and WITHOUT a
+       trailing "· TICKER" (a bulk import/reset has no single ticker). #}
+    <strong>
+    {%- if item['kind'] == 'shadow_edit' -%}
+    {{ item['action'] }}
+    {%- else -%}
+    {% if item['kind'] == 'strategy_revision' %}{{ 'new strategy' if item['is_new'] else 'revise strategy' }}{% elif item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}
+    {%- endif -%}
+    </strong>
     <span class="muted">#{{ item['id'] }}</span>
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
+  {% if item['kind'] == 'shadow_edit' %}
+  <p class="muted" style="font-size:13px;margin:6px 0">Shadow ledger edit from your chat.</p>
+  <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+    {{ shadow_before_after(item['snapshot']['before'], item['snapshot']['after']) }}
+  </div>
+  {% endif %}
   {% if item['kind'] == 'strategy_revision' %}
   {# Proposer chip + New-strategy badge: who made this proposal, and
      whether it's a brand-new strategy (spec §②) rather than a revision of
@@ -158,6 +175,16 @@
     Revision applied
     {% elif er and er.get('error') %}
     Revision failed after approval (file may not have been written) — {{ er['error'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
+    {% elif item['kind'] == 'shadow_edit' %}
+    {# Same shape as strategy_revision above: execution_result is either
+       {"applied": true} or {"error": ...} -- no order/risk-gate outcome. #}
+    {% if er and er.get('applied') %}
+    Applied to the shadow ledger
+    {% elif er and er.get('error') %}
+    Failed after approval — {{ er['error'] }}
     {% else %}
     {{ item['status'] }}
     {% endif %}

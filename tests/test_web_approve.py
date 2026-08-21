@@ -695,3 +695,59 @@ def test_approve_link_for_a_paper_row_still_works_unchanged(client):
     r = client.post(f"/a/{rid}/approve", data={"k": rid.token})
     assert r.status_code == 200
     assert client.app.state.holder.get().queue.get(rid)["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: shadow_edit rows on the approve-link surface
+# (source="chat", always -- a shadow edit is always user-initiated). Uses
+# `client` (logged-in, real shadow ShadowLedger via build_components).
+# ---------------------------------------------------------------------------
+
+def queue_shadow_edit(client, **over):
+    from allpath_trade.agent.shadow_tools import cash_snapshot
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = cash_snapshot(b.broker)
+    kwargs = {"op": "set_cash", "ticker": "", "action": "Set cash",
+              "args": {"amount": "444"}, "before": before,
+              "after": {"cash": "444"}}
+    kwargs.update(over)
+    return b.queue.add_shadow_edit(**kwargs)
+
+
+def test_confirm_page_shows_shadow_edit_before_after(client):
+    rid = queue_shadow_edit(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "Set cash" in body
+    assert "444" in body
+    assert_english_only(body)
+
+
+def test_confirm_page_shows_shadow_chip_for_a_shadow_edit(client):
+    rid = queue_shadow_edit(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert 'class="chip chip-shadow"' in body
+
+
+def test_post_approve_shadow_edit_applies_to_the_ledger(client):
+    rid = queue_shadow_edit(client)
+    b = client.app.state.holder.get().accounts["shadow"]
+
+    r = client.post(f"{approve_url(rid)}/approve", data={"k": rid.token})
+
+    assert r.status_code == 200
+    assert "applied to the shadow ledger" in r.text
+    assert b.broker.get_account().cash == 444
+    assert b.queue.get(rid)["status"] == "approved"
+
+
+def test_post_reject_shadow_edit_leaves_ledger_untouched(client):
+    rid = queue_shadow_edit(client)
+    b = client.app.state.holder.get().accounts["shadow"]
+    before_cash = b.broker.get_account().cash
+
+    r = client.post(f"{approve_url(rid)}/reject", data={"k": rid.token})
+
+    assert r.status_code == 200
+    assert b.broker.get_account().cash == before_cash
+    assert b.queue.get(rid)["status"] == "rejected"

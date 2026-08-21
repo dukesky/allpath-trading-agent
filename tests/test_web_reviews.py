@@ -990,3 +990,74 @@ def test_split_diff_rows_two_empty_texts_still_say_no_changes():
     # empty table body under the column headers.
     rows = split_diff_rows("", "")
     assert rows == [{"kind": "none", "text": "No changes"}]
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: shadow_edit review cards + real end-to-end approval
+# against the shadow account's actual ShadowLedger (this `client` fixture's
+# accounts["shadow"] is wired through the real build_components, applier
+# included -- see app.py's `_build_account_components`).
+# ---------------------------------------------------------------------------
+
+def queue_shadow_edit(client, **over):
+    from allpath_trade.agent.shadow_tools import cash_snapshot
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = cash_snapshot(b.broker)
+    kwargs = {"op": "set_cash", "ticker": "", "action": "Set cash",
+              "args": {"amount": "777"}, "before": before,
+              "after": {"cash": "777"}}
+    kwargs.update(over)
+    return b.queue.add_shadow_edit(**kwargs), b
+
+
+def test_shadow_edit_card_renders_title_and_before_after(client):
+    rid, _b = queue_shadow_edit(client)
+    # The card only shows on the CURRENT account's view -- switch first.
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+    assert f"#{rid}" in body
+    assert "Set cash" in body
+    assert "777" in body
+
+
+def test_shadow_edit_card_is_english_only(client):
+    _rid, _b = queue_shadow_edit(client)
+    client.post("/account/switch", data={"account": "shadow"})
+    assert_english_only(client.get("/reviews").text)
+
+
+def test_approve_shadow_edit_applies_to_the_real_ledger(client):
+    rid, b = queue_shadow_edit(client)
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert r.status_code in (200, 303)
+    assert b.broker.get_account().cash == 777
+    row = b.queue.get(rid)
+    assert row["status"] == "approved"
+    assert "applied" in row["execution_result"]
+
+
+def test_reject_shadow_edit_leaves_ledger_untouched(client):
+    rid, b = queue_shadow_edit(client)
+    before_cash = b.broker.get_account().cash
+
+    client.post(f"/reviews/{rid}/reject", data={"note": "no"})
+
+    assert b.broker.get_account().cash == before_cash
+    assert b.queue.get(rid)["status"] == "rejected"
+
+
+def test_approve_shadow_edit_stale_before_state_stays_pending(client):
+    from decimal import Decimal
+
+    rid, b = queue_shadow_edit(
+        client, before={"cash": "999999"})  # never matched reality
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert r.status_code in (200, 303)
+    row = b.queue.get(rid)
+    assert row["status"] == "pending"
+    assert b.broker.get_account().cash != Decimal(777)

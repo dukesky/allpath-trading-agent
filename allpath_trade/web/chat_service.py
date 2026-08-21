@@ -127,6 +127,26 @@ class ChatService:
             queue=b.queue, conversation_id=conversation_id,
             notifier=c.notifier, web_base_url=c.settings.web_base_url,
             app_state=c.app_state, telegram_bot_token=c.settings.telegram_bot_token)
+        if self.account == "shadow":
+            # shadow-dual-active T6: registered ONLY on the shadow account's
+            # own ChatService -- paper's chat build (self.account == "paper")
+            # never reaches this branch, so paper's registry has no
+            # shadow_set_position/set_cash/remove_position/record_fill tools
+            # at all, not merely unused ones. `b.broker` for this account IS
+            # the ShadowLedger instance (see app.py's `_build_broker`).
+            # `conversation_id_fn` re-reads the same stable id `order_sink`
+            # above was built with -- a plain closure, not a mutable ref,
+            # since this whole registry is rebuilt fresh on every
+            # `ChatService._build` call anyway.
+            from allpath_trade.agent.shadow_tools import register_shadow_tools
+
+            register_shadow_tools(
+                registry, ledger=b.broker, queue=b.queue,
+                conversation_id_fn=lambda: conversation_id,
+                confirm=lambda _prompt: False,
+                notifier=c.notifier, web_base_url=c.settings.web_base_url,
+                app_state=c.app_state,
+                telegram_bot_token=c.settings.telegram_bot_token)
 
         prompt = build_system_prompt(
             identity=load_identity(), broker=b.broker, journal=b.journal,

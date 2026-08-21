@@ -91,6 +91,14 @@ class ReviewQueue:
         # setter is needed too. None until set: revision approvals fail
         # loudly (see `approve`) rather than silently no-op-ing.
         self._revision_applier: Callable[[str, str, str, str, bool], None] | None = None
+        # shadow-dual-active T6: same injection pattern as `_revision_applier`
+        # above, for `kind="shadow_edit"` rows -- wired once at startup (see
+        # app.py's `_build_account_components`, shadow bundle only) with
+        # `agent.shadow_tools.apply_shadow_edit_factory`'s built function.
+        # `None` until set: a shadow_edit approval fails loudly (see
+        # `_approve_shadow_edit`) rather than silently no-op-ing, same as an
+        # unwired revision applier.
+        self._shadow_edit_applier: Callable[[str, dict, object], None] | None = None
 
     def set_revision_applier(self, fn: Callable[[str, str, str, str, bool], None]) -> None:
         """Wire up the function that actually applies an approved strategy
@@ -111,6 +119,18 @@ class ReviewQueue:
         but the file is very much supposed to already be there). Task 3
         calls this once at startup with the real strategy-file writer."""
         self._revision_applier = fn
+
+    def set_shadow_edit_applier(self, fn: Callable[[str, dict, object], None]) -> None:
+        """Wire up the function that actually applies an approved shadow
+        ledger edit: `fn(op, args, before)` -- `op` is one of "set_position"/
+        "set_cash"/"remove_position"/"record_fill"/"import"/"reset", `args`
+        is the tool call's own arguments, and `before` is the row's own
+        recorded before-state snapshot (compared to the ledger's CURRENT
+        state at approval time to detect staleness -- see
+        `agent.shadow_tools.apply_shadow_edit_factory`, which builds the
+        real function this points to). Only ever meaningful for the shadow
+        account's own `ReviewQueue`; wired once at startup in app.py."""
+        self._shadow_edit_applier = fn
 
     def _issue_token(self) -> tuple[str, str, str]:
         """Mint a fresh single-use approval-link token for a row about to
@@ -188,6 +208,55 @@ class ReviewQueue:
                         "diff": diff, "rationale": rationale, "is_new": is_new}),
              None, source, conversation_id, "strategy_revision",
              token_hash, expires))
+        self._conn.commit()
+        return ReviewHandle(cur.lastrowid, token)
+
+    def add_shadow_edit(self, *, op: str, ticker: str, action: str, args: dict,
+                        before: object, after: object,
+                        conversation_id: int | None = None,
+                        source: str = "chat") -> ReviewHandle:
+        """Queue a proposed shadow-ledger edit for human approval
+        (shadow-dual-active T6, spec §④). Shares `pending_reviews` with
+        order/strategy_revision rows -- same unified-inbox reasoning as
+        `add_strategy_revision` (see its own docstring) -- so it fills the
+        legacy order-shaped NOT NULL columns honestly rather than leaving
+        them blank: `strategy_id` is always `""` (a shadow edit has no
+        strategy), `rule_id`/`rule_type` are the fixed sentinel
+        `"shadow_edit"`, `condition` carries the op name, and `action` is
+        the human-readable title the caller (`agent/shadow_tools.py`)
+        already built for this op ("Set position AAPL", "Correct fill
+        #12", ...) -- rendered verbatim by `_review_card.html`, the same
+        way an order row's own free-text `action` already is.
+
+        `args`/`before`/`after` are the caller's own tool arguments and its
+        read-only before/after ledger snapshot -- persisted together on
+        `snapshot` so `_approve_shadow_edit` can re-read the CURRENT ledger
+        state at approval time and compare it to `before` (staleness --
+        same "校验不过则批准动作报错并保持 pending" contract as
+        `_approve_revision`'s `old_yaml` check). This store layer never
+        interprets any of the three: it has no idea what a ledger looks
+        like, on purpose -- that knowledge lives entirely in
+        `agent/shadow_tools.py`.
+
+        Only valid on the shadow account's own queue instance -- there is
+        no ledger on paper to edit at all -- so this raises `ReviewError`
+        if called on any other account's `ReviewQueue`, the same
+        fail-closed posture `approve()`'s kind allowlist takes for an
+        unrecognized `kind`."""
+        if self._account != "shadow":
+            raise ReviewError(
+                "shadow ledger edits are only valid on the shadow account")
+        token, token_hash, expires = self._issue_token()
+        cur = self._conn.execute(
+            "INSERT INTO pending_reviews (account, ts, strategy_id, rule_id, ticker,"
+            " rule_type, condition, action, snapshot, intent, source,"
+            " conversation_id, kind, approval_token_hash, token_expires_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._account, datetime.now(UTC).isoformat(), "", "shadow_edit",
+             ticker.strip().upper() if ticker else "", "shadow_edit", op, action,
+             json.dumps({"op": op, "args": args, "before": before, "after": after},
+                        default=_json_default),
+             None, source, conversation_id, "shadow_edit", token_hash, expires))
         self._conn.commit()
         return ReviewHandle(cur.lastrowid, token)
 
@@ -415,6 +484,8 @@ class ReviewQueue:
             return self._approve_revision(review_id)
         if row["kind"] == "order":
             return self._approve_order(review_id)
+        if row["kind"] == "shadow_edit":
+            return self._approve_shadow_edit(review_id)
         raise ReviewError(f"unknown review kind: {row['kind']!r}")
 
     def _approve_order(self, review_id: int) -> ExecutionResult:
@@ -555,6 +626,69 @@ class ReviewQueue:
         # ExecutionResult JSON (there's no execution result for a file
         # write) -- keeps `execution_result` a reliable "has this row been
         # acted on" signal rather than leaving it ambiguously NULL.
+        self._conn.execute(
+            "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+            (json.dumps({"applied": True}), review_id, self._account))
+        self._conn.commit()
+
+    def _approve_shadow_edit(self, review_id: int) -> None:
+        # Mirrors `_approve_revision`'s shape exactly: reject up front if
+        # approval can't possibly succeed, fetch + status-check, parse the
+        # snapshot BEFORE claiming (a corrupt snapshot must leave the row
+        # pending, not stuck "approved" with nothing applied), atomically
+        # claim, then act and record the outcome on the claimed row.
+        if self._shadow_edit_applier is None:
+            raise ReviewError(
+                "approve requires a shadow edit applier (none configured)")
+        row = self.get(review_id)
+        if row["status"] != "pending":
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
+
+        try:
+            snapshot = json.loads(row["snapshot"])
+            op = snapshot["op"]
+            args = snapshot["args"]
+            before = snapshot["before"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ReviewError(
+                f"review {review_id} has corrupt snapshot: {exc}") from exc
+
+        resolved_ts = datetime.now(UTC).isoformat()
+        cur = self._conn.execute(
+            "UPDATE pending_reviews SET status=?, resolved_ts=?,"
+            " approval_token_hash=NULL, token_expires_ts=NULL "
+            "WHERE id=? AND status=? AND account=?",
+            ("approved", resolved_ts, review_id, "pending", self._account))
+        self._conn.commit()
+        if cur.rowcount == 0:
+            row = self.get(review_id)
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
+
+        try:
+            self._shadow_edit_applier(op, args, before)
+        except RevisionValidationError:
+            # Same rollback-to-pending contract as `_approve_revision`'s own
+            # RevisionValidationError handling -- see the LOUD INVARIANT
+            # comment there. `apply_shadow_edit_factory` guarantees every
+            # staleness/bad-arg/ledger-ValueError check runs (and raises
+            # this, and only this) before its own `conn.transaction()`
+            # block ever opens, so there is nothing on the ledger to undo.
+            self._conn.execute(
+                "UPDATE pending_reviews SET status=?, resolved_ts=?"
+                " WHERE id=? AND account=?",
+                ("pending", None, review_id, self._account))
+            self._conn.commit()
+            raise
+        except Exception as exc:
+            # Not safely retryable (a write may have partially landed even
+            # though the applier's own transaction is meant to prevent
+            # that) -- claim stays "approved" with the failure recorded,
+            # mirroring the order/revision paths' own handling.
+            self._conn.execute(
+                "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+                (json.dumps({"error": str(exc)}), review_id, self._account))
+            self._conn.commit()
+            raise
         self._conn.execute(
             "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
             (json.dumps({"applied": True}), review_id, self._account))
