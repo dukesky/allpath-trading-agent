@@ -8,16 +8,15 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from allpath_trade.broker.base import Broker
 from allpath_trade.execution import refresh_pending_fills
 from allpath_trade.notify import events
-from allpath_trade.sentinel import Sentinel, SentinelReport
+from allpath_trade.sentinel import SentinelReport
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import (
     SENTINEL_HEARTBEAT_KEY,
     SENTINEL_MARKET_OPEN_KEY,
     AppState,
 )
-from allpath_trade.store.journal import TradeJournal
 
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
@@ -77,58 +76,80 @@ def _is_after_close(now: datetime | None = None) -> bool:
     return et.weekday() < 5 and et.time() >= time(16, 5)
 
 
-def _run_sentinel_pass(get_sentinel: Callable[[], Sentinel],
-                       on_report: Callable[[SentinelReport | None], None] | None = None,
+# shadow-dual-active T4: `accounts` is a `dict[str, app.AccountComponents]`
+# -- duck-typed here (only `.journal .broker .sentinel` are read) rather
+# than importing `AccountComponents` from app.py, to keep this module free
+# of an app.py dependency (cli.py/web/app.py already import both; this
+# module itself doesn't need to).
+def _run_sentinel_pass(accounts: dict,
                        app_state: AppState | None = None,
-                       journal: TradeJournal | None = None,
-                       broker: Broker | None = None) -> None:
-    """Run one sentinel pass, but only during market hours.
+                       on_report: Callable[[str, SentinelReport | None], None]
+                       | None = None) -> None:
+    """Run one sentinel pass PER ACCOUNT (shadow-dual-active T4, spec §③),
+    each only actually evaluating strategies during market hours.
 
-    `on_report` (if given) is called with the resulting `SentinelReport`, or
-    with `None` when the pass was skipped because the market is closed — the
-    only place that wants to know is `run_daemon`'s terminal output.
+    Each account's fill-refresh + sentinel run is wrapped in its OWN
+    try/except: paper's sentinel raising must never stop shadow's pass from
+    running (or the reverse) -- see the dual-sentinel-isolation tests in
+    tests/test_scheduler.py. `on_report` (if given) is called once per
+    account with `(account, report)` -- `report` is `None` when that
+    account's pass was skipped (market closed) or itself failed (already
+    printed to stderr below).
 
-    The heartbeat write (`app_state`, if given) happens unconditionally,
-    market open or closed: it proves the *scheduler* is alive, not the
-    market, and this is the one job body both `run_daemon` (the headless
-    daemon) and `build_jobs` (the `serve` process) call through, so writing
-    it here covers both without duplicating the call site.
+    Heartbeats: every account gets its OWN `sentinel_last_pass:{account}`
+    key, written unconditionally (market open or closed -- it proves the
+    *scheduler* is alive for that account, not the market) before that
+    account's fill-refresh/sentinel logic runs. The LEGACY (un-suffixed)
+    `SENTINEL_HEARTBEAT_KEY` is ALSO still written, mirroring paper's own
+    timestamp -- the dashboard (web/routes/dashboard.py) reads exactly that
+    key today, and Task 7 is what teaches it to read the per-account keys
+    instead; keeping this write means paper's existing "last check Nm ago"
+    tile stays accurate without waiting on Task 7 to land first.
 
-    The market-open flag is written in the same try block, right alongside
-    the timestamp -- a reader needs both together to tell "the scheduler
-    ticked, and the sentinel actually ran" from "the scheduler ticked, but
-    the market was closed so nothing was evaluated" (dashboard.py's
-    sentinel_heartbeat_status uses it for exactly that).
+    The market-open flag (`SENTINEL_MARKET_OPEN_KEY`) is written ONCE,
+    before the per-account loop, not per account -- the market is the
+    market regardless of which account's sentinel is evaluating it; a
+    second per-account copy of the same boolean would just be duplication,
+    not a real second fact.
 
-    The pending-fill refresh (`journal`/`broker`, if both given) also runs
-    unconditionally, before the market-hours gate, same as the heartbeat and
-    for the same reason: a DAY order queued outside market hours fills at
-    the next open, and the first pass after that open must pick it up
-    without waiting on the market-hours-gated sentinel logic below (which
-    only evaluates strategies, not fills) -- see execution.refresh_pending_
-    fills and Order.filled_at. Deliberately does NOT call get_sentinel():
-    that factory is reserved for the market-hours branch below (some
-    callers assert it is never invoked while the market is closed), so the
-    refresh gets its own journal/broker instead of reaching into the
-    sentinel for them."""
+    The pending-fill refresh (`acc.journal`/`acc.broker`) also runs
+    unconditionally per account, before that account's market-hours gate,
+    same reasoning as the heartbeat: a DAY order queued outside market
+    hours fills at the next open, and the first pass after that open must
+    pick it up without waiting on the market-hours-gated sentinel logic
+    below (which only evaluates strategies, not fills) -- see
+    execution.refresh_pending_fills and Order.filled_at."""
     if app_state is not None:
         try:
-            app_state.set(SENTINEL_HEARTBEAT_KEY, datetime.now(UTC).isoformat())
             app_state.set(SENTINEL_MARKET_OPEN_KEY,
                           "true" if is_market_hours() else "false")
-        except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
-            print(f"[heartbeat] failed: {exc}", file=sys.stderr)
-    if journal is not None and broker is not None:
+        except Exception as exc:  # noqa: BLE001 — a failed flag write must not stop the pass
+            print(f"[heartbeat] market-open flag failed: {exc}", file=sys.stderr)
+
+    for account, acc in accounts.items():
+        if app_state is not None:
+            try:
+                now_iso = datetime.now(UTC).isoformat()
+                app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:{account}", now_iso)
+                if account == DEFAULT_ACCOUNT:
+                    # Legacy compat write -- see docstring above.
+                    app_state.set(SENTINEL_HEARTBEAT_KEY, now_iso)
+            except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
+                print(f"[heartbeat] {account} failed: {exc}", file=sys.stderr)
         try:
-            refresh_pending_fills(journal, broker)
+            refresh_pending_fills(acc.journal, acc.broker)
         except Exception as exc:  # noqa: BLE001 — a dead broker must not stop the pass
-            print(f"[fill-refresh] failed: {exc}", file=sys.stderr)
-    if is_market_hours():
-        report = get_sentinel().run_once()
-    else:
-        report = None
-    if on_report is not None:
-        on_report(report)
+            print(f"[fill-refresh] {account} failed: {exc}", file=sys.stderr)
+
+        report: SentinelReport | None = None
+        if is_market_hours():
+            try:
+                report = acc.sentinel.run_once()
+            except Exception as exc:  # noqa: BLE001 — one account's sentinel
+                # failing must never take the other account's pass down too.
+                print(f"[sentinel] {account} failed: {exc}", file=sys.stderr)
+        if on_report is not None:
+            on_report(account, report)
 
 
 def _maybe_run_daily(daily_job: Callable[[], None] | None, state: dict) -> None:
@@ -149,19 +170,25 @@ def _maybe_run_daily(daily_job: Callable[[], None] | None, state: dict) -> None:
         print(f"[daily] failed: {exc}")
 
 
-def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
+def run_daemon(get_accounts: Callable[[], dict], interval_minutes: int,
                scheduler_cls: type = BlockingScheduler,
                daily_job: Callable[[], None] | None = None,
-               app_state: AppState | None = None,
-               journal: TradeJournal | None = None,
-               broker: Broker | None = None) -> None:
+               app_state: AppState | None = None) -> None:
+    """The headless `allpath-trade run` daemon -- shadow-dual-active T4:
+    `get_accounts` returns the current `dict[str, app.AccountComponents]`
+    (a callable, like `build_jobs`'s `holder.get()`, so a future live
+    rebuild is possible even though `cli.py`'s own caller today just
+    returns the same dict every time) rather than a single sentinel/
+    journal/broker triple -- `_run_sentinel_pass` iterates it, one pass per
+    account, each isolated in its own try/except."""
     state = {"last_daily": None}
 
-    def report_progress(report: SentinelReport | None) -> None:
+    def report_progress(account: str, report: SentinelReport | None) -> None:
         if report is None:
-            print("[sentinel] market closed, skipping")
+            # Market closed, or that account's own pass already failed and
+            # printed to stderr -- nothing new to say here.
             return
-        print(f"[sentinel] checked={report.strategies_checked} "
+        print(f"[sentinel:{account}] checked={report.strategies_checked} "
               f"triggers={len(report.outcomes)} errors={len(report.errors)}")
         for o in report.outcomes:
             print(f"  {o.strategy_id}/{o.rule_id}: {o.disposition} {o.detail}")
@@ -169,8 +196,8 @@ def run_daemon(sentinel_factory: Callable[[], Sentinel], interval_minutes: int,
             print(f"  error: {e}")
 
     def job() -> None:
-        _run_sentinel_pass(sentinel_factory, report_progress, app_state,
-                           journal=journal, broker=broker)
+        _run_sentinel_pass(get_accounts(), app_state=app_state,
+                           on_report=report_progress)
         _maybe_run_daily(daily_job, state)
 
     scheduler = scheduler_cls()
@@ -277,20 +304,78 @@ def _send_daily_digest(components) -> None:
     components.app_state.set(DIGEST_LAST_DATE_KEY, today)
 
 
+def _account_has_active_strategy(strategies) -> bool:
+    """The reflection cost gate (spec §③: "反思跳过(无 active 策略)") -- an
+    account with zero active strategies (a fresh `shadow` ledger the user
+    hasn't written anything for yet is the common case) must not burn a
+    nightly LLM call reviewing nothing. `load_all`'s default `status=
+    StrategyStatus.ACTIVE` filter already does the filtering; this just
+    asks "is that list non-empty" without needing the caller to import
+    StrategyStatus. Errors degrade to "no active strategies" (skip) rather
+    than raising -- a broken strategy YAML must never be what decides
+    tonight's LLM spend, and `Reflector.run_daily` would hit the same
+    broken file itself if this let it through anyway."""
+    try:
+        return bool(strategies.load_all())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> None:
+    """One account's reflection -> consolidation pair (shadow-dual-active
+    T4, spec §③). Order matches `run_daily_jobs`'s own docstring: reflection
+    before consolidation, so the same night's consolidation pass can pick up
+    reflection's memory_update conclusions. Each step keeps its own
+    try/except, same as the pre-dual-active single-account version, so one
+    broken task never silently prevents the other from running -- and,
+    since this whole function is called once per account from a loop, a
+    failure inside it (there shouldn't be one left uncaught, but belt and
+    suspenders) must never be allowed to stop the OTHER account's nightly
+    chain either; see run_daily_jobs's own per-account try/except."""
+    reflector = acc.reflector
+    if reflector is not None and settings.daily_reflection:
+        if _account_has_active_strategy(acc.strategies):
+            try:
+                status = reflector.run_daily()
+                if verbose:
+                    print(f"[reflection:{account}] {status}")
+            except Exception as exc:  # noqa: BLE001 — must not stop consolidation
+                print(f"[reflection:{account}] failed: {exc}", file=sys.stderr)
+        elif verbose:
+            print(f"[reflection:{account}] skipped (no active strategies)")
+
+    consolidator = acc.consolidator
+    if consolidator is not None and settings.daily_consolidation:
+        try:
+            status = consolidator.run_daily()
+            if verbose:
+                print(f"[memory:{account}] {status}")
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            print(f"[consolidation:{account}] failed: {exc}")
+
+
 def run_daily_jobs(components, verbose: bool = False) -> None:
     """The after-close daily sequence, shared by `build_jobs` (`serve`) and
     `cli.py`'s `run` daemon so the two entry points can't drift out of sync
     again (docs/TODO.md's Phase 5 leftover: `run` used to skip the digest
     entirely and never gated consolidation on `daily_consolidation`).
 
-    Order: digest -> reflection -> consolidation (spec §①: reflection's
-    memory_update conclusions need to land before consolidation runs, so
-    the same night's consolidation pass can pick them up). Each step gets
-    its OWN try/except so one broken task can never silently prevent the
-    other two from running. The digest fires unconditionally (it doesn't
-    depend on daily_consolidation or daily_reflection, though it dedupes
-    itself against a same-day restart -- see _send_daily_digest); reflection
-    and consolidation each stay gated by their own setting.
+    Order: digest -> {reflection -> consolidation} PER ACCOUNT
+    (shadow-dual-active T4, spec §③) -- within one account, reflection
+    still runs before consolidation (spec §①: reflection's memory_update
+    conclusions need to land before consolidation runs, so the same
+    night's pass can pick them up); each account's whole
+    reflection+consolidation pair is further isolated in its own
+    try/except in the loop below, so paper's nightly chain failing outright
+    can never silently prevent shadow's from running, or the reverse.
+
+    The digest fires unconditionally, once, BEFORE the per-account loop --
+    shadow-dual-active T4 deliberately does NOT explode it into one digest
+    per account (that -- and the `[Paper]`/`[Shadow]` subject prefixes
+    every other notification eventually gets -- is Task 7's job per the
+    plan; see docs/TODO.md). It keeps reading through the legacy
+    `components.observations`/`.journal`/`.queue` attribute alias, i.e.
+    paper's own, same single combined summary as before this task.
 
     Callers are expected to wrap this in their own once-per-day gate (see
     `_maybe_run_daily`) -- this function itself is state-free.
@@ -306,23 +391,14 @@ def run_daily_jobs(components, verbose: bool = False) -> None:
     except Exception as exc:  # noqa: BLE001 — a failed digest must not stop the rest
         print(f"[digest] failed: {exc}")
 
-    reflector = components.reflector
-    if reflector is not None and components.settings.daily_reflection:
+    for account, acc in components.accounts.items():
         try:
-            status = reflector.run_daily()
-            if verbose:
-                print(f"[reflection] {status}")
-        except Exception as exc:  # noqa: BLE001 — must not stop consolidation
-            print(f"[reflection] failed: {exc}", file=sys.stderr)
-
-    consolidator = components.consolidator
-    if consolidator is not None and components.settings.daily_consolidation:
-        try:
-            status = consolidator.run_daily()
-            if verbose:
-                print(f"[memory] {status}")
-        except Exception as exc:  # noqa: BLE001 — see comment above
-            print(f"[consolidation] failed: {exc}")
+            _run_account_daily(account, acc, components.settings, verbose=verbose)
+        except Exception as exc:  # noqa: BLE001 — one account's nightly chain
+            # must never take the other account's down (belt and
+            # suspenders: _run_account_daily already catches its own two
+            # steps individually, so this is not expected to be reachable).
+            print(f"[daily:{account}] failed: {exc}", file=sys.stderr)
 
 
 def build_jobs(scheduler, holder) -> None:
@@ -336,8 +412,7 @@ def build_jobs(scheduler, holder) -> None:
 
     def job() -> None:
         components = holder.get()
-        _run_sentinel_pass(lambda: components.sentinel, app_state=components.app_state,
-                           journal=components.journal, broker=components.broker)
+        _run_sentinel_pass(components.accounts, app_state=components.app_state)
         _maybe_run_daily(lambda: run_daily_jobs(components), state)
 
     scheduler.add_job(job, "interval",

@@ -596,19 +596,22 @@ def main(argv: list[str] | None = None,
     if args.command == "run":
         from allpath_trade.scheduler import run_daemon, run_daily_jobs
 
-        # Same daily sequence as `serve`'s build_jobs -- digest, then
-        # gated reflection, then gated consolidation -- via the shared
-        # helper in scheduler.py so the two entry points can't drift out
-        # of sync again (docs/TODO.md's Phase 5 leftover this closes: the
-        # headless `run` daemon used to skip the digest entirely and never
-        # gated consolidation on `daily_consolidation`). Unconditional,
-        # like build_jobs's job(): the digest itself has no reflector/
-        # consolidator dependency, so there is no longer a "nothing to do
-        # today" case to special-case away.
-        run_daemon(lambda: sentinel, settings.sentinel_interval_minutes,
+        # Same daily sequence as `serve`'s build_jobs -- digest, then each
+        # account's gated reflection + gated consolidation -- via the
+        # shared helper in scheduler.py so the two entry points can't
+        # drift out of sync again (docs/TODO.md's Phase 5 leftover this
+        # closes: the headless `run` daemon used to skip the digest
+        # entirely and never gated consolidation on `daily_consolidation`).
+        # shadow-dual-active T4 (cli run parity): `run_daemon` now iterates
+        # `components.accounts` -- both paper and shadow get their own
+        # sentinel pass and nightly chain from this one daemon, matching
+        # `serve`'s build_jobs exactly. `lambda: components.accounts`
+        # mirrors build_jobs's own `holder.get()` indirection even though
+        # this particular `components` object never gets rebuilt within
+        # one `run` process.
+        run_daemon(lambda: components.accounts, settings.sentinel_interval_minutes,
                    daily_job=lambda: run_daily_jobs(components, verbose=True),
-                   app_state=components.app_state,
-                   journal=components.journal, broker=components.broker)
+                   app_state=components.app_state)
         return 0
     if args.command == "strategies":
         return cmd_strategies(settings, store)

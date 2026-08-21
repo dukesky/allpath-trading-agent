@@ -59,10 +59,20 @@ class ConversationStore:
             # in session search instead of "You resolved #12. Result: ...".
             indexed = message.get("display", message.get("content"))
             if isinstance(indexed, str) and indexed.strip():
+                # shadow-dual-active T4 CRITICAL carry (from T1's review):
+                # tag this row with the OWNING conversation's account (this
+                # store's own `self._account` -- `append` already refuses a
+                # foreign conversation_id above), not left blank/default --
+                # SessionSearch scopes every query by account, so an
+                # untagged row would either vanish from search entirely or
+                # (worse, pre-this-fix) default to 'paper' regardless of
+                # which account the turn actually belongs to.
                 conn.execute(
-                    "INSERT INTO search_index (kind, ref_id, subject, content)"
-                    " VALUES ('turn', ?, ?, ?)",
-                    (str(conversation_id), message.get("role", ""), indexed))
+                    "INSERT INTO search_index"
+                    " (kind, ref_id, subject, content, account)"
+                    " VALUES ('turn', ?, ?, ?, ?)",
+                    (str(conversation_id), message.get("role", ""), indexed,
+                     self._account))
 
     def history(self, conversation_id: int, after_turn_id: int = 0) -> list[dict]:
         # Joined to `conversations` and filtered by account (shadow-dual-

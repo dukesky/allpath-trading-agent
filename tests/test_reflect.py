@@ -128,8 +128,10 @@ class FailingQueue:
 class FakeComponents:
     reports: ReportStore
     conn: object
+    conversations: ConversationStore
     journal: TradeJournal
     observations: ObservationLog
+    search: SessionSearch
     broker: Broker
     data: DataSource
     strategies: StrategyStore
@@ -145,8 +147,10 @@ def make_components(tmp_path, broker=None, data=None):
     return FakeComponents(
         reports=ReportStore(conn),
         conn=conn,
+        conversations=ConversationStore(conn),
         journal=TradeJournal(conn),
         observations=ObservationLog(conn),
+        search=SessionSearch(conn),
         broker=broker if broker is not None else FakeBroker(),
         data=data if data is not None else FakeData(),
         strategies=StrategyStore(strategies_dir, conn),

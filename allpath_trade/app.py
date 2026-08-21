@@ -11,6 +11,7 @@ from allpath_trade.data.yf import YFinanceSource
 from allpath_trade.execution import Executor
 from allpath_trade.memory.consolidate import Consolidator
 from allpath_trade.memory.observations import ObservationLog
+from allpath_trade.memory.search import SessionSearch
 from allpath_trade.memory.store import MemoryStore
 from allpath_trade.migrate_files import migrate_files
 from allpath_trade.notify.base import Notifier
@@ -18,7 +19,7 @@ from allpath_trade.notify.email import build_notifier
 from allpath_trade.reflect import Reflector
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 from allpath_trade.sentinel import Sentinel
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import ACCOUNTS, DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
@@ -30,25 +31,180 @@ from allpath_trade.strategy.store import StrategyStore
 
 
 @dataclass
-class Components:
-    settings: Settings
+class AccountComponents:
+    """Everything scoped to ONE account (`paper` or `shadow`) -- own broker,
+    journal, risk gate + executor, review queue, strategies, conversations,
+    reports, memory, observations, session search, sentinel, and (LLM
+    permitting) consolidator/reflector. Shared, process-wide objects (the
+    sqlite connection, the data source, the notifier, the LLM usage store,
+    app_state, and MemoryStore's shared profile.md file) are NOT duplicated
+    per account -- `conn`/`data` are carried here too as plain references
+    (every account's stores/tools need them close at hand), everything else
+    process-wide lives only on the parent `Components` container below.
+
+    ChatService-compatible wiring (a per-account chat instance reachable
+    from the web app / Telegram) is deliberately NOT built here -- wiring an
+    account into the web/Telegram layer is Task 5's job; this task only
+    builds what the sentinel and the nightly jobs (and Task 5's future
+    ChatService) need in order to construct one, per spec §③."""
+
+    account: str
     broker: Broker
     data: DataSource
+    conn: sqlite3.Connection
     journal: TradeJournal
     gate: RiskGate
     executor: Executor
     queue: ReviewQueue
     strategies: StrategyStore
-    notifier: Notifier
-    sentinel: Sentinel
-    conn: sqlite3.Connection
-    observations: ObservationLog
-    memory: MemoryStore
-    app_state: AppState
+    conversations: ConversationStore
     reports: ReportStore
-    llm_usage: LLMUsage
+    memory: MemoryStore
+    observations: ObservationLog
+    search: SessionSearch
+    sentinel: Sentinel
     consolidator: Consolidator | None = None
     reflector: Reflector | None = None
+
+
+@dataclass
+class Components:
+    settings: Settings
+    conn: sqlite3.Connection
+    data: DataSource
+    notifier: Notifier
+    app_state: AppState
+    llm_usage: LLMUsage
+    accounts: dict[str, AccountComponents]
+
+    # shadow-dual-active T4: LEGACY SINGLE-ACCOUNT ATTRIBUTE SURFACE.
+    #
+    # Every existing consumer of `Components` -- web routes, cli.py, the
+    # Telegram poller/mirror -- was written against a single account and
+    # reaches these attributes directly (`components.broker`,
+    # `components.queue`, `components.sentinel`, ...). Rewiring every one
+    # of those call sites onto `components.accounts[...]` (the account
+    # switcher, per-account ChatService, row-bound approvals) is Task 5's
+    # job, NOT this task's -- see the plan's Task 4 deliverable list.
+    #
+    # Until Task 5 lands, these fields are a plain alias for
+    # `accounts[DEFAULT_ACCOUNT]`'s own objects, assigned once in
+    # `build_components` right after `accounts` is built. Nothing here is
+    # duplicated state: it is the SAME broker/journal/queue/... instance
+    # `accounts["paper"]` already holds, just also reachable the old way,
+    # so every existing route/command/test keeps behaving exactly as before
+    # -- paper only -- while `shadow`'s bundle already exists alongside it
+    # and runs its own sentinel pass + nightly chain (see scheduler.py).
+    broker: Broker
+    journal: TradeJournal
+    gate: RiskGate
+    executor: Executor
+    queue: ReviewQueue
+    strategies: StrategyStore
+    memory: MemoryStore
+    reports: ReportStore
+    observations: ObservationLog
+    sentinel: Sentinel
+    consolidator: Consolidator | None = None
+    reflector: Reflector | None = None
+
+
+def _build_broker(account: str, settings: Settings, conn: sqlite3.Connection,
+                  data: DataSource, broker_override: Broker | None) -> Broker:
+    if account == DEFAULT_ACCOUNT:
+        if broker_override is not None:
+            return broker_override
+        from allpath_trade.broker.alpaca import AlpacaBroker
+
+        return AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
+                            paper=settings.alpaca_paper)
+    # shadow-dual-active T4: the shadow account is never Alpaca and never
+    # takes `broker_override` (that parameter exists only for paper's own
+    # tests/CLI injection, see build_components) -- it always gets its own
+    # ShadowLedger, an in-DB bookkeeping ledger with no real-brokerage
+    # credentials of any kind (broker/shadow.py's class docstring).
+    from allpath_trade.broker.shadow import ShadowLedger
+
+    return ShadowLedger(conn, data)
+
+
+def _build_account_components(account: str, *, settings: Settings,
+                              conn: sqlite3.Connection, data: DataSource,
+                              notifier: Notifier, app_state: AppState,
+                              llm_usage: LLMUsage,
+                              broker_override: Broker | None) -> AccountComponents:
+    broker = _build_broker(account, settings, conn, data, broker_override)
+    journal = TradeJournal(conn, account=account)
+    gate = RiskGate(RiskLimits())
+    executor = Executor(broker, gate, journal, data)
+    queue = ReviewQueue(conn, executor, account=account)
+    # shadow-dual-active T4: use the classmethod so account validation gates
+    # the directory resolution (StrategyStore.for_account's own docstring:
+    # prevents a Task 5 shadow-bundle miss where the directory is resolved
+    # but the account parameter itself was never validated).
+    strategies = StrategyStore.for_account(settings.strategies_dir, conn,
+                                           account=account)
+    # Unconditional (unlike the LLM-backed wiring below): applying an
+    # already-approved revision is plain file I/O, no LLM involved, so a
+    # review approved via the web/CLI must work even when no LLM is
+    # configured, for either account.
+    queue.set_revision_applier(apply_revision_factory(strategies))
+    conversations = ConversationStore(conn, account=account)
+    reports = ReportStore(conn, account=account)
+    memory = MemoryStore(settings.memory_dir, conn, account=account)
+    # shadow-dual-active T4 CRITICAL carry (from T1's review): both
+    # constructed with `account=` so a shadow turn/observation can never
+    # surface in paper's session_search results, or vice versa -- see
+    # ObservationLog's and SessionSearch's own docstrings.
+    observations = ObservationLog(conn, account=account)
+    search = SessionSearch(conn, account=account)
+    sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
+                       observations=observations, web_base_url=settings.web_base_url,
+                       app_state=app_state, telegram_bot_token=settings.telegram_bot_token)
+
+    bundle = AccountComponents(
+        account=account, broker=broker, data=data, conn=conn, journal=journal,
+        gate=gate, executor=executor, queue=queue, strategies=strategies,
+        conversations=conversations, reports=reports, memory=memory,
+        observations=observations, search=search, sentinel=sentinel)
+
+    try:
+        from allpath_trade.agent.readonly_tools import register_readonly_tools
+        from allpath_trade.agent.review import ReviewAgent
+        from allpath_trade.agent.tools import ToolRegistry
+        from allpath_trade.llm.factory import LLMConfigError, build_llm
+
+        review_llm = build_llm(settings, tier="review", usage_store=llm_usage)
+        review_registry = ToolRegistry()
+        register_readonly_tools(review_registry, data=data, broker=broker,
+                                journal=journal, strategies=strategies,
+                                queue=queue)
+        sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
+        bundle.consolidator = Consolidator(
+            build_llm(settings, tier="memory", usage_store=llm_usage), memory,
+            observations, journal, conn,
+            conversations=conversations, app_state=app_state, account=account)
+    except LLMConfigError:
+        pass  # no LLM configured: Phase 2 behavior, same for either account
+
+    if bundle.consolidator is not None:
+        # Reflector needs the whole per-account component bundle (reports/
+        # conn/conversations/journal/observations/search/broker/data/
+        # strategies/queue/memory -- see its class docstring in reflect.py),
+        # which only exists once `bundle` above has been assembled -- built
+        # here, right after, rather than inside the try block above
+        # alongside the consolidator. Gated on `bundle.consolidator is not
+        # None` rather than repeating build_llm inside its own try/except:
+        # the consolidator's own `build_llm(settings, tier="memory")` call a
+        # few lines up already proved this exact (settings, tier) pair
+        # doesn't raise LLMConfigError, so a second try/except here would be
+        # dead code.
+        from allpath_trade.llm.factory import build_llm
+
+        bundle.reflector = Reflector(
+            llm=build_llm(settings, tier="memory", usage_store=llm_usage),
+            components=bundle, settings=settings, notifier=notifier)
+    return bundle
 
 
 def build_components(settings: Settings, broker: Broker | None = None,
@@ -67,85 +223,35 @@ def build_components(settings: Settings, broker: Broker | None = None,
     # the web app's ComponentHolder).
     migrate_files(settings)
 
-    # Single-account (paper) on the new layout for this task -- Task 4 wires
-    # up the second (shadow) account bundle. Hardcoded rather than read from
-    # anywhere: there is exactly one account until then.
-    account = DEFAULT_ACCOUNT
-
-    if broker is None:
-        from allpath_trade.broker.alpaca import AlpacaBroker
-
-        broker = AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
-                              paper=settings.alpaca_paper)
     if conn is None:
         conn = connect(settings.db_path)
     data = YFinanceSource()
-    journal = TradeJournal(conn)
-    gate = RiskGate(RiskLimits())
-    executor = Executor(broker, gate, journal, data)
-    queue = ReviewQueue(conn, executor)
-    # shadow-dual-active T4: use classmethod to ensure account validation
-    # gates the directory resolution (prevents T5 shadow-bundle miss where the
-    # directory is resolved but account is unvalidated).
-    strategies = StrategyStore.for_account(settings.strategies_dir, conn,
-                                           account=account)
-    # Unconditional (unlike the LLM-backed wiring in the try/except below):
-    # applying an already-approved revision is plain file I/O, no LLM
-    # involved, so a review approved via the web/CLI must work even when no
-    # LLM is configured.
-    queue.set_revision_applier(apply_revision_factory(strategies))
     notifier = build_notifier(settings)
-    observations = ObservationLog(conn)
-    memory = MemoryStore(settings.memory_dir, conn, account=account)
     app_state = AppState(conn)
-    reports = ReportStore(conn)
     llm_usage = LLMUsage(conn)
-    sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
-                       observations=observations, web_base_url=settings.web_base_url,
-                       app_state=app_state, telegram_bot_token=settings.telegram_bot_token)
-    consolidator: Consolidator | None = None
-    try:
-        from allpath_trade.agent.readonly_tools import register_readonly_tools
-        from allpath_trade.agent.review import ReviewAgent
-        from allpath_trade.agent.tools import ToolRegistry
-        from allpath_trade.llm.factory import LLMConfigError, build_llm
 
-        review_llm = build_llm(settings, tier="review", usage_store=llm_usage)
-        review_registry = ToolRegistry()
-        register_readonly_tools(review_registry, data=data, broker=broker,
-                                journal=journal, strategies=strategies,
-                                queue=queue)
-        sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
-        consolidator = Consolidator(
-            build_llm(settings, tier="memory", usage_store=llm_usage), memory,
-            observations, journal, conn,
-            conversations=ConversationStore(conn),
-            app_state=app_state)
-    except LLMConfigError:
-        pass  # no LLM configured: Phase 2 behavior
+    # shadow-dual-active T4: both accounts always active -- own broker,
+    # journal, queue, strategies, memory, sentinel, and (LLM permitting)
+    # consolidator/reflector -- sharing only the conn/data/notifier/
+    # llm_usage/app_state built above (and MemoryStore's shared profile.md
+    # file, which comes free: every MemoryStore's `path_for("profile", ...)`
+    # resolves to the same root-level file regardless of `account`). `broker`
+    # (the test-injection / cli.py hook) only ever stands in for paper's own
+    # broker -- see `_build_broker`.
+    accounts: dict[str, AccountComponents] = {
+        account: _build_account_components(
+            account, settings=settings, conn=conn, data=data, notifier=notifier,
+            app_state=app_state, llm_usage=llm_usage,
+            broker_override=broker if account == DEFAULT_ACCOUNT else None)
+        for account in ACCOUNTS
+    }
 
-    components = Components(
-        settings=settings, broker=broker, data=data, journal=journal,
-        gate=gate, executor=executor, queue=queue,
-        strategies=strategies, notifier=notifier, sentinel=sentinel,
-        conn=conn, observations=observations, memory=memory,
-        app_state=app_state, reports=reports, llm_usage=llm_usage,
-        consolidator=consolidator)
-
-    if consolidator is not None:
-        # Reflector needs the whole component bag (reports/conn/journal/
-        # observations/broker/data/strategies/queue/memory -- see its class
-        # docstring in reflect.py), which only exists once `components`
-        # above has been assembled -- built here, right after, rather than
-        # inside the try block above alongside the consolidator. Gated on
-        # `consolidator is not None` rather than repeating build_llm inside
-        # its own try/except: the consolidator's own
-        # `build_llm(settings, tier="memory")` call a few lines up already
-        # proved this exact (settings, tier) pair doesn't raise
-        # LLMConfigError, so a second try/except here would be dead code.
-        from allpath_trade.llm.factory import build_llm
-
-        components.reflector = Reflector(
-            llm=build_llm(settings, tier="memory", usage_store=llm_usage),
-            components=components, settings=settings, notifier=notifier)
-    return components
+    paper = accounts[DEFAULT_ACCOUNT]
+    return Components(
+        settings=settings, conn=conn, data=data, notifier=notifier,
+        app_state=app_state, llm_usage=llm_usage, accounts=accounts,
+        broker=paper.broker, journal=paper.journal, gate=paper.gate,
+        executor=paper.executor, queue=paper.queue, strategies=paper.strategies,
+        memory=paper.memory, reports=paper.reports, observations=paper.observations,
+        sentinel=paper.sentinel, consolidator=paper.consolidator,
+        reflector=paper.reflector)

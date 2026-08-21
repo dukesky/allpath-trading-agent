@@ -222,9 +222,10 @@ def test_daily_consolidation_reads_web_turns_since_last_marker(tmp_path):
     assert "ladder into TSM" in prompt
     # both markers advanced: the observation marker (existing invariant)...
     assert any(r["source"] == "consolidator" for r in _obs_rows(c))
-    # ...and the new turn-id watermark in app_state.
-    from allpath_trade.memory.consolidate import TURN_MARKER_KEY
-    assert app_state.get(TURN_MARKER_KEY) is not None
+    # ...and the new turn-id watermark in app_state (per-account key --
+    # shadow-dual-active T4 -- `make()` below defaults to the paper account).
+    from allpath_trade.memory.consolidate import _turn_marker_key
+    assert app_state.get(_turn_marker_key("paper")) is not None
 
     # second run: nothing new since the marker -- no LLM call at all.
     c.llm = ScriptedLLM([])
@@ -282,7 +283,7 @@ def test_daily_consolidation_excludes_tool_messages_and_preserves_fencing(tmp_pa
 
 def test_daily_consolidation_llm_failure_leaves_both_markers_unmoved(tmp_path):
     from allpath_trade.llm.base import LLMError
-    from allpath_trade.memory.consolidate import TURN_MARKER_KEY
+    from allpath_trade.memory.consolidate import _turn_marker_key
 
     c, _memory, obs, convo, app_state = make(tmp_path, ScriptedLLM([LLMError("down")]))
     cid = convo.start()
@@ -292,7 +293,7 @@ def test_daily_consolidation_llm_failure_leaves_both_markers_unmoved(tmp_path):
 
     assert "failed" in out or "llm error" in out
     assert not any(r["source"] == "consolidator" for r in obs.recent())
-    assert app_state.get(TURN_MARKER_KEY) is None
+    assert app_state.get(_turn_marker_key("paper")) is None
 
     # same turn is re-offered on the next (successful) run
     c.llm = ScriptedLLM([LLMResponse(text="recovered")])
@@ -379,7 +380,7 @@ def test_daily_consolidation_marker_only_advances_past_turns_actually_sent(tmp_p
     # 3 turns, run once, and confirm the 3rd (dropped by the cap) still
     # shows up on the next run rather than being silently skipped.
     import allpath_trade.memory.consolidate as consolidate_module
-    from allpath_trade.memory.consolidate import TURN_MARKER_KEY
+    from allpath_trade.memory.consolidate import _turn_marker_key
 
     orig_cap = consolidate_module.TURN_LINES_CAP
     consolidate_module.TURN_LINES_CAP = 2
@@ -403,7 +404,7 @@ def test_daily_consolidation_marker_only_advances_past_turns_actually_sent(tmp_p
         assert out2 == "second batch"
         prompt2 = c.llm.seen[0][0]["content"]
         assert "newest turn" in prompt2  # picked up, not lost
-        assert app_state.get(TURN_MARKER_KEY) is not None
+        assert app_state.get(_turn_marker_key("paper")) is not None
     finally:
         consolidate_module.TURN_LINES_CAP = orig_cap
 
@@ -469,3 +470,35 @@ def test_run_daily_reports_truthfully_when_only_turn_marker_write_fails(tmp_path
     assert "consolidation failed" not in out
     # the observation marker (and thus the memory write) already landed
     assert any(r["source"] == "consolidator" for r in obs.recent())
+
+
+def test_turn_marker_seeds_paper_from_legacy_key_shadow_starts_at_zero(tmp_path):
+    # shadow-dual-active T4 CRITICAL carry: the pre-dual-active turn-id
+    # watermark lived under one global app_state key. Paper's new
+    # per-account key must fall back to that legacy value ONE TIME (until
+    # paper's own run_daily writes the new key); shadow has no legacy
+    # history and must start at 0 regardless of what the legacy key holds.
+    from allpath_trade.memory.consolidate import TURN_MARKER_KEY, _turn_marker_key
+
+    conn = connect(tmp_path / "db.sqlite")
+    app_state = AppState(conn)
+    app_state.set(TURN_MARKER_KEY, "42")  # pre-dual-active global watermark
+
+    paper = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="paper"),
+        ObservationLog(conn, account="paper"), TradeJournal(conn, account="paper"),
+        conn, conversations=ConversationStore(conn, account="paper"),
+        app_state=app_state, account="paper")
+    shadow = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="shadow"),
+        ObservationLog(conn, account="shadow"), TradeJournal(conn, account="shadow"),
+        conn, conversations=ConversationStore(conn, account="shadow"),
+        app_state=app_state, account="shadow")
+
+    assert paper._last_turn_marker() == 42  # seeded from the legacy key
+    assert shadow._last_turn_marker() == 0  # no legacy history for shadow
+
+    # Once paper's own per-account key is written, the legacy fallback is
+    # never consulted again even if the legacy key still holds a value.
+    app_state.set(_turn_marker_key("paper"), "100")
+    assert paper._last_turn_marker() == 100

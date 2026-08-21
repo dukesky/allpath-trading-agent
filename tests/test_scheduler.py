@@ -63,15 +63,12 @@ def test_run_daemon_runs_job_on_worker_thread_against_real_store(
         tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
     s, _store, _ex, _q, _n = make(tmp_path, strategy_yaml(condition="price < 100"))
-    calls = []
+    accounts = {"paper": SimpleNamespace(
+        sentinel=s, journal=SimpleNamespace(unfilled_recent=lambda hours=48: []),
+        broker=SimpleNamespace())}
 
-    def sentinel_factory():
-        calls.append(1)
-        return s
+    run_daemon(lambda: accounts, 5, scheduler_cls=ImmediateScheduler)
 
-    run_daemon(sentinel_factory, 5, scheduler_cls=ImmediateScheduler)
-
-    assert calls == [1]
     out = capsys.readouterr().out
     assert "checked=1" in out
     assert "errors=0" in out
@@ -79,15 +76,12 @@ def test_run_daemon_runs_job_on_worker_thread_against_real_store(
 
 def test_run_daemon_skips_sentinel_when_market_closed(monkeypatch):
     monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
-    calls = []
+    accounts = {"paper": SimpleNamespace(
+        sentinel=RaisingSentinel(),
+        journal=SimpleNamespace(unfilled_recent=lambda hours=48: []),
+        broker=SimpleNamespace())}
 
-    def sentinel_factory():
-        calls.append(1)
-        raise AssertionError("sentinel_factory must not be called when market is closed")
-
-    run_daemon(sentinel_factory, 5, scheduler_cls=ImmediateScheduler)
-
-    assert calls == []
+    run_daemon(lambda: accounts, 5, scheduler_cls=ImmediateScheduler)  # must not raise
 
 
 def test_run_daemon_fires_daily_job_after_close(monkeypatch):
@@ -104,7 +98,7 @@ def test_run_daemon_fires_daily_job_after_close(monkeypatch):
 
     monkeypatch.setattr(sched, "is_market_hours", lambda now=None: False)
     monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
-    sched.run_daemon(lambda: None, 60, scheduler_cls=OneShotScheduler,
+    sched.run_daemon(dict, 60, scheduler_cls=OneShotScheduler,
                      daily_job=lambda: calls.append(1))
     assert calls == [1]
 
@@ -219,6 +213,30 @@ class FakeObservations:
         return self._rows
 
 
+class FakeStrategies:
+    """Stands in for StrategyStore's `.load_all()` -- the reflection cost
+    gate (shadow-dual-active T4, spec §③) calls this and skips the whole
+    reflection pass for an account with zero active strategies. `active`
+    defaults True so every existing test not specifically exercising the
+    gate itself sees a reflector run exactly as it did before this feature
+    existed."""
+
+    def __init__(self, active: bool = True):
+        self._active = active
+
+    def load_all(self, status=None, errors=None):
+        return ["strategy"] if self._active else []
+
+
+class RaisingSentinel:
+    """A sentinel whose `run_once` must never be called -- used to prove a
+    sentinel pass was correctly skipped (market closed) rather than merely
+    not reported."""
+
+    def run_once(self):
+        raise AssertionError("sentinel.run_once() must not be called here")
+
+
 class FakeAppState:
     """Stands in for allpath_trade.store.app_state.AppState -- a plain dict
     is enough to prove build_jobs/run_daemon call .set() with the right key,
@@ -244,19 +262,50 @@ class DigestNotifier:
         return True
 
 
+def _account_bundle(sentinel=None, journal=None, broker=None, queue=None,
+                    observations=None, strategies=None, reflector=None,
+                    consolidator=None):
+    return SimpleNamespace(
+        sentinel=sentinel, reflector=reflector, consolidator=consolidator,
+        journal=journal if journal is not None else FakeJournal(),
+        broker=broker if broker is not None else FakeSchedulerBroker(),
+        queue=queue if queue is not None else FakeQueue(),
+        observations=observations if observations is not None else FakeObservations(),
+        strategies=strategies if strategies is not None else FakeStrategies())
+
+
 def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5,
                 journal=None, queue=None, notifier=None, observations=None,
                 app_state=None, reflector=None, daily_reflection=True, broker=None,
-                llm_usage=None):
+                llm_usage=None, strategies=None, accounts=None):
+    # shadow-dual-active T4: every field below (sentinel/journal/broker/
+    # queue/observations/reflector/consolidator/strategies) is ALSO
+    # reachable as the flat legacy attribute (mirrors app.py's
+    # `Components` legacy alias surface, pointing at the "paper" bundle) --
+    # `_send_daily_digest` still reads the flat attributes directly, while
+    # `_run_sentinel_pass`/`run_daily_jobs` read `.accounts`. Both views are
+    # literally the SAME objects, so a test that asserts against e.g. the
+    # `journal`/`sentinel` it passed in keeps working unchanged whichever
+    # path the production code reads them through.
+    journal = journal if journal is not None else FakeJournal()
+    broker = broker if broker is not None else FakeSchedulerBroker()
+    queue = queue if queue is not None else FakeQueue()
+    observations = observations if observations is not None else FakeObservations()
+    strategies = strategies if strategies is not None else FakeStrategies()
+    bundle = _account_bundle(sentinel=sentinel, journal=journal, broker=broker,
+                             queue=queue, observations=observations,
+                             strategies=strategies, reflector=reflector,
+                             consolidator=consolidator)
     return SimpleNamespace(
         sentinel=sentinel,
         consolidator=consolidator,
         reflector=reflector,
-        journal=journal if journal is not None else FakeJournal(),
-        broker=broker if broker is not None else FakeSchedulerBroker(),
-        queue=queue if queue is not None else FakeQueue(),
+        journal=journal,
+        broker=broker,
+        queue=queue,
         notifier=notifier if notifier is not None else DigestNotifier(),
-        observations=observations if observations is not None else FakeObservations(),
+        observations=observations,
+        strategies=strategies,
         app_state=app_state if app_state is not None else FakeAppState(),
         # `_llm_cost_line`'s only touch point: `.summary_for_day()` -- empty
         # by default, matching "no LLM usage recorded" (no cost line in the
@@ -264,6 +313,7 @@ def _components(sentinel, consolidator=None, daily_consolidation=True, interval=
         # existed.
         llm_usage=llm_usage if llm_usage is not None
         else SimpleNamespace(summary_for_day=lambda date_utc=None: []),
+        accounts=accounts if accounts is not None else {"paper": bundle},
         settings=SimpleNamespace(daily_consolidation=daily_consolidation,
                                  daily_reflection=daily_reflection,
                                  sentinel_interval_minutes=interval),
@@ -349,8 +399,12 @@ def test_run_daemon_records_heartbeat_even_when_market_closed(monkeypatch):
     monkeypatch.setattr(sched, "datetime", SimpleNamespace(
         now=lambda tz=None: datetime(2026, 8, 9, 3, 0, tzinfo=UTC)))
     app_state = FakeAppState()
+    accounts = {"paper": SimpleNamespace(
+        sentinel=RaisingSentinel(),
+        journal=SimpleNamespace(unfilled_recent=lambda hours=48: []),
+        broker=SimpleNamespace())}
 
-    run_daemon(lambda: None, 5, scheduler_cls=ImmediateScheduler, app_state=app_state)
+    run_daemon(lambda: accounts, 5, scheduler_cls=ImmediateScheduler, app_state=app_state)
 
     assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == "2026-08-09T03:00:00+00:00"
 
@@ -734,8 +788,12 @@ def test_build_jobs_records_market_open_false_alongside_heartbeat_when_closed(mo
 def test_run_daemon_records_market_open_flag_too(monkeypatch):
     monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
     app_state = FakeAppState()
+    accounts = {"paper": SimpleNamespace(
+        sentinel=RaisingSentinel(),
+        journal=SimpleNamespace(unfilled_recent=lambda hours=48: []),
+        broker=SimpleNamespace())}
 
-    run_daemon(lambda: None, 5, scheduler_cls=ImmediateScheduler, app_state=app_state)
+    run_daemon(lambda: accounts, 5, scheduler_cls=ImmediateScheduler, app_state=app_state)
 
     assert app_state.get(SENTINEL_MARKET_OPEN_KEY) == "false"
 
@@ -830,9 +888,10 @@ def test_run_daemon_refreshes_pending_fills(monkeypatch):
     order = SimpleNamespace(status=SimpleNamespace(value="filled"))
     journal = FakeJournal(unfilled=[{"id": 7, "broker_order_id": "o7"}])
     broker = FakeSchedulerBroker(orders={"o7": order})
+    accounts = {"paper": SimpleNamespace(
+        sentinel=RaisingSentinel(), journal=journal, broker=broker)}
 
-    run_daemon(lambda: None, 5, scheduler_cls=ImmediateScheduler,
-              journal=journal, broker=broker)
+    run_daemon(lambda: accounts, 5, scheduler_cls=ImmediateScheduler)
 
     assert journal.refreshed == [(7, order)]
 
@@ -937,7 +996,7 @@ def test_build_jobs_reflection_failure_does_not_stop_consolidation(
 
     assert reflector.calls == 1
     assert consolidator.calls == 1
-    assert "[reflection] failed" in capsys.readouterr().err
+    assert "[reflection:paper] failed" in capsys.readouterr().err
 
 
 def test_build_jobs_digest_failure_does_not_stop_reflection(monkeypatch, capsys):
@@ -976,12 +1035,138 @@ def test_run_daily_jobs_verbose_prints_success_lines(capsys):
     # must restore the success-path prints the pre-extraction daily() had.
     run_daily_jobs(_chatty_daily_components(), verbose=True)
     out = capsys.readouterr().out
-    assert "[reflection] report stored for 2026-08-11" in out
-    assert "[memory] consolidated 3 events" in out
+    assert "[reflection:paper] report stored for 2026-08-11" in out
+    assert "[memory:paper] consolidated 3 events" in out
 
 
 def test_run_daily_jobs_default_is_quiet_on_success(capsys):
     run_daily_jobs(_chatty_daily_components())
     out = capsys.readouterr().out
-    assert "[reflection]" not in out
-    assert "[memory]" not in out
+    assert "[reflection:paper]" not in out
+    assert "[memory:paper]" not in out
+
+
+# -- shadow-dual-active T4: dual sentinel isolation + per-account nightly
+# reflection gate --
+
+
+def test_run_sentinel_pass_isolates_a_raising_account_from_the_other(monkeypatch, capsys):
+    # The whole point of dual-active: paper's sentinel raising must never
+    # stop shadow's pass from running, and vice versa.
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    from allpath_trade.scheduler import _run_sentinel_pass
+
+    class RaisingPaperSentinel:
+        def run_once(self):
+            raise RuntimeError("paper is on fire")
+
+    shadow_sentinel = FakeSentinel()
+    accounts = {
+        "paper": _account_bundle(sentinel=RaisingPaperSentinel()),
+        "shadow": _account_bundle(sentinel=shadow_sentinel),
+    }
+
+    _run_sentinel_pass(accounts)  # must not raise
+
+    assert shadow_sentinel.calls == 1  # shadow ran despite paper's failure
+    stderr = capsys.readouterr().err
+    assert "[sentinel] paper failed" in stderr
+    assert "paper is on fire" in stderr
+
+
+def test_run_sentinel_pass_writes_separate_per_account_heartbeat_keys(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    import allpath_trade.scheduler as sched
+
+    app_state = FakeAppState()
+    accounts = {
+        "paper": _account_bundle(sentinel=FakeSentinel()),
+        "shadow": _account_bundle(sentinel=FakeSentinel()),
+    }
+
+    sched._run_sentinel_pass(accounts, app_state=app_state)
+
+    paper_key = app_state.get(f"{sched.SENTINEL_HEARTBEAT_KEY}:paper")
+    shadow_key = app_state.get(f"{sched.SENTINEL_HEARTBEAT_KEY}:shadow")
+    assert paper_key is not None
+    assert shadow_key is not None
+    # Legacy un-suffixed key still mirrors paper only (dashboard compat,
+    # Task 7 carry) -- shadow never writes it.
+    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == paper_key
+
+
+def test_run_sentinel_pass_market_open_flag_is_a_single_shared_key(monkeypatch):
+    # Market-open-ness is one global fact, not duplicated per account.
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    from allpath_trade.scheduler import SENTINEL_MARKET_OPEN_KEY, _run_sentinel_pass
+
+    app_state = FakeAppState()
+    accounts = {
+        "paper": _account_bundle(sentinel=FakeSentinel()),
+        "shadow": _account_bundle(sentinel=FakeSentinel()),
+    }
+
+    _run_sentinel_pass(accounts, app_state=app_state)
+
+    assert app_state.get(SENTINEL_MARKET_OPEN_KEY) == "true"
+    assert f"{SENTINEL_MARKET_OPEN_KEY}:shadow" not in app_state.values
+
+
+def test_run_daily_jobs_reflection_gate_skips_shadow_with_no_active_strategies(capsys):
+    # spec §③: reflection is gated on >=1 ACTIVE strategy -- an empty
+    # shadow ledger the user hasn't written anything for yet must not burn
+    # a nightly LLM call. Consolidation is NOT gated by this -- only
+    # reflection is.
+    paper_reflector = FakeReflector()
+    paper_consolidator = FakeConsolidator()
+    shadow_reflector = FakeReflector()
+    shadow_consolidator = FakeConsolidator()
+    components = _components(
+        sentinel=FakeSentinel(),
+        accounts={
+            "paper": _account_bundle(
+                strategies=FakeStrategies(active=True),
+                reflector=paper_reflector, consolidator=paper_consolidator),
+            "shadow": _account_bundle(
+                strategies=FakeStrategies(active=False),
+                reflector=shadow_reflector, consolidator=shadow_consolidator),
+        })
+
+    run_daily_jobs(components, verbose=True)
+
+    assert paper_reflector.calls == 1  # active strategy -> reflection ran
+    assert shadow_reflector.calls == 0  # NO LLM call: zero active strategies
+    assert paper_consolidator.calls == 1
+    assert shadow_consolidator.calls == 1  # consolidation is not gated
+    out = capsys.readouterr().out
+    assert "[reflection:shadow] skipped (no active strategies)" in out
+
+
+def test_run_daily_jobs_runs_both_accounts_the_same_night_isolated(capsys):
+    # Both accounts' reflection+consolidation run the same night, each
+    # isolated from the other -- paper's reflection failing must not stop
+    # shadow's chain.
+    paper_reflector = FakeReflector(fail=True)
+    paper_consolidator = FakeConsolidator()
+    shadow_reflector = FakeReflector()
+    shadow_consolidator = FakeConsolidator()
+    components = _components(
+        sentinel=FakeSentinel(),
+        accounts={
+            "paper": _account_bundle(
+                strategies=FakeStrategies(active=True),
+                reflector=paper_reflector, consolidator=paper_consolidator),
+            "shadow": _account_bundle(
+                strategies=FakeStrategies(active=True),
+                reflector=shadow_reflector, consolidator=shadow_consolidator),
+        })
+
+    run_daily_jobs(components, verbose=True)
+
+    assert paper_reflector.calls == 1
+    assert shadow_reflector.calls == 1
+    assert paper_consolidator.calls == 1
+    assert shadow_consolidator.calls == 1
+    stderr = capsys.readouterr().err
+    assert "[reflection:paper] failed" in stderr
+    assert "[reflection:shadow] failed" not in stderr

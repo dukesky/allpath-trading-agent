@@ -261,9 +261,12 @@ class _FakeRunConsolidator:
 
 
 def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
-    def fake_run_daemon(sentinel_factory, interval, daily_job=None, app_state=None,
-                        journal=None, broker=None):
+    # shadow-dual-active T4: run_daemon's first positional param is now
+    # `get_accounts` (a callable returning the current accounts dict), not
+    # a single sentinel factory -- see scheduler.run_daemon's own docstring.
+    def fake_run_daemon(get_accounts, interval, daily_job=None, app_state=None):
         captured["daily_job"] = daily_job
+        captured["get_accounts"] = get_accounts
         if daily_job is not None:
             daily_job()
 
@@ -272,7 +275,8 @@ def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
 
 def _fake_run_components(reflector=None, consolidator=None, daily_reflection=True,
                          daily_consolidation=True, notifier=None, journal=None,
-                         queue=None, observations=None, app_state=None):
+                         queue=None, observations=None, app_state=None,
+                         strategies=None):
     from types import SimpleNamespace
 
     from tests.test_scheduler import (
@@ -281,20 +285,37 @@ def _fake_run_components(reflector=None, consolidator=None, daily_reflection=Tru
         FakeJournal,
         FakeObservations,
         FakeQueue,
+        FakeSchedulerBroker,
+        FakeStrategies,
     )
 
-    return SimpleNamespace(
-        strategies=None, sentinel=None, broker=None,
+    shared_app_state = app_state if app_state is not None else FakeAppState()
+    account_bundle = SimpleNamespace(
+        strategies=strategies if strategies is not None else FakeStrategies(),
+        sentinel=None, broker=FakeSchedulerBroker(),
         queue=queue if queue is not None else FakeQueue(),
         journal=journal if journal is not None else FakeJournal(),
-        app_state=app_state if app_state is not None else FakeAppState(),
-        notifier=notifier if notifier is not None else DigestNotifier(),
         observations=observations if observations is not None else FakeObservations(),
+        reflector=reflector, consolidator=consolidator)
+    return SimpleNamespace(
+        strategies=account_bundle.strategies, sentinel=None, broker=account_bundle.broker,
+        queue=account_bundle.queue, journal=account_bundle.journal,
+        app_state=shared_app_state,
+        notifier=notifier if notifier is not None else DigestNotifier(),
+        observations=account_bundle.observations,
         # `_llm_cost_line`'s only touch point -- empty by default (no LLM
         # usage recorded), same as every test here before this feature
         # existed (no cost line in the digest).
-        llm_usage=SimpleNamespace(summary=lambda days: []),
+        llm_usage=SimpleNamespace(summary_for_day=lambda date_utc=None: []),
         reflector=reflector, consolidator=consolidator,
+        # shadow-dual-active T4: `run_daily_jobs` now iterates
+        # `components.accounts` -- a single-account (paper-only) dict is
+        # enough for these CLI-parity tests, which only care that `run`
+        # wires digest/reflection/consolidation through the shared
+        # scheduler.run_daily_jobs helper the same way build_jobs does
+        # (that per-account behavior itself is covered by
+        # test_scheduler.py).
+        accounts={"paper": account_bundle},
         settings=SimpleNamespace(daily_reflection=daily_reflection,
                                  daily_consolidation=daily_consolidation))
 
@@ -318,7 +339,7 @@ def test_run_daily_job_runs_reflection_before_consolidation_isolated(
     # a broken reflection must not silently swallow consolidation.
     assert reflector.calls == 1
     assert consolidator.calls == 1
-    assert "[reflection] failed" in capsys.readouterr().err
+    assert "[reflection:paper] failed" in capsys.readouterr().err
 
 
 def test_run_daily_job_skips_reflection_when_setting_disabled(tmp_path, monkeypatch):

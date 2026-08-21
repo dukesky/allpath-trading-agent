@@ -95,16 +95,32 @@ CREATE TABLE IF NOT EXISTS memory_log (
     after TEXT
 );
 
+-- shadow-dual-active T4 CRITICAL carry (from T1's review): `account` scopes
+-- every read/write here (memory/observations.py's ObservationLog) so a
+-- shadow-account observation can never be picked up by paper's daily
+-- consolidation/reflection window queries, or vice versa. Was UNIQUE-free
+-- before, so a plain ALTER (see _MIGRATIONS) is enough -- no rebuild needed.
 CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',
     ts TEXT NOT NULL,
     source TEXT NOT NULL,
     subject TEXT,
     text TEXT NOT NULL
 );
 
+-- shadow-dual-active T4 CRITICAL carry (from T1's review): `account` (last
+-- column, UNINDEXED) scopes every row so a shadow chat turn or observation
+-- can never surface in paper's session_search results (memory/search.py)
+-- -- straight into the paper agent's context, the exact leak class T1's
+-- review flagged. Appended LAST (not inserted before subject/content) so
+-- SessionSearch.query's `snippet(search_index, 3, ...)` column-index call
+-- -- 0=kind, 1=ref_id, 2=subject, 3=content -- keeps pointing at `content`
+-- unchanged. FTS5 has no ALTER TABLE ADD COLUMN in the sqlite3 version this
+-- app targets, so an existing on-disk table needs the same rebuild
+-- treatment as `reports`/`rule_states` below -- see `_rebuild_search_index`.
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-    kind UNINDEXED, ref_id UNINDEXED, subject, content
+    kind UNINDEXED, ref_id UNINDEXED, subject, content, account UNINDEXED
 );
 
 -- Tiny key-value table for process-level facts that don't belong in any
@@ -249,6 +265,13 @@ _MIGRATIONS = [
     # comment above `strategy_versions`): plain ALTER + DEFAULT backfills
     # every legacy row 'paper', exactly like the four T1 columns above.
     "ALTER TABLE strategy_versions ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    # shadow-dual-active T4 CRITICAL carry: plain ALTER is enough for
+    # `observations` (no constraint to rebuild, see the SCHEMA comment
+    # above it) -- legacy rows backfill 'paper' via the column default,
+    # same pattern as the T1 four-column block above. `search_index`
+    # (FTS5) needs the rebuild treatment instead; see
+    # `_rebuild_search_index` below.
+    "ALTER TABLE observations ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)
@@ -485,6 +508,42 @@ def _rebuild_rule_states(conn: LockedConnection) -> None:
         conn.execute("ALTER TABLE rule_states_v2 RENAME TO rule_states")
 
 
+def _rebuild_search_index(conn: LockedConnection) -> None:
+    """Table-rebuild for `search_index` (FTS5): shadow-dual-active T4
+    CRITICAL carry-forward from T1's review. FTS5 tables can't gain a
+    column via `ALTER TABLE ... ADD COLUMN` the way `observations` just
+    did above, so this mirrors `_rebuild_reports`/`_rebuild_rule_states`'s
+    approach: create a new virtual table with the extra `account` column,
+    copy every existing row into it (backfilled 'paper' -- the only
+    account that could have pre-existing rows), drop the old table, rename
+    the new one into place. `account` lands as the LAST column so
+    `SessionSearch.query`'s `snippet(search_index, 3, ...)` column-index
+    call -- 0=kind, 1=ref_id, 2=subject, 3=content -- keeps pointing at
+    `content` unchanged; see the SCHEMA comment above the CREATE VIRTUAL
+    TABLE for the full rationale.
+
+    Guarded the same way as the other two rebuilds: inspect the table's
+    own stored CREATE TABLE text for the new column name (FTS5 virtual
+    tables register in `sqlite_master` as type='table', same as ordinary
+    tables), so a second call -- or a fresh install that already got the
+    new shape straight from SCHEMA -- is a strict no-op. Idempotent across
+    restarts and verified against a populated legacy index (see
+    tests/test_db_migrations.py)."""
+    sql = _table_sql(conn, "search_index")
+    if sql is None or "account" in sql:
+        return
+    with conn.transaction():
+        conn.execute(
+            "CREATE VIRTUAL TABLE search_index_v2 USING fts5("
+            "kind UNINDEXED, ref_id UNINDEXED, subject, content,"
+            " account UNINDEXED)")
+        conn.execute(
+            "INSERT INTO search_index_v2 (kind, ref_id, subject, content, account)"
+            " SELECT kind, ref_id, subject, content, 'paper' FROM search_index")
+        conn.execute("DROP TABLE search_index")
+        conn.execute("ALTER TABLE search_index_v2 RENAME TO search_index")
+
+
 def _migrate(conn: LockedConnection) -> None:
     for stmt in _MIGRATIONS:
         try:
@@ -495,6 +554,7 @@ def _migrate(conn: LockedConnection) -> None:
     # column they depend on is already backfilled on a legacy DB.
     _rebuild_reports(conn)
     _rebuild_rule_states(conn)
+    _rebuild_search_index(conn)
 
 
 def connect(path: Path | str) -> LockedConnection:

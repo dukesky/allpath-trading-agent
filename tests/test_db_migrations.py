@@ -163,3 +163,88 @@ def test_half_migrated_db_t1_complete_t2_strategy_versions_not_yet(tmp_path):
     rows = store.versions("a")
     assert [r["version"] for r in rows] == [1]
     assert rows[0]["account"] == "paper"
+
+
+# -- shadow-dual-active T4 CRITICAL carry: search_index (FTS5) + observations
+# account-column migration --
+
+
+def test_search_index_rebuild_backfills_paper_and_preserves_rows(tmp_path):
+    """A populated legacy `search_index` (no `account` column) migrated by
+    `connect()` must keep every row, backfilled `account='paper'`, and stay
+    fully searchable afterward -- the exact "test on a populated legacy
+    index" the plan calls for."""
+    path = tmp_path / "t.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE VIRTUAL TABLE search_index USING fts5("
+        "kind UNINDEXED, ref_id UNINDEXED, subject, content)")
+    raw.execute(
+        "INSERT INTO search_index (kind, ref_id, subject, content)"
+        " VALUES ('observation', '1', 'sentinel', 'AAPL stop-loss executed')")
+    raw.execute(
+        "INSERT INTO search_index (kind, ref_id, subject, content)"
+        " VALUES ('turn', '1', 'user', 'why did we exit AAPL')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT kind, ref_id, subject, content, account FROM search_index"
+        " ORDER BY ref_id")]
+    assert len(rows) == 2
+    assert all(r["account"] == "paper" for r in rows)
+    assert {r["content"] for r in rows} == {
+        "AAPL stop-loss executed", "why did we exit AAPL"}
+
+    # Still searchable, scoped by the backfilled account.
+    hits = list(conn.execute(
+        "SELECT ref_id FROM search_index WHERE search_index MATCH 'AAPL'"
+        " AND account = 'paper'"))
+    assert len(hits) == 2
+
+
+def test_search_index_rebuild_is_idempotent_across_two_connects(tmp_path):
+    path = tmp_path / "t.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE VIRTUAL TABLE search_index USING fts5("
+        "kind UNINDEXED, ref_id UNINDEXED, subject, content)")
+    raw.execute(
+        "INSERT INTO search_index (kind, ref_id, subject, content)"
+        " VALUES ('observation', '1', 'sentinel', 'legacy row')")
+    raw.commit()
+    raw.close()
+
+    conn1 = connect(path)
+    rows1 = [tuple(r) for r in conn1.execute(
+        "SELECT kind, ref_id, subject, content, account FROM search_index")]
+    conn1.close()
+
+    conn2 = connect(path)  # simulates a process restart: fresh connect()
+    rows2 = [tuple(r) for r in conn2.execute(
+        "SELECT kind, ref_id, subject, content, account FROM search_index")]
+
+    assert rows1 == rows2 == [("observation", "1", "sentinel", "legacy row", "paper")]
+    # No leftover _v2 table from a re-fired rebuild.
+    leftover = conn2.execute(
+        "SELECT name FROM sqlite_master WHERE name='search_index_v2'").fetchone()
+    assert leftover is None
+
+
+def test_observations_account_column_backfills_paper_on_legacy_table(tmp_path):
+    path = tmp_path / "t.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts TEXT NOT NULL, source TEXT NOT NULL, subject TEXT, text TEXT NOT NULL)")
+    raw.execute(
+        "INSERT INTO observations (ts, source, subject, text)"
+        " VALUES ('2026-08-01T00:00:00+00:00', 'chat', NULL, 'legacy note')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT account, text FROM observations").fetchone()
+    assert row["account"] == "paper"
+    assert row["text"] == "legacy note"

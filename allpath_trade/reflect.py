@@ -15,11 +15,9 @@ from allpath_trade.agent.reflection_tools import register_reflection_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient
-from allpath_trade.memory.search import SessionSearch
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
 from allpath_trade.scheduler import ET, ts_to_et_date
-from allpath_trade.store.conversations import ConversationStore
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
@@ -341,9 +339,12 @@ class Reflector:
     """
 
     llm: LLMClient
-    # Duck-typed rather than `app.Components` -- see class docstring. Only
-    # `.reports .conn .journal .observations .broker .data .strategies
-    # .queue .memory` are ever read.
+    # shadow-dual-active T4: an `app.AccountComponents` bundle (one
+    # account's own broker/journal/queue/strategies/memory/observations/
+    # search/conn) -- duck-typed rather than importing that type here (see
+    # class docstring) to avoid a reflect.py <-> app.py import cycle. Only
+    # `.reports .conn .conversations .journal .observations .search .broker
+    # .data .strategies .queue .memory` are ever read.
     components: Any
     settings: Settings
     # Optional, defaulting to None, so Task 4's tests (which construct a
@@ -367,19 +368,29 @@ class Reflector:
 
     def _run(self, et_date: str) -> str:
         c = self.components
-        conversations = ConversationStore(c.conn)
+        # shadow-dual-active T4: `c.conversations` is already this
+        # account's own ConversationStore (built once in app.py's per-
+        # account bundle), not a fresh unscoped instance constructed here
+        # -- constructing a bare `ConversationStore(c.conn)` would default
+        # to the paper account regardless of which account this Reflector
+        # actually belongs to.
+        conversations = c.conversations
         conversation_id = conversations.start(kind="reflection")
 
         registry = ToolRegistry()
         register_readonly_tools(registry, data=c.data, broker=c.broker,
                                 journal=c.journal, strategies=c.strategies,
                                 queue=c.queue)
-        # search=SessionSearch(c.conn) so session_search -- advertised right
-        # in REFLECTION_INSTRUCTIONS's tool list -- actually exists in the
-        # registry (mirrors web/chat_service.py's wiring). Without it the
+        # search=c.search (this account's own SessionSearch, built in
+        # app.py) so session_search -- advertised right in
+        # REFLECTION_INSTRUCTIONS's tool list -- actually exists in the
+        # registry (mirrors web/chat_service.py's wiring) AND stays scoped
+        # to this account: a bare `SessionSearch(c.conn)` would default to
+        # paper and leak the other account's turns/observations into this
+        # session's search results. Without registering it at all, the
         # first call the model makes to it burns an iteration on
         # "error: unknown tool" out of the 12-call session budget.
-        register_memory_tools(registry, memory=c.memory, search=SessionSearch(c.conn))
+        register_memory_tools(registry, memory=c.memory, search=c.search)
         register_reflection_tools(registry, strategies=c.strategies, queue=c.queue)
 
         identity = load_identity()
