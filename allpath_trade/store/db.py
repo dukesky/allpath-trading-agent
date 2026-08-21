@@ -150,6 +150,62 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     purpose TEXT NOT NULL DEFAULT ''
 );
+
+-- shadow-dual-active T3: ShadowLedger's own tables (broker/shadow.py).
+-- Deliberately have NO `account` column, unlike every table above --
+-- these tables ARE the shadow account's ledger (there is one shadow
+-- account, so there is nothing to dimension by), not a shared table a
+-- second account's rows could leak into. New tables land straight in
+-- SCHEMA (not _MIGRATIONS) per the house convention: CREATE TABLE IF NOT
+-- EXISTS already covers both a fresh install and an existing on-disk DB
+-- that predates this table, with no ALTER step needed.
+CREATE TABLE IF NOT EXISTS shadow_positions (
+    ticker TEXT PRIMARY KEY,
+    qty TEXT NOT NULL,
+    avg_cost TEXT NOT NULL,
+    last_price TEXT,
+    last_price_ts TEXT,
+    updated_ts TEXT NOT NULL
+);
+
+-- Single-row table (CHECK id=1) holding shadow cash. INSERT ... ON
+-- CONFLICT(id) DO UPDATE is how ShadowLedger both creates and updates it,
+-- so there is no separate "initialize the ledger" step.
+CREATE TABLE IF NOT EXISTS shadow_cash (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    cash TEXT NOT NULL,
+    updated_ts TEXT NOT NULL
+);
+
+-- Every submit_order call appends a row here, filled or rejected alike
+-- (rejections carry their reason in `note`, no fill_price/filled_at) --
+-- this table is the shadow account's full audit trail. `side='adjust'`
+-- rows (written by ShadowLedger's ledger-mutation helpers: set_position,
+-- set_cash, remove_position, record_fill -- Task 6's applier, never
+-- reachable from the agent directly) are also appended here for the same
+-- audit-trail reason, but are excluded from get_order/get_orders (Broker
+-- interface methods, side IN ('buy','sell') only) since they aren't
+-- orders the user submitted through the trading flow.
+CREATE TABLE IF NOT EXISTS shadow_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty TEXT,
+    notional TEXT,
+    status TEXT NOT NULL,
+    fill_price TEXT,
+    filled_at TEXT,
+    note TEXT NOT NULL DEFAULT ''
+);
+
+-- One row per ET calendar day, upserted both by get_account (every read,
+-- best-effort) and (eventually) a nightly job -- see ShadowLedger.
+CREATE TABLE IF NOT EXISTS shadow_equity_daily (
+    date TEXT PRIMARY KEY,
+    equity TEXT NOT NULL,
+    cash TEXT NOT NULL
+);
 """
 
 
