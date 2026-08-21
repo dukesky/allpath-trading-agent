@@ -24,8 +24,9 @@ DEFAULT_ACCOUNT = "paper"
 def is_valid_account(account: str) -> bool:
     """True iff `account` is one of the known `ACCOUNTS`. Every boundary that
     accepts an account from outside the process (a cookie, a Telegram
-    command, a CLI flag) must gate on this before it reaches a store -- an
-    unvalidated value would still be safe from injection (every query below
-    parameterizes it), but an unknown account string would silently create a
-    fourth, ungoverned partition of the data instead of failing closed."""
+    command, a CLI flag) must gate on this before it reaches a store. An
+    unvalidated value would be unsafe for filesystem-based stores (path joins
+    are not parameterized -- unvalidated strings like "../../evil" would write
+    outside the memory root). MemoryStore and other stores gate this; T5
+    also gates at the external boundaries (cookies, Telegram, CLI)."""
     return account in ACCOUNTS

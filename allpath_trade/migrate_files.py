@@ -11,11 +11,12 @@ After this task, `MemoryStore`/`StrategyStore` read/write:
   memory/{account}/stocks/*.md, .../strategies/*.md, .../lessons/*.md
   strategies/{account}/*.yaml
 
-`migrate_files` is the one-shot, idempotent move from the old shape to the
-new one for the `paper` account (the only account that can have pre-existing
-data -- `shadow` starts empty by spec). It is called exactly once, from
-`app.build_components`, before any store is constructed, so every store
-always sees the new layout regardless of how it got there.
+`migrate_files(settings)` is the one-shot, idempotent move from the old shape
+to the new one for the `paper` account (the only account that can have
+pre-existing data -- `shadow` starts empty by spec). It is called exactly
+once, from `app.build_components`, before any store is constructed, so every
+store always sees the new layout regardless of how it got there. Also called
+by `cli.py`'s `main` before dispatching broker-less commands.
 
 Safety: nothing here is ever destructive. If -- and only if -- a legacy
 layout is detected, the ENTIRE memory/ or strategies/ tree is copied to a
@@ -47,6 +48,20 @@ def _timestamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%d%H%M%S")
 
 
+def _backup_path(parent: Path, name: str, timestamp: str) -> Path:
+    """Generate a backup directory path, with numeric suffix if collision."""
+    base = parent / f"{name}.bak-{timestamp}"
+    if not base.exists():
+        return base
+    # Same-second collision: append numeric suffix (_0, _1, ...)
+    i = 0
+    while True:
+        candidate = parent / f"{name}.bak-{timestamp}_{i}"
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
 def _move_or_merge(src: Path, dst: Path) -> None:
     """Move `src` to `dst`. `dst`'s parent is created if needed. If `dst`
     already exists as a directory (not expected on the detection-gated path
@@ -72,12 +87,25 @@ def _migrate_memory(memory_dir: Path) -> None:
     if not legacy:
         return  # already migrated (or this layer was never written)
 
-    backup = memory_dir.parent / f"{memory_dir.name}.bak-{_timestamp()}"
-    shutil.copytree(memory_dir, backup)
+    timestamp = _timestamp()
+    backup = _backup_path(memory_dir.parent, memory_dir.name, timestamp)
+    try:
+        shutil.copytree(memory_dir, backup, symlinks=True)
+    except shutil.Error as exc:
+        print(f"[migrate] FAILED for {memory_dir.name}/: {exc} — fix the listed files and restart; nothing was moved")
+        raise RuntimeError(f"Migration failed for {memory_dir.name}") from exc
 
-    target_root = memory_dir / DEFAULT_ACCOUNT
-    for name in legacy:
-        _move_or_merge(memory_dir / name, target_root / name)
+    try:
+        target_root = memory_dir / DEFAULT_ACCOUNT
+        for name in legacy:
+            _move_or_merge(memory_dir / name, target_root / name)
+    except Exception as exc:
+        # Cleanup partial backup on failure
+        shutil.rmtree(backup, ignore_errors=True)
+        print(f"[migrate] FAILED for {memory_dir.name}/: {exc} — fix the listed files and restart; nothing was moved")
+        raise RuntimeError(f"Migration failed for {memory_dir.name}") from exc
+
+    print(f"[migrate] moved legacy memory layers into {memory_dir.name}/{DEFAULT_ACCOUNT}/ (backup: {backup.name})")
 
 
 def _migrate_strategies(strategies_dir: Path) -> None:
@@ -87,13 +115,30 @@ def _migrate_strategies(strategies_dir: Path) -> None:
     if not legacy_files:
         return  # already migrated (or nothing was ever authored)
 
-    backup = strategies_dir.parent / f"{strategies_dir.name}.bak-{_timestamp()}"
-    shutil.copytree(strategies_dir, backup)
+    timestamp = _timestamp()
+    backup = _backup_path(strategies_dir.parent, strategies_dir.name, timestamp)
+    try:
+        shutil.copytree(strategies_dir, backup, symlinks=True)
+    except shutil.Error as exc:
+        print(f"[migrate] FAILED for {strategies_dir.name}/: {exc} — fix the listed files and restart; nothing was moved")
+        raise RuntimeError(f"Migration failed for {strategies_dir.name}") from exc
 
-    target = strategies_dir / DEFAULT_ACCOUNT
-    target.mkdir(parents=True, exist_ok=True)
-    for path in legacy_files:
-        shutil.move(str(path), str(target / path.name))
+    try:
+        target = strategies_dir / DEFAULT_ACCOUNT
+        target.mkdir(parents=True, exist_ok=True)
+        for path in legacy_files:
+            dst = target / path.name
+            # Strategies collision: existing paper file wins, legacy twin
+            # remains in backup -- same keep-existing rule as memory
+            if not dst.exists():
+                shutil.move(str(path), str(dst))
+    except Exception as exc:
+        # Cleanup partial backup on failure
+        shutil.rmtree(backup, ignore_errors=True)
+        print(f"[migrate] FAILED for {strategies_dir.name}/: {exc} — fix the listed files and restart; nothing was moved")
+        raise RuntimeError(f"Migration failed for {strategies_dir.name}") from exc
+
+    print(f"[migrate] moved legacy strategies into {strategies_dir.name}/{DEFAULT_ACCOUNT}/ (backup: {backup.name})")
 
 
 def migrate_files(settings: Settings) -> None:

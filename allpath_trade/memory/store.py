@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from allpath_trade.memory.guard import scan_entry
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 LAYER_BUDGETS: dict[str, int] = {
     "profile": 2000, "strategy": 2000, "stock": 3000, "lesson": 2000,
@@ -26,6 +26,8 @@ class MemoryStore:
 
     def __init__(self, root: Path, conn: sqlite3.Connection,
                 account: str = DEFAULT_ACCOUNT) -> None:
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self.root = root
         self._conn = conn
         self.account = account

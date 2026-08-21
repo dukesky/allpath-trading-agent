@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.strategy.loader import StrategyValidationError, load_strategy
 from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
 
@@ -28,9 +28,25 @@ class StrategyStore:
 
     def __init__(self, directory: Path, conn: sqlite3.Connection,
                 account: str = DEFAULT_ACCOUNT) -> None:
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self.directory = directory
         self._conn = conn
         self._account = account
+
+    @classmethod
+    def for_account(cls, root: Path, conn: sqlite3.Connection,
+                   account: str) -> StrategyStore:
+        """Construct a StrategyStore rooted at `root/{account}/`, gating on
+        `is_valid_account(account)` so the T5 shadow-bundle miss (strategies
+        dir resolved but account parameter unvalidated) is impossible.
+
+        Used by both app.py and cli.py to construct the per-account store."""
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
+        directory = root / account
+        directory.mkdir(parents=True, exist_ok=True)
+        return cls(directory, conn, account=account)
 
     def load_all(self, status: StrategyStatus | None = StrategyStatus.ACTIVE,
                  errors: list[str] | None = None) -> list[StrategyDoc]:

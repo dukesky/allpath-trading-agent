@@ -580,9 +580,9 @@ def main(argv: list[str] | None = None,
         # already-canonical strategies/{account}/ location (a prior
         # build_components call, or a fresh install with nothing to
         # migrate, is what put it there; see migrate_files.py's docstring).
-        strategies_dir = settings.strategies_dir / DEFAULT_ACCOUNT
-        strategies_dir.mkdir(parents=True, exist_ok=True)
-        store = StrategyStore(strategies_dir, conn)
+        # Use classmethod for account validation (T4 shadow-bundle gate).
+        store = StrategyStore.for_account(settings.strategies_dir, conn,
+                                          account=DEFAULT_ACCOUNT)
         queue = ReviewQueue(conn, executor=None)
         # Wired unconditionally, same as build_components does for the
         # broker branch: approving a strategy_revision row is plain file

@@ -84,9 +84,11 @@ def build_components(settings: Settings, broker: Broker | None = None,
     gate = RiskGate(RiskLimits())
     executor = Executor(broker, gate, journal, data)
     queue = ReviewQueue(conn, executor)
-    strategies_dir = settings.strategies_dir / account
-    strategies_dir.mkdir(parents=True, exist_ok=True)
-    strategies = StrategyStore(strategies_dir, conn, account=account)
+    # shadow-dual-active T4: use classmethod to ensure account validation
+    # gates the directory resolution (prevents T5 shadow-bundle miss where the
+    # directory is resolved but account is unvalidated).
+    strategies = StrategyStore.for_account(settings.strategies_dir, conn,
+                                           account=account)
     # Unconditional (unlike the LLM-backed wiring in the try/except below):
     # applying an already-approved revision is plain file I/O, no LLM
     # involved, so a review approved via the web/CLI must work even when no

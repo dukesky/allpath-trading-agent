@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from allpath_trade.config import Settings
 from allpath_trade.migrate_files import migrate_files
 
@@ -164,3 +166,108 @@ def test_already_migrated_layout_is_a_noop(tmp_path):
     assert list(tmp_path.glob("strategies.bak-*")) == []
     assert (memory / "AAPL.md").read_text() == "- already migrated\n"
     assert (strategies / "a.yaml").read_text() == "name: A\n"
+
+
+def test_dangling_symlink_in_legacy_memory_copies_as_symlink(tmp_path, capsys):
+    # Dangling symlinks should copy as symlinks (not cause errors).
+    # This tests that symlinks=True preserves them intact.
+    _write_legacy_memory(tmp_path)
+    memory = tmp_path / "memory"
+    # Add a dangling symlink -- should copy as-is, not raise
+    (memory / "broken_link").symlink_to("/nonexistent/file")
+
+    settings = _settings(tmp_path)
+    migrate_files(settings)
+
+    # Migration succeeds and prints output
+    captured = capsys.readouterr()
+    assert "[migrate] moved legacy memory" in captured.out
+
+    # Backup contains the dangling symlink
+    backups = list(tmp_path.glob("memory.bak-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "broken_link").is_symlink()
+
+    # Legacy tree migrated successfully
+    assert (memory / "paper" / "stocks" / "AAPL.md").exists()
+    assert (memory / "broken_link").is_symlink()
+
+
+def test_same_second_backup_collision_uses_numeric_suffix(tmp_path, capsys, monkeypatch):
+    # Two migrations in the same second should use numeric suffix (_0, _1, ...)
+    # for backup collision avoidance.
+    _write_legacy_memory(tmp_path)
+    settings = _settings(tmp_path)
+
+    # Manually create the first backup before running migrate_files
+    memory = tmp_path / "memory"
+    timestamp = "20260101000000"
+    backup1 = memory.parent / f"memory.bak-{timestamp}"
+    backup1.mkdir()
+    (backup1 / "placeholder").write_text("existing backup")
+
+    # Patch _timestamp to return the same value, forcing collision detection
+    from allpath_trade import migrate_files as mf
+    original_timestamp = mf._timestamp
+    mf._timestamp = lambda: timestamp
+
+    try:
+        migrate_files(settings)
+
+        # First backup unchanged, second backup created with _0 suffix
+        assert (backup1 / "placeholder").read_text() == "existing backup"
+        backup2_list = list(tmp_path.glob(f"memory.bak-{timestamp}_*"))
+        assert len(backup2_list) == 1
+        assert (backup2_list[0] / "stocks" / "AAPL.md").exists()
+
+        # Migration still succeeds
+        assert (memory / "paper" / "stocks" / "AAPL.md").exists()
+        captured = capsys.readouterr()
+        assert "[migrate] moved legacy memory" in captured.out
+    finally:
+        mf._timestamp = original_timestamp
+
+
+def test_memory_store_rejects_invalid_account(tmp_path):
+    # MemoryStore.__init__ should validate account before using it.
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.db import connect
+
+    with pytest.raises(ValueError, match="invalid account"):
+        MemoryStore(tmp_path / "memory", connect(tmp_path / "db.sqlite"),
+                    account="../../evil")
+
+
+def test_strategy_store_rejects_invalid_account(tmp_path):
+    # StrategyStore.__init__ should validate account.
+    from allpath_trade.store.db import connect
+    from allpath_trade.strategy.store import StrategyStore
+
+    with pytest.raises(ValueError, match="invalid account"):
+        StrategyStore(tmp_path / "strategies", connect(tmp_path / "db.sqlite"),
+                      account="../../evil")
+
+
+def test_strategy_store_for_account_classmethod(tmp_path):
+    # Classmethod should construct the store with account validation
+    # and create the directory if needed.
+    from allpath_trade.store.db import connect
+    from allpath_trade.strategy.store import StrategyStore
+
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore.for_account(tmp_path / "strategies", conn,
+                                      account="paper")
+    assert store.directory == tmp_path / "strategies" / "paper"
+    assert (tmp_path / "strategies" / "paper").exists()
+    assert store._account == "paper"
+
+
+def test_strategy_store_for_account_rejects_invalid(tmp_path):
+    # Classmethod should also validate account.
+    from allpath_trade.store.db import connect
+    from allpath_trade.strategy.store import StrategyStore
+
+    with pytest.raises(ValueError, match="invalid account"):
+        StrategyStore.for_account(tmp_path / "strategies",
+                                  connect(tmp_path / "db.sqlite"),
+                                  account="unknown")
