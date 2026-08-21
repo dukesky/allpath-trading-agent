@@ -175,6 +175,63 @@ def test_reviews_approve_on_a_stale_revision_leaves_it_pending(
     conn.close()
 
 
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6 review: `cli reviews approve` on a shadow_edit row
+# -- Important 2 (AttributeError on `result.submitted` for None) + M3
+# (RevisionValidationError wording must say "ledger change", not
+# "revision"). broker_factory=FakeBroker is required even for a shadow-only
+# approval: build_components always constructs BOTH accounts' bundles in
+# one call (Task 4 dual-active), so reaching it needs a paper broker
+# regardless of which --account the approval itself targets.
+# ---------------------------------------------------------------------------
+
+def _queue_shadow_edit(tmp_path, *, before=None) -> int:
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    conn = connect(tmp_path / "allpath-trade.db")
+    rid = ReviewQueue(conn, executor=None, account="shadow").add_shadow_edit(
+        op="set_cash", ticker="", action="Set cash", args={"amount": "1"},
+        before=(before if before is not None else {"cash": "0"}),
+        after={"cash": "1"})
+    conn.close()
+    return rid
+
+
+def test_reviews_approve_on_a_shadow_edit_row_applies_it(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    rid = _queue_shadow_edit(tmp_path)
+
+    code = main(["reviews", "--account", "shadow", "approve", str(rid)],
+               broker_factory=lambda s: FakeBroker())
+
+    out = capsys.readouterr().out
+    assert code == 0  # not a crash from `result.submitted` on None
+    assert "Ledger change applied." in out
+
+
+def test_reviews_approve_on_a_stale_shadow_edit_leaves_it_pending(
+        tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    rid = _queue_shadow_edit(tmp_path, before={"cash": "999999"})  # never real
+
+    code = main(["reviews", "--account", "shadow", "approve", str(rid)],
+               broker_factory=lambda s: FakeBroker())
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "ledger change" in err.lower()
+    assert "revision" not in err.lower()
+
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    conn = connect(tmp_path / "allpath-trade.db")
+    row = ReviewQueue(conn, executor=None, account="shadow").get(rid)
+    assert row["status"] == "pending"
+    conn.close()
+
+
 def _clear_alpaca_env(monkeypatch):
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)

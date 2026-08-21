@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
+from allpath_trade.agent.shadow_tools import current_shadow_state
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.web.account_ctx import bundle_for
@@ -104,6 +105,17 @@ def _confirm_context(c, row) -> dict:
         snapshot = json.loads(row["snapshot"]) if row["snapshot"] else {}
         ctx["shadow_before"] = snapshot.get("before")
         ctx["shadow_after"] = snapshot.get("after")
+        ctx["shadow_op"] = snapshot.get("op", "")
+        # M4: staleness for a shadow_edit confirm page, computed the exact
+        # same way `apply_shadow_edit_factory`'s own `_stale_check` will at
+        # approval time (`current_shadow_state` is the SAME snapshot lookup
+        # the applier uses, extracted so the two can never disagree) --
+        # previously this page never told an unauthenticated link visitor
+        # their one-click approve was about to fail re-validation, unlike
+        # the strategy_revision branch below which already does this.
+        current = current_shadow_state(c.broker, snapshot.get("op", ""),
+                                       snapshot.get("args", {}))
+        ctx["stale"] = current is not None and current != ctx["shadow_before"]
         return ctx
     if kind == "strategy_revision":
         # I3: a revision confirm page has no order to price -- the template
@@ -271,9 +283,14 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
     try:
         result = b.queue.approve(review_id)
     except RevisionValidationError as exc:
+        # M3: `apply_shadow_edit_factory` raises this exact exception too
+        # (see its own docstring) -- a shadow_edit row failing this must
+        # say "Ledger change", not "Revision", or the message actively
+        # lies about what kind of row this was.
+        noun = "Ledger change" if row["kind"] == "shadow_edit" else "Revision"
         return _result_page(
             request, ok=False, account=b.account,
-            message=(f"Revision failed re-validation and was left pending "
+            message=(f"{noun} failed re-validation and was left pending "
                      f"for you to retry or reject in the app: {exc}"))
     except ExecutionError as exc:
         return _result_page(

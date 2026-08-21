@@ -1061,3 +1061,94 @@ def test_approve_shadow_edit_stale_before_state_stays_pending(client):
     row = b.queue.get(rid)
     assert row["status"] == "pending"
     assert b.broker.get_account().cash != Decimal(777)
+
+
+def test_approve_stale_shadow_edit_message_says_ledger_change_not_revision(client):
+    # M3: apply_shadow_edit_factory raises the exact same
+    # RevisionValidationError strategy_revision's applier does -- the
+    # in-app approve route must not echo "Revision failed re-validation"
+    # for a row that never was a revision.
+    rid, _b = queue_shadow_edit(client, before={"cash": "999999"})
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=True)
+
+    assert "Ledger change failed re-validation" in r.text
+    assert "Revision failed re-validation" not in r.text
+
+
+def test_shadow_edit_card_does_not_duplicate_the_action_as_a_reason(client):
+    # M1: shadow_edit's own `action` ("Set cash") is already the card's
+    # headline (the <strong> block) -- the .review-reason echo further
+    # down used to repeat it a second time.
+    queue_shadow_edit(client, action="Set cash to 777")
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+    assert body.count("Set cash to 777") == 1
+
+
+def test_shadow_edit_card_does_not_show_a_from_chat_triggered_on_line(client):
+    # M1: "From chat — triggered on <code>set_cash</code>" duplicates the
+    # card's own "Shadow ledger edit from your chat." line while also
+    # confusingly echoing the raw op name as if it were a rule condition.
+    queue_shadow_edit(client)
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+    assert "triggered on" not in body
+    assert "Shadow ledger edit from your chat." in body
+
+
+def test_import_card_lists_the_tickers_being_set(client):
+    from allpath_trade.agent.shadow_tools import full_snapshot, preview_import
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = full_snapshot(b.broker)
+    rows = [{"ticker": "AAPL", "qty": "10", "avg_cost": "150"},
+            {"ticker": "MSFT", "qty": "5", "avg_cost": "300"}]
+    after = preview_import(before, rows, None)
+    b.queue.add_shadow_edit(
+        op="import", ticker="", action="Import 2 position(s) from CSV",
+        args={"rows": rows, "cash": None}, before=before, after=after)
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert "AAPL" in body and "MSFT" in body
+
+
+def test_import_card_lists_first_10_tickers_and_a_count_of_the_rest(client):
+    from allpath_trade.agent.shadow_tools import full_snapshot, preview_import
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = full_snapshot(b.broker)
+    rows = [{"ticker": f"T{i}", "qty": "1", "avg_cost": "1"} for i in range(12)]
+    after = preview_import(before, rows, None)
+    b.queue.add_shadow_edit(
+        op="import", ticker="", action="Import 12 position(s) from CSV",
+        args={"rows": rows, "cash": None}, before=before, after=after)
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert "and 2 more" in body
+
+
+def test_reset_card_does_not_list_tickers(client):
+    # M7 is scoped to import specifically -- reset unconditionally wipes
+    # everything, so a "tickers being set" list would be misleading (it
+    # doesn't "set" anything, it removes it all).
+    from decimal import Decimal
+
+    from allpath_trade.agent.shadow_tools import full_snapshot
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    before = full_snapshot(b.broker)
+    rid = b.queue.add_shadow_edit(
+        op="reset", ticker="", action="Reset ledger", args={},
+        before=before, after={"positions": {}, "cash": "0"})
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert f"#{rid}" in body
+    assert "Tickers" not in body

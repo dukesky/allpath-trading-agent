@@ -751,3 +751,35 @@ def test_post_reject_shadow_edit_leaves_ledger_untouched(client):
     assert r.status_code == 200
     assert b.broker.get_account().cash == before_cash
     assert b.queue.get(rid)["status"] == "rejected"
+
+
+def test_confirm_page_warns_when_shadow_edit_has_gone_stale(client):
+    # M4: the applier's own staleness check compares the CURRENT ledger
+    # state to the proposal's recorded `before` -- the confirm page must
+    # show the exact same warning strategy_revision's confirm page already
+    # gets, computed via current_shadow_state (the SAME snapshot lookup
+    # apply_shadow_edit_factory uses).
+    rid = queue_shadow_edit(client, before={"cash": "999999"})  # never real
+
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+
+    assert "changed since this proposal" in body
+
+
+def test_confirm_page_no_stale_warning_when_shadow_edit_is_fresh(client):
+    rid = queue_shadow_edit(client)  # before == actual current cash snapshot
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "changed since this proposal" not in body
+
+
+def test_post_approve_stale_shadow_edit_says_ledger_change_not_revision(client):
+    # M3: apply_shadow_edit_factory raises the exact same
+    # RevisionValidationError strategy_revision's applier does -- this
+    # unauthenticated one-click surface must not call a ledger edit a
+    # "Revision".
+    rid = queue_shadow_edit(client, before={"cash": "999999"})
+
+    r = client.post(f"{approve_url(rid)}/approve", data={"k": rid.token})
+
+    assert "Ledger change failed re-validation" in r.text
+    assert "Revision failed re-validation" not in r.text

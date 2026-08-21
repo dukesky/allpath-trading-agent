@@ -1138,6 +1138,23 @@ def test_shadow_csv_preview_shows_a_clean_preview_table(client):
     assert_english_only(r.text)
 
 
+@pytest.mark.parametrize("bad", ["Infinity", "-Infinity", "NaN", "sNaN", "1e999"])
+def test_shadow_csv_preview_never_500s_on_non_finite_numbers(client, bad):
+    # Important 1 / Critical 1: Decimal(...) < 0 on a NaN/sNaN raises
+    # InvalidOperation uncaught (not caught by the constructor's own
+    # try/except), which used to 500 this route outright; Infinity/1e999
+    # sailed through every guard silently and would have bricked the
+    # ledger on the next read. Both must now degrade to the same
+    # 200-with-a-line-numbered-error response as any other bad CSV row.
+    b = client.app.state.holder.get().accounts["shadow"]
+    r = client.post("/settings/shadow/csv-preview",
+                    files={"csv_file": ("p.csv", f"AAPL,{bad},150\n".encode(), "text/csv")})
+    assert r.status_code == 200
+    assert "line 1" in r.text
+    assert "nothing was queued" in r.text
+    assert b.queue.list() == []
+
+
 def test_shadow_csv_confirm_queues_one_bulk_shadow_edit(client):
     b = client.app.state.holder.get().accounts["shadow"]
     r = client.post("/settings/shadow/csv-confirm",

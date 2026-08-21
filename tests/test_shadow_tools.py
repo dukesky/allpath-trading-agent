@@ -480,6 +480,142 @@ def test_apply_missing_arg_raises_revision_validation_error(tmp_path):
 
 # --- add_shadow_edit is only valid on the shadow account's own queue -------
 
+# --- Critical 1: Infinity/NaN/sNaN/1e999/-0 are rejected at every layer ----
+# `Decimal("Infinity") < 0` is False and `> 0` is True -- every existing
+# "must be >= 0"/"must be > 0" guard passes it straight through, and once
+# written, ShadowLedger.get_account/get_positions (pydantic Decimal fields
+# reject non-finite) raise ValidationError on every subsequent read forever.
+# A bare `<`/`>` against NaN/sNaN raises InvalidOperation immediately,
+# uncaught, which is what 500'd the CSV preview route. _parse_money closes
+# both holes at the one shared choke point (agent/shadow_tools.py).
+
+_BAD_NUMBERS = ["Infinity", "-Infinity", "NaN", "sNaN", "1e999", "-1e999"]
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_set_position_rejects_non_finite_and_oversized_qty(tmp_path, bad):
+    reg, ledger, _, _, prompts = make(tmp_path, queue=None, answers=[True])
+    out = call(reg, "shadow_set_position", ticker="AAPL", qty=bad, avg_cost="1")
+    assert out.startswith("error:")
+    assert prompts == []
+    assert ledger.get_positions() == []
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_set_position_rejects_non_finite_and_oversized_avg_cost(tmp_path, bad):
+    reg, ledger, _, _, prompts = make(tmp_path, queue=None, answers=[True])
+    out = call(reg, "shadow_set_position", ticker="AAPL", qty="1", avg_cost=bad)
+    assert out.startswith("error:")
+    assert prompts == []
+    assert ledger.get_positions() == []
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_set_cash_rejects_non_finite_and_oversized(tmp_path, bad):
+    reg, ledger, _, _, prompts = make(tmp_path, queue=None, answers=[True])
+    out = call(reg, "shadow_set_cash", amount=bad)
+    assert out.startswith("error:")
+    assert prompts == []
+    assert ledger.get_account().cash == Decimal(10000)
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_record_fill_rejects_non_finite_and_oversized_price(tmp_path, bad):
+    from allpath_trade.broker.base import OrderIntent, OrderSide
+
+    reg, ledger, _, _, prompts = make(tmp_path, queue=None, answers=[True],
+                                      prices={"AAPL": Decimal(100)})
+    order = ledger.submit_order(
+        OrderIntent(ticker="AAPL", side=OrderSide.BUY, qty=Decimal(10), reason="x"))
+    out = call(reg, "shadow_record_fill", order_id=order.id, actual_price=bad)
+    assert out.startswith("error:")
+    assert prompts == []
+    assert ledger.get_order(order.id).filled_avg_price == Decimal(100)
+
+
+def test_set_position_rejects_magnitude_over_1e12(tmp_path):
+    reg, ledger, _, _, _ = make(tmp_path, queue=None, answers=[True])
+    out = call(reg, "shadow_set_position", ticker="AAPL", qty="1", avg_cost="1e13")
+    assert out.startswith("error:") and "avg_cost" in out
+    assert ledger.get_positions() == []
+
+
+def test_set_position_normalizes_negative_zero_qty(tmp_path):
+    # -0 < 0 is False (a legit qty=0 no-op-ish "flatten to zero" case) --
+    # but the STORED value must be plain "0", not the surprising literal
+    # "-0", so a later snapshot string-compare (staleness) is predictable.
+    reg, ledger, _, _, _ = make(tmp_path, queue=None, answers=[True])
+    out = call(reg, "shadow_set_position", ticker="AAPL", qty="-0", avg_cost="1")
+    assert out.startswith("applied:")
+    [pos] = ledger.get_positions()
+    assert str(pos.qty) == "0"
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_csv_rejects_non_finite_and_oversized_qty(bad):
+    _rows, _cash, errors = parse_shadow_csv(f"AAPL,{bad},150\n")
+    assert len(errors) == 1 and "line 1" in errors[0]
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_csv_rejects_non_finite_and_oversized_cash(bad):
+    _rows, _cash, errors = parse_shadow_csv(f"CASH,{bad}\n")
+    assert len(errors) == 1 and "line 1" in errors[0]
+
+
+def test_csv_caps_row_count():
+    text = "\n".join(f"T{i},1,1" for i in range(2001))
+    _rows, _cash, errors = parse_shadow_csv(text)
+    assert any("too many rows" in e for e in errors)
+
+
+def test_csv_caps_file_size():
+    text = "AAPL,10,150\n" + ("x" * 1_000_001)
+    _rows, _cash, errors = parse_shadow_csv(text)
+    assert any("too large" in e for e in errors)
+
+
+@pytest.mark.parametrize("bad", _BAD_NUMBERS)
+def test_apply_set_position_rejects_non_finite_qty_leaves_pending(tmp_path, bad):
+    ledger, conn, _ = make_ledger(tmp_path)
+    apply = apply_shadow_edit_factory(ledger, conn)
+    before = position_snapshot(ledger, "AAPL")
+
+    with pytest.raises(RevisionValidationError):
+        apply("set_position", {"ticker": "AAPL", "qty": bad, "avg_cost": "1"}, before)
+
+    assert position_snapshot(ledger, "AAPL") is None  # never written
+
+
+def test_apply_import_rejects_non_finite_row_and_writes_nothing(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, cash="1")
+    before = full_snapshot(ledger)
+    apply = apply_shadow_edit_factory(ledger, conn)
+    rows = [
+        {"ticker": "AAPL", "qty": "10", "avg_cost": "100"},
+        {"ticker": "GOOG", "qty": "Infinity", "avg_cost": "1"},
+    ]
+
+    with pytest.raises(RevisionValidationError):
+        apply("import", {"rows": rows, "cash": None}, before)
+
+    assert position_snapshot(ledger, "AAPL") is None
+    assert full_snapshot(ledger) == before
+
+
+def test_apply_set_cash_rejects_nan_leaves_pending(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, cash="500")
+    apply = apply_shadow_edit_factory(ledger, conn)
+    before = cash_snapshot(ledger)
+
+    with pytest.raises(RevisionValidationError):
+        apply("set_cash", {"amount": "NaN"}, before)
+
+    assert ledger.get_account().cash == Decimal(500)  # untouched
+
+
+# --- add_shadow_edit is only valid on the shadow account's own queue -------
+
 def test_add_shadow_edit_rejected_on_a_non_shadow_queue(tmp_path):
     from allpath_trade.store.db import connect
 

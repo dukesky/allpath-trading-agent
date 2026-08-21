@@ -19,7 +19,15 @@
 
     {% if kind == "shadow_edit" %}
     <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
-      {{ shadow_before_after(shadow_before, shadow_after) }}
+      {{ shadow_before_after(shadow_before, shadow_after, shadow_op) }}
+      {% if stale %}
+      {# M4: same staleness compare `apply_shadow_edit_factory` itself runs
+         at approval time (web/routes/approve.py's `current_shadow_state`
+         call) -- an unauthenticated one-click confirm page is, if
+         anything, the MORE important place to warn: a visitor here may
+         never have seen the in-app /reviews card at all. #}
+      <p class="warn" style="font-size:13px;margin:8px 0 0">The ledger has changed since this proposal — approving will fail safely; re-propose or reject.</p>
+      {% endif %}
     </div>
     {% endif %}
     {% if kind == "order" %}

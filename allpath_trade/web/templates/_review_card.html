@@ -32,7 +32,7 @@
   {% if item['kind'] == 'shadow_edit' %}
   <p class="muted" style="font-size:13px;margin:6px 0">Shadow ledger edit from your chat.</p>
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
-    {{ shadow_before_after(item['snapshot']['before'], item['snapshot']['after']) }}
+    {{ shadow_before_after(item['snapshot']['before'], item['snapshot']['after'], item['snapshot'].get('op', '')) }}
   </div>
   {% endif %}
   {% if item['kind'] == 'strategy_revision' %}
@@ -51,6 +51,13 @@
     {% if item['is_new'] %}<span class="badge">New strategy</span>{% endif %}
   </div>
   {% endif %}
+  {# M1: shadow_edit already got its own "Shadow ledger edit from your
+     chat." line + before/after table above -- this block's "From chat —
+     triggered on <code>{op name}</code>" would just be a second, more
+     confusing copy of the exact same fact (item['condition'] IS the op
+     name for a shadow_edit row, see add_shadow_edit), so it's skipped
+     here entirely rather than gated per-branch. #}
+  {% if item['kind'] != 'shadow_edit' %}
   <p class="muted" style="font-size:13px;margin:6px 0">
     {% if item['kind'] == 'strategy_revision' %}
     {% if item['source'] == 'chat' %}
@@ -64,12 +71,16 @@
     {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
     {% endif %}
   </p>
+  {% endif %}
   {# Minor 2: a strategy_revision row's `action` is the fixed "revise
      strategy" sentinel, not free-text worth echoing as a reason -- the
      revision block below already shows the real rationale
      (item['snapshot']['rationale']). Only an order-kind chat proposal's
-     `action` (the LLM's free-text reason, order_sink.py) belongs here. #}
-  {% if item['source'] == 'chat' and item['kind'] != 'strategy_revision' and item['action'] %}
+     `action` (the LLM's free-text reason, order_sink.py) belongs here.
+     M1: a shadow_edit row's `action` is ALSO excluded -- it's already the
+     card's own headline (the `<strong>` block above), so echoing it again
+     here would be the same duplicate-copy problem. #}
+  {% if item['source'] == 'chat' and item['kind'] not in ('strategy_revision', 'shadow_edit') and item['action'] %}
   <p class="review-reason">{{ item['action'] }}</p>
   {% endif %}
   {% if item['intent'] %}

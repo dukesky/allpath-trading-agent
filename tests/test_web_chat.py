@@ -245,6 +245,65 @@ def test_chat_page_pending_strategy_revision_has_no_inline_approve_form(
     assert "Risk pre-check" not in body
 
 
+# --- Critical 2: chat page must not absorb shadow_edit (or an unknown
+# future kind) into the bare order-approval card -- the recorded lesson,
+# again, this time for a second kind besides strategy_revision. ------------
+
+def test_chat_page_pending_shadow_edit_has_no_inline_approve_form(tmp_path, monkeypatch):
+    from allpath_trade.web.account_ctx import ACCOUNT_COOKIE
+
+    client = make_client(tmp_path, monkeypatch, [])
+    b = client.app.state.holder.get().accounts["shadow"]
+    row = b.queue.add_shadow_edit(
+        op="set_cash", ticker="", action="Set cash", args={"amount": "500"},
+        before={"cash": "0"}, after={"cash": "500"}, conversation_id=None)
+
+    client.cookies.set(ACCOUNT_COOKIE, "shadow")
+    page = client.get("/chat")
+
+    assert page.status_code == 200
+    body = page.text
+    # No inline approve/reject for this row -- it must point at /reviews
+    # (the surface with the before/after diff + staleness check), same as
+    # strategy_revision already does above.
+    assert f"/reviews/{row}/approve" not in body
+    assert 'href="/reviews"' in body
+    assert f"#{row}" in body
+    assert "Set cash" in body
+    # And it must NOT have fallen into the bare order-approval card, whose
+    # tell is the "Risk pre-check" line (shadow_edit rows never carry one).
+    assert "Risk pre-check" not in body
+
+
+def test_chat_page_unrecognized_pending_kind_renders_a_neutral_link_card(
+        tmp_path, monkeypatch):
+    # Fail-closed by construction: a FUTURE kind this template has never
+    # heard of must degrade to a neutral "open Pending" link, never the
+    # bare order-approval card -- so the next new pending kind can't repeat
+    # this mistake a third time. Simulated here by forcing an existing
+    # chat-sourced row's kind to something invented; the loop is filtered
+    # by `source == 'chat'`, not by kind, so this is a legitimate row shape
+    # for the template to encounter.
+    client = make_client(tmp_path, monkeypatch, [])
+    comp = client.app.state.holder.get()
+    row = comp.queue.add(
+        strategy_id="", rule_id="mystery", ticker="AAPL", rule_type="mystery",
+        condition="mystery", action="Do a mystery thing", snapshot={},
+        intent=None, source="chat")
+    comp.conn.execute("UPDATE pending_reviews SET kind = ? WHERE id = ?",
+                      ("a_future_kind_nobody_wrote_a_branch_for", row))
+    comp.conn.commit()
+
+    page = client.get("/chat")
+
+    assert page.status_code == 200
+    body = page.text
+    assert f"/reviews/{row}/approve" not in body
+    assert "Risk pre-check" not in body
+    assert 'href="/reviews"' in body
+    assert f"#{row}" in body
+
+
 def test_empty_message_is_ignored(tmp_path, monkeypatch):
     client = make_client(tmp_path, monkeypatch, [])
     r = client.post("/chat/send", data={"message": "   "})

@@ -202,8 +202,14 @@ def cmd_reviews(q, args, store=None) -> int:
                 result = q.approve(args.review_id)
             except RevisionValidationError as exc:
                 # ReviewQueue already rolled the row back to "pending"
-                # before raising -- say that, not just "error".
-                print(f"error: revision failed re-validation and was left "
+                # before raising -- say that, not just "error". M3:
+                # `apply_shadow_edit_factory` raises this exact exception
+                # too (same rollback-to-pending contract) -- a shadow_edit
+                # row failing this must say "Ledger change", not
+                # "revision", or the message actively lies about what kind
+                # of row this was.
+                noun = "ledger change" if kind == "shadow_edit" else "revision"
+                print(f"error: {noun} failed re-validation and was left "
                       f"pending: {exc}", file=sys.stderr)
                 return 1
             if kind == "strategy_revision":
@@ -214,6 +220,12 @@ def cmd_reviews(q, args, store=None) -> int:
                 # real caller (main(), below) passes the StrategyStore.
                 note = store.rearm_warning(strategy_id) if store is not None else ""
                 print(f"Revision applied to {strategy_id}.{note}")
+            elif kind == "shadow_edit":
+                # Important 2: approve() returns None for shadow_edit rows
+                # too (mirrors strategy_revision above) -- `result.submitted`
+                # below would raise AttributeError on None for this kind,
+                # after the write already succeeded.
+                print("Ledger change applied.")
             else:
                 print("executed" if result.submitted
                       else f"rejected by risk gate: {'; '.join(result.decision.reasons)}")

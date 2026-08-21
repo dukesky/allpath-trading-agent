@@ -450,10 +450,17 @@ def approve(request: Request, review_id: int) -> Response:
         # first: ReviewQueue._approve_revision already rolled the row back
         # to "pending" before raising (see the loud comment there), so the
         # message here has to say that, not the generic "not processed".
+        #
+        # M3: `apply_shadow_edit_factory` raises this exact exception too
+        # (same rollback-to-pending contract, see its own docstring) -- a
+        # shadow_edit row failing this must say "Ledger change", not
+        # "Revision", or the message actively lies about what kind of row
+        # this was.
+        noun = "Ledger change" if kind == "shadow_edit" else "Revision"
         _echo_resolution(request, account, review_id, row_source,
-                         f"revision left pending: re-validation failed ({exc})")
+                         f"{noun.lower()} left pending: re-validation failed ({exc})")
         return _back_to_reviews(
-            f"Revision failed re-validation and was left pending -- "
+            f"{noun} failed re-validation and was left pending -- "
             f"you can retry or reject it: {exc}")
     except ReviewError as exc:
         # Nothing was claimed: the atomic UPDATE never matched a pending

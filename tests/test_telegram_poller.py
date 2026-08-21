@@ -1504,3 +1504,10 @@ def test_paired_approve_callback_shadow_edit_stale_stays_pending(tmp_path):
 
     assert shadow_queue.get(review_id)["status"] == "pending"
     assert any("failed re-validation" in html for _cid, html in api.sent_messages)
+    # M3: apply_shadow_edit_factory raises the exact same
+    # RevisionValidationError strategy_revision's applier does -- a
+    # shadow_edit row failing this must say "Ledger change", not
+    # "Revision" (see test_revalidation_failure_removes_buttons_and_says_
+    # reopen_from_the_app, which covers the strategy_revision wording).
+    assert any("Ledger change" in html and "Revision" not in html
+              for _cid, html in api.sent_messages)

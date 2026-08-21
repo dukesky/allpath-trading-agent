@@ -10,7 +10,7 @@
    the same way -- rendered instead as position-count + cash summary rows.
    Detected by the presence of a `positions` key rather than by op name, so
    this macro stays correct even if a future op reuses either shape. #}
-{% macro shadow_before_after(before, after) %}
+{% macro shadow_before_after(before, after, op='') %}
 {% set is_bulk = (before is mapping and 'positions' in before) or (after is mapping and 'positions' in after) %}
 <div class="table-scroll">
 <table class="shadow-edit-table">
@@ -21,6 +21,26 @@
     {% set a = after if after is mapping else {'positions': {}, 'cash': '0'} %}
     <tr><td>Positions</td><td>{{ b.positions | length }}</td><td>{{ a.positions | length }}</td></tr>
     <tr><td>Cash</td><td>{{ b.cash | money }}</td><td>{{ a.cash | money }}</td></tr>
+    {# M7: a bare "Positions: 3 -> 5" count tells the approver NOTHING
+       about what's actually changing -- for an import specifically (the
+       one bulk op that upserts a caller-chosen set of tickers, as opposed
+       to reset's unconditional wipe-everything) list which tickers this
+       row actually sets, so approving isn't a leap of faith. A ticker
+       counts as "being set" if its after-value differs from (or is new
+       relative to) its before-value -- tickers the CSV didn't mention are
+       untouched and correctly excluded. #}
+    {% if op == 'import' %}
+    {% set changed = [] %}
+    {% for ticker, pos in a.positions.items() %}
+      {% if b.positions.get(ticker) != pos %}
+        {% set _ = changed.append(ticker) %}
+      {% endif %}
+    {% endfor %}
+    {% if changed %}
+    {% set changed_sorted = changed | sort %}
+    <tr><td>Tickers</td><td colspan="2">{{ changed_sorted[:10] | join(', ') }}{% if changed_sorted | length > 10 %} and {{ changed_sorted | length - 10 }} more{% endif %}</td></tr>
+    {% endif %}
+    {% endif %}
   {% else %}
     {% set fields = ['ticker', 'side', 'qty', 'avg_cost', 'cash', 'fill_price'] %}
     {% for k in fields %}

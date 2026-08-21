@@ -65,7 +65,24 @@
     <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
     {% endif %}
   </div>
-  {% elif item['source'] == 'chat' %}
+  {% elif item['source'] == 'chat' and item['kind'] == 'shadow_edit' %}
+  {# Critical 2: a shadow_edit row was falling into the bare order-approval
+     card below (the exact bug this comment block already warns about for
+     strategy_revision) -- same fix, same reasoning: this needs the
+     before/after ledger diff and staleness check that only /reviews
+     renders (_review_card.html), not a second, weaker inline Approve
+     button with no evidence of WHAT is being approved. #}
+  <div class="card" style="margin:12px 0">
+    <div class="row">
+      <strong>{{ item['action'] }}</strong>
+      <span style="margin-left:auto" class="muted">#{{ id }}</span>
+    </div>
+    <p class="muted" style="font-size:13px;margin:8px 0">
+      Ledger change #{{ id }} is waiting for your review —
+      <a href="/reviews">review it on the Reviews page</a>.
+    </p>
+  </div>
+  {% elif item['source'] == 'chat' and item['kind'] == 'order' %}
   <div class="card" style="margin:12px 0">
     <div class="row">
       <strong>Waiting for your approval</strong>
@@ -77,6 +94,23 @@
       <form method="post" action="/reviews/{{ id }}/approve"><button class="primary" type="submit">Approve</button></form>
       <form method="post" action="/reviews/{{ id }}/reject"><button class="danger" type="submit">Reject</button></form>
     </div>
+  </div>
+  {% elif item['source'] == 'chat' %}
+  {# Fail-closed by construction (Critical 2): any FUTURE pending kind that
+     can carry source='chat' lands here by default, never in the bare
+     order-approval card above -- a neutral link-only card is always the
+     safe degrade for a kind this template doesn't know about yet, so the
+     next new kind can't repeat the strategy_revision/shadow_edit mistake
+     a third time. #}
+  <div class="card" style="margin:12px 0">
+    <div class="row">
+      <strong>Waiting for your review</strong>
+      <span style="margin-left:auto" class="muted">#{{ id }}</span>
+    </div>
+    <p class="muted" style="font-size:13px;margin:8px 0">
+      Item #{{ id }} is waiting for your review —
+      <a href="/reviews">open Pending</a>.
+    </p>
   </div>
   {% endif %}
 {% endfor %}

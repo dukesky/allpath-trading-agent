@@ -58,6 +58,18 @@ def test_review_queued_price_context_is_included_when_present():
     assert "Est. size: ~2.44 shares at that price" in body
 
 
+def test_review_queued_with_empty_ticker_uses_ledger_as_subject_noun():
+    # M2: a ticker-less shadow ledger edit (set_cash/import/reset) used to
+    # leave a bare "[AllPath] : waiting for your approval" subject and a
+    # dangling "Proposed: ... on " body line -- "Ledger" stands in as the
+    # subject noun instead of an empty string.
+    subject, body = events.review_queued(
+        review_id=12, ticker="", action="Reset ledger", strategy_id="")
+    assert subject == "[AllPath] Ledger: waiting for your approval"
+    assert "Proposed: Reset ledger" in body
+    assert "Proposed: Reset ledger on" not in body
+
+
 def test_review_queued_price_context_is_omitted_when_absent():
     _subject, body = events.review_queued(
         review_id=12, ticker="AAPL", action="sell 50%", strategy_id="s1")

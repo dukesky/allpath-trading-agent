@@ -62,6 +62,75 @@ def _valid_ticker(raw: str) -> str | None:
     return ticker if _TICKER_RE.match(ticker) else None
 
 
+# Sane upper bound for a personal ledger -- no real position/cash balance
+# this app deals with is ever within light-years of this, so it costs
+# nothing to reject and closes off the "huge-but-finite" half of the
+# Infinity bug (a value like 1e999 IS finite per Decimal.is_finite(), but
+# is exactly as ledger-bricking once it flows into equity/market_value
+# arithmetic -- see _parse_money's docstring).
+_MAX_MAGNITUDE = Decimal("1e12")
+
+# CSV import cap (M6): a personal ledger's import file is a handful to a
+# few hundred rows at most -- these are generous ceilings that exist only
+# to give a clear, immediate error on a pasted-wrong-file/runaway-generator
+# CSV instead of a slow parse of something absurd.
+_MAX_CSV_BYTES = 1_000_000
+_MAX_CSV_ROWS = 2000
+
+
+def _parse_money(value: object, *, field: str) -> Decimal:
+    """The ONE place any shadow-ledger numeric input (qty/avg_cost/cash/
+    price, from a chat tool call, a CSV cell, or an approved row's stored
+    `args`) is turned into a `Decimal` -- shared by all three write-path
+    layers (register_shadow_tools' tool functions, parse_shadow_csv, and
+    apply_shadow_edit_factory's applier) so none of them can independently
+    forget a guard the others remember.
+
+    Critical 1: `Decimal("Infinity") < 0` is `False` and `> 0` is `True` --
+    every existing "must be >= 0" / "must be > 0" guard in this file passed
+    it straight through, and once written to `shadow_positions`/
+    `shadow_cash`, `ShadowLedger.get_account`/`get_positions` (which build
+    pydantic `Account`/`Position` models -- `Decimal` fields there DO reject
+    non-finite values) raise `ValidationError` on every subsequent read,
+    forever -- bricking `/settings`, repair tools, and even the reset
+    applier, which itself has to READ the ledger before it can zero it.
+    `NaN`/`sNaN` are worse: a bare `<`/`>` comparison against one raises
+    `InvalidOperation` immediately (not silently False/True), which is what
+    let a CSV `CASH,NaN` row 500 the preview route in the first place (see
+    parse_shadow_csv). Rejecting every non-finite value here, before any
+    comparison ever runs, closes both holes at once.
+
+    Order of checks matters: `is_finite()` is evaluated first and is safe
+    to call on Infinity/NaN/sNaN alike (it never itself raises) -- only
+    once a value is known finite do the magnitude comparisons below run,
+    which is what makes the sNaN case safe (a raw `<` against an sNaN
+    raises `InvalidOperation`, which is exactly the failure mode this
+    function exists to prevent).
+
+    Never raises anything but `ValueError` (garbage input, non-finite, or
+    over `_MAX_MAGNITUDE`) -- every caller turns that into its own error
+    surface: an `"error: ..."` string (chat tools), a line-numbered CSV
+    error (parse_shadow_csv), or `RevisionValidationError` (the applier,
+    which already catches `ValueError` from its `except` clause).
+
+    `-0` normalizes to plain `0` (Decimal's own `-0 == 0` but a distinct
+    object with its own `str()`) -- so a zeroed-out value round-trips
+    predictably through the string snapshots (`position_snapshot` et al.)
+    the staleness check compares, rather than occasionally reading back as
+    the surprising literal `"-0"`."""
+    try:
+        d = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid {field} {value!r}") from exc
+    if not d.is_finite():
+        raise ValueError(f"invalid {field} {value!r}: must be a finite number")
+    if d.copy_abs() > _MAX_MAGNITUDE:
+        raise ValueError(f"invalid {field} {value!r}: magnitude too large")
+    if d == 0:
+        d = Decimal(0)
+    return d
+
+
 # --- Ledger snapshot helpers (read-only) ------------------------------------
 
 def position_snapshot(ledger: ShadowLedger, ticker: str) -> dict | None:
@@ -104,6 +173,28 @@ def full_snapshot(ledger: ShadowLedger) -> dict:
     return {"positions": positions, "cash": str(ledger.get_account().cash)}
 
 
+def current_shadow_state(ledger: ShadowLedger, op: str, args: dict) -> object:
+    """The CURRENT ledger state in the exact shape `op`'s `before` snapshot
+    was recorded in -- the same lookup `apply_shadow_edit_factory`'s
+    `apply()` uses internally to detect staleness, extracted here so a
+    SECOND caller (the approve-link confirm page, web/routes/approve.py's
+    `_confirm_context`) can show the identical "this changed since you
+    proposed it" warning the in-app approval flow gets from `_stale_check`,
+    without re-deriving the op dispatch and risking the two disagreeing
+    (M4). Returns `None` for an unrecognized op -- a confirm-page GET has
+    no side effects either way, so this degrades to "no staleness warning
+    shown" rather than raising on a page a visitor can't act on regardless."""
+    if op in ("set_position", "remove_position"):
+        return position_snapshot(ledger, args.get("ticker", ""))
+    if op == "set_cash":
+        return cash_snapshot(ledger)
+    if op == "record_fill":
+        return order_snapshot(ledger, args.get("order_id", ""))
+    if op in ("import", "reset"):
+        return full_snapshot(ledger)
+    return None
+
+
 def preview_import(before: dict, rows: list[dict], cash: Decimal | None) -> dict:
     """Read-only preview of what `full_snapshot` will look like after an
     "import" op applies -- upsert semantics (mirrors `ShadowLedger.
@@ -131,8 +222,16 @@ def parse_shadow_csv(text: str) -> tuple[list[dict], Decimal | None, list[str]]:
     every error in the file is reported at once, but the caller must queue
     NOTHING at all if `errors` is non-empty (spec: "解析+校验每一行,任何
     错误都不入队,列出行号")."""
+    # M6: reject an absurd file up front, before any parsing work -- a
+    # clear error instead of a slow parse (or a giant `all_rows` list) of
+    # something pasted-wrong or runaway-generated.
+    if len(text.encode("utf-8")) > _MAX_CSV_BYTES:
+        return [], None, [f"file too large: max {_MAX_CSV_BYTES // 1000} KB"]
+
     reader = csv.reader(io.StringIO(text))
     all_rows = list(reader)
+    if len(all_rows) > _MAX_CSV_ROWS:
+        return [], None, [f"too many rows: max {_MAX_CSV_ROWS}"]
     errors: list[str] = []
     rows: list[dict] = []
     cash: Decimal | None = None
@@ -155,9 +254,9 @@ def parse_shadow_csv(text: str) -> tuple[list[dict], Decimal | None, list[str]]:
                 errors.append(f"line {i}: only one CASH row is allowed")
                 continue
             try:
-                amount = Decimal(cells[1])
-            except InvalidOperation:
-                errors.append(f"line {i}: invalid cash amount {cells[1]!r}")
+                amount = _parse_money(cells[1], field="cash amount")
+            except ValueError as exc:
+                errors.append(f"line {i}: {exc}")
                 continue
             if amount < 0:
                 errors.append(f"line {i}: cash must be >= 0")
@@ -178,17 +277,17 @@ def parse_shadow_csv(text: str) -> tuple[list[dict], Decimal | None, list[str]]:
             errors.append(f"line {i}: duplicate ticker {ticker}")
             continue
         try:
-            qty = Decimal(qty_raw)
-        except InvalidOperation:
-            errors.append(f"line {i}: invalid qty {qty_raw!r}")
+            qty = _parse_money(qty_raw, field="qty")
+        except ValueError as exc:
+            errors.append(f"line {i}: {exc}")
             continue
         if qty < 0:
             errors.append(f"line {i}: qty must be >= 0")
             continue
         try:
-            avg_cost = Decimal(avg_cost_raw)
-        except InvalidOperation:
-            errors.append(f"line {i}: invalid avg_cost {avg_cost_raw!r}")
+            avg_cost = _parse_money(avg_cost_raw, field="avg_cost")
+        except ValueError as exc:
+            errors.append(f"line {i}: {exc}")
             continue
         if avg_cost <= 0:
             errors.append(f"line {i}: avg_cost must be > 0")
@@ -238,30 +337,46 @@ def apply_shadow_edit_factory(
     def apply(op: str, args: dict, before: object) -> None:
         try:
             if op == "set_position":
+                # C1: parse (and reject Infinity/NaN/1e999/...) BEFORE the
+                # staleness check or the transaction opens -- a bad arg must
+                # never reach ShadowLedger.set_position, staleness-clean or
+                # not.
+                qty_d = _parse_money(args["qty"], field="qty")
+                avg_cost_d = _parse_money(args["avg_cost"], field="avg_cost")
                 _stale_check(position_snapshot(ledger, args["ticker"]), before)
                 with conn.transaction():
-                    ledger.set_position(
-                        args["ticker"], Decimal(args["qty"]), Decimal(args["avg_cost"]))
+                    ledger.set_position(args["ticker"], qty_d, avg_cost_d)
             elif op == "set_cash":
+                amount_d = _parse_money(args["amount"], field="amount")
                 _stale_check(cash_snapshot(ledger), before)
                 with conn.transaction():
-                    ledger.set_cash(Decimal(args["amount"]))
+                    ledger.set_cash(amount_d)
             elif op == "remove_position":
                 _stale_check(position_snapshot(ledger, args["ticker"]), before)
                 with conn.transaction():
                     ledger.remove_position(args["ticker"])
             elif op == "record_fill":
+                price_d = _parse_money(args["actual_price"], field="actual_price")
                 _stale_check(order_snapshot(ledger, args["order_id"]), before)
                 with conn.transaction():
-                    ledger.record_fill(args["order_id"], Decimal(args["actual_price"]))
+                    ledger.record_fill(args["order_id"], price_d)
             elif op == "import":
+                # Parse every row (and the optional cash) up front, same
+                # reasoning as set_position above -- one bad Infinity/NaN
+                # anywhere in the batch must fail the WHOLE import before
+                # any row is written, not just the row it's on.
+                rows_d = [
+                    (row["ticker"], _parse_money(row["qty"], field="qty"),
+                     _parse_money(row["avg_cost"], field="avg_cost"))
+                    for row in args["rows"]]
+                cash_d = (_parse_money(args["cash"], field="cash")
+                         if args.get("cash") is not None else None)
                 _stale_check(full_snapshot(ledger), before)
                 with conn.transaction():
-                    for row in args["rows"]:
-                        ledger.set_position(
-                            row["ticker"], Decimal(row["qty"]), Decimal(row["avg_cost"]))
-                    if args.get("cash") is not None:
-                        ledger.set_cash(Decimal(args["cash"]))
+                    for ticker, qty_d, avg_cost_d in rows_d:
+                        ledger.set_position(ticker, qty_d, avg_cost_d)
+                    if cash_d is not None:
+                        ledger.set_cash(cash_d)
             elif op == "reset":
                 current = full_snapshot(ledger)
                 _stale_check(current, before)
@@ -346,15 +461,15 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
         if ticker_u is None:
             return f"error: invalid ticker format {ticker!r}"
         try:
-            qty_d = Decimal(str(qty))
-        except InvalidOperation:
-            return f"error: invalid qty {qty!r}"
+            qty_d = _parse_money(qty, field="qty")
+        except ValueError as exc:
+            return f"error: {exc}"
         if qty_d < 0:
             return "error: qty must be >= 0"
         try:
-            avg_cost_d = Decimal(str(avg_cost))
-        except InvalidOperation:
-            return f"error: invalid avg_cost {avg_cost!r}"
+            avg_cost_d = _parse_money(avg_cost, field="avg_cost")
+        except ValueError as exc:
+            return f"error: {exc}"
         if avg_cost_d <= 0:
             return "error: avg_cost must be > 0"
 
@@ -370,9 +485,9 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
 
     def shadow_set_cash(amount: str) -> str:
         try:
-            amount_d = Decimal(str(amount))
-        except InvalidOperation:
-            return f"error: invalid amount {amount!r}"
+            amount_d = _parse_money(amount, field="amount")
+        except ValueError as exc:
+            return f"error: {exc}"
         if amount_d < 0:
             return "error: cash must be >= 0"
 
@@ -401,9 +516,9 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
 
     def shadow_record_fill(order_id: str, actual_price: str) -> str:
         try:
-            price_d = Decimal(str(actual_price))
-        except InvalidOperation:
-            return f"error: invalid actual_price {actual_price!r}"
+            price_d = _parse_money(actual_price, field="actual_price")
+        except ValueError as exc:
+            return f"error: {exc}"
         if price_d <= 0:
             return "error: actual_price must be > 0"
 

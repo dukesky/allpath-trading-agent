@@ -61,10 +61,19 @@ def review_queued(*, review_id: int, ticker: str, action: str,
     close in time to the first would only look like independent
     confirmation it isn't). `approve_url`, when non-empty, is the one place
     a notification body ever carries a link -- see FOOTER's docstring for
-    why that's still opt-in and safe to describe truthfully there."""
-    subject = f"[AllPath] {ticker}: waiting for your approval"
-    lines = [f"Item #{review_id} is waiting for you.",
-             f"Proposed: {action} on {ticker}"]
+    why that's still opt-in and safe to describe truthfully there.
+
+    M2: `ticker` is `""` for a ticker-less shadow ledger edit (set_cash,
+    import, reset -- agent/shadow_tools.py, web/routes/settings.py's CSV/
+    reset routes), which used to leave a bare "[AllPath] : waiting for
+    your approval" subject and a "Proposed: ... on " body line with
+    nothing after "on". "Ledger" stands in as the subject noun for these
+    -- honest (it IS the shadow ledger being changed) without inventing a
+    ticker that was never there."""
+    subject_noun = ticker or "Ledger"
+    subject = f"[AllPath] {subject_noun}: waiting for your approval"
+    proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
+    lines = [f"Item #{review_id} is waiting for you.", proposed]
     if strategy_id:
         lines.append(f"Strategy: {strategy_id}")
     if trigger_price:

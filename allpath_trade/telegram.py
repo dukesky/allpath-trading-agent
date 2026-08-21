@@ -800,7 +800,11 @@ class TelegramPoller:
         try:
             result = queue.approve(review_id)
         except RevisionValidationError as exc:
-            _echo(f"revision left pending: re-validation failed ({exc})")
+            # M3: `apply_shadow_edit_factory` raises this exact exception
+            # too (same rollback-to-pending contract) -- a shadow_edit row
+            # failing this must say "Ledger change", not "Revision".
+            noun = "Ledger change" if row["kind"] == "shadow_edit" else "Revision"
+            _echo(f"{noun.lower()} left pending: re-validation failed ({exc})")
             # `acted=True` here already makes `_handle_callback_query` strip
             # this message's buttons -- but they can't just be left off
             # silently: a re-validation failure burns `consume_token`'s
@@ -810,7 +814,7 @@ class TelegramPoller:
             # so explicitly, rather than just "left pending", is the honest
             # version -- a bare "left pending" with no live buttons and no
             # explanation reads as a stuck bot, not a stuck review.
-            message = (f"{prefix}⚠️ Revision #{review_id} failed re-validation "
+            message = (f"{prefix}⚠️ {noun} #{review_id} failed re-validation "
                       f"({exc}) and stayed pending — reopen from the app.")
             return message, "Left pending: re-validation failed", True
         except ReviewError as exc:
