@@ -420,13 +420,19 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
             return
         try:
             approve_url = events.approve_link(web_base_url, review_id)
+            # account="shadow" literal: this module is registered ONLY on
+            # the shadow account's tool registries (see module docstring),
+            # so there is no other account this could ever concern.
+            # kind="shadow_edit": the "you'll place it yourself" clause
+            # (events.review_queued's own docstring) doesn't apply here --
+            # this message is already about the ledger edit itself.
             subject, body = events.review_queued(
-                review_id=review_id, ticker="", action=action_title,
-                strategy_id="", approve_url=approve_url)
+                account="shadow", review_id=review_id, ticker="", action=action_title,
+                strategy_id="", approve_url=approve_url, kind="shadow_edit")
             notify_review_queued(
                 queue=queue, notifier=notifier, app_state=app_state,
                 telegram_bot_token=telegram_bot_token, review_id=review_id,
-                subject=subject, body=body)
+                subject=subject, body=body, account="shadow")
         except Exception as exc:  # noqa: BLE001 — see docstring above
             print(f"[shadow_tools] queued-edit notification failed: {exc}",
                   file=sys.stderr)

@@ -10,6 +10,7 @@ from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued
 from allpath_trade.risk.gate import RiskGate
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.reviews import ReviewQueue
@@ -28,13 +29,19 @@ class QueueingOrderSink:
                  conversation_id: int | None = None,
                  notifier: Notifier | None = None,
                  app_state: AppState | None = None,
-                 telegram_bot_token: str = "", web_base_url: str = "") -> None:
+                 telegram_bot_token: str = "", web_base_url: str = "",
+                 account: str = DEFAULT_ACCOUNT) -> None:
         self.queue = queue
         self.gate = gate
         self.broker = broker
         self.data = data
         self.journal = journal
         self.conversation_id = conversation_id
+        # shadow-dual-active T7: which account this chat's order proposals
+        # belong to -- threaded into events.review_queued for the
+        # `[Paper]`/`[Shadow]` subject prefix and, for shadow, the
+        # "if approved, you'll place it yourself" clause.
+        self.account = account
         # Notification wiring (all optional, default off/None): a chat order
         # proposal now goes through the same shared notify_review_queued
         # choke point (notify/dispatch.py) as sentinel.py's soft-rule
@@ -73,12 +80,12 @@ class QueueingOrderSink:
         try:
             approve_url = events.approve_link(self.web_base_url, review_id)
             subject, body = events.review_queued(
-                review_id=review_id, ticker=intent.ticker,
+                account=self.account, review_id=review_id, ticker=intent.ticker,
                 action=intent.reason, strategy_id="", approve_url=approve_url)
             notify_review_queued(
                 queue=self.queue, notifier=self.notifier, app_state=self.app_state,
                 telegram_bot_token=self.telegram_bot_token, review_id=review_id,
-                subject=subject, body=body)
+                subject=subject, body=body, account=self.account)
         except Exception as exc:  # noqa: BLE001 — see docstring above
             print(f"[order_sink] chat order notification failed: {exc}",
                   file=sys.stderr)

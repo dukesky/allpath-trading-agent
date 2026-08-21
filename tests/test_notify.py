@@ -155,8 +155,9 @@ def test_multi_notifier_send_each_reports_per_channel_results():
 
 def test_daily_report_subject_and_body():
     subject, full_body = events.daily_report(
-        date="2026-08-10", summary="Quiet day overall.", body="Day summary: ...")
-    assert subject == "[AllPath] Daily reflection 2026-08-10"
+        account="paper", date="2026-08-10", summary="Quiet day overall.",
+        body="Day summary: ...")
+    assert subject == "[Paper] [AllPath] Daily reflection 2026-08-10"
     assert "Quiet day overall." in full_body
     assert "Day summary: ..." in full_body
     assert full_body.endswith(events.FOOTER)

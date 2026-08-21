@@ -99,12 +99,19 @@ def _run_sentinel_pass(accounts: dict,
     Heartbeats: every account gets its OWN `sentinel_last_pass:{account}`
     key, written unconditionally (market open or closed -- it proves the
     *scheduler* is alive for that account, not the market) before that
-    account's fill-refresh/sentinel logic runs. The LEGACY (un-suffixed)
-    `SENTINEL_HEARTBEAT_KEY` is ALSO still written, mirroring paper's own
-    timestamp -- the dashboard (web/routes/dashboard.py) reads exactly that
-    key today, and Task 7 is what teaches it to read the per-account keys
-    instead; keeping this write means paper's existing "last check Nm ago"
-    tile stays accurate without waiting on Task 7 to land first.
+    account's fill-refresh/sentinel logic runs.
+
+    shadow-dual-active T7 (carried from T4): the LEGACY (un-suffixed)
+    `SENTINEL_HEARTBEAT_KEY` used to also be written, mirroring paper's own
+    timestamp, because the dashboard read exactly that bare key. The
+    dashboard (web/routes/dashboard.py, T5) now reads the per-account
+    `sentinel_last_pass:{account}` key for whichever account is currently
+    being viewed -- nothing left reads the bare key -- so this task drops
+    the legacy write entirely rather than carrying dead compat code
+    forward. The bare `SENTINEL_HEARTBEAT_KEY` constant itself stays
+    (still imported by the dashboard for the per-account key's prefix, and
+    still exercised by `run_daemon`'s own single-account tests), it just
+    never gets its own un-suffixed row written any more.
 
     The market-open flag (`SENTINEL_MARKET_OPEN_KEY`) is written ONCE,
     before the per-account loop, not per account -- the market is the
@@ -130,10 +137,10 @@ def _run_sentinel_pass(accounts: dict,
         if app_state is not None:
             try:
                 now_iso = datetime.now(UTC).isoformat()
+                # shadow-dual-active T7: per-account key only -- see the
+                # docstring above for why the legacy un-suffixed write was
+                # dropped (nothing reads it any more).
                 app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:{account}", now_iso)
-                if account == DEFAULT_ACCOUNT:
-                    # Legacy compat write -- see docstring above.
-                    app_state.set(SENTINEL_HEARTBEAT_KEY, now_iso)
             except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
                 print(f"[heartbeat] {account} failed: {exc}", file=sys.stderr)
         try:
@@ -213,7 +220,32 @@ def run_daemon(get_accounts: Callable[[], dict], interval_minutes: int,
 # (memory/consolidate.py) and the reports table's per-ET-date row
 # (reflect.py), which are the equivalent persisted markers for
 # consolidation and reflection respectively.
+#
+# shadow-dual-active T7 (carried from T4's review, which deliberately left
+# this single global while the digest itself was still one email covering
+# both accounts): now that the digest is one send PER ACCOUNT, this bare
+# name is kept only as the pre-dual-active LEGACY key -- `_digest_date_key`
+# below suffixes it with the account, exactly the same
+# `TURN_MARKER_KEY`/`_turn_marker_key` shape memory/consolidate.py already
+# established, including the same one-time legacy-seed-for-paper fallback.
 DIGEST_LAST_DATE_KEY = "digest_last_date"
+
+
+def _digest_date_key(account: str) -> str:
+    return f"{DIGEST_LAST_DATE_KEY}:{account}"
+
+
+def _last_digest_date(app_state: AppState, account: str) -> str | None:
+    value = app_state.get(_digest_date_key(account))
+    if value is None and account == DEFAULT_ACCOUNT:
+        # One-time fallback to the pre-dual-active global key, exactly like
+        # Consolidator._last_turn_marker's own paper-only seed -- once
+        # today's per-account key is written below (any day the digest
+        # actually sends), this is never consulted again. `shadow` has no
+        # legacy history to seed from and simply starts unsent, same as a
+        # brand-new account should.
+        value = app_state.get(DIGEST_LAST_DATE_KEY)
+    return value
 
 
 def _llm_cost_line(components) -> str:
@@ -268,40 +300,73 @@ def _llm_cost_line(components) -> str:
         return ""
 
 
-def _send_daily_digest(components) -> None:
-    """Count today's activity and email a summary, at most once per ET
-    calendar day.
-
-    `trades` comes from `TradeJournal.trades_today()` — the journal's real
-    accessor (there is no `journal.today()`). `triggers` counts today's
-    "sentinel"-sourced rows in the observation log: `Sentinel._check_strategy`
-    logs exactly one there per rule trigger regardless of disposition, so
-    this is a real count, not the brief's hardcoded placeholder. Per-strategy
+def _send_one_digest(components, account: str, acc, today: str, llm_cost: str) -> None:
+    """One account's digest -- `trades` comes from `TradeJournal.
+    trades_today()` — the journal's real accessor (there is no `journal.
+    today()`). `triggers` counts today's "sentinel"-sourced rows in THIS
+    account's own observation log: `Sentinel._check_strategy` logs exactly
+    one there per rule trigger regardless of disposition, so this is a
+    real count, not the brief's hardcoded placeholder. Per-strategy
     failures (e.g. a bad quote) log under the distinct "sentinel_error"
     source instead, so they can never inflate this count. `since_iso`
     is a UTC calendar-day boundary, matching `TradeJournal.trades_today`'s
     own day convention; `limit` is set high because `recent()`'s 200-row
     default would silently undercount on a very active day.
 
-    The `digest_last_date` guard exists because `_maybe_run_daily`'s
-    once-per-day gate (`state["last_daily"]`) is in-memory only: a `serve`
-    restart after 16:05 forgets today's digest already went out and would
-    otherwise re-send it on the next tick. Reflection doesn't have this
-    problem — `Reflector.run_daily` (reflect.py) checks `reports.exists
-    (et_date)`, a persisted table row — and consolidation tracks its own
-    turn marker the same way; this mirrors that pattern for the digest
-    specifically, without touching `_maybe_run_daily` itself."""
-    today = datetime.now(UTC).astimezone(ET).date().isoformat()
-    if components.app_state.get(DIGEST_LAST_DATE_KEY) == today:
-        return
+    `acc` is this account's own `app.AccountComponents` bundle
+    (`.observations`/`.journal`/`.queue`) -- shadow-dual-active T7: reading
+    `acc`'s own stores rather than the legacy `components.observations`/
+    `.journal`/`.queue` aliases (which only ever point at paper's) is what
+    makes shadow's digest count shadow's own activity instead of silently
+    repeating paper's."""
     since_iso = datetime.now(UTC).date().isoformat()
-    triggers = sum(1 for row in components.observations.recent(
+    triggers = sum(1 for row in acc.observations.recent(
         since_iso=since_iso, limit=10_000) if row["source"] == "sentinel")
     subject, body = events.daily_digest(
-        triggers=triggers, trades=components.journal.trades_today(),
-        pending=len(components.queue.list()), llm_cost=_llm_cost_line(components))
+        account=account, triggers=triggers, trades=acc.journal.trades_today(),
+        pending=len(acc.queue.list()), llm_cost=llm_cost)
     components.notifier.send(subject, body)
-    components.app_state.set(DIGEST_LAST_DATE_KEY, today)
+    components.app_state.set(_digest_date_key(account), today)
+
+
+def _send_daily_digest(components) -> None:
+    """One digest per account (shadow-dual-active T7, spec §⑤: every event
+    prefixed `[Paper]`/`[Shadow]` -- the digest used to be one email
+    combining both accounts, before this task split it), each sent at most
+    once per ET calendar day.
+
+    The `digest_last_date:{account}` guard (see `_digest_date_key`) exists
+    because `_maybe_run_daily`'s once-per-day gate (`state["last_daily"]`)
+    is in-memory only: a `serve` restart after 16:05 forgets today's
+    digest already went out and would otherwise re-send it on the next
+    tick. Reflection doesn't have this problem — `Reflector.run_daily`
+    (reflect.py) checks `reports.exists(et_date)`, a persisted table row —
+    and consolidation tracks its own turn marker the same way; this
+    mirrors that pattern for the digest specifically, without touching
+    `_maybe_run_daily` itself.
+
+    `llm_cost` (the one process-wide, not-per-account, LLM spend line --
+    see `_llm_cost_line`'s and `events.daily_digest`'s own docstrings) is
+    computed ONCE, outside the per-account loop, and handed unchanged to
+    both accounts' digests -- summing it twice would double-count nothing
+    (it already reads the same total table both times), but computing it
+    twice would be wasted work for an identical answer.
+
+    Each account's send is isolated in its own try/except: a failure
+    building or sending shadow's digest (a dead notifier, a broken store)
+    must never prevent paper's from going out, or from being marked done
+    for the day, and vice versa -- same isolation discipline as
+    `_run_sentinel_pass`'s per-account loop and `run_daily_jobs`'s own."""
+    today = datetime.now(UTC).astimezone(ET).date().isoformat()
+    llm_cost = _llm_cost_line(components)
+    for account, acc in components.accounts.items():
+        if _last_digest_date(components.app_state, account) == today:
+            continue
+        try:
+            _send_one_digest(components, account, acc, today, llm_cost)
+        except Exception as exc:  # noqa: BLE001 — one account's digest must
+            # never take the other account's down.
+            print(f"[digest:{account}] failed: {exc}", file=sys.stderr)
 
 
 def _account_has_active_strategy(strategies) -> bool:
@@ -369,13 +434,13 @@ def run_daily_jobs(components, verbose: bool = False) -> None:
     try/except in the loop below, so paper's nightly chain failing outright
     can never silently prevent shadow's from running, or the reverse.
 
-    The digest fires unconditionally, once, BEFORE the per-account loop --
-    shadow-dual-active T4 deliberately does NOT explode it into one digest
-    per account (that -- and the `[Paper]`/`[Shadow]` subject prefixes
-    every other notification eventually gets -- is Task 7's job per the
-    plan; see docs/TODO.md). It keeps reading through the legacy
-    `components.observations`/`.journal`/`.queue` attribute alias, i.e.
-    paper's own, same single combined summary as before this task.
+    The digest fires unconditionally, once per account, BEFORE the
+    reflection/consolidation loop -- shadow-dual-active T7 (carried from
+    T4, which deliberately left the digest as one email covering both
+    accounts pending this task's subject-prefixing work): `_send_daily_
+    digest` now loops `components.accounts` itself and sends one
+    `[Paper]`/`[Shadow]`-prefixed digest per account, each gated on its
+    own `digest_last_date:{account}` watermark.
 
     Callers are expected to wrap this in their own once-per-day gate (see
     `_maybe_run_daily`) -- this function itself is state-free.

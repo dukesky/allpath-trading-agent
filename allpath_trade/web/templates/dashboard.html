@@ -31,7 +31,7 @@
 <h2>Positions</h2>
 {% if positions %}
 <table>
-  <tr><th>Ticker</th><th class="num">Qty</th><th class="num">Avg cost</th><th class="num">Value</th><th class="num">P/L</th></tr>
+  <tr><th>Ticker</th><th class="num">Qty</th><th class="num">Avg cost</th><th class="num">Value</th><th class="num">P/L</th>{% if current_account == 'shadow' %}<th>Price as of</th>{% endif %}</tr>
   {% for p in positions %}
   <tr>
     <td>{{ p.ticker }}</td>
@@ -39,9 +39,21 @@
     <td class="num">{{ p.avg_entry_price | money }}</td>
     <td class="num">{{ p.market_value | money }}</td>
     <td class="num {% if p.unrealized_pl and p.unrealized_pl > 0 %}up{% elif p.unrealized_pl and p.unrealized_pl < 0 %}down{% endif %}">{{ p.unrealized_pl | money }}</td>
+    {% if current_account == 'shadow' %}
+    {# shadow-dual-active T7: `price_as_of` only carries an entry for a
+       ticker whose valuation is stale or came from a failed quote (see
+       dashboard.py's `_shadow_price_staleness`) -- a ticker absent from it
+       priced off a fresh live quote just now, so "current" is honest. #}
+    <td class="muted">{% if p.ticker in price_as_of %}<span class="badge">price as of {% if price_as_of[p.ticker] %}{{ price_as_of[p.ticker] | ago }}{% else %}never recorded{% endif %}</span>{% else %}current{% endif %}</td>
+    {% endif %}
   </tr>
   {% endfor %}
 </table>
+{% elif current_account == 'shadow' %}
+<div class="card">
+  <p>Your shadow ledger has no positions yet.</p>
+  <p class="muted">Import your positions — tell the agent in <a href="/chat">Chat</a> or upload a CSV in <a href="/settings">Settings</a>.</p>
+</div>
 {% else %}<p class="muted">No open positions.</p>{% endif %}
 
 <h2>Strategies</h2>

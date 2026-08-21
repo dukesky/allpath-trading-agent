@@ -2,6 +2,53 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Shadow dual-active accounts — 2026-08-21
+
+- **A second, always-on account**: `shadow` runs in parallel with `paper`
+  from now on — its own sentinel pass, approval queue, conversation/memory,
+  strategies, reflection, and equity curve, sharing one process and one DB.
+  Shadow is a local ledger that *mirrors your real brokerage*: no real
+  credentials, no real order ever routed — every buy/sell a rule or the
+  agent decides on is recorded, and the notification tells you plainly to
+  place it yourself. Paper is unchanged (Alpaca sandbox, real simulated
+  execution).
+- **Account switcher**: a `PAPER`/`SHADOW` chip in the top nav (blue/amber)
+  picks which account every page shows — dashboard, chat, pending queue,
+  reports, memory, strategies — remembered in a cookie, default paper. A
+  small dot flags the account you're *not* looking at when it has
+  something waiting for you.
+- **Shadow ledger editing**: tell the agent in Chat, or go to Settings →
+  Brokerage → Shadow to upload a CSV of your real positions (capped at
+  2,000 rows) or reset the ledger — every change is a normal
+  human-approved proposal, never a direct write.
+- **Telegram `/account`**: switch which account a paired chat talks to
+  with inline Paper/Shadow buttons; approval callbacks resolve by the
+  ROW's own account, not whichever account the chat happens to be on.
+- **Every notification says which account**: every subject line is now
+  prefixed `[Paper]`/`[Shadow]` (email, ntfy, and the Telegram push body,
+  which never renders a subject line of its own). A shadow order that
+  gets recorded says so honestly — *"recorded in your shadow ledger —
+  place this order in your brokerage now: BUY 4.5 TSLA @ ~$332.01"* —
+  never "submitted", since nothing was routed anywhere; a shadow item
+  still waiting for approval adds *"if approved, you'll place it
+  yourself."* The daily digest is now one send per account, each gated on
+  its own once-per-day watermark, and counts shadow activity as "order(s)
+  recorded" rather than "trade(s)".
+- **Dashboard polish**: a guidance card on an empty shadow ledger
+  ("Import your positions — tell the agent in Chat or upload a CSV in
+  Settings"), and a "Price as of" column on shadow's positions table when
+  a position's last known price is more than a trading day old or a live
+  quote just failed — paper's own live-broker feed never shows this
+  column at all.
+- **Cost**: reflection runs *per account*, gated on that account having at
+  least one active strategy, so an empty shadow ledger costs nothing extra
+  — but once both accounts have active strategies, nightly LLM spend is
+  roughly double running paper alone (visible on Settings → Usage).
+- See [Two Accounts](README.md#two-accounts) in the README for the full
+  picture, and `docs/superpowers/specs/2026-08-19-shadow-account-design.md`
+  / `docs/superpowers/plans/2026-08-19-shadow-dual-active.md` for the
+  design and task-by-task implementation record.
+
 ## Telegram approvals + LLM usage panel — 2026-08-19
 
 - Queued reviews (sentinel soft-rule triggers, chat order proposals,

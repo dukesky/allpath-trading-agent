@@ -467,7 +467,7 @@ def test_run_daily_success_sends_notification_via_send_report(tmp_path, monkeypa
     sent_notifier, subject, summary_body, full_body = calls[0]
     assert sent_notifier is notifier
     row = components.reports.get(ET_DATE)
-    assert subject == f"[AllPath] Daily reflection {ET_DATE}"
+    assert subject == f"[Paper] [AllPath] Daily reflection {ET_DATE}"
     assert summary_body == row["summary"]
     assert row["body"] in full_body
 

@@ -15,6 +15,7 @@ from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.loader import (
@@ -43,7 +44,8 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                           notifier: Notifier | None = None,
                           web_base_url: str = "",
                           app_state: AppState | None = None,
-                          telegram_bot_token: str = "") -> None:
+                          telegram_bot_token: str = "",
+                          account: str = DEFAULT_ACCOUNT) -> None:
 
     def _notify_chat_draft_queued(doc, review_id, *, is_new: bool) -> None:
         # Spec §④/降级: a notification failure must never affect queueing --
@@ -72,12 +74,13 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                       else f"revise strategy '{doc.id}' to v{doc.version}")
             approve_url = events.approve_link(web_base_url, review_id)
             subject, body = events.review_queued(
-                review_id=review_id, ticker=doc.position.ticker, action=action,
-                strategy_id=doc.id, approve_url=approve_url)
+                account=account, review_id=review_id, ticker=doc.position.ticker,
+                action=action, strategy_id=doc.id, approve_url=approve_url,
+                kind="strategy_revision")
             notify_review_queued(
                 queue=queue, notifier=notifier, app_state=app_state,
                 telegram_bot_token=telegram_bot_token, review_id=review_id,
-                subject=subject, body=body)
+                subject=subject, body=body, account=account)
         except Exception as exc:  # noqa: BLE001 — see docstring above
             print(f"[action_tools] chat draft notification failed: {exc}",
                   file=sys.stderr)

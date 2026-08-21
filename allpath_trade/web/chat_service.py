@@ -115,7 +115,7 @@ class ChatService:
                 b.queue, b.gate, b.broker, c.data, b.journal, conversation_id,
                 notifier=c.notifier, app_state=c.app_state,
                 telegram_bot_token=c.settings.telegram_bot_token,
-                web_base_url=c.settings.web_base_url),
+                web_base_url=c.settings.web_base_url, account=self.account),
             # `queue` (not `order_sink`) is draft_strategy's own web-mode
             # discriminator -- see action_tools.py's register_action_tools
             # docstring comment for why the two tools don't share one
@@ -126,7 +126,8 @@ class ChatService:
             # indirection would be, with none of the extra machinery.
             queue=b.queue, conversation_id=conversation_id,
             notifier=c.notifier, web_base_url=c.settings.web_base_url,
-            app_state=c.app_state, telegram_bot_token=c.settings.telegram_bot_token)
+            app_state=c.app_state, telegram_bot_token=c.settings.telegram_bot_token,
+            account=self.account)
         if self.account == "shadow":
             # shadow-dual-active T6: registered ONLY on the shadow account's
             # own ChatService -- paper's chat build (self.account == "paper")

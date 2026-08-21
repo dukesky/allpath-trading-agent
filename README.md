@@ -39,7 +39,7 @@ Write strategies in plain YAML, let a sentinel watch them every hour, chat with 
 
 ---
 
-> **Project status:** Phases 1-6 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Phase 6 closed the third loop: an after-close **reflection** pass that re-checks each strategy against the day's trades and prices, writes durable lessons to memory, and proposes strategy revisions for your approval — see [Reflection](#reflection). The agent is now also reachable from Telegram — same conversation and memory as the web chat, mirrored both ways — see [Telegram Chat](#telegram-chat); and drafting or revising a strategy from either chat surface now queues a Pending approval instead of requiring a terminal. **Paper trading only by default.**
+> **Project status:** Phases 1-6 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Phase 6 closed the third loop: an after-close **reflection** pass that re-checks each strategy against the day's trades and prices, writes durable lessons to memory, and proposes strategy revisions for your approval — see [Reflection](#reflection). The agent is now also reachable from Telegram — same conversation and memory as the web chat, mirrored both ways — see [Telegram Chat](#telegram-chat); and drafting or revising a strategy from either chat surface now queues a Pending approval instead of requiring a terminal. Phase 7 added a second, always-on account — **Shadow**, a local ledger that mirrors your real brokerage and records rather than routes orders — running in parallel with Paper; see [Two Accounts](#two-accounts). **Paper trading (and shadow recording — never a real order) only by default.**
 
 ## Table of Contents
 
@@ -52,6 +52,7 @@ Write strategies in plain YAML, let a sentinel watch them every hour, chat with 
 - [Getting Started](#getting-started)
 - [Web Interface](#web-interface)
 - [Telegram Chat](#telegram-chat)
+- [Two Accounts](#two-accounts)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
 - [Development](#development)
@@ -314,6 +315,61 @@ for its whole duration, so an Approve/Reject click on the web dashboard
 during that window will simply wait its turn rather than fail — expect a
 brief stall, not an error.
 
+## Two Accounts
+
+`allpath-trade` runs **two practice grounds at once, always active** — not a
+toggle you flip between, but two parallel pipelines (own sentinel, queue,
+memory, strategies, reflection, equity curve) sharing one process:
+
+| Account | What it is |
+|---|---|
+| **Paper** | An Alpaca paper-trading sandbox, starting from zero. Orders route through Alpaca's own simulated execution — exactly how this app has always worked. |
+| **Shadow** | A local ledger that **mirrors your real brokerage account**. It holds no real-broker credentials and never places a real order — every buy/sell the agent (or a rule) decides on is *recorded* here, and the notification tells you plainly to go place it yourself, in your real account, if you agree with it. |
+
+The point isn't just "paper trading is safer" — it's **comparison**. Feed
+both accounts the same stock, the same news, the same week, and watch where
+your paper-account instincts (free to fail, nothing real at stake) diverge
+from the account that actually shadows what you hold. Every page, every
+notification, and the Telegram bot make it unambiguous which account you're
+looking at, so that comparison never turns into confusion.
+
+**Switching accounts** — a chip in the top nav (`PAPER` in blue, `SHADOW` in
+amber) picks which account every page shows — dashboard, chat, pending
+queue, reports, memory, strategies. The choice is remembered in a cookie
+(default: paper, until you first switch); a small dot on the switcher for
+the account you're *not* looking at means it has something waiting for you.
+
+**Getting your real positions into Shadow** — tell the agent in Chat ("I
+hold 10 AAPL at $180 average cost") or go to Settings → Brokerage → Shadow
+and upload a CSV (`ticker,qty,avg_cost` per line, capped at 2,000 rows).
+Either way it's a normal approval-queue proposal — nothing lands in the
+ledger until you approve it — and a "Reset ledger" button is there if you
+want to start clean.
+
+**Notifications** — every subject line is prefixed `[Paper]` or `[Shadow]`,
+so a rule trigger, an order receipt, or the daily digest can never be
+mistaken for the account you actually hold. A shadow order that gets
+recorded says so plainly:
+
+> *A buy order for TSLA was recorded in your shadow ledger — place this
+> order in your brokerage now: BUY 4.5 TSLA @ ~$332.01.*
+
+and a shadow item still waiting for your approval adds:
+
+> *If approved, you'll place it yourself — approving here only records it
+> in your shadow ledger.*
+
+**Telegram** — send `/account` to a paired bot to switch which account that
+chat talks to (inline Paper/Shadow buttons); every message, receipt, and
+approval prompt carries the same `[Paper]`/`[Shadow]` prefix as the web UI.
+
+**Cost** — reflection (the after-close deep-review pass) runs *per
+account*, gated on that account having at least one active strategy, so a
+fresh, empty Shadow ledger costs nothing extra. Once both accounts have
+active strategies, expect roughly **2× the nightly LLM spend** of running
+Paper alone — the Usage tab in Settings shows the real number, not an
+estimate you have to trust.
+
 ## Project Structure
 
 ```
@@ -340,6 +396,7 @@ allpath_trade/          # import package (PyPI/CLI name: allpath-trade)
 | 6 | **Reflection loop** — after-close daily deep review, memory updates, strategy revision proposals, Reports page | ✅ Complete |
 | 6.5 | **Telegram chat channel** — two-way chat with the same agent from Telegram, paired to one private chat, full web→Telegram mirroring, no new write capability | ✅ Complete |
 | 6.6 | **Chat strategy proposals** — `draft_strategy` in web/Telegram chat queues a proposal on Pending instead of requiring a terminal, reusing the reflection revision pipeline (proposer chip, new-strategy and auto/status-regression warnings, superseding an earlier chat draft) | ✅ Complete |
+| 7 | **Shadow dual-active accounts** — a second, always-on account that mirrors your real brokerage (local ledger, no real-broker credentials, orders recorded not routed) running in parallel with Paper; account switcher, per-account chat/memory/strategies/reflection, row-bound Telegram/web approvals, CSV import, `[Paper]`/`[Shadow]`-prefixed notifications | ✅ Complete |
 
 ## Development
 

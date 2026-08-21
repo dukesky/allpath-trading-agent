@@ -1047,3 +1047,88 @@ def test_dashboard_range_query_param_name_is_unchanged(client, monkeypatch):
     dashboard_route._equity_history_cache.clear()
     body = client.get("/?range=1y").text
     assert '<a href="/?range=1y" class="tab-link on">Year</a>' in body
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T7: shadow empty-ledger guidance card and the
+# per-position "price as of" staleness column. Uses the real `client`
+# fixture (real build_components, so `accounts["shadow"]` is a real
+# ShadowLedger, same as test_web_settings.py's own shadow tests).
+# ---------------------------------------------------------------------------
+
+def test_dashboard_paper_never_shows_price_as_of_column(client):
+    # FakeBroker (the paper fixture's broker) always reports one AAPL
+    # position -- Alpaca's own live feed has no "last known, possibly
+    # stale" concept for this app to surface, so the column must not exist
+    # at all on paper's own dashboard render.
+    body = client.get("/").text
+    assert "Price as of" not in body
+
+
+def test_dashboard_shadow_empty_ledger_shows_guidance_card(client):
+    client.post("/account/switch", data={"account": "shadow"})
+
+    body = client.get("/").text
+
+    assert "Your shadow ledger has no positions yet." in body
+    assert "Import your positions" in body
+    assert 'href="/chat"' in body
+    assert 'href="/settings"' in body
+
+
+def test_dashboard_shadow_position_never_priced_shows_never_recorded(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    client.post("/account/switch", data={"account": "shadow"})
+
+    body = client.get("/").text
+
+    assert "Price as of" in body
+    assert "never recorded" in body
+
+
+def test_dashboard_shadow_position_stale_price_shows_price_as_of(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    stale_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+    with b.conn.transaction():
+        b.conn.execute("UPDATE shadow_positions SET last_price_ts = ? WHERE ticker = ?",
+                       (stale_ts, "AAPL"))
+    # A failing quote for this ticker so staleness isn't masked by a fresh
+    # live price -- FakeDataSource.fail below matches the "or quote failed"
+    # half of spec §⑧, independent of the stale timestamp itself.
+    client.app.state.holder.get().data.fail = True
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/").text
+
+    assert "Price as of" in body
+    assert "d ago" in body
+
+
+def test_dashboard_shadow_position_fresh_quote_and_recent_ts_shows_current(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    fresh_ts = datetime.now(UTC).isoformat()
+    with b.conn.transaction():
+        b.conn.execute("UPDATE shadow_positions SET last_price_ts = ? WHERE ticker = ?",
+                       (fresh_ts, "AAPL"))
+    # FakeDataSource (the client fixture's data source) succeeds by default.
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/").text
+
+    assert "Price as of" in body  # column exists on shadow...
+    assert "<td class=\"muted\">current</td>" in body  # ...but this row is fresh
+
+
+def test_dashboard_shadow_empty_ledger_guidance_card_is_english_only(client):
+    client.post("/account/switch", data={"account": "shadow"})
+    assert_english_only(client.get("/").text)
+
+
+def test_dashboard_shadow_stale_position_is_english_only(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    client.post("/account/switch", data={"account": "shadow"})
+    assert_english_only(client.get("/").text)

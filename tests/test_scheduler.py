@@ -366,7 +366,7 @@ def test_build_jobs_records_heartbeat_when_market_open(monkeypatch):
 
     scheduler.job()
 
-    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == "2026-08-09T15:00:00+00:00"
+    assert app_state.get(f"{sched.SENTINEL_HEARTBEAT_KEY}:paper") == "2026-08-09T15:00:00+00:00"
 
 
 def test_build_jobs_records_heartbeat_even_when_market_closed(monkeypatch):
@@ -389,7 +389,7 @@ def test_build_jobs_records_heartbeat_even_when_market_closed(monkeypatch):
     scheduler.job()
 
     assert sentinel.calls == 0  # market closed: sentinel itself did not run
-    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == "2026-08-09T03:00:00+00:00"
+    assert app_state.get(f"{sched.SENTINEL_HEARTBEAT_KEY}:paper") == "2026-08-09T03:00:00+00:00"
 
 
 def test_run_daemon_records_heartbeat_even_when_market_closed(monkeypatch):
@@ -406,7 +406,7 @@ def test_run_daemon_records_heartbeat_even_when_market_closed(monkeypatch):
 
     run_daemon(lambda: accounts, 5, scheduler_cls=ImmediateScheduler, app_state=app_state)
 
-    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == "2026-08-09T03:00:00+00:00"
+    assert app_state.get(f"{sched.SENTINEL_HEARTBEAT_KEY}:paper") == "2026-08-09T03:00:00+00:00"
 
 
 def test_build_jobs_runs_daily_consolidation_once_per_day_after_close(monkeypatch):
@@ -496,7 +496,7 @@ def test_build_jobs_sends_daily_digest_once_per_day_after_close(monkeypatch):
 
     assert len(notifier.sent) == 1
     subject, body = notifier.sent[0]
-    assert subject == "[AllPath] Daily summary"
+    assert subject == "[Paper] [AllPath] Daily summary"
     # 2 sentinel-sourced observations, 3 trades, 2 pending reviews
     assert "2 rule trigger(s)" in body
     assert "3 trade(s)" in body
@@ -521,7 +521,7 @@ def test_build_jobs_daily_digest_mentions_llm_cost_when_usage_recorded(monkeypat
     scheduler.job()
 
     [(_subject, body)] = notifier.sent
-    assert "Estimated LLM cost today: $18.00" in body
+    assert "Estimated LLM cost today (all accounts): $18.00" in body
 
 
 def test_build_jobs_daily_digest_omits_cost_line_when_no_usage(monkeypatch, tmp_path):
@@ -1017,7 +1017,11 @@ def test_build_jobs_digest_failure_does_not_stop_reflection(monkeypatch, capsys)
     scheduler.job()  # must not raise
 
     assert reflector.calls == 1
-    assert "[digest] failed" in capsys.readouterr().out
+    # shadow-dual-active T7: _send_daily_digest now isolates each account's
+    # send in its own try/except (same "[xxx:{account}] failed" shape as
+    # the heartbeat/sentinel/reflection/consolidation per-account failure
+    # prints elsewhere in this module) and reports to stderr, not stdout.
+    assert "[digest:paper] failed" in capsys.readouterr().err
 
 
 def _chatty_daily_components():
@@ -1090,9 +1094,11 @@ def test_run_sentinel_pass_writes_separate_per_account_heartbeat_keys(monkeypatc
     shadow_key = app_state.get(f"{sched.SENTINEL_HEARTBEAT_KEY}:shadow")
     assert paper_key is not None
     assert shadow_key is not None
-    # Legacy un-suffixed key still mirrors paper only (dashboard compat,
-    # Task 7 carry) -- shadow never writes it.
-    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) == paper_key
+    # shadow-dual-active T7: the legacy un-suffixed key is no longer
+    # written at all -- the dashboard reads the per-account key for
+    # whichever account is being viewed (T5), so nothing reads this bare
+    # key any more (see scheduler.py's `_run_sentinel_pass` docstring).
+    assert app_state.get(sched.SENTINEL_HEARTBEAT_KEY) is None
 
 
 def test_run_sentinel_pass_market_open_flag_is_a_single_shared_key(monkeypatch):

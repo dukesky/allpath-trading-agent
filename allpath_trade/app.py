@@ -192,7 +192,8 @@ def _build_account_components(account: str, *, settings: Settings,
     search = SessionSearch(conn, account=account)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
                        observations=observations, web_base_url=settings.web_base_url,
-                       app_state=app_state, telegram_bot_token=settings.telegram_bot_token)
+                       app_state=app_state, telegram_bot_token=settings.telegram_bot_token,
+                       account=account)
 
     bundle = AccountComponents(
         account=account, broker=broker, data=data, conn=conn, journal=journal,

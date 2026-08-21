@@ -215,6 +215,50 @@
       的消息、失败配对静默丢弃不回应攻击者），更干净的独立一次性配对码设计
       本轮仍未落地，留在同一条遗留里跟踪，不重复开新条目。
 
+## shadow-dual-active（Task 7）已知限制
+
+双活账户体系落地后仍然存在的、有意选择不做或暂不做的限制，随实现一并记录，
+而不是散落在各任务的 commit message 里。
+
+- [ ] **股息/拆股/税批次不自动处理**：shadow 账本（`broker/shadow.py`）只认
+      买卖两种成交，没有股息入账、拆股调整持仓与均价、或税务批次（lot）追踪的
+      概念——真实券商发生这些事件后，用户需要自己算出调整后的 qty/avg_cost，
+      通过 Chat 或 Settings → Brokerage → Shadow 的 `set_position` 提案手动
+      改一次账本。spec §⑧ 就是这样定的："股息/拆股/税批次:手动修正,记为限制"，
+      本轮 Task 7 只是把它从设计文档搬进这份面向用户的已知限制清单——不是新
+      发现的缺口。期权/加密同理，完全不支持。
+- [ ] **没有真实券商 API**：shadow 账本从不连接、也从不需要连接你真实的
+      brokerage——它是本地记账,不是第三方集成。这意味着账本不会自动同步你
+      真实账户的持仓变化;每一次买卖都要你自己去真实账户执行,再回来告诉
+      agent(或用 CSV 重新导入全量持仓)。这是刻意的产品选择(spec 的"影子
+      账本,不接真实凭证"不变量),不是尚待补的集成——记在这里是为了让用户在
+      读文档时就知道,而不是用了才发现。
+- [ ] **反思(reflection)夜间 LLM 成本**：`_run_account_daily`
+      (`scheduler.py`)按账户门控——只有当天该账户存在至少一个 active
+      策略,reflection 才会跑一次 LLM 调用(§③的成本闸门,空 shadow 账本不会
+      产生任何反思花费)。但一旦 Paper 和 Shadow 两边都挂了 active 策略,
+      两边各自跑一次独立的 reflection 会话,夜间 Opus/LLM 总花费大约是只跑
+      单账户时的**两倍**——Settings → Usage 面板上能看到真实数字,这里只是
+      提前把这个数量级写清楚,免得用户第一次看账单才意外发现。
+- [ ] **CLI `--account` 在需要完整 bundle 的命令上仍然要求 Alpaca 凭证**：
+      `cli.py` 的 `needs_broker` 判断里,`status`/`check`/`run`/`chat`/
+      `serve` 这几个命令只要被调用就会走 `build_components`,而它一次性
+      构建**两个账户**的 bundle(Task 4 的双活设计——一个进程,两条流水线
+      始终都在),所以哪怕这次 `--account shadow` 只想看 shadow 一侧,
+      Paper 侧 AlpacaBroker 的构造依然会失败、要求 `.env` 里有真实(哪怕是
+      沙盒)Alpaca key——`--account shadow status` 在没配 Alpaca 凭证的
+      全新安装上不会工作。真正不需要 Alpaca 凭证的是压根不经过
+      `build_components` 的只读命令:`strategies`、`rearm`、纯粹的
+      `reviews list`/`reject`。修复思路是让 `build_components` 支持"只建
+      单个账户的 bundle",但那会改变它当前"一次调用两个账户永远同时存在"的
+      不变量,本轮不做,留给后续如果这个限制真的造成困扰时再评估。
+- [ ] **CSV 导入有硬上限**：Settings → Brokerage → Shadow 的持仓 CSV 导入
+      (`agent/shadow_tools.py`)限制文件不超过 1,000,000 字节、不超过 2,000
+      行(`_MAX_CSV_BYTES`/`_MAX_CSV_ROWS`)——超限直接拒绝、不做分批导入。
+      对绝大多数个人投资组合(几十到几百个持仓)完全够用;真遇到需要导入
+      上千行的场景(比如某种批量测试数据),现在的唯一办法是拆成多次
+      导入(每次都是独立的批准提案)。
+
 ## chat-strategy-proposals review round 遗留
 
 - [ ] **`pending_reviews.conversation_id` 是只写字段**：`add_strategy_revision`

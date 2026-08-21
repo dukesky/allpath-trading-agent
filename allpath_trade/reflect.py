@@ -476,7 +476,7 @@ class Reflector:
             # actionable for the user to act on at 4am, and paging them for
             # a broken-LLM night would just be noise they'd learn to ignore.
             subject, full_body = events.daily_report(
-                date=et_date, summary=summary, body=body)
+                account=c.account, date=et_date, summary=summary, body=body)
             # Push failure must never fail the *run* -- the report is
             # already durably stored above; a dead notification channel is
             # a notify-layer problem, not a reflection-layer one. The bool

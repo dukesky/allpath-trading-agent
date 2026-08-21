@@ -3,7 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import re
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
@@ -112,6 +112,59 @@ def _cached_quote(data: DataSource, ticker: str) -> Quote | None:
 # lookup) need this same cached lookup and must not reach across module
 # boundaries into a name prefixed `_private`.
 cached_quote = _cached_quote
+
+
+def _last_trading_day_cutoff(now: datetime) -> datetime:
+    """The instant before which a shadow position's `last_price_ts`
+    (broker/shadow.py's `_valuation_price` docstring: "staleness surfaced
+    to the user via last_price_ts -- Task 7 renders it") counts as stale
+    for the dashboard's "price as of" column -- "1 trading day ago", with
+    the same weekday-only calendar `is_market_hours`/`_is_after_close`
+    already use (no holiday awareness -- see docs/TODO.md, same documented
+    limitation). Monday's cutoff reaches back to Friday (the previous
+    trading day), not Sunday, so a price set at Friday's close is still
+    "yesterday's trading day" Monday morning rather than flagged stale by a
+    plain 24h window."""
+    days_back = 3 if now.weekday() == 0 else 1  # Monday -> back to Friday
+    return now - timedelta(days=days_back)
+
+
+def _shadow_price_staleness(b, positions: list[Position], data: DataSource,
+                            now: datetime) -> dict[str, str | None]:
+    """`{ticker: last_price_ts}` for every shadow position whose displayed
+    valuation the dashboard should flag with a "price as of" note --
+    shadow-dual-active T7, spec §⑧: "行情失败:最后已知价 + 标注". Empty (no
+    flags at all) on the paper account -- Alpaca's own live feed has no
+    analogous "last known, possibly stale" concept for this app to surface.
+
+    A ticker is flagged when EITHER of spec §⑧'s two conditions holds:
+    `last_price_ts` is missing or older than one trading day
+    (`_last_trading_day_cutoff`), OR a fresh quote attempt for it fails
+    right now (`_cached_quote` -- the exact same cached lookup the
+    strategy cards already use, so this costs no extra network calls on a
+    warm cache). Reads `shadow_positions.last_price_ts` directly via raw
+    SQL (mirrors `web/routes/settings.py`'s own `_shadow_ledger_summary`)
+    because `Broker.get_positions()`'s `Position` model -- shared with
+    paper/Alpaca -- has no timestamp field to carry this shadow-only
+    concept through."""
+    if b.account != "shadow" or not positions:
+        return {}
+    rows = b.conn.execute("SELECT ticker, last_price_ts FROM shadow_positions")
+    ts_by_ticker = {row["ticker"]: row["last_price_ts"] for row in rows}
+    cutoff = _last_trading_day_cutoff(now)
+    stale: dict[str, str | None] = {}
+    for p in positions:
+        ts = ts_by_ticker.get(p.ticker)
+        quote_failed = _cached_quote(data, p.ticker) is None
+        ts_stale = ts is None
+        if not ts_stale:
+            parsed = datetime.fromisoformat(ts)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            ts_stale = parsed.astimezone(UTC) < cutoff
+        if quote_failed or ts_stale:
+            stale[p.ticker] = ts
+    return stale
 
 
 # Dashboard equity-chart range tabs. Values are the `?range=` query string;
@@ -496,6 +549,12 @@ def dashboard(request: Request,
     equity_up_for_chart = (None if equity_summary["change"] is None
                            else equity_summary["change"] >= 0)
 
+    # shadow-dual-active T7: `{}` on paper, always -- see
+    # `_shadow_price_staleness`'s own docstring for why only a shadow
+    # position's valuation carries this "last known, possibly stale" idea
+    # at all.
+    price_as_of = _shadow_price_staleness(b, positions, c.data, _utcnow())
+
     errors: list[str] = []
     strategies = b.strategies.load_all(status=None, errors=errors)
     positions_by_ticker = {p.ticker: p for p in positions}
@@ -521,6 +580,7 @@ def dashboard(request: Request,
 
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
+        "price_as_of": price_as_of,
         "broker_error": broker_error, "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": b.journal.recent(limit=8),
         "sentinel_status": sentinel_status, "market_open": market_open,

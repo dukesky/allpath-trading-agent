@@ -347,7 +347,8 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None,
                             strategies=components.strategies,
                             queue=components.queue)
     register_action_tools(registry, strategies=components.strategies,
-                          executor=components.executor, confirm=confirm)
+                          executor=components.executor, confirm=confirm,
+                          account=account)
     register_memory_tools(registry, memory=components.memory,
                           search=SessionSearch(components.conn, account=account))
     if account == "shadow":

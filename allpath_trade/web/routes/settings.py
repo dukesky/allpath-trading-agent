@@ -262,13 +262,17 @@ def _notify_shadow_edit_queued(c, b, review_id: int, action_title: str) -> None:
     # `b` (the shadow bundle) carries the queue this review was just added to.
     try:
         approve_url = events.approve_link(c.settings.web_base_url, review_id)
+        # account="shadow" literal: these CSV/reset routes only ever queue
+        # a shadow_edit for the shadow ledger -- see _shadow_context/
+        # _shadow_ledger_summary above, and agent/shadow_tools.py's own
+        # `_notify_queued` for the same reasoning.
         subject, body = events.review_queued(
-            review_id=review_id, ticker="", action=action_title,
-            strategy_id="", approve_url=approve_url)
+            account="shadow", review_id=review_id, ticker="", action=action_title,
+            strategy_id="", approve_url=approve_url, kind="shadow_edit")
         notify_review_queued(
             queue=b.queue, notifier=c.notifier, app_state=c.app_state,
             telegram_bot_token=c.settings.telegram_bot_token, review_id=review_id,
-            subject=subject, body=body)
+            subject=subject, body=body, account="shadow")
     except Exception as exc:  # noqa: BLE001 — see docstring above
         print(f"[settings] shadow edit notification failed: {exc}", file=sys.stderr)
 
