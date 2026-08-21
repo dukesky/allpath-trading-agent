@@ -18,6 +18,7 @@ from allpath_trade.llm.base import LLMClient
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
 from allpath_trade.scheduler import ET, ts_to_et_date
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
@@ -281,7 +282,8 @@ def _format_target(position: Any) -> str:
 
 def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict],
                    positions: list[dict], pending_counts: dict[str, int],
-                   strategies: list[dict] | None = None) -> str:
+                   strategies: list[dict] | None = None,
+                   account: str = DEFAULT_ACCOUNT) -> str:
     """Pure, deterministic seed briefing -- no LLM, no I/O. `trades` /
     `observations` / `positions` / `strategies` are already-fetched plain
     dicts (the Reflector does the DB/broker/data-source/YAML reads); this
@@ -289,7 +291,14 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
     `fence_external`-wrapped independently (spec §②: "全部 fence_external
     围栏") since every value inside ultimately traces back to model-authored
     strings (trade `reason`, observation `text`, strategy `thesis`) or a
-    remote price feed -- data, not instructions."""
+    remote price feed -- data, not instructions.
+
+    `account` defaults to `DEFAULT_ACCOUNT` ("paper") so every existing
+    direct-format test that predates the shadow account keeps passing
+    unchanged; the Reflector's own `_build_briefing` always passes its
+    bundle's real account explicitly. Rendered plainly in the header, not
+    fenced -- unlike the blocks below it never traces back to model- or
+    feed-authored content, it's a fact this function itself is asserting."""
     strategies_block = "\n".join(_format_strategy(s) for s in (strategies or []))
     strategies_block = strategies_block or "no active strategies"
 
@@ -309,6 +318,7 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
 
     return "\n".join([
         f"# Daily reflection seed briefing -- {et_date}",
+        f"Account: {account}",
         "\n## Strategies (thesis & rules)",
         fence_external(_cap_chars(strategies_block, MAX_STRATEGY_CHARS)),
         "\n## Today's trades",
@@ -396,7 +406,13 @@ class Reflector:
         identity = load_identity()
         base_prompt = build_system_prompt(
             identity=identity, broker=c.broker, journal=c.journal,
-            strategies=c.strategies, queue=c.queue, memory=c.memory)
+            strategies=c.strategies, queue=c.queue, memory=c.memory,
+            # Important 1: the Reflector always knows its own account (this
+            # bundle) -- pass it so the system prompt carries the
+            # paper/shadow section (agent/context.py's ACCOUNT_NOTES),
+            # never omitted here the way an as-yet-unwired chat caller
+            # might leave it.
+            account=c.account)
         system_prompt = f"{base_prompt}\n{REFLECTION_INSTRUCTIONS}"
 
         compactor = Compactor(self.llm, conversations,
@@ -486,7 +502,8 @@ class Reflector:
             trades=self._trades_today(et_date),
             observations=self._observations_today(et_date),
             positions=self._positions_with_change(),
-            pending_counts=self._pending_counts())
+            pending_counts=self._pending_counts(),
+            account=self.components.account)
 
     def _strategies_today(self) -> list[dict]:
         try:

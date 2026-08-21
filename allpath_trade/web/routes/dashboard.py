@@ -121,15 +121,26 @@ _EQUITY_HISTORY_CACHE_TTL_SECONDS = 300  # 5 min -- same reasoning as the quote 
 # the quote cache's equivalent failure, so a stale broker hiccup shouldn't
 # get to keep the chart blank nearly as long.
 _EQUITY_HISTORY_FAILURE_TTL_SECONDS = 30
-# Module-level, keyed by range -- same "survive across requests, not just
-# within one render" rationale as `_quote_cache` above. A single-process app
-# talks to one broker, so the range alone is a sufficient key.
-_equity_history_cache: dict[str, tuple[float, list]] = {}
+# Module-level, keyed by (broker.name, range) -- same "survive across
+# requests, not just within one render" rationale as `_quote_cache` above.
+#
+# shadow-dual-active T4 review (Important 4): this used to be keyed by
+# `range_key` ALONE on the assumption that "a single-process app talks to
+# one broker" -- that stopped being true the moment paper and shadow
+# started sharing this one process. Whichever account's dashboard render
+# happened to populate a given range's slot first would silently serve
+# ITS equity curve to the other account's page for the rest of the TTL
+# (a paper-curve-under-shadow-view leak, or vice versa) until the cache
+# happened to expire. `broker.name` ("alpaca" for paper, "shadow" for the
+# ledger) is a sufficient second key -- each account's own broker instance
+# never changes identity across requests within one process.
+_equity_history_cache: dict[tuple[str, str], tuple[float, list]] = {}
 
 
 def _cached_equity_history(broker: Broker, range_key: str, days: int) -> list:
     now = time.monotonic()
-    cached = _equity_history_cache.get(range_key)
+    cache_key = (broker.name, range_key)
+    cached = _equity_history_cache.get(cache_key)
     if cached is not None:
         cached_at, cached_history = cached
         # An empty cached result reads as "the last attempt failed (or a
@@ -144,7 +155,7 @@ def _cached_equity_history(broker: Broker, range_key: str, days: int) -> list:
         history = _with_timeout(lambda: broker.get_equity_history(days))
     except Exception:  # noqa: BLE001 — a history failure must render the placeholder, never an error page
         history = []
-    _equity_history_cache[range_key] = (now, history)
+    _equity_history_cache[cache_key] = (now, history)
     return history
 
 

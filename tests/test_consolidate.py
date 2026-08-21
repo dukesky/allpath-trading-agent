@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
 from allpath_trade.llm.base import LLMResponse
 from allpath_trade.memory.consolidate import Consolidator
@@ -426,6 +428,44 @@ def test_consolidator_requires_app_state_when_conversations_given(tmp_path):
     except ValueError:
         raised = True
     assert raised
+
+
+# -- shadow-dual-active T4 review Minor 8: structural account-match guard --
+
+def test_consolidator_rejects_mismatched_observations_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn, account="shadow")
+    # Wrong account on purpose: paper's ObservationLog handed to a
+    # Consolidator that otherwise thinks it's shadow's.
+    obs = ObservationLog(conn, account="paper")
+    with pytest.raises(ValueError, match="observations is scoped to 'paper'"):
+        Consolidator(ScriptedLLM([]), memory, obs, TradeJournal(conn, account="shadow"),
+                     conn, account="shadow")
+
+
+def test_consolidator_rejects_mismatched_conversations_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn, account="shadow")
+    obs = ObservationLog(conn, account="shadow")
+    # Wrong account on purpose: paper's ConversationStore handed to a
+    # Consolidator that otherwise thinks it's shadow's.
+    convo = ConversationStore(conn, account="paper")
+    app_state = AppState(conn)
+    with pytest.raises(ValueError, match="conversations is scoped to 'paper'"):
+        Consolidator(ScriptedLLM([]), memory, obs, TradeJournal(conn, account="shadow"),
+                     conn, conversations=convo, app_state=app_state, account="shadow")
+
+
+def test_consolidator_accepts_matching_accounts_throughout(tmp_path):
+    # Sanity check the guard isn't over-strict: every store genuinely
+    # scoped to the same account must construct cleanly.
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn, account="shadow")
+    obs = ObservationLog(conn, account="shadow")
+    convo = ConversationStore(conn, account="shadow")
+    app_state = AppState(conn)
+    Consolidator(ScriptedLLM([]), memory, obs, TradeJournal(conn, account="shadow"),
+                 conn, conversations=convo, app_state=app_state, account="shadow")
 
 
 def test_system_note_echoes_are_excluded_from_turn_lines(tmp_path):

@@ -436,6 +436,25 @@ def _table_sql(conn: LockedConnection, table: str) -> str | None:
     return row["sql"] if row is not None else None
 
 
+def _table_has_column(conn: LockedConnection, table: str, column: str) -> bool:
+    """Exact column-name check via `PRAGMA table_info`, not a substring
+    search over the table's stored CREATE statement text. Used by
+    `_rebuild_search_index` below (shadow-dual-active T4 review, Minor 5):
+    a plain `"account" in sql` guard is one stray word away from a false
+    positive (e.g. a future column, index name, or even a comment
+    containing the literal substring "account" would short-circuit the
+    rebuild as already-done without actually adding the column). PRAGMA
+    table_info works on FTS5 virtual tables the same as ordinary ones --
+    they register their declared columns there too -- so this is a strict
+    improvement with no new caveats, verified against a populated legacy
+    `search_index` in tests/test_db_migrations.py. `table` is always one of
+    this module's own hardcoded constants, never external input, so an
+    f-string is safe here -- PRAGMA doesn't accept bound parameters for the
+    table name at all."""
+    return any(row["name"] == column
+              for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
 def _rebuild_reports(conn: LockedConnection) -> None:
     """Table-rebuild for `reports`: SQLite has no `ALTER TABLE ... ADD
     CONSTRAINT`, so the old UNIQUE(date) key can't become UNIQUE(account,
@@ -530,7 +549,7 @@ def _rebuild_search_index(conn: LockedConnection) -> None:
     restarts and verified against a populated legacy index (see
     tests/test_db_migrations.py)."""
     sql = _table_sql(conn, "search_index")
-    if sql is None or "account" in sql:
+    if sql is None or _table_has_column(conn, "search_index", "account"):
         return
     with conn.transaction():
         conn.execute(

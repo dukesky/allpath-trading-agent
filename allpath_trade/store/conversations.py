@@ -12,6 +12,16 @@ class ConversationStore:
         self._conn = conn
         self._account = account
 
+    @property
+    def account(self) -> str:
+        # Read-only: shadow-dual-active T4 review Minor 8 needs a public
+        # way for `Consolidator.__init__` to assert this store's account
+        # matches its own, without reaching into the `_account` internal
+        # (every write path here still goes through `self._account`
+        # directly -- this property exists for that one external
+        # structural check, not as a second name for internal use).
+        return self._account
+
     def start(self, kind: str = "chat") -> int:
         cur = self._conn.execute(
             "INSERT INTO conversations (account, started_ts, kind) VALUES (?, ?, ?)",

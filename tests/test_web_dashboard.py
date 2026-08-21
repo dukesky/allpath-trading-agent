@@ -933,16 +933,60 @@ def test_equity_history_cache_retries_a_failure_well_before_the_success_ttl(
     monkeypatch.setattr(client.app.state.holder.get(), "broker", FailingEquityHistoryBroker())
     dashboard_route._equity_history_cache.clear()
     client.get("/")
-    ts, history = dashboard_route._equity_history_cache[dashboard_route._DEFAULT_RANGE]
+    cache_key = ("fake", dashboard_route._DEFAULT_RANGE)
+    ts, history = dashboard_route._equity_history_cache[cache_key]
     assert history == []
 
     # 31s back is past the 30s failure TTL but nowhere near the 5-minute
     # success TTL -- a genuine failure must not get to hide behind the long
     # TTL meant for a working chart.
-    dashboard_route._equity_history_cache[dashboard_route._DEFAULT_RANGE] = (ts - 31, history)
+    dashboard_route._equity_history_cache[cache_key] = (ts - 31, history)
     monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
     body = client.get("/").text
     assert "<polyline" in body
+
+
+# --- shadow-dual-active T4 review Important 4: keyed by (broker.name, range),
+# not range alone -- two brokers sharing one process (paper + shadow) must
+# never serve each other's cached equity curve. ------------------------------
+
+class _NamedEquityHistoryBroker(EquityHistoryBroker):
+    """Same canned history shape as EquityHistoryBroker, but with a
+    distinct `.name` and a distinct series -- so a cache-key collision
+    would be caught by the SERIES ending up wrong, not just by dict size."""
+
+    def __init__(self, name: str, offset: int) -> None:
+        super().__init__()
+        self.name = name
+        self._offset = offset
+
+    def get_equity_history(self, days):
+        base = datetime(2026, 8, 1, tzinfo=UTC)
+        return [(base + timedelta(days=i), Decimal(str(self._offset + i * 100)))
+                for i in range(5)]
+
+
+def test_equity_history_cache_keyed_by_broker_name_not_range_alone(client, monkeypatch):
+    dashboard_route._equity_history_cache.clear()
+    holder = client.app.state.holder
+
+    monkeypatch.setattr(holder.get(), "broker", _NamedEquityHistoryBroker("paper", 10000))
+    client.get("/")
+    monkeypatch.setattr(holder.get(), "broker", _NamedEquityHistoryBroker("shadow", 50000))
+    client.get("/")
+
+    assert len(dashboard_route._equity_history_cache) == 2
+    paper_key = ("paper", dashboard_route._DEFAULT_RANGE)
+    shadow_key = ("shadow", dashboard_route._DEFAULT_RANGE)
+    assert paper_key in dashboard_route._equity_history_cache
+    assert shadow_key in dashboard_route._equity_history_cache
+    _, paper_history = dashboard_route._equity_history_cache[paper_key]
+    _, shadow_history = dashboard_route._equity_history_cache[shadow_key]
+    # Distinct series prove shadow's render didn't reuse paper's cached
+    # entry (or vice versa) -- a same-key collision would leave one
+    # account's dashboard silently showing the other's equity curve.
+    assert paper_history[0][1] == Decimal(10000)
+    assert shadow_history[0][1] == Decimal(50000)
 
 
 # --- Minor 2: a one-point history hides the period-change headline ---------

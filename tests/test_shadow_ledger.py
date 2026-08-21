@@ -9,7 +9,9 @@ from allpath_trade import scheduler as scheduler_module
 from allpath_trade.broker import shadow as shadow_module
 from allpath_trade.broker.base import OrderIntent, OrderSide, OrderStatus
 from allpath_trade.broker.shadow import ShadowLedger
+from allpath_trade.data import yf as yf_module
 from allpath_trade.data.base import DataSource, Quote
+from allpath_trade.data.yf import YFinanceSource
 from allpath_trade.store.db import connect
 
 
@@ -683,3 +685,94 @@ def test_record_fill_leaves_notional_null_for_qty_based_order(tmp_path):
     row = conn.execute(
         "SELECT notional FROM shadow_orders WHERE id = ?", (int(order.id),)).fetchone()
     assert row["notional"] is None
+
+
+# -- shadow-dual-active T4 review Important 3: quote-fetch amplification ----
+# ShadowLedger already has exactly one shadow_positions row per ticker
+# (PRIMARY KEY), so get_account()/get_positions() were never re-fetching a
+# quote twice for the SAME ticker within one call -- the amplification came
+# from cross-call/cross-account repetition (get_account + get_positions
+# each re-valuing the same positions, every dashboard render, every
+# sentinel tick, for both accounts sharing one process). That's fixed at
+# the shared YFinanceSource cache (see tests/test_data.py); these tests
+# confirm ShadowLedger's own per-call fetch count and that it actually
+# benefits from that shared cache end-to-end.
+
+class _CountingData(FakeData):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.calls: list[str] = []
+
+    def get_quote(self, ticker: str) -> Quote:
+        self.calls.append(ticker)
+        return super().get_quote(ticker)
+
+
+def test_get_account_fetches_each_distinct_ticker_quote_exactly_once(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    data = _CountingData(prices={
+        "AAPL": Decimal(100), "MSFT": Decimal(200), "TSLA": Decimal(300)})
+    ledger = ShadowLedger(conn, data)
+    ledger.set_cash(Decimal(100000))
+    for ticker in ("AAPL", "MSFT", "TSLA"):
+        ledger.submit_order(buy(ticker=ticker, qty=Decimal(1)))
+    data.calls.clear()
+
+    ledger.get_account()
+
+    assert sorted(data.calls) == ["AAPL", "MSFT", "TSLA"]
+
+
+def test_get_positions_fetches_each_distinct_ticker_quote_exactly_once(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    data = _CountingData(prices={"AAPL": Decimal(100), "MSFT": Decimal(200)})
+    ledger = ShadowLedger(conn, data)
+    ledger.set_cash(Decimal(100000))
+    for ticker in ("AAPL", "MSFT"):
+        ledger.submit_order(buy(ticker=ticker, qty=Decimal(1)))
+    data.calls.clear()
+
+    ledger.get_positions()
+
+    assert sorted(data.calls) == ["AAPL", "MSFT"]
+
+
+class _StubFastInfoTicker:
+    def __init__(self, price: Decimal) -> None:
+        self.fast_info = {"last_price": price, "regular_market_previous_close": price}
+
+    def history(self, period, interval="1d"):  # pragma: no cover — get_bars not exercised
+        raise NotImplementedError
+
+
+def test_shadow_ledger_get_account_reuses_the_shared_yfinance_quote_cache(tmp_path):
+    """End-to-end with the REAL YFinanceSource (not the test FakeData
+    above): repeated get_account()/get_positions() calls within the TTL
+    must cost zero additional underlying Ticker fetches -- this is the
+    actual fix for the measured 14-fetches-per-dual-tick amplification."""
+    yf_module._quote_cache.clear()
+    try:
+        calls: list[str] = []
+
+        def factory(ticker):
+            calls.append(ticker)
+            return _StubFastInfoTicker(Decimal(100))
+
+        data = YFinanceSource(ticker_factory=factory)
+        conn = connect(tmp_path / "t.db")
+        ledger = ShadowLedger(conn, data)
+        ledger.set_cash(Decimal(100000))
+        ledger.submit_order(buy(ticker="AAPL", qty=Decimal(1)))
+        calls.clear()
+
+        ledger.get_account()
+        ledger.get_account()
+        ledger.get_positions()
+
+        # submit_order's own quote lookup already warmed the cache for
+        # AAPL above (before `calls.clear()`) -- every subsequent lookup
+        # here, across three more calls spanning both get_account and
+        # get_positions, is a pure cache hit costing zero further fetches.
+        assert calls == []
+    finally:
+        yf_module._quote_cache.clear()

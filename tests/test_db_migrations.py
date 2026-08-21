@@ -8,7 +8,7 @@ T1's review rather than pinned as tests."""
 
 import sqlite3
 
-from allpath_trade.store.db import SCHEMA, connect
+from allpath_trade.store.db import SCHEMA, _table_has_column, connect
 
 
 def test_migration_is_idempotent_across_two_connects(tmp_path):
@@ -230,6 +230,37 @@ def test_search_index_rebuild_is_idempotent_across_two_connects(tmp_path):
     leftover = conn2.execute(
         "SELECT name FROM sqlite_master WHERE name='search_index_v2'").fetchone()
     assert leftover is None
+
+
+# -- Minor 5: the search_index rebuild guard is an exact column-name check
+# (`PRAGMA table_info`), not a substring search over the stored CREATE TABLE
+# text -- a plain `"account" in sql` guard is one stray word away from a
+# false positive.
+
+def test_table_has_column_is_exact_not_a_substring_match(tmp_path):
+    """PRAGMA table_info's exact name match must not be fooled by a column
+    (or DDL comment) whose text merely CONTAINS the target column name as a
+    substring -- the failure mode a plain `"account" in sql` guard was
+    exposed to."""
+    path = tmp_path / "t.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE decoy (id INTEGER PRIMARY KEY, account_manager TEXT)")
+    raw.commit()
+    raw.close()
+    conn = connect(path)
+    assert not _table_has_column(conn, "decoy", "account")
+    assert _table_has_column(conn, "decoy", "account_manager")
+
+
+def test_table_has_column_works_on_a_rebuilt_fts5_virtual_table(tmp_path):
+    """Confirms PRAGMA table_info actually reports declared columns for an
+    FTS5 virtual table too (reviewer-verified, not just assumed) -- the
+    property `_rebuild_search_index`'s guard now depends on."""
+    path = tmp_path / "t.db"
+    conn = connect(path)  # fresh install already gets the new shape directly
+    assert _table_has_column(conn, "search_index", "account")
+    assert not _table_has_column(conn, "search_index", "nonexistent_column")
 
 
 def test_observations_account_column_backfills_paper_on_legacy_table(tmp_path):

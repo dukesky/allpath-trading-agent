@@ -437,6 +437,49 @@ def test_run_daily_job_digest_deduped_across_a_simulated_restart(tmp_path, monke
     assert len(notifier.sent) == 1
 
 
+def test_run_wires_both_accounts_to_the_daemon(tmp_path, monkeypatch):
+    # shadow-dual-active T4 review Minor 6: cli.py's `run` command passes
+    # `lambda: components.accounts` straight through to run_daemon's
+    # `get_accounts` param -- this pins that wiring against a regression
+    # that narrows it back down to a single hardcoded account (e.g.
+    # `{"paper": components.accounts["paper"]}`), which would silently
+    # stop shadow's sentinel pass and nightly chain from ever running
+    # under the headless `run` daemon even though `serve`'s build_jobs
+    # still covered both accounts.
+    monkeypatch.chdir(tmp_path)
+    from types import SimpleNamespace
+
+    from tests.test_scheduler import (
+        FakeJournal,
+        FakeObservations,
+        FakeQueue,
+        FakeSchedulerBroker,
+        FakeStrategies,
+    )
+
+    fake_components = _fake_run_components()
+    shadow_bundle = SimpleNamespace(
+        strategies=FakeStrategies(), sentinel=None, broker=FakeSchedulerBroker(),
+        queue=FakeQueue(), journal=FakeJournal(), observations=FakeObservations(),
+        reflector=None, consolidator=None)
+    # `.accounts` is the only thing this test cares about -- everything
+    # else on `fake_components` stays exactly what `_fake_run_components`
+    # already builds for the other `run`-parity tests above.
+    fake_components.accounts = {**fake_components.accounts, "shadow": shadow_bundle}
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert "get_accounts" in captured
+    accounts = captured["get_accounts"]()
+    assert set(accounts) == {"paper", "shadow"}
+    assert accounts["shadow"] is shadow_bundle
+    assert accounts["paper"] is fake_components.accounts["paper"]
+
+
 class SpyCompactor:
     """Stands in for allpath_trade.agent.compact.Compactor so a test can
     inspect what cmd_chat constructed it with, without needing a real LLM

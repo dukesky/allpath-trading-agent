@@ -137,9 +137,10 @@ class FakeComponents:
     strategies: StrategyStore
     queue: ReviewQueue
     memory: MemoryStore
+    account: str = "paper"
 
 
-def make_components(tmp_path, broker=None, data=None):
+def make_components(tmp_path, broker=None, data=None, account="paper"):
     conn = connect(tmp_path / "db.sqlite")
     strategies_dir = tmp_path / "strategies"
     strategies_dir.mkdir()
@@ -155,7 +156,8 @@ def make_components(tmp_path, broker=None, data=None):
         data=data if data is not None else FakeData(),
         strategies=StrategyStore(strategies_dir, conn),
         queue=ReviewQueue(conn, executor=None),
-        memory=MemoryStore(tmp_path / "memory", conn))
+        memory=MemoryStore(tmp_path / "memory", conn),
+        account=account)
 
 
 def make_settings(**overrides):
@@ -327,6 +329,23 @@ def test_build_briefing_quote_failure_renders_n_a():
     assert "day_change=n/a" in briefing
 
 
+# -- shadow-dual-active T4 review Important 1: the briefing header states
+# which account it reflects on --------------------------------------------
+
+def test_build_briefing_defaults_to_paper_account_header():
+    briefing = build_briefing(
+        et_date=ET_DATE, trades=[], observations=[], positions=[], pending_counts={})
+    assert "Account: paper" in briefing
+
+
+def test_build_briefing_shadow_account_header():
+    briefing = build_briefing(
+        et_date=ET_DATE, trades=[], observations=[], positions=[], pending_counts={},
+        account="shadow")
+    assert "Account: shadow" in briefing
+    assert "Account: paper" not in briefing
+
+
 # ---------------------------------------------------------------------------
 # Reflector.run_daily -- happy path
 # ---------------------------------------------------------------------------
@@ -371,6 +390,44 @@ def test_run_daily_happy_path_stores_ok_report_and_conversation(tmp_path):
         "SELECT kind FROM conversations WHERE id = ?",
         (row["conversation_id"],)).fetchone()
     assert kind_row["kind"] == "reflection"
+
+
+# -- shadow-dual-active T4 review Important 1: the Reflector wires its own
+# bundle's account into BOTH the system prompt and the seed briefing, so a
+# shadow reflection can never reason about the local ledger as if it were
+# paper's real simulated execution. -----------------------------------------
+
+def test_run_daily_paper_system_prompt_and_briefing_carry_the_paper_account(tmp_path):
+    components = make_components(tmp_path, account="paper")
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings())
+
+    reflector.run_daily(now=NOW)
+
+    system_prompt = llm.seen[0][0]["content"]
+    assert "ACCOUNT: paper" in system_prompt
+    assert "Alpaca paper sandbox" in system_prompt
+    assert "LOCAL LEDGER" not in system_prompt
+
+    briefing = llm.seen[0][1]["content"]
+    assert "Account: paper" in briefing
+
+
+def test_run_daily_shadow_system_prompt_and_briefing_carry_the_shadow_account(tmp_path):
+    components = make_components(tmp_path, account="shadow")
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings())
+
+    reflector.run_daily(now=NOW)
+
+    system_prompt = llm.seen[0][0]["content"]
+    assert "ACCOUNT: shadow" in system_prompt
+    assert "LOCAL LEDGER" in system_prompt
+    assert "user executes them manually" in system_prompt
+    assert "Alpaca paper sandbox" not in system_prompt
+
+    briefing = llm.seen[0][1]["content"]
+    assert "Account: shadow" in briefing
 
 
 # ---------------------------------------------------------------------------

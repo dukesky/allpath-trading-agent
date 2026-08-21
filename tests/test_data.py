@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import datetime
 from decimal import Decimal
 from typing import ClassVar
@@ -5,7 +7,21 @@ from typing import ClassVar
 import pandas as pd
 import pytest
 
+from allpath_trade.data import yf as yf_module
 from allpath_trade.data.yf import YFinanceSource
+
+
+@pytest.fixture(autouse=True)
+def _clear_quote_cache():
+    # shadow-dual-active T4 review (Important 3): `_quote_cache` is
+    # module-level so it survives across CALLERS within the process, which
+    # is the point -- but that means it also survives across *tests*
+    # sharing the same ticker (AAPL) unless cleared, making assertions
+    # depend on test order (same pattern as
+    # tests/test_web_dashboard.py's `_clear_quote_cache`).
+    yf_module._quote_cache.clear()
+    yield
+    yf_module._quote_cache.clear()
 
 
 class YFRateLimitError(Exception):
@@ -88,3 +104,99 @@ def test_get_quote_raises_when_no_price():
     source = YFinanceSource(ticker_factory=lambda t: NoPriceTicker())
     with pytest.raises(ValueError, match="no price available for AAPL"):
         source.get_quote("aapl")
+
+
+# -- shadow-dual-active T4 review Important 3: quote-fetch amplification ----
+
+class CountingTickerFactory:
+    """Counts how many times a fresh Ticker was actually constructed --
+    the real cost this cache exists to collapse (each construction is a
+    fresh fast_info, i.e. a fresh 1y-history download)."""
+
+    def __init__(self, ticker_cls=StubTicker):
+        self.ticker_cls = ticker_cls
+        self.calls: list[str] = []
+
+    def __call__(self, ticker: str):
+        self.calls.append(ticker)
+        return self.ticker_cls()
+
+
+def test_get_quote_caches_across_positions_sharing_one_ticker():
+    # N positions on the same ticker (ShadowLedger.get_account/get_positions
+    # valuing every position) must cost exactly one underlying fetch, not N.
+    factory = CountingTickerFactory()
+    source = YFinanceSource(ticker_factory=factory)
+    for _ in range(5):
+        q = source.get_quote("AAPL")
+        assert q.price == Decimal("201.37")
+    assert factory.calls == ["AAPL"]
+
+
+def test_get_quote_cache_is_per_ticker_not_global():
+    factory = CountingTickerFactory()
+    source = YFinanceSource(ticker_factory=factory)
+    source.get_quote("AAPL")
+    source.get_quote("MSFT")
+    source.get_quote("AAPL")
+    assert factory.calls == ["AAPL", "MSFT"]
+
+
+def test_get_quote_repeated_call_within_ttl_does_not_refetch(monkeypatch):
+    factory = CountingTickerFactory()
+    source = YFinanceSource(ticker_factory=factory)
+    t = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: t[0])
+
+    source.get_quote("AAPL")
+    t[0] += yf_module._QUOTE_CACHE_TTL_SECONDS - 1
+    source.get_quote("AAPL")
+    assert factory.calls == ["AAPL"]
+
+
+def test_get_quote_refetches_after_ttl_expires(monkeypatch):
+    factory = CountingTickerFactory()
+    source = YFinanceSource(ticker_factory=factory)
+    t = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: t[0])
+
+    source.get_quote("AAPL")
+    t[0] += yf_module._QUOTE_CACHE_TTL_SECONDS + 1
+    source.get_quote("AAPL")
+    assert factory.calls == ["AAPL", "AAPL"]
+
+
+def test_get_quote_failure_is_cached_too_not_retried_every_call():
+    # A sustained rate-limit must not turn into a fresh network hit from
+    # every single caller within the TTL window -- the whole point of
+    # collapsing 14 fetches/tick down to one per distinct ticker.
+    factory = CountingTickerFactory(ticker_cls=NoPriceTicker)
+    source = YFinanceSource(ticker_factory=factory)
+    for _ in range(3):
+        with pytest.raises(ValueError, match="no price available for AAPL"):
+            source.get_quote("AAPL")
+    assert factory.calls == ["AAPL"]
+
+
+def test_get_quote_cache_is_thread_safe_under_concurrent_callers():
+    factory = CountingTickerFactory()
+    source = YFinanceSource(ticker_factory=factory)
+    errors = []
+
+    def worker():
+        try:
+            source.get_quote("AAPL")
+        except Exception as exc:  # noqa: BLE001 — surfaced via `errors` below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert not errors
+    # Some interleaving before the first write is acceptable (a handful of
+    # concurrent misses racing to populate the cache), but the lock must
+    # still bound it far below one fetch per thread.
+    assert len(factory.calls) < len(threads)

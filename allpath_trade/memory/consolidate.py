@@ -118,6 +118,25 @@ class Consolidator:
                  account: str = DEFAULT_ACCOUNT) -> None:
         if not is_valid_account(account):
             raise ValueError(f"invalid account: {account!r}")
+        # shadow-dual-active T4 review Minor 8: `_last_marker_ts` and
+        # `_last_turn_marker` (see their own docstrings just below) both
+        # rely, BY CONVENTION ONLY, on the caller having handed this
+        # Consolidator the SAME account's `observations`/`conversations`
+        # instances -- nothing previously enforced that. A future call
+        # site that mismatches them (e.g. shadow's Consolidator built with
+        # paper's ObservationLog by a copy-paste error in app.py) would
+        # silently consolidate the WRONG account's events into this
+        # account's memory, with no error anywhere to catch it. Structural
+        # checks here turn that into a loud construction-time failure
+        # instead of a quiet cross-account leak.
+        if observations.account != account:
+            raise ValueError(
+                f"Consolidator account mismatch: observations is scoped to"
+                f" {observations.account!r}, not {account!r}")
+        if conversations is not None and conversations.account != account:
+            raise ValueError(
+                f"Consolidator account mismatch: conversations is scoped to"
+                f" {conversations.account!r}, not {account!r}")
         if conversations is not None and app_state is None:
             # Not graceful degradation -- a slow corruption loop (Finding
             # 4). `_last_turn_marker` returns 0 forever without app_state,
