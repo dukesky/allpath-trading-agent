@@ -281,7 +281,8 @@ def _cli_chat_bundle(components, account: str):
         settings=components.settings, llm_usage=components.llm_usage)
 
 
-def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> int:
+def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None,
+            account: str | None = None) -> int:
     from rich.console import Console
     from rich.markdown import Markdown
     from rich.panel import Panel
@@ -294,7 +295,21 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> i
     from allpath_trade.agent.readonly_tools import register_readonly_tools
     from allpath_trade.agent.tools import ToolRegistry
     from allpath_trade.memory.search import SessionSearch
+    from allpath_trade.store.accounts import DEFAULT_ACCOUNT
     from allpath_trade.store.conversations import ConversationStore
+
+    # shadow-dual-active T5 review Critical fix: without this, every
+    # ConversationStore/SessionSearch built below defaulted to
+    # DEFAULT_ACCOUNT ("paper") regardless of which account's bundle
+    # `_cli_chat_bundle` (main's "chat" branch) handed in as `components` --
+    # a `cli chat --account shadow` turn landed in paper's conversations
+    # table (which paper's web chat would then resume) and the shadow
+    # terminal agent's own session_search tool read paper's FTS index.
+    # Defaulting the param itself to DEFAULT_ACCOUNT keeps every existing
+    # caller that never passes `account` (the whole pre-T5 test suite)
+    # behaving exactly as before.
+    if account is None:
+        account = DEFAULT_ACCOUNT
 
     # Resolved at call time (not as a default-arg value) so tests can
     # monkeypatch builtins.input and have it take effect here.
@@ -302,7 +317,7 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> i
         input_fn = input
 
     console = Console(highlight=False)
-    store = ConversationStore(components.conn)
+    store = ConversationStore(components.conn, account=account)
     cid = store.start() if new or store.latest() is None else store.latest()
 
     def confirm(prompt: str) -> bool:
@@ -322,13 +337,20 @@ def cmd_chat(components, llm, *, new: bool, input_fn=None, memory_llm=None) -> i
     register_action_tools(registry, strategies=components.strategies,
                           executor=components.executor, confirm=confirm)
     register_memory_tools(registry, memory=components.memory,
-                          search=SessionSearch(components.conn))
+                          search=SessionSearch(components.conn, account=account))
+    # Important 3 (T5 review): the terminal agent must know which account
+    # it serves, matching ChatService._build's own `account=self.account`
+    # -- otherwise the shadow terminal session's system prompt renders no
+    # account section at all (build_system_prompt treats `account=None` as
+    # "omit the section"), even though every tool call underneath it is
+    # already scoped to shadow's own stores.
     system = build_system_prompt(identity=load_identity(),
                                  broker=components.broker,
                                  journal=components.journal,
                                  strategies=components.strategies,
                                  queue=components.queue,
-                                 memory=components.memory)
+                                 memory=components.memory,
+                                 account=account)
     # The terminal chat resumes the same unbounded conversation the web chat
     # does (allpath_trade/web/chat_service.py ChatService._build) -- without
     # a Compactor here too, a long-lived interactive session grows its
@@ -751,7 +773,7 @@ def main(argv: list[str] | None = None,
         # into one object `cmd_chat` can read from either account without
         # `cmd_chat` itself needing to know about accounts at all.
         return cmd_chat(_cli_chat_bundle(components, account), llm,
-                        new=args.new, memory_llm=memory_llm)
+                        new=args.new, memory_llm=memory_llm, account=account)
     if args.command == "memory":
         if args.memory_command == "show":
             from allpath_trade.memory.store import MemoryStore

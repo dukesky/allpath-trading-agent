@@ -93,6 +93,15 @@ def _safe_redirect_target(request: Request) -> str:
             request.url.scheme, request.url.netloc):
         return "/"
     path = parsed.path or "/"
+    # shadow-dual-active T5 review Minor: a Referer whose path itself starts
+    # with `//` (e.g. `https://this-host//evil.example/x`) parses with an
+    # empty netloc override but a path a browser will still treat as
+    # protocol-relative when handed back in a Location header -- `RedirectResponse`
+    # doesn't re-validate this string, so returning it as-is would send the
+    # browser off this app to whatever host follows the `//`, defeating the
+    # same-origin check just above.
+    if path.startswith("//"):
+        return "/"
     if parsed.query:
         path = f"{path}?{parsed.query}"
     return path

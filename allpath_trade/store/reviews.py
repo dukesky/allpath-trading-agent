@@ -314,10 +314,27 @@ class ReviewQueue:
         Callable on ANY `ReviewQueue` instance regardless of that
         instance's own `account` -- the query below never references
         `self._account`. Returns `(account, row)`, or `None` if no row
-        with this id exists at all."""
+        with this id exists at all -- including when the row's stored
+        `account` column isn't one of `is_valid_account`'s known accounts.
+
+        shadow-dual-active T5 review Minor: every caller of `locate` (the
+        web reviews page, the `/a/<id>` approve-link, the Telegram
+        Approve/Reject button) turns its `account` result straight into
+        `c.accounts[account]` (`web/account_ctx.bundle_for`, or
+        `telegram.py`'s own inline equivalent) with no further check --
+        neither of those does `is_valid_account`-style validation, because
+        every OTHER account string in the app already passed through a
+        cookie/form/app_state gate that guarantees it. A row whose
+        `account` column was hand-corrupted (or, in principle, written by a
+        future migration bug) would reach that unguarded dict lookup and
+        raise `KeyError`, a 500, instead of the uniform "not found" this id
+        would already get if it didn't exist at all. Filtering here, at the
+        one shared unscoped-lookup primitive, keeps every caller's existing
+        "row not found" handling as the answer for that case too, without
+        needing the same guard repeated at each call site."""
         row = self._conn.execute(
             "SELECT * FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
-        if row is None:
+        if row is None or not is_valid_account(row["account"]):
             return None
         return row["account"], row
 

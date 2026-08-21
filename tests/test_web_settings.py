@@ -281,6 +281,26 @@ def test_saving_invalidates_the_cached_session_so_the_next_turn_picks_up_new_con
     assert service._session is None
 
 
+def test_saving_invalidates_both_accounts_chat_services(client):
+    # shadow-dual-active T5 review Important 2: the settings save handler
+    # used to invalidate ONLY `app.state.chat_service` -- the paper-only
+    # legacy alias (web/app.py) -- even though `holder.rebuild()` just
+    # rebuilt the shared `Components` (and both accounts' bundles) for the
+    # whole process. Shadow's own `ChatService` instance in
+    # `app.state.chat_services["shadow"]` kept its stale cached
+    # AgentSession, built against the pre-save Components, until its
+    # independent staleness timer happened to expire -- so a shadow chat
+    # turn right after a settings save could still run on the old
+    # provider/model/key. Every account's instance must be invalidated.
+    paper = client.app.state.chat_services["paper"]
+    shadow = client.app.state.chat_services["shadow"]
+    paper._session = object()
+    shadow._session = object()
+    client.post("/settings", data={"chat_model": "anthropic/claude-opus-5"})
+    assert paper._session is None
+    assert shadow._session is None
+
+
 def test_telegram_bot_token_round_trips_as_a_secret_field(client, tmp_path):
     r = client.post("/settings", data={"telegram_bot_token": "123:ABC-token"},
                      follow_redirects=False)

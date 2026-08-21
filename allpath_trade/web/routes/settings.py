@@ -311,7 +311,16 @@ async def save(request: Request) -> Response:
     # orphaned object. Instead, invalidate() drops just the cached session,
     # so the *next* call to `session()` rebuilds against the just-rebuilt
     # Components, picking up the new provider/model/key.
-    request.app.state.chat_service.invalidate()
+    #
+    # shadow-dual-active T5 review Important 2: `app.state.chat_service` is
+    # only the paper alias (web/app.py) -- `holder.rebuild()` above rebuilds
+    # the shared `Components` (and both accounts' bundles) for BOTH
+    # accounts, but invalidating just the paper alias left shadow's
+    # ChatService holding a stale AgentSession built against the pre-rebuild
+    # Components until its own staleness timer expired. Every account's
+    # instance in `app.state.chat_services` must be invalidated here.
+    for service in request.app.state.chat_services.values():
+        service.invalidate()
 
     new_interval = holder.get().settings.sentinel_interval_minutes
     scheduler = getattr(request.app.state, "scheduler", None)

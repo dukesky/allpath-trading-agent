@@ -948,3 +948,26 @@ def test_locate_returns_none_for_a_missing_id(tmp_path):
     conn = connect(tmp_path / "t.db")
     queue = ReviewQueue(conn, None)
     assert queue.locate(999999) is None
+
+
+def test_locate_returns_none_for_a_row_with_a_corrupted_account_column(tmp_path):
+    # shadow-dual-active T5 review Minor: every caller of `locate`
+    # (web/account_ctx.bundle_for, telegram.py's own inline equivalent)
+    # feeds its `account` result straight into `c.accounts[account]` with
+    # no further validation -- so a row whose `account` column isn't one of
+    # the known accounts (hand-edited DB, a hypothetical future migration
+    # bug) used to reach that dict lookup and raise `KeyError`, a 500,
+    # instead of the same "not found" this id would get if it simply didn't
+    # exist. `locate` must filter such rows out itself, at the one shared
+    # unscoped lookup, rather than leaving every call site to guard against
+    # it independently.
+    conn = connect(tmp_path / "t.db")
+    queue = ReviewQueue(conn, None)
+    rid = queue.add(strategy_id="s1", rule_id="r1", ticker="AAPL",
+                    rule_type="soft", condition="c", action="a",
+                    snapshot={}, intent=None)
+    conn.execute("UPDATE pending_reviews SET account = ? WHERE id = ?",
+                ("not-a-real-account", rid))
+    conn.commit()
+
+    assert queue.locate(rid) is None

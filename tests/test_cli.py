@@ -773,3 +773,77 @@ def test_account_flag_scopes_rearm(tmp_path, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert code == 1
     assert "not found" in err
+
+
+def test_chat_account_flag_scopes_conversations_search_and_system_prompt(
+        tmp_path, monkeypatch):
+    """shadow-dual-active T5 review Critical: `cmd_chat` used to build
+    `ConversationStore(components.conn)` and `SessionSearch(components.conn)`
+    with no `account=` at all -- both silently defaulted to DEFAULT_ACCOUNT
+    ("paper") regardless of which account's bundle `_cli_chat_bundle` handed
+    in. A `cli chat --account shadow` turn landed in paper's `conversations`
+    table (which paper's web chat would then resume as its own history),
+    and the shadow terminal agent's own `session_search` tool read paper's
+    FTS index straight into its context. This also pins Important 3: the
+    terminal agent's system prompt must carry the shadow account section
+    (`build_system_prompt(..., account="shadow")`), matching
+    `ChatService._build`'s own `account=self.account`.
+    """
+    from allpath_trade.agent import loop as loop_mod
+    from allpath_trade.app import build_components
+    from allpath_trade.cli import _cli_chat_bundle
+    from allpath_trade.llm.base import LLMResponse
+    from allpath_trade.memory import search as search_mod
+    from tests.test_agent_loop import ScriptedLLM
+
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory",
+                        openrouter_api_key="k")
+    settings.strategies_dir.mkdir()
+    llm = ScriptedLLM([LLMResponse(text="hi there")])
+    monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
+                        lambda settings, tier="chat", usage_store=None: llm)
+    components = build_components(settings, broker=FakeBroker())
+
+    # Spy on SessionSearch so the test can inspect what `.account` the one
+    # cmd_chat actually wires into the memory-search tool was built with,
+    # without needing a real search call.
+    captured: dict = {}
+    RealSessionSearch = search_mod.SessionSearch
+
+    class SpySessionSearch(RealSessionSearch):
+        def __init__(self, conn, account="paper"):
+            super().__init__(conn, account=account)
+            captured["search"] = self
+
+    monkeypatch.setattr("allpath_trade.memory.search.SessionSearch", SpySessionSearch)
+
+    # Same idea for AgentSession, to capture the assembled system prompt --
+    # cmd_chat never returns the session object itself.
+    RealAgentSession = loop_mod.AgentSession
+
+    class SpyAgentSession(RealAgentSession):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            captured["system_prompt"] = self.system_prompt
+
+    monkeypatch.setattr("allpath_trade.agent.loop.AgentSession", SpyAgentSession)
+
+    bundle = _cli_chat_bundle(components, "shadow")
+    inputs = iter(["hello", "/exit"])
+    code = cmd_chat(bundle, llm, new=False, account="shadow",
+                    input_fn=lambda prompt="": next(inputs))
+
+    assert code == 0
+
+    # Every conversations row this turn created landed under account
+    # "shadow", not the DEFAULT_ACCOUNT ("paper") ConversationStore() would
+    # have silently defaulted to.
+    rows = components.conn.execute("SELECT account FROM conversations").fetchall()
+    assert rows
+    assert all(row["account"] == "shadow" for row in rows)
+
+    assert captured["search"].account == "shadow"
+    assert "ACCOUNT: shadow" in captured["system_prompt"]

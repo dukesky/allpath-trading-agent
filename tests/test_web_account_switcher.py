@@ -140,6 +140,20 @@ def test_switch_with_cross_origin_referer_redirects_to_dashboard_not_the_foreign
     assert r.headers["location"] == "/"
 
 
+def test_switch_with_same_origin_double_slash_referer_path_redirects_to_dashboard(client):
+    # shadow-dual-active T5 review Minor: `http://testserver//evil.example/x`
+    # passes the same-origin (scheme, netloc) check just above -- urlparse
+    # stops the netloc at the first single `/`, so `netloc == "testserver"`
+    # here -- but its PATH, `//evil.example/x`, is itself protocol-relative.
+    # Handed back as a `Location` header unmodified, a browser interprets a
+    # leading `//` as "same scheme, different host" and follows it off this
+    # app entirely, defeating the same-origin check's whole purpose.
+    r = client.post("/account/switch", data={"account": "paper"},
+                    headers={"referer": "http://testserver//evil.example/steal"},
+                    follow_redirects=False)
+    assert r.headers["location"] == "/"
+
+
 def test_switch_with_invalid_account_value_falls_back_to_paper(client):
     r = client.post("/account/switch", data={"account": "admin"},
                     follow_redirects=False)
