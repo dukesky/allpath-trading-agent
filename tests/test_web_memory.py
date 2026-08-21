@@ -93,7 +93,7 @@ def test_stray_file_with_invalid_key_name_is_skipped(client):
     # every write. The route must skip the bad file, not 500 the page.
     c = client.app.state.holder.get()
     c.memory.apply("stock", "aapl", "add", text="strong cash flow")
-    stray = c.memory.root / "stocks" / "stray backup.md"
+    stray = c.memory.root / c.memory.account / "stocks" / "stray backup.md"
     stray.write_text("not a valid key")
     r = client.get("/memory?tab=stock")
     assert r.status_code == 200

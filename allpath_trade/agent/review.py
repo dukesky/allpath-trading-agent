@@ -71,7 +71,10 @@ class ReviewAgent:
     def _matching_lessons(self, ticker: str, budget: int = 1000) -> str:
         if self.memory is None:
             return ""
-        lessons_dir = self.memory.root / "lessons"
+        # shadow-dual-active T2: "lessons" moved under memory/{account}/ --
+        # must glob the same directory MemoryStore.path_for() actually
+        # writes to (see also web/routes/memory.py's identical fix).
+        lessons_dir = self.memory.root / self.memory.account / "lessons"
         if not lessons_dir.exists():
             return ""
         chunks: list[str] = []

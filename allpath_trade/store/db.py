@@ -21,8 +21,14 @@ CREATE TABLE IF NOT EXISTS trades (
     broker_order_id TEXT
 );
 
+-- shadow-dual-active T2 (carried from T1 review): `account` is a plain
+-- column here, not part of a constraint SQLite can't ALTER in place (unlike
+-- `reports`'s UNIQUE or `rule_states`'s PRIMARY KEY) -- version numbers are
+-- never required to be unique across rows, so a legacy DB just gets the
+-- column ALTERed + backfilled 'paper' below, no table rebuild needed.
 CREATE TABLE IF NOT EXISTS strategy_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',
     strategy_id TEXT NOT NULL,
     version INTEGER NOT NULL,
     ts TEXT NOT NULL,
@@ -179,7 +185,34 @@ _MIGRATIONS = [
     "ALTER TABLE conversations ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
     "ALTER TABLE reports ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
     "ALTER TABLE rule_states ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    # shadow-dual-active T2 (carried from T1 review): strategy_versions was
+    # keyed on strategy_id alone -- after the strategies/{account}/
+    # directory split (this task), a same-id strategy in each account would
+    # otherwise share one version history, the same leak class as the
+    # rule_states PK T1 fixed. No table rebuild needed here (see the SCHEMA
+    # comment above `strategy_versions`): plain ALTER + DEFAULT backfills
+    # every legacy row 'paper', exactly like the four T1 columns above.
+    "ALTER TABLE strategy_versions ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
 ]
+
+# LOUD REMINDER for whoever adds the next account-scoped (or any other)
+# column to `reports` or `rule_states`: both tables have been rebuilt at
+# least once already (`_rebuild_reports`/`_rebuild_rule_states` below)
+# because SQLite cannot ALTER a UNIQUE/PRIMARY KEY constraint in place. Each
+# rebuild function hand-writes its own full DDL (CREATE TABLE ..._v2 with
+# every column spelled out) and its own explicit column list for the
+# INSERT ... SELECT copy. Adding a column ONLY to `_MIGRATIONS` (the ALTER
+# list above) is not enough for these two tables on a fresh install that
+# still needs a rebuild for some OTHER, still-unmigrated reason -- and
+# adding a column only to SCHEMA's CREATE TABLE IF NOT EXISTS is not enough
+# for an existing on-disk DB that goes through the rebuild path. Any new
+# column on `reports` or `rule_states` must be added in ALL THREE places:
+# SCHEMA's CREATE TABLE, the matching `_rebuild_*` function's CREATE TABLE
+# ..._v2 + INSERT column list, AND (if it needs backfilling on a DB that
+# predates the rebuild too) a plain ALTER in `_MIGRATIONS` above, run before
+# the rebuild so the rebuild's SELECT can read it. Forgetting one of the
+# three is silent: the column will exist on SOME on-disk databases and not
+# others, depending on exactly which migration path a given install took.
 
 
 class LockedConnection:

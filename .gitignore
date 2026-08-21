@@ -15,3 +15,11 @@ dist/
 # stays tracked. Example strategy: docs/examples/strategy-example.yaml
 /strategies/
 /memory/
+# shadow-dual-active T2: migrate_files.py's pre-migration backups are
+# timestamped SIBLINGS of the two directories above (e.g.
+# /memory.bak-20260820120000/), so the exact-name patterns above don't cover
+# them -- without this, a legacy install's first run after upgrading would
+# leave an untracked-but-not-ignored personal-data directory sitting in the
+# repo root, one `git add -A` away from being committed.
+/memory.bak-*/
+/strategies.bak-*/

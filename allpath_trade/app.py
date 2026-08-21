@@ -12,11 +12,13 @@ from allpath_trade.execution import Executor
 from allpath_trade.memory.consolidate import Consolidator
 from allpath_trade.memory.observations import ObservationLog
 from allpath_trade.memory.store import MemoryStore
+from allpath_trade.migrate_files import migrate_files
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.email import build_notifier
 from allpath_trade.reflect import Reflector
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 from allpath_trade.sentinel import Sentinel
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
@@ -51,6 +53,25 @@ class Components:
 
 def build_components(settings: Settings, broker: Broker | None = None,
                      conn: sqlite3.Connection | None = None) -> Components:
+    # shadow-dual-active T2: one-shot, idempotent move of a legacy
+    # single-account memory/strategies layout into memory/paper/ and
+    # strategies/paper/ (backing up first if anything legacy is found).
+    # Must run before any store below is constructed, and before this
+    # function's own strategies_dir/memory_dir use just below -- both
+    # already assume the post-migration (per-account) shape. Idempotent, so
+    # this is safe to call unconditionally even though cli.py's `main` also
+    # calls it before dispatching to any command (cli.py's broker-less
+    # commands -- "strategies", "rearm", "reviews list/reject", "memory
+    # show" -- never reach this function at all, so they need their own
+    # call; this one covers every OTHER caller of build_components, e.g.
+    # the web app's ComponentHolder).
+    migrate_files(settings)
+
+    # Single-account (paper) on the new layout for this task -- Task 4 wires
+    # up the second (shadow) account bundle. Hardcoded rather than read from
+    # anywhere: there is exactly one account until then.
+    account = DEFAULT_ACCOUNT
+
     if broker is None:
         from allpath_trade.broker.alpaca import AlpacaBroker
 
@@ -63,8 +84,9 @@ def build_components(settings: Settings, broker: Broker | None = None,
     gate = RiskGate(RiskLimits())
     executor = Executor(broker, gate, journal, data)
     queue = ReviewQueue(conn, executor)
-    settings.strategies_dir.mkdir(parents=True, exist_ok=True)
-    strategies = StrategyStore(settings.strategies_dir, conn)
+    strategies_dir = settings.strategies_dir / account
+    strategies_dir.mkdir(parents=True, exist_ok=True)
+    strategies = StrategyStore(strategies_dir, conn, account=account)
     # Unconditional (unlike the LLM-backed wiring in the try/except below):
     # applying an already-approved revision is plain file I/O, no LLM
     # involved, so a review approved via the web/CLI must work even when no
@@ -72,7 +94,7 @@ def build_components(settings: Settings, broker: Broker | None = None,
     queue.set_revision_applier(apply_revision_factory(strategies))
     notifier = build_notifier(settings)
     observations = ObservationLog(conn)
-    memory = MemoryStore(settings.memory_dir, conn)
+    memory = MemoryStore(settings.memory_dir, conn, account=account)
     app_state = AppState(conn)
     reports = ReportStore(conn)
     llm_usage = LLMUsage(conn)

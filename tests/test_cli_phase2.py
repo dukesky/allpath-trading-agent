@@ -125,7 +125,11 @@ def test_reviews_approve_on_a_revision_row_applies_it(tmp_path, capsys, monkeypa
     out = capsys.readouterr().out
     assert code == 0  # not a crash from `result.submitted` on None
     assert "Revision applied to t." in out
-    assert (tmp_path / "strategies" / "t.yaml").read_text() == VALID_REVISION_YAML
+    # shadow-dual-active T2: build_components (reached via main()'s broker
+    # branch above) migrates the legacy strategies/t.yaml this fixture wrote
+    # into strategies/paper/t.yaml before the approve applier ever runs.
+    assert (tmp_path / "strategies" / "paper" / "t.yaml").read_text() == \
+        VALID_REVISION_YAML
 
 
 def test_reviews_approve_warns_when_the_revised_rule_is_still_triggered(
@@ -237,7 +241,11 @@ def test_reviews_approve_revision_works_without_credentials(tmp_path, capsys, mo
     out = capsys.readouterr().out
     assert code == 0
     assert "Revision applied to t." in out
-    assert (tmp_path / "strategies" / "t.yaml").read_text() == VALID_REVISION_YAML
+    # shadow-dual-active T2: build_components (reached via main()'s broker
+    # branch above) migrates the legacy strategies/t.yaml this fixture wrote
+    # into strategies/paper/t.yaml before the approve applier ever runs.
+    assert (tmp_path / "strategies" / "paper" / "t.yaml").read_text() == \
+        VALID_REVISION_YAML
 
 
 def test_cli_output_is_english_only(tmp_path, capsys, monkeypatch):

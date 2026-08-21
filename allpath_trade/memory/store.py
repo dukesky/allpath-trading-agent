@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from allpath_trade.memory.guard import scan_entry
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 
 LAYER_BUDGETS: dict[str, int] = {
     "profile": 2000, "strategy": 2000, "stock": 3000, "lesson": 2000,
@@ -23,12 +24,19 @@ class MemoryStore:
     Every mutation is diff-logged to SQLite. The files are the user's to read
     and edit; the agent gets no other write path."""
 
-    def __init__(self, root: Path, conn: sqlite3.Connection) -> None:
+    def __init__(self, root: Path, conn: sqlite3.Connection,
+                account: str = DEFAULT_ACCOUNT) -> None:
         self.root = root
         self._conn = conn
+        self.account = account
 
     def path_for(self, layer: str, key: str | None) -> Path:
         if layer == "profile":
+            # Shared across every account by design (shadow-dual-active
+            # spec §②) -- profile.md/user_profile.md lives at the memory
+            # root, never under an account subdirectory. A MemoryStore
+            # built for "shadow" reads/writes the exact same file as one
+            # built for "paper".
             return self.root / "user_profile.md"
         subdir = {"strategy": "strategies", "stock": "stocks",
                   "lesson": "lessons"}.get(layer)
@@ -38,7 +46,7 @@ class MemoryStore:
             raise MemoryStoreError(f"invalid memory key: {key!r}")
         if layer == "stock":
             key = key.upper()
-        return self.root / subdir / f"{key}.md"
+        return self.root / self.account / subdir / f"{key}.md"
 
     def read(self, layer: str, key: str | None = None) -> str:
         path = self.path_for(layer, key)

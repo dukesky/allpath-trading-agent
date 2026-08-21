@@ -12,10 +12,15 @@ def store(tmp_path):
 
 def test_paths(store, tmp_path):
     root = tmp_path / "memory"
+    # profile stays shared at the memory root, unaffected by account
+    # (shadow-dual-active T2, spec §②) -- everything else lives under the
+    # store's account subdirectory.
     assert store.path_for("profile", None) == root / "user_profile.md"
-    assert store.path_for("stock", "aapl") == root / "stocks" / "AAPL.md"
-    assert store.path_for("strategy", "aapl-long") == root / "strategies" / "aapl-long.md"
-    assert store.path_for("lesson", "earnings-chasing") == root / "lessons" / "earnings-chasing.md"
+    assert store.path_for("stock", "aapl") == root / "paper" / "stocks" / "AAPL.md"
+    assert store.path_for("strategy", "aapl-long") == \
+        root / "paper" / "strategies" / "aapl-long.md"
+    assert store.path_for("lesson", "earnings-chasing") == \
+        root / "paper" / "lessons" / "earnings-chasing.md"
 
 
 @pytest.mark.parametrize("layer,key", [
@@ -112,3 +117,42 @@ def test_apply_enforces_guard_even_without_the_tool_layer(store, tmp_path):
 def test_memory_store_error_is_raised_for_an_unknown_layer(store):
     with pytest.raises(MemoryStoreError):
         store.read("not-a-layer")
+
+
+# --- shadow-dual-active T2: per-account layers, shared profile -----------
+
+def test_profile_is_shared_across_accounts(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = MemoryStore(tmp_path / "memory", conn)
+    shadow = MemoryStore(tmp_path / "memory", conn, account="shadow")
+
+    paper.apply("profile", None, "add", text="Risk tolerance: moderate")
+
+    # Written via the paper instance, visible via the shadow instance --
+    # both resolve to the exact same file (memory/user_profile.md).
+    assert shadow.read("profile") == paper.read("profile")
+    assert "moderate" in shadow.read("profile")
+    assert paper.path_for("profile", None) == shadow.path_for("profile", None)
+
+
+def test_stock_and_lesson_layers_are_isolated_per_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = MemoryStore(tmp_path / "memory", conn)
+    shadow = MemoryStore(tmp_path / "memory", conn, account="shadow")
+
+    paper.apply("stock", "AAPL", "add", text="paper: strong cash flow")
+    shadow.apply("stock", "AAPL", "add", text="shadow: too richly valued")
+    paper.apply("lesson", "overtrading", "add", text="paper: cut size")
+    shadow.apply("lesson", "overtrading", "add", text="shadow: wait for confirmation")
+
+    # Same key ("AAPL"/"overtrading") in both accounts -- must not cross-read.
+    assert paper.entries("stock", "AAPL") == ["- paper: strong cash flow"]
+    assert shadow.entries("stock", "AAPL") == ["- shadow: too richly valued"]
+    assert paper.entries("lesson", "overtrading") == ["- paper: cut size"]
+    assert shadow.entries("lesson", "overtrading") == \
+        ["- shadow: wait for confirmation"]
+
+    # And they land on genuinely different files on disk.
+    assert paper.path_for("stock", "AAPL") != shadow.path_for("stock", "AAPL")
+    assert paper.path_for("stock", "AAPL").exists()
+    assert shadow.path_for("stock", "AAPL").exists()

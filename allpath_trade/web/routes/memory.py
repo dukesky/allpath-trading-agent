@@ -13,10 +13,11 @@ LAYER_TITLES = {"profile": "Profile", "strategy": "Strategy notes",
                 "stock": "Stock dossiers", "lesson": "Lessons"}
 
 # MemoryStore.path_for() keeps each of these layers as one file per key,
-# under a pluralized subdirectory of the memory root -- "profile" is the
-# only layer that is a single flat file. Mirrors the subdir map in
-# allpath_trade/memory/store.py so this page globs the same directory the
-# store actually writes to.
+# under a pluralized subdirectory of memory/{account}/ -- "profile" is the
+# only layer that is a single flat file, and the only one that stays shared
+# at the memory root regardless of account (shadow-dual-active T2). Mirrors
+# the subdir map in allpath_trade/memory/store.py so this page globs the
+# same directory the store actually writes to.
 _KEYED_SUBDIRS = {"strategy": "strategies", "stock": "stocks", "lesson": "lessons"}
 
 
@@ -28,7 +29,7 @@ def _layer_sections(c, layer: str | None = None) -> list[dict]:
         if current_layer == "profile":
             sections.append({"title": title, "body": c.memory.read(current_layer)})
             continue
-        subdir = c.memory.root / _KEYED_SUBDIRS[current_layer]
+        subdir = c.memory.root / c.memory.account / _KEYED_SUBDIRS[current_layer]
         keys = sorted(p.stem for p in subdir.glob("*.md")) if subdir.exists() else []
         if not keys:
             # Nothing written for this layer yet -- still show the section

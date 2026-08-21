@@ -12,6 +12,7 @@ from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings, SettingsStore, describe_validation_error
 from allpath_trade.llm.base import LLMClient
+from allpath_trade.migrate_files import migrate_files
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
 
@@ -105,7 +106,11 @@ def cmd_strategies(settings: Settings, store) -> int:
     for err in errors:
         print(f"warning: {err}", file=sys.stderr)
     if not docs:
-        print("no strategies found in", settings.strategies_dir)
+        # store.directory (not settings.strategies_dir) -- shadow-dual-
+        # active T2 moved the actual scanned directory to
+        # strategies/{account}/, so this must name what `load_all` above
+        # actually globbed, not the un-account-scoped settings root.
+        print("no strategies found in", store.directory)
         return 0
     for d in docs:
         print(f"{d.id}  [{d.status.value}/{d.authorization.value}]  {d.name}")
@@ -518,6 +523,19 @@ def main(argv: list[str] | None = None,
               "Fix or remove that line in .env, then try again.", file=sys.stderr)
         return 2
 
+    # shadow-dual-active T2: every CLI command that touches strategies/ or
+    # memory/ must see the post-migration (per-account) layout, not just the
+    # ones that happen to route through `build_components` below (that
+    # covers "status"/"check"/"run"/"chat"/"serve" and revision-kind
+    # "reviews approve" -- but "strategies", "rearm", plain "reviews
+    # list"/"reject", and "memory show" all construct their stores directly,
+    # with no broker and no build_components call, and must be just as
+    # correct against a legacy on-disk layout). Idempotent, so calling it
+    # again inside `build_components` a few lines down (that call exists for
+    # every OTHER caller of build_components, e.g. the web app) is a no-op,
+    # not a double-migration.
+    migrate_files(settings)
+
     # Only commands that actually reach the broker require credentials;
     # read-only commands (strategies, rearm, reviews list/reject) work
     # without. `reviews approve` only needs one when the row being approved
@@ -552,12 +570,19 @@ def main(argv: list[str] | None = None,
         queue = components.queue
         sentinel = components.sentinel
     else:
+        from allpath_trade.store.accounts import DEFAULT_ACCOUNT
         from allpath_trade.store.reviews import ReviewQueue
         from allpath_trade.strategy.store import StrategyStore
 
         conn = connect(settings.db_path)
-        settings.strategies_dir.mkdir(parents=True, exist_ok=True)
-        store = StrategyStore(settings.strategies_dir, conn)
+        # shadow-dual-active T2: this branch never calls build_components,
+        # so it never runs migrate_files() -- it only reads/writes the
+        # already-canonical strategies/{account}/ location (a prior
+        # build_components call, or a fresh install with nothing to
+        # migrate, is what put it there; see migrate_files.py's docstring).
+        strategies_dir = settings.strategies_dir / DEFAULT_ACCOUNT
+        strategies_dir.mkdir(parents=True, exist_ok=True)
+        store = StrategyStore(strategies_dir, conn)
         queue = ReviewQueue(conn, executor=None)
         # Wired unconditionally, same as build_components does for the
         # broker branch: approving a strategy_revision row is plain file

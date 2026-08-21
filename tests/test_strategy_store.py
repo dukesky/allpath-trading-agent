@@ -161,3 +161,68 @@ def test_legacy_rule_states_row_defaults_account_paper_after_migration(tmp_path)
         "SELECT account FROM rule_states WHERE rule_id = 'r1' AND account = 'paper'"
     ).fetchone()
     assert row2["account"] == "paper"
+
+
+# --- shadow-dual-active T2: per-account directories + version history -----
+
+def test_same_strategy_id_in_two_account_directories_is_independent(tmp_path):
+    # shadow-dual-active T2: the caller (app.py/cli.py) points each
+    # account's StrategyStore at its own strategies/{account}/ directory --
+    # the store itself does no directory resolution, it just reads/writes
+    # whatever `directory` it was given. Two stores pointed at two different
+    # directories, each with a strategy file called "a.yaml", must be
+    # completely independent: same id, unrelated content, unrelated files.
+    conn = connect(tmp_path / "t.db")
+    paper_dir = tmp_path / "strategies" / "paper"
+    shadow_dir = tmp_path / "strategies" / "shadow"
+    paper_dir.mkdir(parents=True)
+    shadow_dir.mkdir(parents=True)
+    (paper_dir / "a.yaml").write_text(ACTIVE)
+    shadow_active = ACTIVE.replace("AAPL", "MSFT")
+    (shadow_dir / "a.yaml").write_text(shadow_active)
+
+    paper = StrategyStore(paper_dir, conn, account="paper")
+    shadow = StrategyStore(shadow_dir, conn, account="shadow")
+
+    assert paper.load("a").position.ticker == "AAPL"
+    assert shadow.load("a").position.ticker == "MSFT"
+
+    # Writing rule state for "a" in one account's file must never touch the
+    # other's -- separate directories, separate files, on top of the
+    # already-independent (account, strategy_id, rule_id) rows.
+    paper.set_rule_state("a", "r1", RuleState.TRIGGERED)
+    assert paper.load("a").rules[0].state == RuleState.TRIGGERED
+    assert shadow.load("a").rules[0].state == RuleState.ARMED
+    assert (paper_dir / "a.yaml").read_text() == ACTIVE  # untouched by set_rule_state
+    assert (shadow_dir / "a.yaml").read_text() == shadow_active
+
+
+def test_versions_scoped_to_account(tmp_path):
+    # shadow-dual-active T2 (carried from T1 review): strategy_versions
+    # gained an `account` column -- the same strategy id snapshotted from
+    # two different StrategyStore accounts must keep two fully independent
+    # version histories, not one shared list keyed on strategy_id alone.
+    (tmp_path / "a.yaml").write_text(ACTIVE)
+    conn = connect(tmp_path / "t.db")
+    paper = StrategyStore(tmp_path, conn, account="paper")
+    shadow = StrategyStore(tmp_path, conn, account="shadow")
+
+    doc = paper.load("a")
+    paper.snapshot_version(doc, reason="paper initial")
+    paper.snapshot_version(doc.model_copy(update={"version": 2}), reason="paper v2")
+
+    shadow.snapshot_version(doc, reason="shadow initial")
+
+    paper_versions = paper.versions("a")
+    shadow_versions = shadow.versions("a")
+
+    assert [v["version"] for v in paper_versions] == [2, 1]
+    assert [r["reason"] for r in paper_versions] == ["paper v2", "paper initial"]
+    assert [v["version"] for v in shadow_versions] == [1]
+    assert shadow_versions[0]["reason"] == "shadow initial"
+
+    # And the account column itself is stamped correctly on every row.
+    rows = list(conn.execute(
+        "SELECT account, reason FROM strategy_versions ORDER BY id"))
+    assert [(r["account"], r["reason"]) for r in rows] == [
+        ("paper", "paper initial"), ("paper", "paper v2"), ("shadow", "shadow initial")]

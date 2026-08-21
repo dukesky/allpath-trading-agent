@@ -16,11 +16,15 @@ class StrategyStore:
     Runtime rule state and version snapshots live in SQLite — the sentinel
     never rewrites the user's YAML.
 
-    `account` scopes `rule_states` only (shadow-dual-active T1): the same
-    strategy/rule id can independently arm/trigger per account (Task 2 moves
-    `directory` itself under `strategies/{account}/`, so ids can genuinely
-    collide between accounts). `directory` is passed by the caller as-is and
-    untouched here -- that per-account directory split is Task 2's job."""
+    `account` scopes `rule_states` and `strategy_versions` (shadow-dual-
+    active T1/T2): the same strategy/rule id can independently arm/trigger
+    and version per account. `directory` is passed by the caller as-is and
+    untouched here -- the per-account directory split (`strategies/
+    {account}/`) is the CALLER's job (see `app.py`/`cli.py` build sites),
+    not this constructor's: `directory` genuinely IS the strategies
+    directory this store reads/writes, whatever the caller resolved it to
+    be, so ids can genuinely collide between two `StrategyStore`s pointed at
+    different account subdirectories."""
 
     def __init__(self, directory: Path, conn: sqlite3.Connection,
                 account: str = DEFAULT_ACCOUNT) -> None:
@@ -76,16 +80,21 @@ class StrategyStore:
         content = yaml.safe_dump(doc.model_dump(mode="json"), allow_unicode=True,
                                  sort_keys=False)
         self._conn.execute(
-            "INSERT INTO strategy_versions (strategy_id, version, ts, reason, content)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (doc.id, doc.version, datetime.now(UTC).isoformat(),
+            "INSERT INTO strategy_versions (account, strategy_id, version, ts,"
+            " reason, content) VALUES (?, ?, ?, ?, ?, ?)",
+            (self._account, doc.id, doc.version, datetime.now(UTC).isoformat(),
              reason, content))
         self._conn.commit()
 
     def versions(self, strategy_id: str) -> list[sqlite3.Row]:
+        # shadow-dual-active T2 (carried from T1 review): scoped by account
+        # -- after the directory split, a same-id strategy can legitimately
+        # exist in both `paper` and `shadow`, each with its own version
+        # history. Without this filter, one account's snapshot rows would
+        # bleed into the other's version list purely because the ids match.
         return list(self._conn.execute(
-            "SELECT * FROM strategy_versions WHERE strategy_id = ?"
-            " ORDER BY version DESC, id DESC", (strategy_id,)))
+            "SELECT * FROM strategy_versions WHERE strategy_id = ? AND account = ?"
+            " ORDER BY version DESC, id DESC", (strategy_id, self._account)))
 
     def not_armed_rules(self, strategy_id: str) -> list:
         """Rules of `strategy_id` whose persisted state is not ARMED
