@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from allpath_trade.broker.base import (
@@ -25,6 +25,11 @@ from allpath_trade.store.db import LockedConnection
 # artifacts" test goal. Quantizing both to a fixed 6dp keeps every stored
 # number finite, reproducible, and fine enough for fractional-share
 # bookkeeping (a broker's own fractional fills are typically 6dp or coarser).
+# The rounding this introduces is bounded and tiny: ROUND_HALF_UP at 6dp is
+# off by at most 0.0000005 per unit, so a $20k notional order's derived qty
+# (and the avg_cost a buy folds into the position) drifts by at most
+# roughly $0.001 -- far below a single cent on any position size this
+# ledger deals in.
 _QTY_QUANT = Decimal("0.000001")
 _AVG_COST_QUANT = Decimal("0.000001")
 
@@ -109,25 +114,41 @@ class ShadowLedger(Broker):
         try:
             quote = self._data.get_quote(intent.ticker)
         except Exception:  # noqa: BLE001 -- a raising DataSource == no quote
-            quote = None
-        # No quote, no book entry at an unknown price -- reject outright,
-        # nothing to record a fill price for and nothing to touch on
-        # shadow_positions (a raising DataSource == "no quote").
-        if quote is None:
+            # No quote, no book entry at an unknown price -- reject outright,
+            # nothing to record a fill price for and nothing to touch on
+            # shadow_positions. `get_quote`'s contract always returns a
+            # `Quote` or raises (never a bare `None`), so handling this
+            # straight from the except -- rather than funneling it through a
+            # `quote = None` sentinel checked afterward -- covers the one
+            # real "no quote" case without a second branch that can never
+            # otherwise be reached.
             return self._record_order(
                 intent, now, OrderStatus.REJECTED, qty=None, price=None,
                 note=f"no quote available for {intent.ticker}")
         price = quote.price
         qty = self._resolve_qty(intent, price)
         with self._conn.transaction():
-            if intent.side == OrderSide.BUY:
+            if qty <= 0:
+                # A notional order that rounds to less than one 6dp share at
+                # the current price (e.g. a fraction-of-a-cent notional
+                # against a normal share price) -- reject outright rather
+                # than writing a 0-share FILLED order and a phantom
+                # shadow_positions row for a purchase that never actually
+                # bought anything.
+                note = (
+                    f"notional ${intent.notional} too small at price ${price}"
+                    if intent.notional is not None else f"invalid order quantity {qty}")
+                order = self._record_order(
+                    intent, now, OrderStatus.REJECTED, qty=None, price=None, note=note)
+            elif intent.side == OrderSide.BUY:
                 order = self._fill_buy(intent, now, qty, price)
             else:
                 order = self._fill_sell(intent, now, qty, price)
             # Refresh the ticker's last-known price even on a rejection
-            # (insufficient cash / oversell) -- we did get a fresh quote,
-            # so a position row that already exists for this ticker should
-            # reflect it. No-op (rowcount 0) if no position row exists yet.
+            # (insufficient cash / oversell / too-small-notional) -- we did
+            # get a fresh quote, so a position row that already exists for
+            # this ticker should reflect it. No-op (rowcount 0) if no
+            # position row exists yet.
             self._conn.execute(
                 "UPDATE shadow_positions SET last_price = ?, last_price_ts = ?"
                 " WHERE ticker = ?",
@@ -142,19 +163,44 @@ class ShadowLedger(Broker):
         return None
 
     def get_equity_history(self, days: int) -> list[tuple[datetime, Decimal]]:
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
+        # Anchor "today" to the same ET calendar date `_upsert_equity_daily`
+        # stamps rows with (`today_et_date()`), not a raw UTC-now
+        # truncation -- otherwise a call made late evening ET but already
+        # past UTC midnight (or the reverse, early UTC morning but still
+        # the prior ET day) computes a cutoff one calendar day off from the
+        # dates actually stored in shadow_equity_daily.
+        today = date.fromisoformat(today_et_date())
+        cutoff = (today - timedelta(days=days)).isoformat()
         rows = self._conn.execute(
             "SELECT date, equity FROM shadow_equity_daily WHERE date >= ?"
             " ORDER BY date ASC", (cutoff,))
-        return [
-            (datetime.fromisoformat(r["date"]).replace(tzinfo=UTC), Decimal(r["equity"]))
-            for r in rows
-        ]
+        out = []
+        for r in rows:
+            equity = Decimal(r["equity"])
+            if equity == 0:
+                # Pre-funding / never-written days report equity as exactly
+                # 0 -- not a real data point. Base Broker.get_equity_history's
+                # contract (and AlpacaBroker's implementation) already
+                # filters these; match that parity here.
+                continue
+            out.append((datetime.fromisoformat(r["date"]).replace(tzinfo=UTC), equity))
+        return out
 
     # -- Ledger mutation helpers (Task 6's applier; never called by the
     # agent directly -- these are the human-approval-gated write path) ----
 
     def set_position(self, ticker: str, qty: Decimal, avg_cost: Decimal) -> None:
+        # No silent shorts: a shadow position mirrors real holdings the
+        # user actually has, never a short thesis this ledger has no
+        # borrow/margin model to represent. avg_cost must be strictly
+        # positive too -- a zero or negative cost basis isn't a real
+        # correction, just corrupt input. (Cash going negative is a
+        # different question, deliberately left unguarded -- see set_cash
+        # below.)
+        if qty < 0:
+            raise ValueError(f"set_position: qty must be >= 0 (got {qty})")
+        if avg_cost <= 0:
+            raise ValueError(f"set_position: avg_cost must be > 0 (got {avg_cost})")
         ticker = ticker.strip().upper()
         now = datetime.now(UTC)
         with self._conn.transaction():
@@ -174,6 +220,12 @@ class ShadowLedger(Broker):
                        f"set_position {ticker}: {before} -> {qty}@{avg_cost}")
 
     def set_cash(self, amount: Decimal) -> None:
+        # Deliberately no non-negative guard here (unlike set_position's
+        # qty/avg_cost guards above) -- this covers cash only. A shadow
+        # account's cash going negative (e.g. correcting toward a margin or
+        # debit balance) is a real state Task 6's human-approval applier
+        # gets to decide about, not something this low-level ledger
+        # primitive should reject outright.
         now = datetime.now(UTC)
         with self._conn.transaction():
             before = self._get_cash()
@@ -223,7 +275,31 @@ class ShadowLedger(Broker):
         the price a share sold at), so only cash is reverted and reapplied:
         net delta `qty*(actual_price - old_price)`. There is no qty to
         revert, so no reversal-impossible case exists on this branch.
+
+        Guard: `remaining_qty < 0` alone isn't enough to catch every case
+        where reverting-then-reapplying no longer means what it claims to.
+        Two examples: (a) buy, buy a second lot, sell part of the combined
+        position, then correct the FIRST buy -- `current_qty` still exceeds
+        this fill's qty, so `remaining_qty >= 0`, but the shares the sell
+        liquidated could well have been (some of) this very fill's, and
+        there is no per-lot tracking to tell. (b) a position is sold to
+        zero and later reopened by an unrelated buy -- `current_qty` can
+        coincidentally land back at or above the old fill's qty, at which
+        point this correction would silently rewrite a brand new,
+        unrelated position's avg_cost. Both are caught below by refusing to
+        correct a fill if ANY sell fill or manual set_position/
+        remove_position adjustment has touched this ticker since -- those
+        are exactly the events that break the "nothing else changed this
+        position's shape" assumption the revert math depends on.
+        Re-correcting THIS SAME order again is explicitly exempted: it
+        doesn't change the position's shape, only this order's own recorded
+        price, so chaining corrections on one order stays safe and doesn't
+        trip its own audit trail.
         """
+        if actual_price <= 0:
+            raise ValueError(
+                f"cannot correct order {order_id} to fill price {actual_price}:"
+                " price must be positive")
         try:
             oid = int(order_id)
         except (TypeError, ValueError):
@@ -241,6 +317,27 @@ class ShadowLedger(Broker):
             old_price = Decimal(row["fill_price"])
             cash = self._get_cash()
 
+            # Guard before any write: any filled sell, or any manual
+            # set_position/remove_position/record_fill adjustment on this
+            # ticker with a later order id, means the book has moved in a
+            # way this correction can't safely unwind. A prior record_fill
+            # correction of THIS SAME order is exempted (it wrote its own
+            # 'adjust' audit row, identifiable by its fixed note prefix)
+            # since re-correcting one order repeatedly is safe.
+            self_correction_prefix = f"record_fill order #{oid} ("
+            blockers = self._conn.execute(
+                "SELECT side, note FROM shadow_orders"
+                " WHERE ticker = ? AND id > ?"
+                " AND ((status = 'filled' AND side = 'sell') OR side = 'adjust')",
+                (ticker, oid)).fetchall()
+            for b in blockers:
+                if b["side"] == "adjust" and b["note"].startswith(self_correction_prefix):
+                    continue
+                raise ValueError(
+                    f"cannot correct order {order_id}: {ticker} has been sold or"
+                    " manually adjusted since this fill -- fix the book with"
+                    " set_position instead")
+
             if side == OrderSide.BUY.value:
                 pos = self._conn.execute(
                     "SELECT qty, avg_cost FROM shadow_positions WHERE ticker = ?",
@@ -249,6 +346,12 @@ class ShadowLedger(Broker):
                 current_avg = Decimal(pos["avg_cost"]) if pos else Decimal(0)
                 remaining_qty = current_qty - qty
                 if remaining_qty < 0:
+                    # Belt-and-suspenders: the guard above should already
+                    # have refused any ticker with an intervening sell (the
+                    # only way remaining_qty could go negative with no
+                    # other buys involved), so this is not expected to be
+                    # reachable in practice -- kept as a defensive invariant
+                    # check rather than trusting the guard's SQL alone.
                     raise ValueError(
                         f"cannot correct order {order_id}: position {ticker} now holds"
                         f" only {current_qty}, less than this fill's {qty} -- reversal"
@@ -262,24 +365,30 @@ class ShadowLedger(Broker):
                 else:
                     new_avg = (new_total_value / current_qty).quantize(
                         _AVG_COST_QUANT, rounding=ROUND_HALF_UP)
+                # The guard above guarantees no sell or manual adjustment
+                # has touched this ticker since this fill, so a position row
+                # is always present here -- a plain UPDATE, never a fresh
+                # INSERT. record_fill corrects a historical fill price, not
+                # the current market price, so last_price/last_price_ts are
+                # deliberately left untouched (unlike _fill_buy's write).
                 self._conn.execute(
-                    "INSERT INTO shadow_positions"
-                    " (ticker, qty, avg_cost, last_price, last_price_ts, updated_ts)"
-                    " VALUES (?, ?, ?, ?, ?, ?)"
-                    " ON CONFLICT(ticker) DO UPDATE SET"
-                    " qty = excluded.qty, avg_cost = excluded.avg_cost,"
-                    " updated_ts = excluded.updated_ts",
-                    (ticker, str(current_qty), str(new_avg), str(actual_price),
-                     now.isoformat(), now.isoformat()))
+                    "UPDATE shadow_positions SET qty = ?, avg_cost = ?, updated_ts = ?"
+                    " WHERE ticker = ?",
+                    (str(current_qty), str(new_avg), now.isoformat(), ticker))
                 new_cash = cash + qty * old_price - qty * actual_price
             else:
                 new_avg = None
                 new_cash = cash - qty * old_price + qty * actual_price
 
             self._set_cash_raw(new_cash, now)
+            # Keep the audit row's notional truthful too: a notional-based
+            # order's `notional` column holds the actual dollar amount
+            # transacted, which changes when the fill price is corrected. A
+            # qty-based order never had a notional value and keeps it NULL.
+            new_notional = str(qty * actual_price) if row["notional"] is not None else None
             self._conn.execute(
-                "UPDATE shadow_orders SET fill_price = ? WHERE id = ?",
-                (str(actual_price), oid))
+                "UPDATE shadow_orders SET fill_price = ?, notional = ? WHERE id = ?",
+                (str(actual_price), new_notional, oid))
             avg_note = f", avg_cost -> {new_avg}" if new_avg is not None else ""
             self._audit(
                 now, ticker,
@@ -433,10 +542,23 @@ class ShadowLedger(Broker):
         return avg_cost
 
     def _upsert_equity_daily(self, equity: Decimal, cash: Decimal) -> None:
+        # `self._conn.transaction()`, not a bare `execute` + `commit()`: a
+        # bare `commit()` commits (and closes out) the underlying sqlite
+        # connection's transaction unconditionally, including any SAVEPOINT
+        # an outer `transaction()` call currently has open on this same
+        # thread (e.g. Task 6's applier doing snapshot-then-mutate inside
+        # one outer transaction that calls get_account() along the way).
+        # That outer call's later ROLLBACK TO/RELEASE then targets a
+        # savepoint that no longer exists and raises OperationalError,
+        # masking whatever real error triggered the rollback and leaving
+        # this partial write committed underneath it.  `transaction()`
+        # nests safely via depth-keyed savepoints and only actually commits
+        # at depth 0, so it's correct both standalone (called directly from
+        # get_account) and nested inside a caller's own transaction().
         today = today_et_date()
-        self._conn.execute(
-            "INSERT INTO shadow_equity_daily (date, equity, cash) VALUES (?, ?, ?)"
-            " ON CONFLICT(date) DO UPDATE SET"
-            " equity = excluded.equity, cash = excluded.cash",
-            (today, str(equity), str(cash)))
-        self._conn.commit()
+        with self._conn.transaction():
+            self._conn.execute(
+                "INSERT INTO shadow_equity_daily (date, equity, cash) VALUES (?, ?, ?)"
+                " ON CONFLICT(date) DO UPDATE SET"
+                " equity = excluded.equity, cash = excluded.cash",
+                (today, str(equity), str(cash)))

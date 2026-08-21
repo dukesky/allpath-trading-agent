@@ -408,7 +408,11 @@ def test_record_fill_reversal_impossible_raises(tmp_path):
     ledger, _conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
     order = ledger.submit_order(buy(qty=Decimal(10)))
     ledger.submit_order(sell(qty=Decimal(10)))  # position fully closed & row removed
-    with pytest.raises(ValueError, match="reversal would go negative"):
+    # The intervening sell is now caught by the earlier, more general
+    # "has this ticker been sold/adjusted since this fill" guard (Critical
+    # 1) before the remaining_qty<0 check is ever reached -- same root
+    # cause, an earlier and more precise diagnosis.
+    with pytest.raises(ValueError, match="sold or.*manually adjusted"):
         ledger.record_fill(order.id, Decimal(50))
     # nothing was mutated by the failed attempt
     assert ledger.get_positions() == []
@@ -444,3 +448,238 @@ def test_today_et_date_is_the_real_scheduler_helper(tmp_path):
     # private reimplementation) -- confirms the frozen-date monkeypatch
     # tests above are patching the thing get_account() actually calls.
     assert shadow_module.today_et_date is scheduler_module.today_et_date
+
+
+# -- helpers for the book-state snapshot assertions below ---------------------
+
+def _snapshot(conn):
+    """A byte-identical snapshot of every table record_fill can touch, for
+    asserting a failed correction attempt mutated nothing."""
+    return (
+        [dict(r) for r in conn.execute(
+            "SELECT * FROM shadow_positions ORDER BY ticker")],
+        dict(conn.execute("SELECT * FROM shadow_cash WHERE id = 1").fetchone()),
+        [dict(r) for r in conn.execute("SELECT * FROM shadow_orders ORDER BY id")],
+    )
+
+
+# -- Critical 1: record_fill guards against an intervening sell/adjust --------
+
+def test_record_fill_blocked_by_intervening_partial_sell_across_two_lots(tmp_path):
+    """Reproduces the multi-lot + partial-sell phantom-basis corruption:
+    two buys blend into one position, a partial sell trims it (the sold
+    shares can't be attributed to either specific lot), and a correction to
+    the FIRST lot must now be refused rather than silently mis-blend a
+    phantom cost basis into the survivors."""
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="100000")
+    first = ledger.submit_order(buy(qty=Decimal(10)))  # 10 @ 100
+    ledger.submit_order(buy(qty=Decimal(10), reason="second"))  # 10 @ 100 -> qty 20
+    ledger.submit_order(sell(qty=Decimal(5), reason="partial trim"))  # qty -> 15
+    before = _snapshot(conn)
+    with pytest.raises(ValueError, match="sold or.*manually adjusted"):
+        ledger.record_fill(first.id, Decimal(50))
+    assert _snapshot(conn) == before  # books byte-identical after the raise
+
+
+def test_record_fill_blocked_after_position_closed_and_reopened(tmp_path):
+    """Reproduces the closed-and-reopened corruption: the original position
+    is fully sold (row deleted), a brand new unrelated position is opened
+    later, and correcting the original (now historical) fill must not
+    silently overwrite the new, unrelated position's avg_cost."""
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="100000")
+    original = ledger.submit_order(buy(qty=Decimal(10)))  # 10 @ 100
+    ledger.submit_order(sell(qty=Decimal(10)))  # position fully closed, row removed
+    ledger.submit_order(buy(qty=Decimal(3), reason="unrelated reopen"))  # 3 @ 100
+    before = _snapshot(conn)
+    with pytest.raises(ValueError, match="sold or.*manually adjusted"):
+        ledger.record_fill(original.id, Decimal(300))  # would have overwritten avg_cost
+    assert _snapshot(conn) == before  # the live, unrelated position is untouched
+
+
+def test_record_fill_blocked_after_manual_set_position(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    order = ledger.submit_order(buy(qty=Decimal(10)))
+    ledger.set_position("AAPL", Decimal(10), Decimal(77))  # manual correction
+    before = _snapshot(conn)
+    with pytest.raises(ValueError, match="sold or.*manually adjusted"):
+        ledger.record_fill(order.id, Decimal(50))
+    assert _snapshot(conn) == before
+
+
+def test_record_fill_blocked_after_remove_position(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    order = ledger.submit_order(buy(qty=Decimal(10)))
+    ledger.remove_position("AAPL")
+    before = _snapshot(conn)
+    with pytest.raises(ValueError, match="sold or.*manually adjusted"):
+        ledger.record_fill(order.id, Decimal(50))
+    assert _snapshot(conn) == before
+
+
+# -- happy paths that must survive the new guard -------------------------------
+
+def test_record_fill_double_correction_of_same_order_still_works(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    order = ledger.submit_order(buy(qty=Decimal(10)))  # 10 @ 100, cash -> 9000
+    ledger.record_fill(order.id, Decimal(90))  # first correction
+    ledger.record_fill(order.id, Decimal(80))  # second correction on the SAME order
+    row = conn.execute("SELECT avg_cost FROM shadow_positions WHERE ticker='AAPL'").fetchone()
+    assert row["avg_cost"] == "80.000000"
+    order_row = conn.execute(
+        "SELECT fill_price FROM shadow_orders WHERE id = ?", (int(order.id),)).fetchone()
+    assert order_row["fill_price"] == "80"
+    # cash: started 10000, cost 1000 -> 9000; corrections net qty*(old-actual)
+    # each time: after both, cash reflects a net fill price of 80.
+    assert ledger.get_account().cash == Decimal(10000) - Decimal(10) * Decimal(80)
+
+
+def test_record_fill_second_lot_present_still_works(tmp_path):
+    # Same scenario as test_record_fill_corrects_buy_with_later_second_buy
+    # (no sell/adjust in between -- only a second buy) -- must stay green.
+    ledger, conn, data = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="100000")
+    first = ledger.submit_order(buy(qty=Decimal(10)))  # 10 @ 100
+    data.prices["AAPL"] = Decimal(200)
+    ledger.submit_order(buy(qty=Decimal(10), reason="second"))  # 10 @ 200 -> avg 150, qty 20
+    ledger.record_fill(first.id, Decimal(50))
+    row = conn.execute("SELECT qty, avg_cost FROM shadow_positions WHERE ticker='AAPL'"
+                       ).fetchone()
+    assert row["qty"] == "20"
+    assert row["avg_cost"] == "125.000000"
+
+
+def test_record_fill_sell_correction_still_works(tmp_path):
+    ledger, _conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    ledger.submit_order(buy(qty=Decimal(10)))
+    sell_order = ledger.submit_order(sell(qty=Decimal(5)))
+    ledger.record_fill(sell_order.id, Decimal(120))
+    assert ledger.get_account().cash == Decimal(9600)
+
+
+# -- Important 2: _upsert_equity_daily must nest inside an outer transaction --
+
+def test_get_account_equity_upsert_nests_inside_outer_transaction(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)})
+    ledger.submit_order(buy(qty=Decimal(10)))
+
+    class Boom(Exception):
+        pass
+
+    # If _upsert_equity_daily's write broke savepoint nesting (a bare
+    # commit() ending the outer transaction()'s SAVEPOINT early), the outer
+    # `with conn.transaction()`'s cleanup on this exception would itself
+    # raise sqlite3.OperationalError ("no such savepoint"), masking Boom.
+    # pytest.raises(Boom) below only passes if that does NOT happen.
+    with pytest.raises(Boom), conn.transaction():
+        ledger.get_account()
+        raise Boom("outer failure")
+
+    # Connection must still be perfectly usable afterward.
+    assert conn.execute("SELECT 1").fetchone() is not None
+
+
+# -- Important 3: record_fill rejects non-positive prices ---------------------
+
+def test_record_fill_rejects_zero_or_negative_price(tmp_path):
+    ledger, _conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    order = ledger.submit_order(buy(qty=Decimal(10)))
+    with pytest.raises(ValueError, match="positive"):
+        ledger.record_fill(order.id, Decimal(0))
+    with pytest.raises(ValueError, match="positive"):
+        ledger.record_fill(order.id, Decimal(-5))
+    # unaffected by the rejected attempts
+    [pos] = ledger.get_positions()
+    assert pos.avg_entry_price == Decimal("100.000000")
+
+
+# -- Minor 4: set_position guards ----------------------------------------------
+
+def test_set_position_rejects_negative_qty(tmp_path):
+    ledger, _conn, _ = make_ledger(tmp_path, prices={})
+    with pytest.raises(ValueError):
+        ledger.set_position("AAPL", Decimal(-1), Decimal(90))
+
+
+def test_set_position_rejects_non_positive_avg_cost(tmp_path):
+    ledger, _conn, _ = make_ledger(tmp_path, prices={})
+    with pytest.raises(ValueError):
+        ledger.set_position("AAPL", Decimal(10), Decimal(0))
+    with pytest.raises(ValueError):
+        ledger.set_position("AAPL", Decimal(10), Decimal(-5))
+
+
+def test_set_position_allows_zero_qty_with_positive_avg_cost(tmp_path):
+    ledger, _conn, _ = make_ledger(tmp_path, prices={})
+    ledger.set_position("AAPL", Decimal(0), Decimal(90))  # not rejected
+    [pos] = ledger.get_positions()
+    assert pos.qty == Decimal(0)
+
+
+# -- Minor 5: notional too small for one 6dp share -----------------------------
+
+def test_notional_too_small_for_one_share_rejected_no_phantom_row(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    order = ledger.submit_order(buy(notional=Decimal("0.0000001")))
+    assert order.status == OrderStatus.REJECTED
+    assert order.filled_qty == Decimal(0)
+    row = conn.execute("SELECT note FROM shadow_orders WHERE side = 'buy'").fetchone()
+    assert "too small" in row["note"]
+    assert ledger.get_positions() == []
+    assert ledger.get_account().cash == Decimal(10000)
+    pos_row = conn.execute(
+        "SELECT * FROM shadow_positions WHERE ticker = 'AAPL'").fetchone()
+    assert pos_row is None  # no phantom 0-share row
+
+
+# -- Minor 7 / 8: get_equity_history ET-anchored cutoff + zero-equity filter --
+
+def test_get_equity_history_cutoff_uses_et_calendar_date(tmp_path, monkeypatch):
+    ledger, conn, _ = make_ledger(tmp_path, prices={})
+    conn.execute(
+        "INSERT INTO shadow_equity_daily (date, equity, cash) VALUES"
+        " ('2026-08-14', '50', '50'),"
+        " ('2026-08-15', '100', '100'),"
+        " ('2026-08-16', '200', '200')")
+    conn.commit()
+    # Freeze "today" (ET) to 2026-08-20 regardless of the real wall clock --
+    # get_equity_history must derive its cutoff from the same today_et_date
+    # helper _upsert_equity_daily uses, not a raw UTC datetime.now() date.
+    monkeypatch.setattr(shadow_module, "today_et_date", lambda: "2026-08-20")
+    history = ledger.get_equity_history(days=5)  # cutoff = 2026-08-15
+    dates = [d.date().isoformat() for d, _ in history]
+    assert dates == ["2026-08-15", "2026-08-16"]
+
+
+def test_get_equity_history_filters_zero_equity_days(tmp_path, monkeypatch):
+    ledger, conn, _ = make_ledger(tmp_path, prices={})
+    conn.execute(
+        "INSERT INTO shadow_equity_daily (date, equity, cash) VALUES"
+        " ('2026-08-18', '0', '0'),"
+        " ('2026-08-19', '300', '300')")
+    conn.commit()
+    monkeypatch.setattr(shadow_module, "today_et_date", lambda: "2026-08-20")
+    history = ledger.get_equity_history(days=30)
+    dates = [d.date().isoformat() for d, _ in history]
+    assert dates == ["2026-08-19"]
+
+
+# -- Minor 9: record_fill rewrites the order row's notional -------------------
+
+def test_record_fill_rewrites_notional_for_notional_based_order(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    order = ledger.submit_order(buy(notional=Decimal(1000)))  # qty 10 @ 100
+    ledger.record_fill(order.id, Decimal(90))
+    row = conn.execute(
+        "SELECT qty, notional, fill_price FROM shadow_orders WHERE id = ?",
+        (int(order.id),)).fetchone()
+    assert row["fill_price"] == "90"
+    assert row["qty"] == "10.000000"  # filled qty unchanged (6dp-quantized at fill time)
+    assert row["notional"] == "900.000000"  # 10.000000 * 90, not the original $1000 target
+
+
+def test_record_fill_leaves_notional_null_for_qty_based_order(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, prices={"AAPL": Decimal(100)}, cash="10000")
+    order = ledger.submit_order(buy(qty=Decimal(10)))
+    ledger.record_fill(order.id, Decimal(90))
+    row = conn.execute(
+        "SELECT notional FROM shadow_orders WHERE id = ?", (int(order.id),)).fetchone()
+    assert row["notional"] is None
