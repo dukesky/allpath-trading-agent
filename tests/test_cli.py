@@ -125,12 +125,25 @@ def test_status_broker_error_prints_friendly_message_and_returns_1(tmp_path, cap
     assert "connection refused" in err
 
 
-def test_serve_without_keys_exits_2(tmp_path, monkeypatch):
+def test_serve_without_keys_starts_the_server_instead_of_exiting_2(
+        tmp_path, capsys, monkeypatch):
+    # setup-wizard T1: `serve` is the ONE command that must start with no
+    # Alpaca credentials -- the first-run setup wizard lives behind it, and
+    # a process that exits 2 before binding a port can never render the page
+    # that collects the keys. Paper's broker degrades to UnconfiguredBroker
+    # (see allpath_trade/broker/unconfigured.py) instead.
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ALPACA_API_KEY", raising=False)
     monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    calls = []
+    monkeypatch.setattr("allpath_trade.cli.cmd_serve",
+                        lambda settings, host, port: calls.append((host, port)) or 0)
+
     code = main(["serve"])
-    assert code == 2
+
+    assert code == 0
+    assert calls == [(None, None)]
+    assert "Missing credentials" not in capsys.readouterr().err
 
 
 def test_serve_starts_uvicorn_with_settings_defaults(tmp_path, monkeypatch):

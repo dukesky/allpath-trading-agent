@@ -1,8 +1,9 @@
+import base64
 from types import SimpleNamespace
 
 import pytest
 
-from allpath_trade.llm.base import LLMError, ToolSpec
+from allpath_trade.llm.base import LLMError, LLMImageUnsupported, ToolSpec
 from allpath_trade.llm.openai_compat import OpenAICompatClient
 
 TOOL = ToolSpec(name="get_quote", description="quote",
@@ -129,3 +130,74 @@ def test_missing_usage_defaults_to_zero_never_raises():
     out = c.complete([{"role": "user", "content": "hello"}])
     assert out.input_tokens == 0
     assert out.output_tokens == 0
+
+
+# -- Image parts (setup-wizard T5) -------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+PNG_B64 = base64.b64encode(PNG_BYTES).decode()
+
+
+def _image_message(text="what is this?"):
+    return {"role": "user",
+            "content": [{"type": "image", "mime": "image/png", "data": PNG_BYTES},
+                        {"type": "text", "text": text}]}
+
+
+def test_list_content_becomes_data_url_image_parts_then_text():
+    c, stub = make([_resp(content="two positions")])
+    c.complete([{"role": "system", "content": "SYS"}, _image_message()])
+    assert stub.calls[0]["messages"] == [
+        {"role": "system", "content": "SYS"},
+        {"role": "user",
+         "content": [
+             {"type": "image_url",
+              "image_url": {"url": f"data:image/png;base64,{PNG_B64}"}},
+             {"type": "text", "text": "what is this?"},
+         ]},
+    ]
+
+
+def test_a_provider_image_complaint_becomes_llm_image_unsupported():
+    class Rejecting:
+        def __init__(self):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            raise RuntimeError(
+                "Error code: 400 - this model does not support image input")
+
+    c = OpenAICompatClient("k", "m", client=Rejecting())
+    with pytest.raises(LLMImageUnsupported):
+        c.complete([_image_message()])
+
+
+def test_an_image_complaint_without_images_stays_a_plain_llm_error():
+    class Rejecting:
+        def __init__(self):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            raise RuntimeError("429 vision-preview capacity exceeded")
+
+    c = OpenAICompatClient("k", "m", client=Rejecting())
+    with pytest.raises(LLMError) as ei:
+        c.complete([{"role": "user", "content": "hi"}])
+    assert not isinstance(ei.value, LLMImageUnsupported)
+
+
+def test_an_unrelated_error_on_an_image_turn_stays_a_plain_llm_error():
+    class Rejecting:
+        def __init__(self):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            raise TimeoutError("upstream hung")
+
+    c = OpenAICompatClient("k", "m", client=Rejecting())
+    with pytest.raises(LLMError) as ei:
+        c.complete([_image_message()])
+    assert not isinstance(ei.value, LLMImageUnsupported)

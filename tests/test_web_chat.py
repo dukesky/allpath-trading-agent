@@ -8,11 +8,22 @@ from typing import ClassVar
 
 from fastapi.testclient import TestClient
 
+from allpath_trade.agent.attachments import (
+    IMAGE_UNSUPPORTED_REPLY,
+    IMAGES_ONLY_TEXT,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGES,
+    MAX_NAME_CHARS,
+    MAX_UPLOAD_BYTES,
+    UPLOAD_TOO_LARGE_MESSAGE,
+    ImageAttachment,
+)
 from allpath_trade.broker.base import Order, OrderStatus
 from allpath_trade.config import Settings
-from allpath_trade.llm.base import LLMClient, LLMResponse
+from allpath_trade.llm.base import LLMClient, LLMImageUnsupported, LLMResponse
+from allpath_trade.web.account_ctx import ACCOUNT_COOKIE
 from allpath_trade.web.app import create_app
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only, dismiss_setup
 from tests.test_agent_loop import ScriptedLLM, tool_response
 from tests.test_sentinel import FakeBroker
 
@@ -35,7 +46,7 @@ def make_client(tmp_path, monkeypatch, responses):
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
                         memory_dir=tmp_path / "memory", web_token="secret",
-                        openrouter_api_key="k")
+                        **CONFIGURED_KEYS)
     llm = ScriptedLLM(responses)
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
                         lambda settings, tier="chat", usage_store=None: llm)
@@ -102,6 +113,12 @@ def test_chat_shows_a_banner_instead_of_500_when_no_llm_key_is_configured(
     # No provider key anywhere -- build_llm raises LLMConfigError.
     client = TestClient(create_app(settings, broker=FakeBroker()))
     client.post("/login", data={"token": "secret"})
+    # setup-wizard T2: with no keys at all this install is also what the
+    # first-run gate exists for, and an ungated GET /chat would be a 302 to
+    # the wizard rather than the banner under test. Skipping the wizard is
+    # exactly the state this test is about: the user chose to go on without
+    # a key, and Chat must degrade instead of 500ing.
+    dismiss_setup(client)
 
     r = client.get("/chat")
 
@@ -119,6 +136,10 @@ def test_chat_send_also_degrades_instead_of_500_when_no_llm_key_is_configured(
                         memory_dir=tmp_path / "memory", web_token="secret")
     client = TestClient(create_app(settings, broker=FakeBroker()))
     client.post("/login", data={"token": "secret"})
+    # Not strictly required (the setup gate is GET-only, so this POST is
+    # never redirected) -- set for the same reason as the GET test above,
+    # so the two halves of the same scenario describe the same install.
+    dismiss_setup(client)
 
     r = client.post("/chat/send", data={"message": "hi"})
 
@@ -648,7 +669,7 @@ def test_a_second_send_waits_for_the_first_turn_to_finish(tmp_path, monkeypatch)
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
                         memory_dir=tmp_path / "memory", web_token="secret",
-                        openrouter_api_key="k")
+                        **CONFIGURED_KEYS)
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
                         lambda settings, tier="chat", usage_store=None: llm)
     client = TestClient(create_app(settings, broker=FakeBroker()))
@@ -735,3 +756,473 @@ def test_chat_service_accepts_known_accounts():
     for account in ("paper", "shadow"):
         service = ChatService(holder=None, account=account)
         assert service.account == account
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T4: per-account onboarding hints on the chat empty state.
+# ---------------------------------------------------------------------------
+
+def test_empty_shadow_conversation_shows_onboarding_card_with_examples(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [])
+    client.cookies.set(ACCOUNT_COOKIE, "shadow")
+
+    body = client.get("/chat").text
+
+    assert "Tell me what you hold" in body
+    assert ("Paste your positions, type them, or attach a screenshot of "
+            "your brokerage — every change is queued for your approval.") in body
+    assert "I own 10 NVDA at 118.40 and 5,000 cash." in body
+    assert "Here is my portfolio: AAPL 20 @ 180, MSFT 5 @ 410, cash 12,000." in body
+    assert "Set my cash to 25,000." in body
+    assert body.count('class="example"') == 3
+    assert_english_only(body)
+
+
+def test_empty_paper_conversation_shows_onboarding_card(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [])
+
+    body = client.get("/chat").text
+
+    assert "Ask me anything about the market" in body
+    assert ("I can look at a ticker, draft a strategy, or explain what I "
+            "can do.") in body
+    assert "What do you think of TSLA right now?" in body
+    assert "Draft a strategy that buys NVDA on a 5% dip." in body
+    assert "What can you do?" in body
+    # The shadow-only copy must not leak onto paper's card.
+    assert "Tell me what you hold" not in body
+    assert_english_only(body)
+
+
+def test_non_empty_conversation_shows_no_onboarding_card(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hello there")])
+    client.post("/chat/send", data={"message": "hi"})
+
+    body = client.get("/chat").text
+
+    assert "Ask me anything about the market" not in body
+    assert "Tell me what you hold" not in body
+
+
+def test_hint_import_shows_onboarding_card_even_with_existing_turns(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hello there")])
+    client.cookies.set(ACCOUNT_COOKIE, "shadow")
+    client.post("/chat/send", data={"message": "hi"})
+
+    body = client.get("/chat?hint=import").text
+
+    assert "Tell me what you hold" in body
+
+
+def test_onboarding_card_still_renders_when_llm_is_unconfigured(tmp_path, monkeypatch):
+    # setup-wizard T4 brief: `_render` may hit LLMConfigError before the
+    # onboarding card is even computed from `messages` -- the card must
+    # still render (it needs no LLM), pointing the user at what to type,
+    # even while the "add a key" banner also shows.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret")
+    client = TestClient(create_app(settings, broker=FakeBroker()))
+    client.post("/login", data={"token": "secret"})
+    dismiss_setup(client)
+
+    body = client.get("/chat").text
+
+    assert "Ask me anything about the market" in body
+    assert "OPENROUTER_API_KEY" in body
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T5: image attachments ride ONE turn and are never persisted.
+# ---------------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 2048
+
+
+def _png(name="positions.png"):
+    return ImageAttachment(data=PNG_BYTES, mime="image/png", name=name)
+
+
+def test_send_forwards_images_to_the_turn_and_keeps_bytes_out_of_the_store(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="two positions")])
+    service = client.app.state.chat_service
+
+    reply = service.send("what do you make of this?", images=[_png()])
+
+    assert reply == "two positions"
+    llm = service.session().llm
+    user_msg = llm.seen[0][-1]
+    assert user_msg["content"][0] == {"type": "image", "mime": "image/png",
+                                      "data": PNG_BYTES}
+    assert user_msg["content"][1] == {"type": "text",
+                                      "text": "what do you make of this?"}
+    stored = service.messages()[0]
+    assert "images" not in stored
+    assert stored["content"] == "what do you make of this?"
+    assert stored["display"].startswith("[image: positions.png,")
+    conn = client.app.state.holder.get().conn
+    rows = conn.execute("SELECT message FROM conversation_turns").fetchall()
+    assert all("PNG" not in r["message"] and "images" not in r["message"]
+               for r in rows)
+    indexed = conn.execute("SELECT content FROM search_index").fetchall()
+    assert all("PNG" not in r["content"] for r in indexed)
+
+
+def test_mirror_receives_the_placeholder_text_never_bytes(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+    service = client.app.state.chat_service
+    seen = []
+    service.set_mirror(lambda source, text, reply: seen.append((source, text, reply)))
+
+    service.send("here", images=[_png()])
+
+    [(source, text, reply)] = seen
+    assert source == "web" and reply == "ok"
+    assert text.startswith("[image: positions.png,") and text.endswith(" here")
+
+
+def test_a_model_that_cannot_read_images_gets_the_fixed_reply_recorded(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [
+        LLMImageUnsupported("llm request failed: image input is not supported")])
+    service = client.app.state.chat_service
+
+    reply = service.send("read this", images=[_png()])
+
+    assert reply == IMAGE_UNSUPPORTED_REPLY
+    history = service.messages()
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert history[-1]["content"] == IMAGE_UNSUPPORTED_REPLY
+    assert all("images" not in m for m in history)
+    # And it survives a reload -- the user sees it in history, not just once.
+    conn = client.app.state.holder.get().conn
+    rows = conn.execute("SELECT message FROM conversation_turns").fetchall()
+    # (json.dumps escapes the em dash, so match an ASCII slice of the copy)
+    assert "vision-capable model in Settings" in rows[-1]["message"]
+    assert all("PNG" not in r["message"] for r in rows)
+
+
+def test_an_ordinary_llm_error_still_takes_the_existing_notice_path(
+        tmp_path, monkeypatch):
+    from allpath_trade.llm.base import LLMError
+
+    client = make_client(tmp_path, monkeypatch, [LLMError("upstream hung")])
+    service = client.app.state.chat_service
+
+    reply = service.send("read this", images=[_png()])
+
+    assert reply.startswith("(llm error:") and "upstream hung" in reply
+    assert service.messages()[-1]["content"] == reply
+
+
+def test_messages_never_exposes_image_bytes_mid_turn(tmp_path, monkeypatch):
+    # Reviewer minor 4: the transcript is readable by other requests while a
+    # turn holds `_turn_lock` (messages() takes `_lock`, not `_turn_lock`).
+    # Now true by construction -- the attachments live on the session, never
+    # on a history dict -- but pinned, since a "pop it later" implementation
+    # would pass every after-the-turn assertion and still leak here.
+    client = make_client(tmp_path, monkeypatch, [])
+    service = client.app.state.chat_service
+    session = service.session()
+    snapshots = []
+
+    class ProbingLLM:
+        model = "probing"
+
+        def complete(self, messages, tools=None):
+            snapshots.append(service.messages())
+            return LLMResponse(text="ok")
+
+    session.llm = ProbingLLM()
+    service.send("read this", images=[_png()])
+
+    [mid_turn] = snapshots
+    assert mid_turn and all("images" not in m for m in mid_turn)
+    assert all(not isinstance(v, bytes) for m in mid_turn for v in m.values())
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T6: the web upload path -- multipart POST /chat/send.
+# ---------------------------------------------------------------------------
+
+JPEG_BYTES = b"\xff\xd8\xff" + b"\x00" * 2048
+
+
+def _upload(name="a.png", data=PNG_BYTES, mime="image/png"):
+    return ("images", (name, data, mime))
+
+
+def test_a_multipart_post_sends_the_image_and_shows_the_placeholder(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="two positions")])
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload()])
+
+    assert response.status_code == 200
+    # The transcript shows the placeholder + the typed text, escaped as
+    # ordinary text (never a `content` that dropped the attachment).
+    assert "[image: a.png, 2 KB] hello" in response.text
+    assert_english_only(response.text)
+    service = client.app.state.chat_service
+    llm = service.session().llm
+    user_msg = llm.seen[0][-1]
+    assert user_msg["content"][0] == {"type": "image", "mime": "image/png",
+                                      "data": PNG_BYTES}
+    assert user_msg["content"][1] == {"type": "text", "text": "hello"}
+    stored = service.messages()[0]
+    assert stored["content"] == "hello"
+    assert stored["display"] == "[image: a.png, 2 KB] hello"
+
+
+def test_two_images_ride_one_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/chat/send", data={"message": "both"},
+                           files=[_upload("a.png"),
+                                  _upload("b.jpg", JPEG_BYTES, "image/jpeg")])
+
+    assert response.status_code == 200
+    llm = client.app.state.chat_service.session().llm
+    parts = llm.seen[0][-1]["content"]
+    assert [p.get("mime") for p in parts[:2]] == ["image/png", "image/jpeg"]
+
+
+def test_more_than_four_images_is_rejected_and_records_no_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload(f"{i}.png") for i in range(5)])
+
+    assert response.status_code == 400
+    assert "Up to 4 images per message." in response.text
+    assert_english_only(response.text)
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_an_oversized_image_is_rejected_and_records_no_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+    huge = b"\x89PNG\r\n\x1a\n" + b"\x00" * (6 * 1024 * 1024)
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload("big.png", huge)])
+
+    assert response.status_code == 400
+    assert "Image too large (max 5 MB)." in response.text
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_a_png_named_file_that_is_not_an_image_is_rejected(tmp_path, monkeypatch):
+    # The declared content type and the filename both say PNG; only the
+    # magic bytes decide (attachments.sniff_mime).
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload("notes.png", b"just some text here")])
+
+    assert response.status_code == 400
+    assert "Only PNG, JPEG, or WebP images are supported." in response.text
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_the_composer_script_renders_its_copy_from_the_python_constants(
+        tmp_path, monkeypatch):
+    """Whole-branch review (M3, M11): the optimistic echo mirrors the
+    server's own strings and name-cleaning rules, so a reword on either side
+    can't leave the bubble saying one thing and the swapped-in transcript
+    line another."""
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    body = client.get("/chat").text
+
+    assert f'var IMAGES_ONLY_TEXT = "{IMAGES_ONLY_TEXT}";' in body
+    assert f'var UPLOAD_TOO_LARGE = "{UPLOAD_TOO_LARGE_MESSAGE}";' in body
+    assert f"var MAX_NAME_CHARS = {MAX_NAME_CHARS};" in body
+    # The client-side `_clean_name` mirror itself.
+    assert "function cleanName(name)" in body
+    assert 'return "[image: " + cleanName(file.name) + ", " + kb + " KB]";' in body
+    # And no hand-typed second copy of the default text left behind.
+    assert f'"{IMAGES_ONLY_TEXT}"' not in body.replace(
+        f'var IMAGES_ONLY_TEXT = "{IMAGES_ONLY_TEXT}";', "")
+
+
+# -- the whole-request cap (whole-branch review, Important 3) ---------------
+#
+# The per-part caps in `_read_uploads` only run AFTER FastAPI has parsed the
+# multipart body -- and Starlette spools any part over 1 MB to an unlinked
+# temporary file while doing so. A client sending 500 MB of parts therefore
+# got all 500 MB written to /tmp before a single line of the handler ran.
+# The guard is a middleware, because by the time the handler is entered the
+# parsing has already happened.
+
+
+def _too_big() -> int:
+    return MAX_UPLOAD_BYTES + 1
+
+
+def test_an_oversized_request_is_refused_before_the_form_is_parsed(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    # `content-length` is what the guard reads, and it reads it BEFORE the
+    # body -- so this test states an enormous length without sending one.
+    response = client.post("/chat/send", content=b"x",
+                           headers={"content-length": str(_too_big()),
+                                    "content-type": "multipart/form-data; boundary=b"})
+
+    assert response.status_code == 413
+    assert response.text.strip() == UPLOAD_TOO_LARGE_MESSAGE
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_the_cap_is_the_four_image_budget_plus_room_for_the_rest(
+        tmp_path, monkeypatch):
+    # Exactly at the cap is allowed through to the ordinary parsing path:
+    # the guard exists to stop absurd bodies, not to second-guess the
+    # per-part limits that follow it.
+    assert MAX_UPLOAD_BYTES == MAX_IMAGES * MAX_IMAGE_BYTES + 1024 * 1024
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/chat/send", data={"message": "hi"},
+                           headers={"content-length": str(MAX_UPLOAD_BYTES)})
+
+    assert response.status_code != 413
+
+
+def test_a_request_without_a_length_still_reaches_the_per_part_caps(
+        tmp_path, monkeypatch):
+    # Chunked (or otherwise length-less) uploads cannot be judged up front;
+    # they fall through to `_read_uploads`, which never reads more than
+    # MAX_IMAGE_BYTES + 1 per part.
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+    huge = b"\x89PNG\r\n\x1a\n" + b"\x00" * (6 * 1024 * 1024)
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload("big.png", huge)],
+                           headers={"transfer-encoding": "chunked"})
+
+    assert response.status_code == 400
+    assert "Image too large (max 5 MB)." in response.text
+
+
+def test_a_garbled_length_is_not_trusted_as_a_pass(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/chat/send", data={"message": "hi"},
+                           headers={"content-length": "not-a-number"})
+
+    # Unparseable: treated as "unknown", i.e. handled downstream, never as
+    # a 500 out of the middleware.
+    assert response.status_code in (200, 400)
+
+
+def test_an_unauthenticated_oversized_post_meets_the_login_gate_first(
+        tmp_path, monkeypatch):
+    # The guard is registered inside the auth middleware, not outside it:
+    # a stranger on the LAN learns nothing about this install's limits.
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+    client.cookies.clear()
+
+    response = client.post("/chat/send", content=b"x",
+                           headers={"content-length": str(_too_big())},
+                           follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_other_routes_are_not_capped(tmp_path, monkeypatch):
+    # The guard is scoped to the one route that accepts uploads; a big POST
+    # anywhere else is somebody else's business.
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/account/switch", data={"account": "shadow"},
+                           headers={"content-length": str(_too_big())},
+                           follow_redirects=False)
+
+    assert response.status_code != 413
+
+
+def test_an_images_only_message_gets_the_default_text(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="I see it")])
+
+    response = client.post("/chat/send", data={"message": "  "}, files=[_upload()])
+
+    assert response.status_code == 200
+    stored = client.app.state.chat_service.messages()[0]
+    assert stored["content"] == "Here is an image."
+    assert stored["display"] == "[image: a.png, 2 KB] Here is an image."
+
+
+def test_a_text_only_post_still_works_without_any_file_part(tmp_path, monkeypatch):
+    # Constraint: the plain urlencoded form POST (and every existing test
+    # that uses it) keeps working now that the route declares File().
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hi there")])
+
+    response = client.post("/chat/send", data={"message": "hello"})
+
+    assert response.status_code == 200
+    assert client.app.state.chat_service.messages()[0]["content"] == "hello"
+
+
+def test_an_empty_post_with_no_text_and_no_files_records_no_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    response = client.post("/chat/send", data={"message": ""})
+
+    assert response.status_code == 200
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_the_chat_form_carries_the_attach_control(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [])
+
+    body = client.get("/chat").text
+
+    assert 'hx-encoding="multipart/form-data"' in body
+    assert 'accept="image/png,image/jpeg,image/webp"' in body
+    assert 'id="chat-images"' in body
+    assert "📎" in body
+    assert_english_only(body)
+
+
+def test_the_vision_hint_appears_only_when_the_catalog_says_the_model_is_blind(
+        tmp_path, monkeypatch):
+    from allpath_trade.web import models_catalog
+
+    client = make_client(tmp_path, monkeypatch, [])
+    model = client.app.state.holder.get().settings.chat_model
+
+    monkeypatch.setattr(models_catalog, "_input_modalities",
+                        {model: ["text", "image"]})
+    assert "may not be able to read images" not in client.get("/chat").text
+
+    monkeypatch.setattr(models_catalog, "_input_modalities", {model: ["text"]})
+    body = client.get("/chat").text
+    assert "may not be able to read images" in body
+    assert_english_only(body)
+
+    # Unknown model (nothing fetched yet) -> informational only, stays quiet.
+    monkeypatch.setattr(models_catalog, "_input_modalities", {})
+    assert "may not be able to read images" not in client.get("/chat").text
+
+
+def test_the_vision_hint_normalizes_a_mixed_case_provider(tmp_path, monkeypatch):
+    # `LLM_PROVIDER=OpenRouter` builds an OpenRouter client and passes the
+    # setup gate (config.normalize_llm_provider), so the hint has to read
+    # the OpenRouter catalog for it too rather than treating it as an
+    # unknown provider and staying silent.
+    from allpath_trade.web import models_catalog
+
+    client = make_client(tmp_path, monkeypatch, [])
+    settings = client.app.state.holder.get().settings
+    monkeypatch.setattr(settings, "llm_provider", "OpenRouter")
+    monkeypatch.setattr(models_catalog, "_input_modalities",
+                        {settings.chat_model: ["text"]})
+
+    assert "may not be able to read images" in client.get("/chat").text

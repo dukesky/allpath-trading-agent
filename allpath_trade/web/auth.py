@@ -7,6 +7,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.web.setup_status import should_redirect_to_setup
 from allpath_trade.web.templating import templates
 
 COOKIE = "allpath_session"
@@ -41,6 +42,28 @@ def _authorized(request: Request, token: str) -> bool:
     return bool(cookie) and hmac.compare_digest(cookie.encode(), token.encode())
 
 
+def _redirect(request: Request, location: str, status_code: int) -> Response:
+    """A redirect this app's own front-end will actually follow.
+
+    A plain 3xx is fine for a full page navigation (the browser just
+    follows it), but htmx follows redirects as part of the same AJAX
+    exchange and swaps whatever HTML comes back into the original target --
+    on chat.html's `hx-post="/chat/send" hx-target="#messages"`, that means
+    login.html's form gets spliced into the chat transcript instead of the
+    user ever seeing a real sign-in page. `HX-Redirect` is htmx's own
+    escape hatch: any response carrying it triggers a full
+    `window.location` navigation instead of a swap, regardless of status
+    code -- and the body stays empty, so there is nothing to swap even if a
+    handler ignored the header.
+
+    Every redirect the guard middleware issues goes through here, so a new
+    one cannot forget the htmx case the way the setup gate first did.
+    """
+    if request.headers.get("hx-request") == "true":
+        return Response(status_code=200, headers={"HX-Redirect": location})
+    return RedirectResponse(location, status_code=status_code)
+
+
 def install_auth(app: FastAPI) -> None:
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -62,21 +85,10 @@ def install_auth(app: FastAPI) -> None:
         if (normalized in PUBLIC_PATHS or path.startswith(("/static/", "/a/"))):
             return await call_next(request)
 
-        token = request.app.state.holder.settings().web_token
+        components = request.app.state.holder.get()
+        token = components.settings.web_token
         if not _authorized(request, token):
-            if request.headers.get("hx-request") == "true":
-                # A plain 303 here is fine for a full page navigation (the
-                # browser just follows it), but htmx follows redirects as
-                # part of the same AJAX exchange and swaps whatever HTML
-                # comes back into the original target -- on chat.html's
-                # `hx-post="/chat/send" hx-target="#messages"`, that means
-                # login.html's form gets spliced into the chat transcript
-                # instead of the user ever seeing a real sign-in page.
-                # `HX-Redirect` is htmx's own escape hatch for this: any
-                # response carrying it triggers a full `window.location`
-                # navigation instead of a swap, regardless of status code.
-                return Response(status_code=200, headers={"HX-Redirect": "/login"})
-            return RedirectResponse("/login", status_code=303)
+            return _redirect(request, "/login", 303)
 
         if request.method not in ("GET", "HEAD"):
             # Same-origin check: on a LAN, another device could otherwise
@@ -104,6 +116,24 @@ def install_auth(app: FastAPI) -> None:
                 if origin != expected:
                     return Response("cross-origin request refused",
                                     status_code=403)
+
+        # setup-wizard T2: the first-run gate. Deliberately BELOW the token
+        # check -- an unauthenticated stranger on the LAN gets the login
+        # page and learns nothing about whether this install has its keys
+        # yet. It is also GET-only (see should_redirect_to_setup), so it
+        # sits after the same-origin check rather than in front of it: no
+        # request can reach one branch and skip the other, and the write
+        # path keeps its own protections untouched.
+        #
+        # Goes through `_redirect` for the same reason the login bounce
+        # does. No template issues an htmx GET *today* (every hx-* in
+        # templates/ is an hx-post), so this branch is currently theory --
+        # but it costs one shared helper, and the first `hx-get` anyone adds
+        # would otherwise splice the wizard (or, until Task 3, a 404) into
+        # whatever div triggered it, with no visible sign of why.
+        if should_redirect_to_setup(request.method, path, components.settings,
+                                    components.app_state):
+            return _redirect(request, "/setup", 302)
         return await call_next(request)
 
     @app.get("/login", response_class=HTMLResponse)

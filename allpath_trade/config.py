@@ -16,6 +16,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 MIN_CONTEXT_BUDGET_TOKENS = 2000
 
 
+def normalize_llm_provider(provider: str) -> str:
+    """The single canonical reading of `LLM_PROVIDER`.
+
+    `llm/factory.py` decides which client to build from it, and
+    `web/setup_status.py` decides whether that provider's key is missing --
+    if those two normalized the same string differently, the setup gate
+    could call an install configured while the factory refused to build
+    anything for it (or the reverse: a gate that never lets go). One
+    function so they cannot drift.
+
+    Case-folded only, deliberately not stripped: an `LLM_PROVIDER` with
+    stray whitespace is a typo in `.env`, and reporting it as unknown --
+    from both call sites, identically -- is more useful than silently
+    accepting it in one place and not the other.
+    """
+    return provider.lower()
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

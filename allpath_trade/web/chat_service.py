@@ -7,12 +7,18 @@ from datetime import UTC, datetime
 from functools import partial
 
 from allpath_trade.agent.action_tools import register_action_tools
+from allpath_trade.agent.attachments import (
+    IMAGE_UNSUPPORTED_REPLY,
+    ImageAttachment,
+    display_for,
+)
 from allpath_trade.agent.compact import Compactor
 from allpath_trade.agent.context import build_system_prompt, load_identity
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
+from allpath_trade.llm.base import LLMImageUnsupported
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.web.order_sink import QueueingOrderSink
 
@@ -180,17 +186,45 @@ class ChatService:
             compactor=compactor,
             on_tool=lambda call: self.activity.append(call.name))
 
-    def send(self, text: str, source: str = "web") -> str:
+    def send(self, text: str, source: str = "web",
+             images: list[ImageAttachment] | None = None) -> str:
+        """`images` (setup-wizard T5) ride this ONE turn: run_turn holds them
+        on the session (`_pending_images`, cleared in a `finally`) and never
+        puts them on the message dict at all -- `loop._with_images` injects
+        them into the throwaway list built for each `llm.complete` call. So
+        nothing durable, and nothing that reads history even mid-turn -- the
+        conversation table, the FTS index, `messages()`, the compactor, this
+        method's mirror hook -- ever sees bytes.
+
+        `LLMImageUnsupported` is the one LLM error this method answers for
+        itself: it means the configured chat model has no vision input at
+        all, which the user can fix (a different CHAT_MODEL) or work around
+        (type the positions). run_turn deliberately lets it propagate
+        rather than folding it into the generic "(llm error: ...)" notice,
+        so the reply is recorded here through the session's own append --
+        the turn shows up in history like any other, on this page and in
+        the mirror. Every other LLMError keeps the existing notice path
+        (run_turn returns it as the reply text)."""
         with self._turn_lock:
             self.activity = []
-            reply = self.session().run_turn(text, extra={"source": source})
+            session = self.session()
+            try:
+                reply = session.run_turn(text, extra={"source": source},
+                                         images=images)
+            except LLMImageUnsupported:
+                reply = IMAGE_UNSUPPORTED_REPLY
+                session._append({"role": "assistant", "content": reply})
+        # The mirror gets the placeholder-prefixed text, the same string the
+        # transcript shows -- never the bytes, and never a bare "" for an
+        # images-only message.
+        mirror_text = display_for(images, text)
         # Mirroring happens after `_turn_lock` is released (the `with` block
         # above has already exited) -- Task 5's mirror fn does its own
         # thread-pool submit for the actual Telegram HTTP call, but even the
         # synchronous dispatch here must not extend the lock hold, or a
         # slow/hanging mirror would add latency to every web chat turn and
         # block the Telegram poller's own next `send()` behind it.
-        self._call_mirror(source, text, reply)
+        self._call_mirror(source, mirror_text, reply)
         return reply
 
     def set_mirror(self, fn: Callable[[str, str, str], None] | None) -> None:

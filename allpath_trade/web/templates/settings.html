@@ -41,7 +41,11 @@
     <label>Provider</label>
     <select name="llm_provider">
       {% for p in ['openrouter', 'openai', 'anthropic'] %}
-      <option value="{{ p }}" {{ 'selected' if s.llm_provider == p }}>{{ p }}</option>
+      {# `provider` is LLM_PROVIDER read through config.normalize_llm_provider,
+         the same reading llm/factory.py and the setup gate use (M1) -- an
+         `.env` saying `OpenRouter` must highlight the openrouter option
+         here rather than leave the select showing the first one blind. #}
+      <option value="{{ p }}" {{ 'selected' if provider == p }}>{{ p }}</option>
       {% endfor %}
     </select>
     <label>OpenRouter API key <span class="muted">{{ masks['openrouter_api_key'] or 'not set' }}</span></label>
@@ -58,7 +62,19 @@
   </section>
 
   <section data-panel="brokerage"{% if active_tab != 'brokerage' %} hidden{% endif %}>
-  <h2>Brokerage</h2>
+  <div class="row section-header" style="margin:0 0 14px">
+    <h2 style="margin:0">Brokerage</h2>
+    {# setup-wizard T3 (spec §②): the same four signup steps the wizard's
+       step 2 shows, from the one shared include -- someone who skipped the
+       wizard and came straight here needs them just as much. #}
+    <details class="help-toggle">
+      <summary aria-label="Setup help">?</summary>
+      <div class="hint">
+        <p>Where these keys come from:</p>
+        {% include "_alpaca_signup_steps.html" %}
+      </div>
+    </details>
+  </div>
   <div class="card">
     <p class="muted">Alpaca · {{ 'paper' if s.alpaca_paper else 'LIVE' }}</p>
     <label>API key <span class="muted">{{ masks['alpaca_api_key'] or 'not set' }}</span></label>
@@ -215,6 +231,17 @@
     usually the machine's LAN IP and the port above (WEB_HOST must be
     listening on that address too, not just 127.0.0.1). Leave this blank
     and notifications never include a link, which is the default.</p>
+  </div>
+  {# setup-wizard T2: the durable way back into the wizard. Once setup is
+     finished the banner disappears, and after "skip for now" the banner is
+     the only other pointer at it -- so rotating a key through the guided
+     flow, or finishing a step that was skipped, would otherwise have no
+     entry point at all. A plain link, not a button: it navigates, and it
+     sits inside the settings <form>, where a <button> would submit it. #}
+  <div class="card">
+    <p class="muted">Walk through the guided first-run setup again --
+    LLM key, then Alpaca keys. Nothing is cleared by opening it.</p>
+    <p><a href="/setup">Re-run setup</a></p>
   </div>
   </section>
 

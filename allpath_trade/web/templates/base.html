@@ -27,6 +27,14 @@
               class="acct-shadow{{ ' on' if current_account == 'shadow' }}">SHADOW{% if other_account == 'shadow' and other_account_pending %}<span class="dot"></span>{% endif %}</button>
     </form>
   </nav>
+  {# setup-wizard T2: only ever rendered for someone who chose "skip for
+     now" in the wizard -- anyone who hasn't is redirected to /setup before
+     any page carrying this banner is reached (web/auth.py's gate). It is
+     the only way back to the wizard from an ordinary page, so it stays put
+     until setup is actually finished, not until it is acknowledged. #}
+  {% if setup_banner %}
+  <p class="setup-banner">Setup incomplete — {{ setup_missing | join(', ') }} missing · <a href="/setup">Finish setup</a></p>
+  {% endif %}
   <main>{% block content %}{% endblock %}</main>
 </body>
 </html>

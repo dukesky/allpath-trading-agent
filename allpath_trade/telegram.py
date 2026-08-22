@@ -10,8 +10,11 @@ caller (this module's own `TelegramPoller`, running on a daemon thread with
 nothing watching for an uncaught exception) must never die from a flaky
 Telegram API or a slow network.
 
-Token scrubbing: every Telegram API URL is shaped `.../bot<token>/<method>`,
-so the token is embedded in the URL string that shows up inside
+Token scrubbing: every Telegram URL this module builds embeds the bot token
+in its path -- `.../bot<token>/<method>` for the API endpoint,
+`.../file/bot<token>/<file_path>` for the file endpoint `download_file`
+GETs image bytes from -- so the token is in the URL string that shows up
+inside
 `urllib.error.URLError`/`HTTPError` messages (and in the request itself).
 Every stderr line and every string derived from an exception message is run
 through `TelegramAPI._scrub` first, which masks the token verbatim -- this
@@ -33,6 +36,17 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from allpath_trade.agent.attachments import (
+    ALLOWED_MIMES,
+    IMAGES_ONLY_TEXT,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGES,
+    TOO_LARGE_MESSAGE,
+    TOO_MANY_MESSAGE,
+    AttachmentError,
+    ImageAttachment,
+    validate_images,
+)
 from allpath_trade.execution import ExecutionError
 from allpath_trade.notify.events import _prefix
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
@@ -50,6 +64,11 @@ from allpath_trade.web.markdown import (
 )
 
 _API_URL = "https://api.telegram.org/bot{token}/{method}"
+# The file endpoint is a DIFFERENT host path from the API endpoint and is
+# fetched with a plain GET (no JSON body) -- but it embeds the bot token the
+# exact same way, so every stderr line derived from a download failure has to
+# go through `_scrub` for the same reason `_API_URL`'s do.
+_FILE_URL = "https://api.telegram.org/file/bot{token}/{path}"
 _TOKEN_MASK = "***"
 
 # Telegram's hard per-message ceiling (`sendMessage` rejects anything longer)
@@ -116,6 +135,23 @@ def strip_telegram_html_to_plain(text: str) -> str:
     characters -- otherwise the fallback message would read as literal
     "&lt;b&gt;" noise instead of the original text."""
     return _html.unescape(_HTML_TAG_RE.sub("", text))
+
+
+# A file download is up to MAX_IMAGE_BYTES of body over a possibly-slow
+# mobile uplink -- longer than a one-shot sendMessage, far shorter than the
+# long poll.
+_DOWNLOAD_TIMEOUT_SECONDS = 30
+
+
+class FileTooLarge(Exception):
+    """`download_file` found more bytes than `max_bytes` allowed.
+
+    A dedicated exception rather than `None` because the two outcomes need
+    DIFFERENT user-facing copy: a failed download is "try again" (transient,
+    the user can just resend), an oversize one is "Image too large (max 5
+    MB)." (permanent for that file, resending changes nothing). Collapsing
+    both into `None` would make the poller tell a user with a 12 MB photo to
+    keep retrying forever."""
 
 
 class TelegramAPI:
@@ -236,6 +272,70 @@ class TelegramAPI:
         except Exception:  # noqa: BLE001, S110 — best-effort, swallow everything
             pass
 
+    def get_file(self, file_id: str) -> str | None:
+        """`getFile` -> `result.file_path`, the relative path the file
+        endpoint serves the bytes under. Returns `None` -- after exactly one
+        scrubbed stderr line -- for every failure mode, same never-raises
+        contract as `get_updates`: a photo the poller can't resolve must
+        become a "couldn't download that" reply, never an exception on the
+        poller thread."""
+        req = self._request("getFile", {"file_id": file_id})
+        try:
+            with self._urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp:
+                body = resp.read()
+            data = json.loads(body)
+        except Exception as exc:  # noqa: BLE001 — transport must never raise
+            print(f"[telegram] getFile failed: {self._scrub(str(exc))}", file=sys.stderr)
+            return None
+        if not isinstance(data, dict) or not data.get("ok"):
+            print(f"[telegram] getFile failed: {self._scrub(str(data))}", file=sys.stderr)
+            return None
+        result = data.get("result")
+        path = result.get("file_path") if isinstance(result, dict) else None
+        if not isinstance(path, str) or not path:
+            print("[telegram] getFile failed: unexpected response shape", file=sys.stderr)
+            return None
+        return path
+
+    def download_file(self, file_path: str, max_bytes: int) -> bytes | None:
+        """GET the file endpoint and return at most `max_bytes` of body.
+
+        Raises `FileTooLarge` when the file is bigger than that, returns
+        `None` (one scrubbed stderr line) for any other failure, and never
+        raises anything else -- see `FileTooLarge` for why those two are
+        distinct outcomes rather than one.
+
+        The body is read as `read(max_bytes + 1)`, never unbounded: the one
+        extra byte is exactly enough to tell "at the limit" from "over it"
+        without materializing the overflow, so a 2 GB `file_path` costs 5 MB
+        of memory here rather than 2 GB (the same bounded-read shape
+        `web/routes/chat.py`'s upload handler uses). The bytes are returned
+        to the caller and never written to disk or logged.
+
+        `file_path` comes back from `getFile`, i.e. from Telegram -- but it
+        is interpolated into a URL whose earlier path segment is the bot
+        token, so a path that escaped its segment could aim this GET at
+        another endpoint entirely. Rejected outright rather than trusted."""
+        if (not file_path or file_path.startswith("/") or ".." in file_path
+                or "://" in file_path or "\\" in file_path):
+            print("[telegram] file download failed: unusable file_path", file=sys.stderr)
+            return None
+        url = _FILE_URL.format(token=self.token, path=file_path)
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with self._urlopen(req, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as resp:
+                data = resp.read(max_bytes + 1)
+        except Exception as exc:  # noqa: BLE001 — transport must never raise
+            print(f"[telegram] file download failed: {self._scrub(str(exc))}",
+                  file=sys.stderr)
+            return None
+        if not isinstance(data, bytes):
+            print("[telegram] file download failed: unexpected body", file=sys.stderr)
+            return None
+        if len(data) > max_bytes:
+            raise FileTooLarge(f"file exceeds {max_bytes} bytes")
+        return data
+
     def delete_message(self, chat_id: str, message_id: int) -> None:
         """Best-effort `deleteMessage`. Used right after a successful `/start
         <token>` pairing to scrub the token out of the chat's visible
@@ -330,6 +430,129 @@ _ACCOUNT_CALLBACK_RE = re.compile(r"^acct:(paper|shadow)\Z")
 # independent of the web UI's own default (`store.accounts.DEFAULT_ACCOUNT`,
 # "paper" -- spec: "手机和电脑各自有上下文").
 _DEFAULT_TELEGRAM_ACCOUNT = "shadow"
+
+# setup-wizard T7. The third rejection reply the Telegram surface needs and
+# the web one doesn't: a browser upload arrives with the request, a Telegram
+# photo has to be fetched back out of Telegram in two more round-trips
+# (`getFile` then the file endpoint), either of which can just fail.
+# Deliberately "try again": unlike the size/type refusals, resending the
+# same photo genuinely can work.
+DOWNLOAD_FAILED_MESSAGE = "Couldn't download that image — try again."
+
+# `message.photo` carries no filename (Telegram re-encodes camera photos and
+# throws the original name away), so this is what lands in the transcript
+# placeholder -- "[image: photo, 812 KB]". No extension: the real type comes
+# from `sniff_mime`, and inventing ".jpg" here would be a second, possibly
+# wrong claim about the same bytes. Image *documents* keep their own
+# `file_name`.
+_PHOTO_NAME = "photo"
+
+
+def _image_ref(message: dict[str, Any]) -> tuple[str, str] | None:
+    """`(file_id, name)` for a message carrying ONE importable image, else
+    `None` (every other message shape -- text, sticker, voice, video, a
+    non-image document -- which the poller ignores exactly as it always
+    has).
+
+    Two accepted shapes, both from the spec:
+
+      * `photo`: a list of `PhotoSize`s for the SAME image in ascending size
+        order. The last one is the original-resolution version; the earlier
+        entries are Telegram's own thumbnails, and downloading one of those
+        would hand the model a 90px blur of the chart the user meant to
+        show. Entries without a usable `file_id` are skipped rather than
+        crashing the batch.
+      * `document`: an image sent "as a file" (which is how a screenshot
+        keeps its pixels intact -- Telegram recompresses `photo`). Filtered
+        on the DECLARED `mime_type` here only as a cheap pre-filter for
+        which documents are worth fetching at all; the authoritative check
+        is `validate_images`' magic-byte sniff after the bytes arrive, since
+        `mime_type` is entirely sender-controlled.
+    """
+    photo = message.get("photo")
+    if isinstance(photo, list):
+        sizes = [p for p in photo
+                 if isinstance(p, dict) and isinstance(p.get("file_id"), str) and p["file_id"]]
+        return (sizes[-1]["file_id"], _PHOTO_NAME) if sizes else None
+    document = message.get("document")
+    if isinstance(document, dict) and document.get("mime_type") in ALLOWED_MIMES:
+        file_id = document.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            name = document.get("file_name")
+            return file_id, name if isinstance(name, str) else _PHOTO_NAME
+    return None
+
+
+def _album_key(chat_id: Any, from_id: Any, group_id: Any) -> tuple[str, str, str] | None:
+    """The album bucket a message belongs to, or `None` when it belongs to
+    no album (no usable `media_group_id`, or an origin this poller could not
+    identify).
+
+    Keyed on `(chat_id, from_id, media_group_id)`, NOT on `media_group_id`
+    alone (round-1 Important). `media_group_id` is scoped to the sender that
+    minted it, so two different chats can present the same value in one
+    batch -- and only ONE member of a group is pairing-checked (the one that
+    triggers dispatch). Keying on the id alone therefore let a batch of
+    `[stranger's photo(mg1), paired user's photo(mg1)]` splice the
+    stranger's image into the paired user's turn -- the stranger's bytes
+    downloaded and handed to the model, past a gate they never cleared --
+    and, with the order reversed, made the paired user's own album vanish
+    with no reply and no turn (dispatch fell to the stranger's message,
+    which the gate then dropped). Both halves close the moment a group can
+    only ever contain messages from one chat AND one sender."""
+    if chat_id is None or from_id is None:
+        return None
+    if not isinstance(group_id, str) or not group_id:
+        return None
+    return str(chat_id), str(from_id), group_id
+
+
+def _index_albums(updates: list[dict[str, Any]]) -> dict[tuple[str, str, str],
+                                                         list[dict[str, Any]]]:
+    """`{(chat_id, from_id, media_group_id): [message, ...]}` for the
+    image-bearing messages of this ONE `getUpdates` batch, in arrival order.
+    See `_album_key` for why the key is a triple.
+
+    Telegram delivers an album as N separate updates that share a
+    `media_group_id`; they have to be collected before the turn can run, or
+    a 3-photo album becomes three separate agent turns each seeing one
+    photo. Building the index up front (rather than buffering across calls)
+    keeps `_handle_update` a pure function of the batch and means no
+    half-collected album can ever be left in memory: the group is processed
+    when its LAST message in the batch is reached.
+
+    ORDERING: because an album is dispatched at its LAST member, a plain
+    text message sitting between an album's first and last part in the same
+    batch runs BEFORE the album does, even though the user sent the photos
+    first. Accepted -- the alternative is buffering the whole batch and
+    re-ordering it, and both turns still happen, in one poll, serialized by
+    `ChatService._turn_lock`.
+
+    KNOWN LIMIT (accepted, spec-level): an album SPLIT across two
+    `getUpdates` batches -- possible when Telegram delivers the parts across
+    a poll boundary -- becomes two turns. Buffering across polls would mean
+    holding image bytes and a timer between polls, which is a materially
+    bigger change than the failure mode is worth."""
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for update in updates:
+        # This pre-pass runs OUTSIDE `poll_once`'s per-update try/except, so
+        # a malformed batch entry (Telegram sending something that isn't an
+        # object, or a test's deliberately-broken update) must be skipped
+        # here rather than taking the whole batch down before any of it is
+        # handled.
+        if not isinstance(update, dict):
+            continue
+        message = update.get("message")
+        if not isinstance(message, dict) or _image_ref(message) is None:
+            continue
+        chat = message.get("chat")
+        from_ = message.get("from")
+        key = _album_key(chat.get("id") if isinstance(chat, dict) else None,
+                         from_.get("id") if isinstance(from_, dict) else None,
+                         message.get("media_group_id"))
+        if key is not None:
+            groups.setdefault(key, []).append(message)
+    return groups
 
 
 class TelegramPoller:
@@ -459,6 +682,10 @@ class TelegramPoller:
             return "failed"
         dropped = 0
         advanced_any = False
+        # Built once per batch, before anything is handled: an album's
+        # parts arrive as separate updates and have to be seen together
+        # (see `_index_albums`).
+        albums = _index_albums(updates)
         for update in updates:
             try:
                 # Offset is persisted the instant an update is received --
@@ -470,7 +697,7 @@ class TelegramPoller:
                 # is fixed, not configurable.
                 if self._advance_offset(update):
                     advanced_any = True
-                if self._handle_update(update) == "dropped":
+                if self._handle_update(update, albums) == "dropped":
                     dropped += 1
             except Exception as exc:  # noqa: BLE001 — one bad update must not kill the batch
                 self._log_error(f"failed to process update: {exc}")
@@ -516,14 +743,21 @@ class TelegramPoller:
             return True
         return False
 
-    def _handle_update(self, update: dict[str, Any]) -> str | None:
-        """Returns `"dropped"` when the update was a text message (or an
-        Approve/Reject button tap) from an unpaired/unmatched sender, or a
-        failed `/start` pairing attempt (so `poll_once` can count it for its
-        one stderr line), `None` otherwise -- including every other
-        non-text update shape (photos, stickers, `edited_message`, ...),
-        which are simply ignored: this bot only ever understands plain text
-        and its own review-approval callback buttons."""
+    def _handle_update(
+            self, update: dict[str, Any],
+            albums: dict[tuple[str, str, str], list[dict[str, Any]]] | None = None,
+    ) -> str | None:
+        """Returns `"dropped"` when the update was a text or image message
+        (or an Approve/Reject button tap) from an unpaired/unmatched sender,
+        or a failed `/start` pairing attempt (so `poll_once` can count it
+        for its one stderr line), `None` otherwise -- including every other
+        update shape (stickers, voice notes, non-image documents,
+        `edited_message`, ...), which are simply ignored: this bot
+        understands plain text, importable images (setup-wizard T7), and its
+        own review-approval callback buttons.
+
+        `albums` is the batch's `_index_albums` map; omitted (tests calling
+        this directly) means every image message is treated as a singleton."""
         callback = update.get("callback_query")
         if isinstance(callback, dict):
             return None if self._handle_callback_query(callback) else "dropped"
@@ -531,9 +765,17 @@ class TelegramPoller:
         message = update.get("message")
         if not isinstance(message, dict):
             return None
-        text = message.get("text")
-        if not isinstance(text, str):
-            return None
+        # An image message's text is its `caption` (Telegram never sets both
+        # `text` and `photo`/`document`), and an absent caption is a
+        # legitimate images-only message, not a reason to ignore the update.
+        image = _image_ref(message)
+        if image is None:
+            text = message.get("text")
+            if not isinstance(text, str):
+                return None
+        else:
+            caption = message.get("caption")
+            text = caption if isinstance(caption, str) else ""
         chat = message.get("chat")
         chat_id = chat.get("id") if isinstance(chat, dict) else None
         if chat_id is None:
@@ -549,7 +791,11 @@ class TelegramPoller:
         # flow to chat_service like anything else. The "@botname" suffix
         # (how a command reads when it's @-mentioned in a group) is
         # stripped before comparing.
-        parts = text.split(maxsplit=1)
+        # Commands are only ever read off a TEXT message. A caption is
+        # something the user wrote *about* the attached image -- treating
+        # "/account" under a photo as the account command would pop the
+        # switcher and silently swallow the image the user actually sent.
+        parts = text.split(maxsplit=1) if image is None else []
         command = parts[0].split("@", 1)[0] if parts else ""
         if command == "/start":
             token = parts[1].strip() if len(parts) > 1 else ""
@@ -580,8 +826,104 @@ class TelegramPoller:
             self._handle_account_command(chat_id)
             return None
 
+        if image is not None:
+            # `chat_id`/`from_id` here are this message's own, already
+            # checked against the pairing above -- so the group this looks
+            # up can only ever hold messages from the same cleared
+            # chat+sender (see `_album_key`).
+            key = _album_key(chat_id, from_id, message.get("media_group_id"))
+            group = (albums or {}).get(key) if key is not None else None
+            if group is None:
+                self._handle_image_message(chat_id, [message])
+            elif message is group[-1]:
+                # The whole album runs once, on its last part in this batch;
+                # the earlier parts were already gathered by `_index_albums`.
+                self._handle_image_message(chat_id, group)
+            return None
+
         self._handle_chat_text(chat_id, text)
         return None
+
+    def _handle_image_message(self, chat_id: str, messages: list[dict[str, Any]]) -> None:
+        """One image message, or one album, becoming one chat turn.
+
+        Every rejection is answered with the SAME fixed copy the web upload
+        path uses (`agent/attachments.py`) and runs no turn at all -- the
+        transcript is untouched, and the user can just resend. The count
+        check comes first, before any network call: refusing a 9-photo album
+        must not cost nine downloads to discover.
+
+        Whole-branch review (M6): a refusal carries this chat's
+        `[Paper] `/`[Shadow] ` prefix like every other reply the bot sends
+        (`_refuse` below, off `notify.events._prefix` -- the one place that
+        shape is decided). One paired chat serves both accounts, so an
+        unlabelled "Up to 4 images per message." said nothing about which
+        conversation had just turned the screenshot away.
+
+        Bytes live in this frame and in the `ImageAttachment`s handed to
+        `ChatService.send` -- never written to disk, never logged, never
+        stored (see `attachments.py`'s module docstring for where they go
+        from there)."""
+        refs = [ref for m in messages if (ref := _image_ref(m)) is not None]
+        if not refs:
+            return
+        if len(refs) > MAX_IMAGES:
+            self._refuse(chat_id, TOO_MANY_MESSAGE)
+            return
+        # The album's caption: Telegram puts it on whichever part the sender
+        # attached it to, so the first non-empty one is the message.
+        text = ""
+        for m in messages:
+            caption = m.get("caption")
+            if isinstance(caption, str) and caption.strip():
+                text = caption
+                break
+
+        # Downloading up to four 5 MB files over Telegram's file endpoint
+        # takes real seconds BEFORE `_handle_chat_text`'s own indicator
+        # starts -- without this the chat looks dead for that whole stretch.
+        self.api.send_typing(chat_id)
+        items: list[tuple[bytes, str]] = []
+        for file_id, name in refs:
+            file_path = self.api.get_file(file_id)
+            if file_path is None:
+                self._refuse(chat_id, DOWNLOAD_FAILED_MESSAGE)
+                return
+            try:
+                data = self.api.download_file(file_path, MAX_IMAGE_BYTES)
+            except FileTooLarge:
+                self._refuse(chat_id, TOO_LARGE_MESSAGE)
+                return
+            if data is None:
+                self._refuse(chat_id, DOWNLOAD_FAILED_MESSAGE)
+                return
+            items.append((data, name))
+
+        try:
+            images = validate_images(items)
+        except AttachmentError as exc:
+            # `str(exc)` is the same user-facing copy the web form shows --
+            # one source of truth for the wording, not a second hand-typed
+            # set here.
+            self._refuse(chat_id, str(exc))
+            return
+
+        # Spec ③: images alone are a legitimate message; the model gets a
+        # real sentence rather than an empty user turn, the same default the
+        # web route applies.
+        self._handle_chat_text(chat_id, text or IMAGES_ONLY_TEXT, images=images)
+
+    def _refuse(self, chat_id: str, message: str) -> None:
+        """A rejected attachment, prefixed for the account this chat is on.
+
+        The prefix comes from `events._prefix` -- the ONE place the
+        bracket/capitalization shape lives, and the reason an unrecognized
+        account degrades to no prefix instead of inventing a label. The copy
+        itself is never rewritten here: it arrives already fixed from
+        `agent/attachments.py` (or `DOWNLOAD_FAILED_MESSAGE`), so the web
+        form and the bot cannot word the same refusal differently.
+        """
+        self.api.send_message(chat_id, _prefix(self._telegram_account()) + message)
 
     def _handle_account_command(self, chat_id: str) -> None:
         """`/account` reply: an inline Paper/Shadow keyboard
@@ -913,7 +1255,8 @@ class TelegramPoller:
         return (f"{prefix}✅ Approved #{review_id} — order submitted.",
                 _toast("Approved"), True)
 
-    def _handle_chat_text(self, chat_id: str, text: str) -> None:
+    def _handle_chat_text(self, chat_id: str, text: str,
+                          images: list[ImageAttachment] | None = None) -> None:
         # Captured once, up front: this chat's account decides BOTH which
         # ChatService the text is routed to (`self.chat_service`, a
         # property reading the same thing) AND which prefix the reply
@@ -945,7 +1288,12 @@ class TelegramPoller:
         # the comment above `account = self._telegram_account()`.
         service = self._chat_services.get(account, self._chat_services.get(DEFAULT_ACCOUNT))
         try:
-            reply = service.send(text, source="telegram")
+            # `images` is passed only when there ARE images: `chat_service`
+            # is duck-typed here (see the class docstring), and a text-only
+            # turn keeping the exact pre-T7 call shape means an
+            # implementation without the keyword stays valid.
+            reply = (service.send(text, source="telegram", images=images) if images
+                     else service.send(text, source="telegram"))
         finally:
             stop_typing.set()
             ticker.join(timeout=1)

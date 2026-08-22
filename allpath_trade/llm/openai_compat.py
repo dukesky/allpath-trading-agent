@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import base64
 import json
 
 from openai import OpenAI
 
-from allpath_trade.llm.base import LLMClient, LLMError, LLMResponse, ToolCall, ToolSpec
+from allpath_trade.llm.base import (
+    LLMClient,
+    LLMError,
+    LLMResponse,
+    ToolCall,
+    ToolSpec,
+    has_image_parts,
+    wrap_request_error,
+)
 
 
 class OpenAICompatClient(LLMClient):
@@ -32,7 +41,8 @@ class OpenAICompatClient(LLMClient):
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except Exception as exc:  # SDK/network errors become LLMError
-            raise LLMError(f"llm request failed: {exc}") from exc
+            raise wrap_request_error(
+                exc, had_images=has_image_parts(messages)) from exc
 
         if not getattr(resp, "choices", None):
             raise LLMError("llm returned no choices")
@@ -73,6 +83,21 @@ class OpenAICompatClient(LLMClient):
                         for c in m["tool_calls"]
                     ],
                 })
+            elif isinstance(m.get("content"), list):
+                # Unified image parts (agent/attachments.py) -> the
+                # chat-completions multimodal shape. Bytes become a data:
+                # URL here, at the last possible moment, and are never
+                # stored on the message.
+                out.append({"role": m["role"],
+                            "content": [_part(p) for p in m["content"]]})
             else:
                 out.append(dict(m))
         return out
+
+
+def _part(part: dict) -> dict:
+    if part.get("type") == "image":
+        data = base64.b64encode(part["data"]).decode()
+        return {"type": "image_url",
+                "image_url": {"url": f"data:{part['mime']};base64,{data}"}}
+    return {"type": "text", "text": part.get("text", "")}

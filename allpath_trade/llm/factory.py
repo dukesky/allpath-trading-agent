@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from allpath_trade.config import Settings
+from allpath_trade.config import Settings, normalize_llm_provider
 from allpath_trade.llm.anthropic_client import AnthropicClient
 from allpath_trade.llm.base import LLMClient, LLMResponse, ToolSpec
 from allpath_trade.llm.openai_compat import OpenAICompatClient
@@ -61,7 +61,7 @@ def build_llm(settings: Settings, tier: str = "chat",
     if tier not in models:
         raise LLMConfigError(f"unknown LLM tier: {tier!r}")
     model = models[tier]
-    provider = settings.llm_provider.lower()
+    provider = normalize_llm_provider(settings.llm_provider)
     # Every tier's client gets the same explicit request timeout (ops-
     # hardening: see config.py's llm_timeout_seconds) -- there's no per-tier
     # override because a hung call is a hung call regardless of which model

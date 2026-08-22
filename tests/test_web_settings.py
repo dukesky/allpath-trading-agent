@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, TELEGRAM_USER_ID
 from allpath_trade.web import models_catalog
 from allpath_trade.web.app import create_app
 from allpath_trade.web.deps import ComponentHolder
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only
 from tests.test_sentinel import FakeBroker
 
 # The catalog covers every field's default value (see config.py's
@@ -27,6 +28,39 @@ FAKE_CATALOG = [
     "anthropic/claude-sonnet-5",
     "openai/gpt-5.2",
 ]
+
+# setup-wizard T2: the keys an install needs before the first-run gate
+# (web/auth.py) stops redirecting every GET to /setup. They have to be on
+# DISK, not merely in the in-memory Settings, because this suite's whole
+# subject is `.env` round-trips: every save and every `holder.rebuild()`
+# reloads Settings straight from that file, so a rebuild against an .env
+# without them would re-arm the gate and turn the next GET /settings into a
+# 302 to a page this task does not even add yet. Exactly the reason -- and
+# the same remedy -- as the WEB_TOKEN line every wholesale rewrite below
+# already carries. Prefixed rather than appended so a test that sets one of
+# these keys to its own value still wins (python-dotenv takes the last
+# occurrence of a duplicated key).
+CONFIGURED_ENV = ('OPENROUTER_API_KEY="sk-or-test-key"\n'
+                  'ALPACA_API_KEY="alpaca-test-key"\n'
+                  'ALPACA_SECRET_KEY="alpaca-test-secret"\n')
+
+
+def mask_for(body: str, field: str) -> str:
+    """The masked value the page renders for ONE named secret field.
+
+    Field-specific on purpose. Every secret input carries a static
+    `placeholder="Replace"`, and `CONFIGURED_ENV` now stores three keys of
+    its own, so a bare `"Replace" in body` or `"•" * 8 in body` passes
+    whether or not the field under test is masked -- or even rendered at
+    all. This pins the mask to the `<span class="muted">` that labels the
+    specific `<input name="...">`, which is the thing those tests are
+    actually about.
+    """
+    match = re.search(
+        r'<span class="muted">([^<]*)</span></label>\s*<input name="'
+        + re.escape(field) + '"', body)
+    assert match is not None, f"no masked secret field named {field!r} on the page"
+    return match.group(1)
 
 
 @pytest.fixture(autouse=True)
@@ -48,10 +82,12 @@ def client(tmp_path, monkeypatch):
     # `holder.rebuild()`, which reloads Settings straight from disk; without
     # the token on disk too, the very first rebuild would silently drop it
     # and lock the already-logged-in test client out of every later request.
+    (tmp_path / ".env").write_text(CONFIGURED_ENV)
     SettingsStore(tmp_path / ".env").set("WEB_TOKEN", "secret")
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
         c.post("/login", data={"token": "secret"})
         yield c
@@ -63,11 +99,14 @@ def test_secrets_are_never_echoed_back(client, tmp_path):
     # the token here would lock the already-logged-in client out before the
     # real assertions ever run.
     (tmp_path / ".env").write_text(
-        'ALPACA_SECRET_KEY="supersecret"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + 'ALPACA_SECRET_KEY="supersecret"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
     body = client.get("/settings").text
     assert "supersecret" not in body
-    assert "Replace" in body
+    # The stored value is 11 characters, so the mask is the fixed-width run
+    # plus its last 4 -- asserted on the Alpaca secret field itself, not on
+    # "some field somewhere on the page is masked".
+    assert mask_for(body, "alpaca_secret_key") == "•" * 8 + "cret"
 
 
 def test_long_secret_is_never_echoed_back_even_partially_unmasked(client, tmp_path):
@@ -79,13 +118,16 @@ def test_long_secret_is_never_echoed_back_even_partially_unmasked(client, tmp_pa
     # secret as a suffix, unlike e.g. an `sk-...` key's non-secret prefix.
     secret = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
     (tmp_path / ".env").write_text(
-        f'OPENROUTER_API_KEY="{secret}"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + f'OPENROUTER_API_KEY="{secret}"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
     body = client.get("/settings").text
     assert secret not in body
     assert secret[:6] not in body  # the old leading-character disclosure
     assert secret[-5:] not in body  # no more than 4 trailing characters
-    assert secret[-4:] in body  # a mask is actually rendered, not blank
+    # A mask is actually rendered for THIS field (the fixture stores other
+    # secrets too, so a bare `secret[-4:] in body` would be weaker than it
+    # looks the moment those tails happened to collide).
+    assert mask_for(body, "openrouter_api_key") == "•" * 8 + secret[-4:]
 
 
 def test_a_short_secret_falls_through_to_the_fixed_width_mask(client, tmp_path):
@@ -97,17 +139,21 @@ def test_a_short_secret_falls_through_to_the_fixed_width_mask(client, tmp_path):
     # secret (exactly at the new threshold) must still fall through to the
     # plain dot mask -- none of it may leak.
     (tmp_path / ".env").write_text(
-        'SMTP_PASSWORD="eightchr"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + 'SMTP_PASSWORD="eightchr"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
     body = client.get("/settings").text
     assert "eightchr" not in body
     assert "chr" not in body  # no trailing slice of it either
-    assert "•" * 8 in body  # the fixed-width mask is still rendered
+    # The fixed-width mask, with NO tail, on the SMTP field itself -- the
+    # other stored secrets are all long enough to show a tail, so a bare
+    # `"•" * 8 in body` would pass on one of those even if this field
+    # leaked outright.
+    assert mask_for(body, "smtp_password") == "•" * 8
 
 
 def test_settings_page_is_english_only(client, tmp_path):
     (tmp_path / ".env").write_text(
-        'OPENROUTER_API_KEY="sk-or-v1-abcdefghijklmnop"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + 'OPENROUTER_API_KEY="sk-or-v1-abcdefghijklmnop"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
     assert_english_only(client.get("/settings").text)
 
@@ -174,7 +220,7 @@ def test_model_fields_render_as_selects_with_the_stored_value_selected(client):
 
 def test_a_stored_off_catalog_model_is_prepended_not_silently_swapped(client, tmp_path):
     (tmp_path / ".env").write_text(
-        'CHAT_MODEL="custom-provider/exotic-model"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + 'CHAT_MODEL="custom-provider/exotic-model"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
     body = client.get("/settings").text
     # The off-list value must still be on the page, selected, as itself --
@@ -204,7 +250,7 @@ def test_saving_an_off_catalog_custom_model_value_persists(client, tmp_path):
 
 def test_blank_secret_field_leaves_the_stored_value_alone(client, tmp_path):
     (tmp_path / ".env").write_text(
-        'OPENROUTER_API_KEY="keep-me"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + 'OPENROUTER_API_KEY="keep-me"\nWEB_TOKEN="secret"\n')
     r = client.post("/settings", data={"openrouter_api_key": ""}, follow_redirects=False)
     assert r.status_code == 303
     assert "keep-me" in (tmp_path / ".env").read_text()
@@ -245,7 +291,7 @@ def test_unchecked_checkboxes_are_written_as_false(client, tmp_path):
     # `save` only wrote fields present in the form body, these could never
     # be turned off again.
     (tmp_path / ".env").write_text(
-        'DAILY_CONSOLIDATION="true"\nCONSOLIDATE_AFTER_CHAT="true"\n'
+        CONFIGURED_ENV + 'DAILY_CONSOLIDATION="true"\nCONSOLIDATE_AFTER_CHAT="true"\n'
         'WEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
     assert client.app.state.holder.get().settings.daily_consolidation is True
@@ -315,7 +361,7 @@ def test_telegram_bot_token_round_trips_as_a_secret_field(client, tmp_path):
 def test_telegram_bot_token_is_masked_and_blank_save_leaves_it_alone(client, tmp_path):
     token = "123456789:AAFakeTokenValueForTesting"
     (tmp_path / ".env").write_text(
-        f'TELEGRAM_BOT_TOKEN="{token}"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + f'TELEGRAM_BOT_TOKEN="{token}"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
 
     # No settings.html field renders this yet (backend-only in this task),
@@ -425,7 +471,7 @@ def test_invalid_field_redisplay_does_not_leak_the_typed_invalid_value_as_a_secr
     # the redisplay path -- a blank/omitted secret field in the failing POST
     # must not somehow end up rendered in the clear.
     (tmp_path / ".env").write_text(
-        'OPENROUTER_API_KEY="keep-me-secret"\nWEB_TOKEN="secret"\n')
+        CONFIGURED_ENV + 'OPENROUTER_API_KEY="keep-me-secret"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
 
     r = client.post("/settings", data={"sentinel_interval_minutes": "not-a-number"})
@@ -591,6 +637,11 @@ def test_save_writes_through_the_holders_store_not_a_default_one(client, tmp_pat
     other_env = tmp_path / "elsewhere" / ".env"
     other_env.parent.mkdir()
     original_settings = client.app.state.holder.get().settings
+    # This file becomes the one the holder reloads from, so it needs the
+    # same two things the fixture's own .env does: the token (or the
+    # logged-in client is locked out) and the keys (or the first-run gate
+    # re-arms and the final GET below is a 302 to /setup).
+    other_env.write_text(CONFIGURED_ENV)
     SettingsStore(other_env).set("WEB_TOKEN", "secret")
     SettingsStore(other_env).set("DB_PATH", str(original_settings.db_path))
 
@@ -666,7 +717,8 @@ def _reset_notifier_spies():
 
 def test_test_email_sends_typed_fields_and_falls_back_to_stored_password_when_blank(
         client, tmp_path, monkeypatch):
-    (tmp_path / ".env").write_text('SMTP_PASSWORD="stored-pw"\nWEB_TOKEN="secret"\n')
+    (tmp_path / ".env").write_text(
+        CONFIGURED_ENV + 'SMTP_PASSWORD="stored-pw"\nWEB_TOKEN="secret"\n')
     client.app.state.holder.rebuild()
     monkeypatch.setattr(settings_route, "EmailNotifier", _SpyEmailNotifier)
     env_before = (tmp_path / ".env").read_text()
@@ -845,8 +897,10 @@ def test_help_toggles_present_with_key_setup_phrases(client):
     body = client.get("/settings").text
     assert "<details" in body
     # F5: each `?` disclosure toggle needs an accessible name -- a bare "?"
-    # glyph means nothing to a screen reader.
-    assert body.count('<summary aria-label="Setup help">?</summary>') == 3
+    # glyph means nothing to a screen reader. Four since setup-wizard T3
+    # added one to Brokerage (the shared Alpaca signup steps), alongside
+    # Email, Push and Telegram.
+    assert body.count('<summary aria-label="Setup help">?</summary>') == 4
     # Email help: Gmail app-password setup, the most-common-failure hint,
     # and the grouping-space strip save() already implements.
     assert "myaccount.google.com/apppasswords" in body
@@ -945,6 +999,22 @@ def test_push_test_button_scopes_via_hx_params_allowlist(client):
     assert 'hx-params="ntfy_url"' in body
     assert "topic name is effectively a password" in body
     assert "Self-hosted ntfy servers work too" in body
+
+
+# --- setup-wizard T3: the shared Alpaca signup steps ------------------------
+
+def test_brokerage_help_toggle_carries_the_shared_signup_steps(client):
+    """Same include as the wizard's step 2 (_alpaca_signup_steps.html), so
+    someone who skipped the wizard and came straight to Settings gets the
+    same four steps rather than a key field with no explanation."""
+    body = client.get("/settings").text
+    brokerage = body[body.index('data-panel="brokerage"'):body.index('data-panel="email"')]
+    assert '<ol class="signup-steps">' in brokerage
+    assert "https://alpaca.markets" in brokerage
+    assert "Paper Trading" in brokerage
+    assert "Generate New Keys" in brokerage
+    assert "the secret is shown once" in brokerage
+    assert_english_only(body)
 
 
 # --- Item 2: settings page tabs --------------------------------------------
@@ -1223,3 +1293,43 @@ def test_shadow_settings_notice_is_shown_and_english_only(client):
     r = client.post("/settings/shadow/reset", follow_redirects=True)
     assert "queued for your approval" in r.text
     assert_english_only(r.text)
+
+
+def test_a_capitalized_provider_still_gets_its_own_catalog(tmp_path, monkeypatch):
+    """Whole-branch review (M1): `LLM_PROVIDER=OpenRouter` builds an
+    OpenRouter client and passes the setup gate (both read it through
+    `normalize_llm_provider`), so the model dropdowns and the Provider
+    select have to read it the same way -- otherwise this install silently
+    got the "unknown provider" list and a select with nothing highlighted."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    SettingsStore(tmp_path / ".env").set("WEB_TOKEN", "secret")
+    seen = []
+    monkeypatch.setattr(models_catalog, "list_models",
+                        lambda provider: seen.append(provider) or ["a/b"])
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **{**CONFIGURED_KEYS, "llm_provider": "OpenRouter"})
+    with TestClient(create_app(settings, broker=FakeBroker())) as c:
+        c.post("/login", data={"token": "secret"})
+        body = c.get("/settings").text
+    assert seen == ["openrouter"]
+    assert '<option value="openrouter" selected>' in body
+
+
+def test_access_section_offers_a_re_run_setup_link(client):
+    """setup-wizard T2: the wizard is dismissable and, once dismissed, the
+    banner is the only pointer back to it -- which disappears the moment
+    setup is finished. Settings is the durable way back in (to rotate a key
+    through the same guided flow, say)."""
+    body = client.get("/settings").text
+    # Whole-branch review (Important 1): `/setup`, not `/setup?step=1`.
+    # Pinning step 1 walked an already-configured install back onto the
+    # provider form, where a blank "Save & continue" used to rewrite
+    # LLM_PROVIDER. Bare `/setup` lets `_default_step` land the user on the
+    # first thing that still needs doing (step 3 when nothing does).
+    assert 'href="/setup"' in body
+    assert "/setup?step=" not in body
+    assert "Re-run setup" in body
+    assert_english_only(body)

@@ -644,3 +644,26 @@ def test_auto_soft_agent_approved_paper_detail_still_says_submitted(tmp_path):
     s.review_agent = StubReviewAgent("execute")
     report = s.run_once()
     assert report.outcomes[0].detail == "agent-approved; submitted"
+
+
+# -- setup-wizard T1: an unconfigured paper broker --
+
+
+def test_run_once_on_an_unconfigured_broker_reports_one_error_and_checks_nothing(tmp_path):
+    # `serve` now starts with no Alpaca keys, so the scheduler's sentinel
+    # pass can reach a paper account whose broker is the placeholder. That
+    # is a setup state, not a broken environment: it must read as one clear
+    # line, never as a raw "setup failed: <exception>" dump, and no strategy
+    # may be evaluated (every evaluation needs live equity/positions).
+    from allpath_trade.broker.unconfigured import UnconfiguredBroker
+
+    s, store, ex, _q, n = make(tmp_path, strategy_yaml())
+    s.broker = UnconfiguredBroker()
+
+    report = s.run_once()
+
+    assert report.errors == ["paper broker not configured"]
+    assert report.strategies_checked == 0
+    assert report.outcomes == []
+    assert ex.calls == [] and n.sent == []
+    assert store.load("t").rules[0].state == RuleState.ARMED

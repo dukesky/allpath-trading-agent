@@ -8,7 +8,7 @@ from allpath_trade.config import Settings
 from allpath_trade.strategy.model import RuleState
 from allpath_trade.web.app import create_app
 from allpath_trade.web.routes import dashboard as dashboard_route
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only
 from tests.test_sentinel import FakeBroker
 
 STRAT = """
@@ -27,7 +27,8 @@ def client(tmp_path, monkeypatch):
     (tmp_path / "strategies" / "semis.yaml").write_text(STRAT)
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
         c.post("/login", data={"token": "secret"})
         yield c

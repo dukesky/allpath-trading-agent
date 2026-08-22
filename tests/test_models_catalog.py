@@ -18,10 +18,16 @@ def _cold_cache():
     test happens to run first would seed it for every test after, making the
     "hits the network once" and "falls back on failure" assertions depend on
     test order instead of on the behavior under test.
+
+    `_input_modalities` (setup-wizard T6) is the same kind of process-global
+    fetch residue and is reset alongside it, so a modality test can't be
+    handed another test's canned catalog.
     """
     models_catalog._cache = None
+    models_catalog._input_modalities = {}
     yield
     models_catalog._cache = None
+    models_catalog._input_modalities = {}
 
 
 # A canned OpenRouter /models response, not the real API: a text chat model,
@@ -182,3 +188,56 @@ def test_anthropic_and_openai_return_the_static_list_and_never_touch_the_network
 
     assert models_catalog.list_models("anthropic") == models_catalog.FALLBACK_MODELS["anthropic"]
     assert models_catalog.list_models("openai") == models_catalog.FALLBACK_MODELS["openai"]
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T6: input modalities, for the chat page's vision hint.
+# ---------------------------------------------------------------------------
+
+_MODALITY_RESPONSE = {
+    "data": [
+        {"id": "text/only", "architecture": {"modality": "text->text",
+                                             "input_modalities": ["text"]}},
+        {"id": "sees/images", "architecture": {"modality": "text+image->text",
+                                               "input_modalities": ["text", "image"]}},
+        {"id": "no/declaration", "architecture": {"modality": "text->text"}},
+    ]
+}
+
+
+def test_input_modalities_is_unknown_until_a_catalog_fetch_has_succeeded(monkeypatch):
+    def _raise(*a, **k):
+        raise AssertionError("the vision hint must never trigger a fetch")
+
+    monkeypatch.setattr(models_catalog.urllib.request, "urlopen", _raise)
+
+    assert models_catalog.cached_input_modalities("openrouter", "sees/images") is None
+
+
+def test_input_modalities_come_from_the_last_successful_fetch(monkeypatch):
+    monkeypatch.setattr(
+        models_catalog.urllib.request, "urlopen",
+        lambda *a, **k: _FakeHTTPResponse(_MODALITY_RESPONSE))
+
+    models_catalog.list_models("openrouter")
+
+    assert models_catalog.cached_input_modalities("openrouter", "sees/images") == [
+        "text", "image"]
+    assert models_catalog.cached_input_modalities("openrouter", "text/only") == ["text"]
+    # A model the catalog lists WITHOUT an `input_modalities` key is unknown,
+    # not "no image support" -- recording `[]` for it would turn a missing
+    # field into a confident (and wrong) "this model can't see" hint.
+    assert models_catalog.cached_input_modalities("openrouter", "no/declaration") is None
+    # And a slug the catalog doesn't list at all is unknown too.
+    assert models_catalog.cached_input_modalities("openrouter", "who/knows") is None
+
+
+def test_input_modalities_are_only_meaningful_for_openrouter(monkeypatch):
+    monkeypatch.setattr(
+        models_catalog.urllib.request, "urlopen",
+        lambda *a, **k: _FakeHTTPResponse(_MODALITY_RESPONSE))
+    models_catalog.list_models("openrouter")
+
+    # anthropic/openai never fetch a catalog, so nothing is ever known about
+    # their slugs -- the hint stays silent rather than guessing.
+    assert models_catalog.cached_input_modalities("anthropic", "sees/images") is None

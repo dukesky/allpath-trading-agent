@@ -107,6 +107,21 @@ def _safe_redirect_target(request: Request) -> str:
     return path
 
 
+def set_account_cookie(response, account: str) -> None:
+    """Write the account cookie onto `response`.
+
+    Extracted from `switch_account` below so the setup wizard's "Open Chat"
+    (web/routes/setup.py) sets the exact same cookie with the exact same
+    flags rather than a second, hand-rolled `set_cookie` that could drift
+    from this one: HttpOnly (no page JS ever reads it) and SameSite=Strict
+    (a third-party page can never flip which account this browser is
+    looking at). Callers pass an already-validated account name -- this is
+    the writer, not the validator.
+    """
+    response.set_cookie(ACCOUNT_COOKIE, account, httponly=True, samesite="strict",
+                        max_age=_COOKIE_MAX_AGE_SECONDS)
+
+
 @router.post("/account/switch")
 def switch_account(request: Request, account: str = Form(DEFAULT_ACCOUNT)):
     # An invalid posted value (a hand-crafted form, a stale client) falls
@@ -115,10 +130,7 @@ def switch_account(request: Request, account: str = Form(DEFAULT_ACCOUNT)):
     # value instead" posture as `current_account` above.
     target = account if is_valid_account(account) else DEFAULT_ACCOUNT
     response = RedirectResponse(_safe_redirect_target(request), status_code=303)
-    # Same cookie discipline as the session cookie (web/auth.py's COOKIE):
-    # HttpOnly (no reason for page JS to ever read this) and SameSite=Strict
-    # (never sent on a cross-site request, so a third-party page cannot
-    # flip which account this browser is looking at).
-    response.set_cookie(ACCOUNT_COOKIE, target, httponly=True, samesite="strict",
-                        max_age=_COOKIE_MAX_AGE_SECONDS)
+    # Same cookie discipline as the session cookie (web/auth.py's COOKIE) --
+    # see `set_account_cookie` above.
+    set_account_cookie(response, target)
     return response

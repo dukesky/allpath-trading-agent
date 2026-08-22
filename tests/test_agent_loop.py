@@ -1,11 +1,19 @@
+import json
 import sqlite3
 
 import pytest
 
+from allpath_trade.agent.attachments import ImageAttachment
 from allpath_trade.agent.compact import Compactor
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.tools import ToolRegistry
-from allpath_trade.llm.base import LLMClient, LLMError, LLMResponse, ToolCall
+from allpath_trade.llm.base import (
+    LLMClient,
+    LLMError,
+    LLMImageUnsupported,
+    LLMResponse,
+    ToolCall,
+)
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 
@@ -268,3 +276,193 @@ def test_compaction_degrades_instead_of_crashing_when_store_is_unwritable(capsys
     assert store.summary_calls == 0             # compaction never advanced the marker
     err = capsys.readouterr().err
     assert err.count("not being saved") == 1    # warned exactly once, not per message
+
+
+# --- image attachments (setup-wizard T5) ------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+def _png(name="positions.png"):
+    return ImageAttachment(data=PNG_BYTES, mime="image/png", name=name)
+
+
+def test_images_reach_the_llm_as_list_content_image_parts_then_text():
+    llm = ScriptedLLM([LLMResponse(text="I see two positions")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("what do you make of this?", images=[_png()])
+    last = llm.seen[0][-1]
+    assert last == {
+        "role": "user",
+        "content": [
+            {"type": "image", "mime": "image/png", "data": PNG_BYTES},
+            {"type": "text", "text": "what do you make of this?"},
+        ],
+    }
+
+
+def _image_parts(messages):
+    """The image parts of the newest user entry of one outgoing request."""
+    user = next(m for m in reversed(messages) if m["role"] == "user")
+    content = user["content"]
+    if not isinstance(content, list):
+        return []
+    return [p for p in content if p.get("type") == "image"]
+
+
+def test_only_the_first_call_of_a_turn_carries_the_image_bytes():
+    # Whole-branch review (Important 4): re-attaching on every iteration
+    # meant a 4-image turn with three tool round-trips uploaded the same
+    # 20 MB four times. The model restates the table it read on its first
+    # reply (agent/context.py's SCREENSHOT_NOTE says so explicitly), and
+    # that restatement is in the history every later iteration sends.
+    llm = ScriptedLLM([tool_response("echo", {"a": 1}, id_="c1"),
+                       tool_response("echo", {"a": 2}, id_="c2"),
+                       tool_response("echo", {"a": 3}, id_="c3"),
+                       LLMResponse(text="done")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("read this", images=[_png()])
+    assert len(llm.seen) == 4
+    assert len(_image_parts(llm.seen[0])) == 1
+    assert [_image_parts(call) for call in llm.seen[1:]] == [[], [], []]
+
+
+def test_later_iterations_send_the_users_text_unchanged():
+    llm = ScriptedLLM([tool_response("echo", {"a": 1}), LLMResponse(text="done")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("read this", images=[_png()])
+    user = next(m for m in llm.seen[1] if m["role"] == "user")
+    assert user["content"] == "read this"
+
+
+def test_a_second_turn_never_resurrects_the_first_turns_images():
+    llm = ScriptedLLM([LLMResponse(text="one"), LLMResponse(text="two")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("here", images=[_png()])
+    s.run_turn("and this?")
+    assert _image_parts(llm.seen[1]) == []
+
+
+def test_images_are_never_kept_on_the_history_message(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    store = ConversationStore(conn)
+    cid = store.start()
+    llm = ScriptedLLM([LLMResponse(text="ok")])
+    s = AgentSession(llm, make_registry(), "SYS", store=store, conversation_id=cid)
+    s.run_turn("here", images=[_png()])
+
+    user = s.history[-2]
+    assert "images" not in user
+    assert user["content"] == "here"
+    assert user["display"] == "[image: positions.png, 1 KB] here"
+    saved = store.history(cid)
+    assert "images" not in saved[0]
+    assert saved[0]["content"] == "here"
+    rows = conn.execute("SELECT message FROM conversation_turns").fetchall()
+    blob = "".join(r["message"] for r in rows)
+    assert "images" not in blob and "PNG" not in blob
+    indexed = conn.execute("SELECT content FROM search_index").fetchall()
+    assert all("PNG" not in r["content"] for r in indexed)
+    assert any("[image: positions.png" in r["content"] for r in indexed)
+
+
+def test_images_are_dropped_even_when_the_llm_raises(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    store = ConversationStore(conn)
+    cid = store.start()
+    llm = ScriptedLLM([LLMError("boom")])
+    s = AgentSession(llm, make_registry(), "SYS", store=store, conversation_id=cid)
+    reply = s.run_turn("here", images=[_png()])
+
+    assert reply.startswith("(llm error:")
+    assert all("images" not in m for m in s.history)
+    rows = conn.execute("SELECT message FROM conversation_turns").fetchall()
+    assert all("images" not in r["message"] for r in rows)
+
+
+def test_an_image_unsupported_error_propagates_instead_of_becoming_a_notice(tmp_path):
+    # ChatService maps this one to its own fixed reply; run_turn must not
+    # swallow it into the generic "(llm error: ...)" notice first. The
+    # transient images key is still popped on the way out.
+    conn = connect(tmp_path / "db.sqlite")
+    store = ConversationStore(conn)
+    cid = store.start()
+    llm = ScriptedLLM([LLMImageUnsupported("llm request failed: no image support")])
+    s = AgentSession(llm, make_registry(), "SYS", store=store, conversation_id=cid)
+    with pytest.raises(LLMImageUnsupported):
+        s.run_turn("here", images=[_png()])
+    assert all("images" not in m for m in s.history)
+    assert [m["role"] for m in s.history] == ["user"]
+
+
+def test_a_text_only_turn_is_unchanged_by_the_images_parameter():
+    llm = ScriptedLLM([LLMResponse(text="hi")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("hello", images=[])
+    assert s.history[0] == {"role": "user", "content": "hello"}
+    assert llm.seen[0] == [{"role": "system", "content": "SYS"},
+                           {"role": "user", "content": "hello"}]
+
+
+def test_an_images_only_turn_sends_no_empty_text_part():
+    # Anthropic 400s on an empty text block, with a message that matches no
+    # "unsupported" pattern -- the user would get a raw provider error for
+    # a perfectly ordinary "screenshot, no caption" message.
+    llm = ScriptedLLM([LLMResponse(text="ok")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("", images=[_png()])
+    assert llm.seen[0][-1]["content"] == [
+        {"type": "image", "mime": "image/png", "data": PNG_BYTES}]
+    # ...and the stored display line has no trailing space.
+    assert s.history[0]["display"] == "[image: positions.png, 1 KB]"
+
+
+def _compaction_run(tmp_path, db_name, final_images, monkeypatch):
+    """Drive a session past its context budget, ending on one turn that may
+    carry images, and report what the Compactor actually did plus every
+    message `estimate_tokens` was asked to weigh."""
+    import allpath_trade.agent.compact as compact_mod
+
+    weighed: list[dict] = []
+    real_estimate = compact_mod.estimate_tokens
+
+    def spy(messages):
+        weighed.extend(messages)
+        return real_estimate(messages)
+
+    monkeypatch.setattr(compact_mod, "estimate_tokens", spy)
+    store = ConversationStore(connect(tmp_path / db_name))
+    cid = store.start()
+    flushes: list[int] = []
+    summarizer = ScriptedLLM([LLMResponse(text=f"summary {i}") for i in range(40)])
+    compactor = Compactor(summarizer, store, budget_tokens=1200,
+                          on_before_compact=lambda msgs: flushes.append(len(msgs)))
+    session = AgentSession(ScriptedLLM([LLMResponse(text=f"reply {i}") for i in range(40)]),
+                           make_registry(), "SYS", store=store,
+                           conversation_id=cid, compactor=compactor)
+    for i in range(15):
+        session.run_turn(f"question {i} " + "x" * 600)
+    session.run_turn("last one", images=final_images)
+    return ({"summaries": len(summarizer.seen), "flushes": len(flushes),
+             "context": len(session.history)}, weighed)
+
+
+def test_a_turn_with_huge_images_compacts_exactly_like_the_text_only_baseline(
+        tmp_path, monkeypatch):
+    # Review finding (Important 1): with `images` on the history dict,
+    # estimate_tokens' `json.dumps(m, default=str)` valued a 5 MB
+    # screenshot at millions of tokens, so `_cut_index` never found a
+    # fitting suffix -- compaction AND the on_before_compact memory flush
+    # silently stopped for that turn, after seconds of re-serializing bytes
+    # under ChatService's turn lock.
+    big = [ImageAttachment(data=b"\x89PNG\r\n\x1a\n" + b"\x00" * (5 * 1024 * 1024),
+                           mime="image/png", name=f"shot{i}.png") for i in range(4)]
+    baseline, _ = _compaction_run(tmp_path, "baseline.db", None, monkeypatch)
+    with_images, weighed = _compaction_run(tmp_path, "images.db", big, monkeypatch)
+
+    assert baseline["summaries"] > 0 and baseline["flushes"] > 0  # it really compacted
+    assert with_images == baseline
+    # estimate_tokens never sees an image: no bytes, no `images` key, and
+    # no message anywhere near a megabyte.
+    assert all("images" not in m for m in weighed)
+    assert max(len(json.dumps(m, default=str)) for m in weighed) < 5_000

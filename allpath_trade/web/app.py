@@ -387,6 +387,13 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app.state.chat = app.state.chat_service
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    # Whole-branch review (Important 3): registered BEFORE install_auth so
+    # the auth middleware ends up wrapping it (Starlette builds the stack so
+    # the LAST registered middleware is outermost) -- an unauthenticated
+    # oversized POST still meets the login redirect, not a 413.
+    from allpath_trade.web.routes import chat as chat_routes
+
+    chat_routes.install_upload_limit(app)
     install_auth(app)
 
     # Env globals apply to every template render regardless of the context
@@ -408,6 +415,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
         memory,
         reports,
         reviews,
+        setup,
         strategies,
     )
     from allpath_trade.web.routes import settings as settings_routes
@@ -421,6 +429,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app.include_router(memory.router)
     app.include_router(reports.router)
     app.include_router(settings_routes.router)
+    app.include_router(setup.router)
 
     @app.get("/healthz")
     def healthz() -> dict:

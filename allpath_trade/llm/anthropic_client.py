@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import base64
+
 import anthropic
 
-from allpath_trade.llm.base import LLMClient, LLMError, LLMResponse, ToolCall, ToolSpec
+from allpath_trade.llm.base import (
+    LLMClient,
+    LLMResponse,
+    ToolCall,
+    ToolSpec,
+    has_image_parts,
+    wrap_request_error,
+)
 
 
 class AnthropicClient(LLMClient):
@@ -34,7 +43,8 @@ class AnthropicClient(LLMClient):
         try:
             resp = self._client.messages.create(**kwargs)
         except Exception as exc:
-            raise LLMError(f"llm request failed: {exc}") from exc
+            raise wrap_request_error(
+                exc, had_images=has_image_parts(messages)) from exc
 
         text_parts: list[str] = []
         calls: list[ToolCall] = []
@@ -82,6 +92,21 @@ class AnthropicClient(LLMClient):
                     out[-1]["content"].append(block)
                 else:
                     out.append({"role": "user", "content": [block]})
+            elif isinstance(m["content"], list):
+                # Unified image parts (agent/attachments.py) -> Anthropic
+                # content blocks. Bytes are base64'd here, at the last
+                # possible moment, and never stored on the message.
+                out.append({"role": role,
+                            "content": [AnthropicClient._part(p)
+                                        for p in m["content"]]})
             else:
                 out.append({"role": role, "content": m["content"]})
         return "\n\n".join(system_parts), out
+
+    @staticmethod
+    def _part(part: dict) -> dict:
+        if part.get("type") == "image":
+            return {"type": "image",
+                    "source": {"type": "base64", "media_type": part["mime"],
+                               "data": base64.b64encode(part["data"]).decode()}}
+        return {"type": "text", "text": part.get("text", "")}

@@ -58,6 +58,22 @@ nav a { color:var(--muted); font-size:14px; padding:4px 0; border-bottom:2px sol
 nav a:hover { color:var(--text); }
 nav a.on { color:var(--text); font-weight:600; border-bottom-color:var(--accent); }
 
+/* setup-wizard T2: the unfinished-setup strip, directly under the nav.
+   Deliberately muted rather than alarm-colored -- an install missing its
+   keys is an unfinished chore, not a fault, and this sits on every page
+   until it's done; --warn/--badge amber is reserved for things that need
+   attention NOW (a triggered rule, a pending approval) and would lose that
+   meaning if a permanent strip also wore it. Every color is a token, so it
+   follows the light-mode overrides at the top of this file with no rules of
+   its own: --surface-2 reads as a recessed band against --bg in both
+   themes, and its own link rule is needed because `main a` (line ~70) does
+   not reach outside <main>, where `a { color:inherit }` would leave the
+   link indistinguishable from the sentence around it. */
+.setup-banner { margin:0; padding:9px 24px; background:var(--surface-2);
+  color:var(--muted); border-bottom:1px solid var(--line); font-size:13px; }
+.setup-banner a { color:var(--accent); font-weight:600; }
+.setup-banner a:hover { text-decoration:underline; }
+
 /* Bare inline text links (Strategies' "View details", a source URL in a
    review's agent analysis) get no other affordance -- .strategy-card is
    also an <a> but is excluded via :not(.card), since a whole card reading
@@ -161,6 +177,15 @@ button.primary:hover { background:var(--accent-soft); border-color:var(--accent)
 button.danger { border-color:var(--down); color:var(--down); }
 button.danger:hover { background:var(--down-soft); }
 button:disabled, .btn:disabled { opacity:.5; cursor:default; }
+
+/* setup-wizard T4: the chat onboarding card's clickable example prompts --
+   full-width, left-aligned, stacked rows read as "pick one of these" more
+   clearly than the centered/inline default `button` styling above, which
+   is built for short single-word actions (Send, Approve). */
+.onboarding-card .examples { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+.onboarding-card .example { text-align:left; font-size:13.5px; color:var(--muted);
+  padding:9px 12px; white-space:normal; }
+.onboarding-card .example:hover { color:var(--text); }
 
 input, select, textarea { background:var(--surface); color:var(--text);
   border:1px solid var(--line); border-radius:var(--radius-sm); padding:9px 11px;
@@ -296,6 +321,31 @@ label:first-child { margin-top:0; }
   .msg.thinking .dots { animation:none; opacity:.7; }
 }
 .activity { color:var(--muted-2); font-size:12px; font-family:var(--mono); margin-top:4px; }
+
+/* setup-wizard T6: the chat composer's image attachments. Every color is a
+   token, so both themes follow the same rules the rest of the page does --
+   no literal hex anywhere here. The 📎 button is sized to match the input's
+   own height (9px padding + a 14px line) so the composer row stays one
+   clean line; `flex:0 0 auto` stops the flex row from stretching it while
+   #chat-input takes the slack. */
+.attach { flex:0 0 auto; font-size:15px; line-height:1; padding:9px 11px;
+  border-color:var(--line); color:var(--muted); }
+.attach:hover { color:var(--text); border-color:var(--muted-2); }
+/* Drop target feedback while a file is dragged over the composer. Border
+   color only -- a background flip would fight the input's own surface. */
+#chat-form.dropping { outline:2px dashed var(--accent); outline-offset:4px;
+  border-radius:var(--radius-sm); }
+.thumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.thumb { position:relative; width:56px; height:56px; border-radius:var(--radius-sm);
+  border:1px solid var(--line); background:var(--surface-2); overflow:hidden; }
+.thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+/* The × sits ON the thumbnail (there is no room for a row beneath a 56px
+   tile) with its own opaque token background, so it stays legible over a
+   screenshot of any brightness in either theme. */
+.thumb-remove { position:absolute; top:2px; right:2px; width:18px; height:18px;
+  padding:0; line-height:16px; font-size:13px; border-radius:999px;
+  background:var(--surface); border:1px solid var(--line); color:var(--muted); }
+.thumb-remove:hover { color:var(--down); border-color:var(--down); }
 pre { font-family:var(--mono); font-size:13px; overflow-x:auto;
   background:var(--surface-2); border:1px solid var(--line);
   border-radius:var(--radius-sm); padding:14px 16px; line-height:1.6; }
@@ -472,6 +522,56 @@ details.agent-analysis[open] summary::before { content:"▾ "; }
   letter-spacing:.06em; color:var(--muted-2); margin-bottom:4px; }
 .turn-text { white-space:pre-wrap; word-wrap:break-word; max-width:720px; line-height:1.6; }
 .turn-line { color:var(--muted-2); font-size:13px; font-family:var(--mono); }
+
+/* --- First-run wizard (/setup, setup-wizard T3) -------------------------
+   Everything here is built from the existing tokens only (--surface,
+   --line, --accent, --muted), so both themes are covered by the same
+   rules -- no hardcoded color appears below. */
+
+/* Progress header: the four step names, the current one highlighted, the
+   ones behind it marked done. A list, not a row of links: steps are
+   reached by finishing or skipping them, never by clicking the header. */
+.setup-progress { list-style:none; display:flex; flex-wrap:wrap; gap:8px;
+  margin:0 0 22px; padding:0; }
+.setup-progress .step { display:flex; align-items:center; gap:8px;
+  padding:7px 13px 7px 8px; border:1px solid var(--line); border-radius:999px;
+  color:var(--muted-2); font-size:12.5px; background:var(--surface); }
+.setup-progress .step .n { display:inline-block; width:19px; height:19px;
+  line-height:18px; text-align:center; border-radius:999px; font-size:11px;
+  border:1px solid var(--line); color:var(--muted); }
+.setup-progress .step.done { color:var(--muted); }
+.setup-progress .step.done .n { border-color:var(--muted-2); color:var(--muted); }
+.setup-progress .step.on { color:var(--text); border-color:var(--accent);
+  background:var(--accent-soft); }
+.setup-progress .step.on .n { border-color:var(--accent); color:var(--accent); }
+
+/* Step 1's "where to get a key" cards, one under each provider radio. */
+.key-source { border-left:2px solid var(--line); margin:0 0 6px 24px;
+  padding:2px 0 2px 14px; }
+.key-source p { margin:0 0 4px; font-size:12.5px; color:var(--muted);
+  line-height:1.55; }
+.key-source p:last-child { margin-bottom:0; }
+
+/* The shared Alpaca signup steps (_alpaca_signup_steps.html), used both in
+   the wizard's step 2 and inside Settings' Brokerage help toggle -- so the
+   rule has to read well against a card AND against the toggle's hint
+   text, which is why the numbers are the list's own markers rather than
+   card chrome of their own. */
+.signup-steps { margin:14px 0 0; padding:0 0 0 22px; }
+.signup-steps li { margin:0 0 9px; font-size:13px; color:var(--muted);
+  line-height:1.6; }
+.signup-steps li:last-child { margin-bottom:0; }
+.help-toggle .signup-steps { margin-top:8px; font-size:12.5px; }
+
+.setup-checklist { margin:14px 0 0; padding:0 0 0 20px; }
+.setup-checklist li { margin:0 0 9px; font-size:13.5px; color:var(--muted);
+  line-height:1.6; }
+
+/* "Skip for now" is a real escape hatch on every step, but never the
+   thing the eye lands on first -- quieter than the step's own primary
+   button, and set apart from it. */
+.setup-skip { margin-top:20px; }
+.setup-skip button { color:var(--muted); font-size:13px; padding:6px 12px; }
 
 @media (max-width:640px) {
   nav { gap:14px; padding:13px 16px; }

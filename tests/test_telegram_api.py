@@ -10,7 +10,12 @@ import urllib.error
 
 import pytest
 
-from allpath_trade.telegram import _HTML_TAG_RE, TelegramAPI, strip_telegram_html_to_plain
+from allpath_trade.telegram import (
+    _HTML_TAG_RE,
+    FileTooLarge,
+    TelegramAPI,
+    strip_telegram_html_to_plain,
+)
 from allpath_trade.web.markdown import TELEGRAM_ALLOWED_TAGS
 
 TOKEN = "123456:AAEsecret-bot-token-value"
@@ -487,3 +492,131 @@ def test_html_tag_re_matches_exactly_telegram_allowed_tags():
         f"but TELEGRAM_ALLOWED_TAGS has {TELEGRAM_ALLOWED_TAGS}. "
         "Update both to stay in sync."
     )
+
+
+# ---------------------------------------------------------------------------
+# getFile / file download (setup-wizard T7: Telegram photo import)
+# ---------------------------------------------------------------------------
+
+class _FakeFileResponse:
+    """A response whose `read` honours the size argument `download_file`
+    passes -- the real `http.client.HTTPResponse.read(n)` does, and the
+    bounded read is the whole point of that call."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, amount: int | None = None) -> bytes:
+        return self._body if amount is None else self._body[:amount]
+
+
+def test_get_file_returns_file_path():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse(_ok_body({"file_id": "abc", "file_path": "photos/file_1.jpg"}))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.get_file("abc") == "photos/file_1.jpg"
+    assert captured["url"] == f"https://api.telegram.org/bot{TOKEN}/getFile"
+    assert captured["body"] == {"file_id": "abc"}
+
+
+def test_get_file_returns_none_on_ok_false(capsys):
+    api = TelegramAPI(TOKEN, urlopen=lambda req, timeout=None: _FakeResponse(_fail_body()))
+    assert api.get_file("abc") is None
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_get_file_returns_none_when_result_has_no_file_path(capsys):
+    api = TelegramAPI(TOKEN,
+                      urlopen=lambda req, timeout=None: _FakeResponse(_ok_body({"file_id": "a"})))
+    assert api.get_file("abc") is None
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_get_file_network_error_returns_none_and_scrubs_the_token(capsys):
+    def raise_url_error(req, timeout=None):
+        raise urllib.error.URLError(f"connection refused for {req.full_url}")
+
+    api = TelegramAPI(TOKEN, urlopen=raise_url_error)
+    assert api.get_file("abc") is None
+    err = capsys.readouterr().err
+    assert TOKEN not in err
+    assert "***" in err
+
+
+def test_download_file_hits_the_file_endpoint_and_returns_bytes():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return _FakeFileResponse(b"\x89PNG\r\n\x1a\nrest")
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.download_file("photos/file_1.jpg", 1000) == b"\x89PNG\r\n\x1a\nrest"
+    assert captured["url"] == f"https://api.telegram.org/file/bot{TOKEN}/photos/file_1.jpg"
+    assert captured["method"] == "GET"
+
+
+def test_download_file_reads_at_most_max_bytes_plus_one():
+    captured = {}
+
+    class _Recording(_FakeFileResponse):
+        def read(self, amount=None):
+            captured["amount"] = amount
+            return super().read(amount)
+
+    api = TelegramAPI(TOKEN, urlopen=lambda req, timeout=None: _Recording(b"x" * 5))
+    assert api.download_file("p.jpg", 10) == b"x" * 5
+    # `max_bytes + 1`, never unbounded: the extra byte is exactly enough to
+    # tell "at the limit" from "over it" without holding the overflow.
+    assert captured["amount"] == 11
+
+
+def test_download_file_over_the_limit_raises_file_too_large():
+    api = TelegramAPI(TOKEN, urlopen=lambda req, timeout=None: _FakeFileResponse(b"x" * 50))
+    with pytest.raises(FileTooLarge):
+        api.download_file("p.jpg", 10)
+
+
+def test_download_file_exactly_at_the_limit_is_returned():
+    api = TelegramAPI(TOKEN, urlopen=lambda req, timeout=None: _FakeFileResponse(b"x" * 10))
+    assert api.download_file("p.jpg", 10) == b"x" * 10
+
+
+def test_download_file_network_error_returns_none_and_never_leaks_the_token(capsys):
+    # The file endpoint embeds the bot token in its URL exactly like the API
+    # endpoint does, so a urllib error message carries it verbatim -- this is
+    # the one stderr line standing between a flaky download and the token in
+    # the server log.
+    def raise_url_error(req, timeout=None):
+        raise urllib.error.URLError(f"timed out fetching {req.full_url}")
+
+    api = TelegramAPI(TOKEN, urlopen=raise_url_error)
+    assert api.download_file("photos/file_1.jpg", 1000) is None
+    err = capsys.readouterr().err
+    assert err.strip()
+    assert TOKEN not in err
+    assert "***" in err
+
+
+def test_download_file_rejects_a_traversing_file_path(capsys):
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        return _FakeFileResponse(b"x")
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.download_file("../../bot/getUpdates", 1000) is None
+    assert calls == []

@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app
-from tests.helpers import assert_english_only
+from tests.helpers import assert_english_only, dismiss_setup
 
 
 class _NoCredsBroker(Broker):
@@ -63,6 +63,14 @@ def client(tmp_path, monkeypatch):
         # default to "" -- no LLM key, no broker credentials.
     with TestClient(create_app(settings, broker=_NoCredsBroker())) as c:
         c.post("/login", data={"token": "secret"})
+        # setup-wizard T2: the keys stay empty -- that IS this suite -- but
+        # the first-run wizard is marked skipped, which is the only way a
+        # user in this state reaches these pages at all now. "Every page
+        # still renders on a brand-new install" is therefore now read as
+        # "every page still renders for someone who chose to go on without
+        # finishing setup"; the redirect they get if they DON'T is covered
+        # by tests/test_web_setup_gate.py.
+        dismiss_setup(c)
         yield c
 
 

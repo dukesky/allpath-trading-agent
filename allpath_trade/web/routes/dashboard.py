@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from allpath_trade.broker.base import Broker, Position
+from allpath_trade.broker.unconfigured import UnconfiguredBroker
 from allpath_trade.data.base import DataSource, Quote
 from allpath_trade.scheduler import is_market_hours, today_et_date
 from allpath_trade.store.accounts import ACCOUNTS
@@ -23,6 +24,7 @@ from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.account_ctx import bundle, bundle_for, current_account
 from allpath_trade.web.charts import equity_since_caption, equity_svg, signed_money, signed_pct
 from allpath_trade.web.deps import components
+from allpath_trade.web.setup_status import setup_missing
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -72,12 +74,25 @@ def nav_context(request: Request) -> dict:
     pending_count = len(bundle_for(c, current).queue.list())
     other = next(a for a in ACCOUNTS if a != current)
     other_pending = bool(bundle_for(c, other).queue.list())
+    # setup-wizard T2: the banner. Independent of the dismissal flag on
+    # purpose -- the redirect gate (web/auth.py) is what dismissal turns
+    # off, and in practice this only ever renders for someone who DID
+    # dismiss, since anyone who hasn't never reaches a page carrying it.
+    # Suppressed on the wizard's own pages, where a banner pointing at the
+    # page you are already on is just noise.
+    missing = setup_missing(c.settings)
     return {
         "pending_count": pending_count,
         "current_account": current,
         "other_account": other,
         "other_account_pending": other_pending,
+        "setup_missing": missing,
+        "setup_banner": bool(missing) and not _is_setup_path(request.url.path),
     }
+
+
+def _is_setup_path(path: str) -> bool:
+    return path == "/setup" or path.startswith("/setup/")
 
 
 def _with_timeout(fn):
@@ -429,7 +444,8 @@ def _parse_heartbeat_ts(raw: str) -> datetime:
 def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
                               market_open_raw: str | None = None,
                               last_ok_raw: str | None = None,
-                              now: datetime | None = None) -> dict:
+                              now: datetime | None = None,
+                              broker_unconfigured: bool = False) -> dict:
     """Pure function -- takes already-read `app_state.get(...)` values, no
     I/O, so it's testable without a store (same shape as summarize_strategy
     above). A malformed stored value degrades to the same "never ran" copy
@@ -462,7 +478,20 @@ def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
     Missing or unparseable `last_ok_raw` reads as "no successful check
     recorded" and warns -- unlike `market_open_raw`, absence here is not
     ambiguous: an account whose sentinel has ever completed a pass during
-    market hours has this key."""
+    market hours has this key.
+
+    `broker_unconfigured` (setup-wizard T1) short-circuits everything
+    above. With no Alpaca keys the scheduler still ticks and still writes
+    the heartbeat -- it is genuinely alive -- so every branch below would
+    render some flavour of "last check Nm ago", which is true and useless:
+    nothing is being monitored at all until setup is finished, and that is
+    the only fact worth a line here. It warns unconditionally for the same
+    reason, including outside market hours and including when the heartbeat
+    is missing entirely: unlike a lagging last-ok on a weekend, this state
+    never resolves itself with time."""
+    if broker_unconfigured:
+        return {"text": "Sentinel: paper broker not configured — finish setup",
+                "warn": True}
     if raw is None:
         return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
     try:
@@ -548,6 +577,11 @@ def dashboard(request: Request,
     # (T4) -- not the bare legacy key, so the dashboard's heartbeat line
     # always reflects the account currently being viewed, not always
     # paper's own pass regardless of which account is on screen.
+    # setup-wizard T1/T4: shared by the heartbeat line below AND the
+    # broker-failure slot's guidance card further down -- both need to
+    # single out "not configured yet" from every other broker failure, and
+    # must agree on the same check rather than risk drifting apart.
+    broker_unconfigured = isinstance(b.broker, UnconfiguredBroker)
     sentinel_status = sentinel_heartbeat_status(
         c.app_state.get(f"{SENTINEL_HEARTBEAT_KEY}:{b.account}"),
         c.settings.sentinel_interval_minutes,
@@ -555,7 +589,12 @@ def dashboard(request: Request,
         # I7: the per-account SUCCESS heartbeat, read alongside the plain
         # one -- the heartbeat proves the scheduler ticked, this proves the
         # tick actually evaluated anything.
-        last_ok_raw=c.app_state.get(f"{SENTINEL_LAST_OK_KEY}:{b.account}"))
+        last_ok_raw=c.app_state.get(f"{SENTINEL_LAST_OK_KEY}:{b.account}"),
+        # setup-wizard T1: the scheduler skips this account's pass entirely
+        # while the keys are missing (scheduler.py's `_run_sentinel_pass`),
+        # so the heartbeat below it must say so rather than reporting on
+        # ticks that deliberately checked nothing.
+        broker_unconfigured=broker_unconfigured)
 
     # Same is_market_hours the scheduler/sentinel gate their pass on (see
     # allpath_trade/scheduler.py) -- reused rather than reimplemented so the
@@ -622,7 +661,8 @@ def dashboard(request: Request,
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
         "price_as_of": price_as_of,
-        "broker_error": broker_error, "strategy_cards": strategy_cards,
+        "broker_error": broker_error, "broker_unconfigured": broker_unconfigured,
+        "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": b.journal.recent(limit=8),
         "sentinel_status": sentinel_status, "market_open": market_open,
         "range": range_key, "range_labels": _RANGE_LABELS,

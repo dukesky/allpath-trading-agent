@@ -11,7 +11,7 @@ from allpath_trade.store.reviews import ReviewError
 from allpath_trade.web.app import create_app
 from allpath_trade.web.routes import dashboard as dashboard_route
 from allpath_trade.web.routes.reviews import split_diff_rows
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only
 from tests.test_sentinel import FakeBroker
 from tests.test_web_dashboard import FakeDataSource
 
@@ -33,7 +33,8 @@ def client(tmp_path, monkeypatch):
     (tmp_path / "strategies").mkdir()
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
         # Must be set before the first request -- otherwise the reviews
         # page's price-context lookup (Part B) hits the real, network-backed

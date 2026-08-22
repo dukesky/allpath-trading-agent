@@ -30,7 +30,7 @@ from allpath_trade.web.routes.dashboard import (
     sentinel_heartbeat_status,
     summarize_strategy,
 )
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only, dismiss_setup
 from tests.test_sentinel import FakeBroker
 
 STRAT = """
@@ -93,7 +93,8 @@ def client(tmp_path, monkeypatch):
     (tmp_path / "strategies" / "semis.yaml").write_text(STRAT)
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
         # /login redirects to "/" on success and TestClient follows
         # redirects by default -- that first dashboard render must already
@@ -1169,6 +1170,10 @@ def test_dashboard_shadow_empty_ledger_shows_guidance_card(client):
     assert "Import your positions" in body
     assert 'href="/chat"' in body
     assert 'href="/settings"' in body
+    # setup-wizard T4: the shadow ledger's import path also accepts a
+    # screenshot of the brokerage (attached in Chat), not just typed
+    # positions or a CSV upload -- the empty-ledger card must say so.
+    assert "attach a screenshot in Chat" in body
 
 
 def test_dashboard_shadow_position_never_priced_shows_never_recorded(client):
@@ -1284,3 +1289,72 @@ def test_shadow_dashboard_stays_english_only(client):
     _record_shadow_trade(client)
     client.post("/account/switch", data={"account": "shadow"})
     assert_english_only(client.get("/").text)
+
+
+# -- setup-wizard T1: an unconfigured paper broker --
+
+
+def test_heartbeat_says_the_broker_is_not_configured_and_warns():
+    # Overrides every other heartbeat state: "last check 3m ago" is
+    # technically true while the keys are missing, but it is the wrong thing
+    # to tell the operator -- nothing is being monitored at all until setup
+    # is finished, and that is the only actionable fact.
+    now = datetime.now(UTC)
+    status = sentinel_heartbeat_status(
+        (now - timedelta(minutes=3)).isoformat(), 5,
+        market_open_raw="true", last_ok_raw=(now - timedelta(minutes=3)).isoformat(),
+        now=now, broker_unconfigured=True)
+    assert status == {"text": "Sentinel: paper broker not configured — finish setup",
+                      "warn": True}
+
+
+def test_heartbeat_broker_unconfigured_beats_a_never_ran_heartbeat():
+    status = sentinel_heartbeat_status(None, 5, broker_unconfigured=True)
+    assert status["text"] == "Sentinel: paper broker not configured — finish setup"
+    assert status["warn"] is True
+
+
+@pytest.fixture
+def unconfigured_client(tmp_path, monkeypatch):
+    from allpath_trade.broker.unconfigured import UnconfiguredBroker
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / "semis.yaml").write_text(STRAT)
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret")
+    with TestClient(create_app(settings, broker=UnconfiguredBroker())) as c:
+        monkeypatch.setattr(c.app.state.holder.get(), "data", FakeDataSource())
+        c.post("/login", data={"token": "secret"})
+        # setup-wizard T2: keys still absent (that is the point of this
+        # fixture), wizard skipped -- so the dashboard is reachable and its
+        # unconfigured-broker degradation is what gets exercised, not the
+        # redirect to /setup that tests/test_web_setup_gate.py owns.
+        dismiss_setup(c)
+        yield c
+
+
+def test_dashboard_renders_with_an_unconfigured_broker(unconfigured_client):
+    # The whole point of T1: with no Alpaca keys the app must still serve a
+    # page (the setup wizard lives behind this server), never a 500.
+    response = unconfigured_client.get("/")
+    assert response.status_code == 200
+    body = response.text
+    assert "Broker unavailable" in body
+    assert "paper broker not configured" in body
+    assert_english_only(body)
+
+
+def test_dashboard_unconfigured_broker_shows_guidance_card_with_step2_link(
+        unconfigured_client):
+    # setup-wizard T4: the generic "Broker unavailable" line (above) tells
+    # the user something is wrong, but not what to do about it -- an
+    # UnconfiguredBroker specifically means "finish setup", so the
+    # broker-failure slot also gets a guidance card pointing at the wizard's
+    # paper-account step rather than leaving the user to guess.
+    body = unconfigured_client.get("/").text
+
+    assert "Connect your Alpaca paper account" in body
+    assert 'href="/setup?step=2"' in body
+    assert_english_only(body)

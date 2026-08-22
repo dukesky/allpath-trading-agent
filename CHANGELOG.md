@@ -2,6 +2,62 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Setup wizard + image import — 2026-08-22
+
+- **`serve` starts without Alpaca keys**: a fresh install no longer
+  deadlocks on a chicken-and-egg credential requirement — the paper
+  account gets an `UnconfiguredBroker` when either Alpaca key is missing,
+  and the sentinel/reflection chain skips paper for that pass (one
+  scrubbed stderr line) rather than erroring, until the keys are saved.
+  Every other command still requires them.
+- **First-run `/setup` wizard**: an unconfigured install is walked through
+  four steps — an LLM key, then Alpaca paper keys (with "where to get a
+  key" steps for each provider and a Test button that checks the
+  connection before you move on), then importing your Shadow positions,
+  then a closing checklist (Telegram, notifications, first strategy).
+  Every step is skippable and none is a dead end.
+- **Setup gate + banner**: while an LLM key or a full Alpaca pair is
+  missing and the wizard hasn't been dismissed, every authenticated GET
+  redirects to `/setup` (POSTs are untouched, so a settings save can't be
+  bounced mid-flight); once dismissed, a "Setup incomplete — ... missing ·
+  Finish setup" banner follows you around instead. Settings → Access
+  carries a permanent "Re-run setup" link either way.
+- **Per-account onboarding cards**: Chat's empty state shows
+  account-specific guidance above the composer — Shadow: "Tell me what you
+  hold" with paste/type/screenshot examples; Paper: three clickable
+  prompts that fill and focus the input. The Dashboard's broker-failure
+  slot gets the same treatment when paper's broker is unconfigured.
+- **Image attachments in web chat**: a 📎 control (pick, paste, or
+  drag-drop) attaches PNG/JPEG/WebP images, up to 5 MB each and 4 per
+  message, alongside your text. Images ride the one turn they're sent
+  with — the model sees them on its first reply of that turn — and are
+  never stored: the transcript, the FTS index, and the Telegram mirror all
+  keep only a `[image: name, size]` placeholder, and nothing is written to
+  the database, a log, or any file the app keeps. (The HTTP layer may still
+  spool a large upload to an unlinked temporary file while parsing the
+  request; a request over the four-image budget is refused with 413 before
+  it is parsed at all.)
+- **Vision hint before you send**: when the OpenRouter catalog positively
+  says the configured chat model has no image input, the Chat composer says
+  so up front. Informational only — an unlisted slug, a curated-list
+  provider or an unfetched catalog says nothing rather than warning about a
+  model that may well see fine.
+- **A fixed reply when the model actually refuses an image**: a provider
+  error that says the model can't read images (as opposed to a rate limit
+  or an outage that merely names a vision model) is answered with "switch
+  CHAT_MODEL to a vision-capable model in Settings, or type the positions
+  instead" rather than a raw provider string.
+- **Telegram photo import**: a photo or image document sent to the paired
+  bot rides the same chat-turn path as text — the caption becomes the
+  message, and up to four images sent together as one Telegram album
+  become a single turn (an album split across two poll batches becomes
+  two turns instead, an accepted limit).
+- **Screenshot import for Shadow**: attach a screenshot of your positions
+  in Chat and the agent restates the table it read back to you before
+  queuing the same `shadow_set_position`/`shadow_set_cash` proposals a
+  typed or CSV import would — still a normal human-approved proposal,
+  never a direct write.
+
 ## Shadow dual-active accounts — 2026-08-21
 
 - **A second, always-on account**: `shadow` runs in parallel with `paper`

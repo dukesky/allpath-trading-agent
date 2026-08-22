@@ -672,7 +672,19 @@ def main(argv: list[str] | None = None,
     # "reviews list"/"reject" -- has no such requirement (see the `else`
     # branch below, which builds a bare per-account store/queue with no
     # broker anywhere in the picture).
-    needs_broker = args.command in {"status", "check", "run", "chat", "serve"} or (
+    # setup-wizard T1: "serve" is deliberately NOT in this set any more.
+    # It is the one command that must start with no credentials at all --
+    # the first-run setup wizard is a page this very process serves, so
+    # exiting 2 before binding a port made the keys unenterable without
+    # hand-editing .env. `build_components` gives paper an
+    # `UnconfiguredBroker` in that state (app.py's `_build_broker`) and
+    # every consumer degrades to a "finish setup" surface instead. Note the
+    # `broker` built below was never even passed to `cmd_serve` -- the
+    # credential check was the only thing "serve"'s membership here ever
+    # did. Every OTHER command keeps the check: they are one-shot terminal
+    # commands with no wizard behind them, so failing fast with an
+    # actionable message beats a `BrokerNotConfigured` traceback.
+    needs_broker = args.command in {"status", "check", "run", "chat"} or (
         args.command == "reviews" and getattr(args, "reviews_command", None) == "approve"
         and _approve_needs_broker(settings, args.review_id, account)) or (
         args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")

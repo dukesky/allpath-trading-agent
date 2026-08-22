@@ -15,6 +15,7 @@ from typing import ClassVar
 
 from allpath_trade.llm.base import LLMResponse
 from allpath_trade.web.account_ctx import ACCOUNT_COOKIE
+from tests.helpers import CONFIGURED_KEYS
 from tests.test_agent_loop import ScriptedLLM
 from tests.test_web_chat import make_client
 
@@ -104,7 +105,7 @@ def test_system_prompt_names_the_correct_account_for_each_chat_service(tmp_path,
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
                         memory_dir=tmp_path / "memory", web_token="secret",
-                        openrouter_api_key="k")
+                        **CONFIGURED_KEYS)
 
     SpyLLM.instances = []
     monkeypatch.setattr(
