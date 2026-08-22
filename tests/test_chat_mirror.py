@@ -223,3 +223,30 @@ def test_mirrored_reply_at_the_telegram_limit_still_fits_after_prefixing(tmp_pat
     assert all(len(html) <= 4096 for html in sent)
     assert reply_chunks[0].startswith("[Shadow] ")
     assert sum(html.count("x") for html in reply_chunks) == 4096
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T6: an image upload mirrors the placeholder, never the bytes.
+# ---------------------------------------------------------------------------
+
+def test_a_web_upload_mirrors_the_placeholder_text_and_never_bytes(
+        tmp_path, monkeypatch):
+    from tests.test_web_chat import PNG_BYTES
+
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="two positions")])
+    seen = []
+    client.app.state.chat_service.set_mirror(
+        lambda source, text, reply: seen.append((source, text, reply)))
+
+    client.post("/chat/send", data={"message": "what is this"},
+                files=[("images", ("positions.png", PNG_BYTES, "image/png"))])
+
+    [(source, text, reply)] = seen
+    assert source == "web"
+    assert isinstance(text, str)
+    assert text == "[image: positions.png, 2 KB] what is this"
+    assert reply == "two positions"
+    # Nothing anywhere in the mirrored tuple is bytes -- the mirror hook is
+    # a Telegram sendMessage, and a stray `bytes` here would either crash it
+    # or push the raw screenshot into the paired chat.
+    assert not any(isinstance(v, bytes) for v in (source, text, reply))

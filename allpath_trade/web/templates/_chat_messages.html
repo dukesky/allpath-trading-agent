@@ -1,4 +1,9 @@
 <div id="messages">
+{# setup-wizard T6: a rejected attachment (POST /chat/send answered 400 --
+   no turn recorded, the transcript below is unchanged). Lives INSIDE
+   #messages so it arrives with the swapped fragment; the form's own
+   `htmx:before-swap` hook is what lets a 400 swap at all. #}
+{% if notice %}<p class="error" id="chat-notice" role="alert">{{ notice }}</p>{% endif %}
 {% if llm_error %}
 <div class="card" style="margin-bottom:12px">
   <p><strong>Chat needs an LLM key.</strong> None is configured yet — add one
@@ -16,7 +21,13 @@
        chat_service.py). #}
     <div class="msg system"><span>{{ m['display'] }}</span></div>
   {% elif m['role'] == 'user' %}
-    <div class="msg user"><span>{{ m['content'] }}</span></div>
+    {# setup-wizard T6: `display` is `content` prefixed with the attachment
+       placeholders ("[image: a.png, 12 KB] hello") when the turn carried
+       images -- see attachments.display_for. Falls back to `content` for
+       every ordinary text turn, which has no `display` at all. Still
+       auto-escaped plain text, exactly as before: the placeholder is
+       server-built, but `content` is whatever the human typed. #}
+    <div class="msg user"><span>{{ m.get('display') or m['content'] }}</span></div>
   {% elif m['role'] == 'assistant' and m['content'] %}
     {# Only assistant replies go through the Markdown renderer -- the
        user's own bubble above and the system_note echo stay plain

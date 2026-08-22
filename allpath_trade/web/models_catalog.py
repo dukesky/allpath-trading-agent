@@ -83,6 +83,55 @@ FALLBACK_MODELS: dict[str, list[str]] = {
 # renders doesn't cost a page that was working a moment ago.
 _cache: tuple[float, list[str]] | None = None
 
+# setup-wizard T6: model id -> the `architecture.input_modalities` list the
+# last successful OpenRouter fetch reported for it, lowercased. Populated as
+# a side effect of `_fetch_openrouter_models` (the dropdown's fetch), read
+# by `cached_input_modalities` for the chat page's vision hint -- which must
+# never fetch on its own: the hint is informational, and /chat is not
+# allowed to grow a network call on every render the way /settings has one.
+# Only entries that actually DECLARE input_modalities are recorded; see
+# `_record_input_modalities`.
+_input_modalities: dict[str, list[str]] = {}
+
+
+def _record_input_modalities(entries: list[dict[str, Any]]) -> None:
+    """Replace `_input_modalities` from a freshly fetched catalog.
+
+    An entry with no `architecture.input_modalities` key is deliberately
+    NOT recorded: "the catalog doesn't say" and "the catalog says text
+    only" are different answers, and collapsing the first into `[]` would
+    let a missing field render as a confident "this model can't read
+    images" warning. Rebuilt wholesale rather than merged so a model
+    dropped upstream doesn't linger with stale capabilities.
+    """
+    global _input_modalities
+    fresh: dict[str, list[str]] = {}
+    for entry in entries:
+        model_id = entry.get("id")
+        architecture = entry.get("architecture") or {}
+        modalities = architecture.get("input_modalities")
+        if not model_id or not isinstance(modalities, list) or not modalities:
+            continue
+        fresh[model_id] = [str(m).lower() for m in modalities]
+    _input_modalities = fresh
+
+
+def cached_input_modalities(provider: str, model: str) -> list[str] | None:
+    """What `model` accepts as input, per the last successful catalog fetch
+    -- or None when that is simply not known.
+
+    Never fetches, never raises, never blocks. None means "no opinion" and
+    covers every uncertain case at once: a provider with no live catalog
+    (`anthropic`/`openai` are curated static lists -- see FALLBACK_MODELS),
+    a process that has not rendered /settings yet, a slug the catalog
+    doesn't list, and an entry that declares no input modalities. Callers
+    must treat None as "assume it works", not as "no image support".
+    """
+    if provider != "openrouter":
+        return None
+    modalities = _input_modalities.get(model)
+    return list(modalities) if modalities else None
+
 
 def _is_chat_model(entry: dict[str, Any]) -> bool:
     """A model belongs in a chat-model dropdown only if its output is text --
@@ -104,6 +153,10 @@ def _fetch_openrouter_models() -> list[str]:
         payload = json.loads(response.read())
     entries = payload["data"]
     ids = {entry["id"] for entry in entries if _is_chat_model(entry) and entry.get("id")}
+    # Recorded off the FULL entry list, not just the chat-model subset the
+    # dropdown keeps -- `cached_input_modalities` answers about whatever
+    # slug is configured as CHAT_MODEL, which need not still be in `ids`.
+    _record_input_modalities(entries)
     return sorted(ids)
 
 

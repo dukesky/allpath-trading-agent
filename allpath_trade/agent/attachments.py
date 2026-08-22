@@ -1,11 +1,14 @@
 """Image attachments on a chat turn.
 
 Images are a *transient* input: they ride along on the one user message
-being sent to the model and are dropped before anything durable sees the
-turn (see `AgentSession.run_turn`'s `finally: message.pop("images")`).
-Nothing here writes bytes to disk, logs them, or hands them to a store --
-the only durable trace of an attachment is its `placeholder()` string,
-which is what the transcript, the FTS index, and the Telegram mirror get.
+being sent to the model and never touch the history dict at all. The turn's
+attachments are held on the session (`AgentSession._pending_images`, cleared
+in a `finally` on every exit path) and injected into the throwaway message
+list built for each `llm.complete` call by `loop._with_images` -- so nothing
+that reads history, mid-turn or after, can observe bytes. Nothing here
+writes bytes to disk, logs them, or hands them to a store -- the only
+durable trace of an attachment is its `placeholder()` string, which is what
+the transcript, the FTS index, and the Telegram mirror get.
 
 Validation is deliberately *not* driven by the declared content type or
 the filename: a browser upload and a Telegram document both let the
@@ -28,6 +31,21 @@ ALLOWED_MIMES = ("image/png", "image/jpeg", "image/webp")
 IMAGE_UNSUPPORTED_REPLY = ("This model can't read images — switch CHAT_MODEL to a "
                            "vision-capable model in Settings, or type the positions "
                            "instead.")
+
+# The three fixed rejection messages (spec ③). Named because the transports
+# reject before `validate_images` ever sees the bytes where they can: the
+# web route (setup-wizard T6) caps each upload read at MAX_IMAGE_BYTES + 1
+# and refuses an over-count before reading anything at all, and must raise
+# the SAME copy the validator would have -- one string each, in one place,
+# rather than a second hand-typed copy per transport.
+TOO_MANY_MESSAGE = f"Up to {MAX_IMAGES} images per message."
+TOO_LARGE_MESSAGE = f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)."
+BAD_TYPE_MESSAGE = "Only PNG, JPEG, or WebP images are supported."
+
+# Default text for an images-only message (spec ③ allows empty text). The
+# model gets a real sentence rather than an empty user turn, and the
+# transcript reads as something a human could have typed.
+IMAGES_ONLY_TEXT = "Here is an image."
 
 _MAX_NAME_CHARS = 60
 _WHITESPACE = re.compile(r"\s+")
@@ -88,12 +106,11 @@ def validate_images(items: list[tuple[bytes, str]]) -> list[ImageAttachment]:
     at MAX_IMAGE_BYTES already where the transport allows it; the size
     check here is the authoritative one either way."""
     if len(items) > MAX_IMAGES:
-        raise AttachmentError(f"Up to {MAX_IMAGES} images per message.")
+        raise AttachmentError(TOO_MANY_MESSAGE)
     out: list[ImageAttachment] = []
     for data, name in items:
         if len(data) > MAX_IMAGE_BYTES:
-            raise AttachmentError(
-                f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB).")
+            raise AttachmentError(TOO_LARGE_MESSAGE)
         mime = sniff_mime(data)
         # Belt and braces: `ALLOWED_MIMES` is the list the web form's
         # `accept=`, the Telegram document filter and the model-catalog hint
@@ -102,7 +119,7 @@ def validate_images(items: list[tuple[bytes, str]]) -> list[ImageAttachment]:
         # a fourth format (say GIF) then stays a pure detection change and
         # cannot silently widen what the chat accepts.
         if mime is None or mime not in ALLOWED_MIMES:
-            raise AttachmentError("Only PNG, JPEG, or WebP images are supported.")
+            raise AttachmentError(BAD_TYPE_MESSAGE)
         out.append(ImageAttachment(data=data, mime=mime, name=_clean_name(name)))
     return out
 

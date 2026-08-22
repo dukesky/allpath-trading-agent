@@ -935,3 +935,151 @@ def test_messages_never_exposes_image_bytes_mid_turn(tmp_path, monkeypatch):
     [mid_turn] = snapshots
     assert mid_turn and all("images" not in m for m in mid_turn)
     assert all(not isinstance(v, bytes) for m in mid_turn for v in m.values())
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T6: the web upload path -- multipart POST /chat/send.
+# ---------------------------------------------------------------------------
+
+JPEG_BYTES = b"\xff\xd8\xff" + b"\x00" * 2048
+
+
+def _upload(name="a.png", data=PNG_BYTES, mime="image/png"):
+    return ("images", (name, data, mime))
+
+
+def test_a_multipart_post_sends_the_image_and_shows_the_placeholder(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="two positions")])
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload()])
+
+    assert response.status_code == 200
+    # The transcript shows the placeholder + the typed text, escaped as
+    # ordinary text (never a `content` that dropped the attachment).
+    assert "[image: a.png, 2 KB] hello" in response.text
+    assert_english_only(response.text)
+    service = client.app.state.chat_service
+    llm = service.session().llm
+    user_msg = llm.seen[0][-1]
+    assert user_msg["content"][0] == {"type": "image", "mime": "image/png",
+                                      "data": PNG_BYTES}
+    assert user_msg["content"][1] == {"type": "text", "text": "hello"}
+    stored = service.messages()[0]
+    assert stored["content"] == "hello"
+    assert stored["display"] == "[image: a.png, 2 KB] hello"
+
+
+def test_two_images_ride_one_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/chat/send", data={"message": "both"},
+                           files=[_upload("a.png"),
+                                  _upload("b.jpg", JPEG_BYTES, "image/jpeg")])
+
+    assert response.status_code == 200
+    llm = client.app.state.chat_service.session().llm
+    parts = llm.seen[0][-1]["content"]
+    assert [p.get("mime") for p in parts[:2]] == ["image/png", "image/jpeg"]
+
+
+def test_more_than_four_images_is_rejected_and_records_no_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload(f"{i}.png") for i in range(5)])
+
+    assert response.status_code == 400
+    assert "Up to 4 images per message." in response.text
+    assert_english_only(response.text)
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_an_oversized_image_is_rejected_and_records_no_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+    huge = b"\x89PNG\r\n\x1a\n" + b"\x00" * (6 * 1024 * 1024)
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload("big.png", huge)])
+
+    assert response.status_code == 400
+    assert "Image too large (max 5 MB)." in response.text
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_a_png_named_file_that_is_not_an_image_is_rejected(tmp_path, monkeypatch):
+    # The declared content type and the filename both say PNG; only the
+    # magic bytes decide (attachments.sniff_mime).
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload("notes.png", b"just some text here")])
+
+    assert response.status_code == 400
+    assert "Only PNG, JPEG, or WebP images are supported." in response.text
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_an_images_only_message_gets_the_default_text(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="I see it")])
+
+    response = client.post("/chat/send", data={"message": "  "}, files=[_upload()])
+
+    assert response.status_code == 200
+    stored = client.app.state.chat_service.messages()[0]
+    assert stored["content"] == "Here is an image."
+    assert stored["display"] == "[image: a.png, 2 KB] Here is an image."
+
+
+def test_a_text_only_post_still_works_without_any_file_part(tmp_path, monkeypatch):
+    # Constraint: the plain urlencoded form POST (and every existing test
+    # that uses it) keeps working now that the route declares File().
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hi there")])
+
+    response = client.post("/chat/send", data={"message": "hello"})
+
+    assert response.status_code == 200
+    assert client.app.state.chat_service.messages()[0]["content"] == "hello"
+
+
+def test_an_empty_post_with_no_text_and_no_files_records_no_turn(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    response = client.post("/chat/send", data={"message": ""})
+
+    assert response.status_code == 200
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_the_chat_form_carries_the_attach_control(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [])
+
+    body = client.get("/chat").text
+
+    assert 'hx-encoding="multipart/form-data"' in body
+    assert 'accept="image/png,image/jpeg,image/webp"' in body
+    assert 'id="chat-images"' in body
+    assert "📎" in body
+    assert_english_only(body)
+
+
+def test_the_vision_hint_appears_only_when_the_catalog_says_the_model_is_blind(
+        tmp_path, monkeypatch):
+    from allpath_trade.web import models_catalog
+
+    client = make_client(tmp_path, monkeypatch, [])
+    model = client.app.state.holder.get().settings.chat_model
+
+    monkeypatch.setattr(models_catalog, "_input_modalities",
+                        {model: ["text", "image"]})
+    assert "may not be able to read images" not in client.get("/chat").text
+
+    monkeypatch.setattr(models_catalog, "_input_modalities", {model: ["text"]})
+    body = client.get("/chat").text
+    assert "may not be able to read images" in body
+    assert_english_only(body)
+
+    # Unknown model (nothing fetched yet) -> informational only, stays quiet.
+    monkeypatch.setattr(models_catalog, "_input_modalities", {})
+    assert "may not be able to read images" not in client.get("/chat").text

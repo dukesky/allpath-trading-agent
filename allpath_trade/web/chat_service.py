@@ -188,10 +188,13 @@ class ChatService:
 
     def send(self, text: str, source: str = "web",
              images: list[ImageAttachment] | None = None) -> str:
-        """`images` (setup-wizard T5) ride this ONE turn: run_turn attaches
-        them to the user message only for the duration of the LLM calls and
-        pops them in a `finally`, so nothing durable -- the conversation
-        table, the FTS index, this method's mirror hook -- ever sees bytes.
+        """`images` (setup-wizard T5) ride this ONE turn: run_turn holds them
+        on the session (`_pending_images`, cleared in a `finally`) and never
+        puts them on the message dict at all -- `loop._with_images` injects
+        them into the throwaway list built for each `llm.complete` call. So
+        nothing durable, and nothing that reads history even mid-turn -- the
+        conversation table, the FTS index, `messages()`, the compactor, this
+        method's mirror hook -- ever sees bytes.
 
         `LLMImageUnsupported` is the one LLM error this method answers for
         itself: it means the configured chat model has no vision input at

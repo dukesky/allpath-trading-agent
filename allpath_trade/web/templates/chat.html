@@ -42,15 +42,40 @@
 </script>
 {% endif %}
 {% if not llm_error %}
+{# setup-wizard T6: the attachment strip sits ABOVE the input, so what is
+   about to be sent is visible in reading order before the box you type in.
+   Populated entirely by the script below (file picker, paste, drop); empty
+   and hidden until then. #}
+<div id="chat-thumbs" class="thumbs" hidden aria-live="polite"></div>
 <form id="chat-form" hx-post="/chat/send" hx-target="#messages" hx-swap="outerHTML"
+      hx-encoding="multipart/form-data"
       hx-disabled-elt="#chat-send, #chat-input"
       hx-on::before-request="chatOnBeforeRequest(event)"
       hx-on::after-request="chatOnAfterRequest(event)"
       class="row" style="margin-top:18px">
   <input name="message" id="chat-input" placeholder="Ask your agent anything" autocomplete="off" autofocus>
+  {# The real file input stays hidden -- a bare `<input type=file>` renders
+     as an unstyleable "Choose File" control that would dominate a one-line
+     composer. The 📎 button is `type=button` so it can never submit the
+     form by being the first button in it. #}
+  <button type="button" class="attach" id="chat-attach"
+          title="Attach an image — or paste / drop one here"
+          aria-label="Attach an image">📎</button>
+  <input type="file" id="chat-images" name="images"
+         accept="{{ allowed_mimes | join(',') }}" multiple hidden>
   <button class="primary" type="submit" id="chat-send">Send</button>
 </form>
+<p class="error" id="attach-error" hidden></p>
 <p class="error" id="chat-error" hidden></p>
+{% if not vision_hint %}
+{# Informational only, and only when the cached model catalog positively
+   says this model takes no image input (routes/chat.py's `_vision_hint`).
+   An unknown model never triggers it -- and nothing here blocks the
+   upload: the model itself is the authority, via LLMImageUnsupported. #}
+<p class="hint" id="vision-hint">Your chat model may not be able to read images —
+pick a vision-capable model in <a href="/settings">Settings</a> if attachments
+come back misunderstood.</p>
+{% endif %}
 <p class="hint">Orders and strategy drafts (new or revised) always wait for your
 approval on the <a href="/reviews">Pending</a> page.</p>
 <script>
@@ -66,6 +91,166 @@ approval on the <a href="/reviews">Pending</a> page.</p>
     var lastBubble = null;
     var lastIndicator = null;
 
+    // ---- setup-wizard T6: image attachments -----------------------------
+    // Limits are rendered from the SAME server constants that validate the
+    // upload (attachments.py via routes/chat.py's _render), so this inline
+    // check can never promise something POST /chat/send would reject, and
+    // its wording is the identical copy the server would have returned.
+    var MAX_IMAGES = {{ max_images }};
+    var MAX_IMAGE_BYTES = {{ max_image_bytes }};
+    var ALLOWED_MIMES = {{ allowed_mimes | tojson }};
+    var TOO_MANY = "Up to " + MAX_IMAGES + " images per message.";
+    var TOO_LARGE = "Image too large (max " + Math.floor(MAX_IMAGE_BYTES / 1048576) + " MB).";
+    var BAD_TYPE = "Only PNG, JPEG, or WebP images are supported.";
+
+    // The queue of File objects for the NEXT send. The hidden file input is
+    // a mirror of this array, not the other way round: picking a second
+    // time, pasting, and dropping all have to ADD rather than replace, and
+    // `input.files` is read-only except through a DataTransfer.
+    var pending = [];
+    var thumbUrls = [];
+    var fileInput = document.getElementById("chat-images");
+    var attachButton = document.getElementById("chat-attach");
+    var thumbStrip = document.getElementById("chat-thumbs");
+    var attachError = document.getElementById("attach-error");
+    var form = document.getElementById("chat-form");
+
+    function showAttachError(reason) {
+      if (!attachError) return;
+      attachError.textContent = reason || "";
+      attachError.hidden = !reason;
+    }
+
+    function placeholderFor(file) {
+      // Mirrors ImageAttachment.placeholder() (half-up KB, never "0 KB")
+      // so the optimistic echo below reads exactly like the transcript
+      // line the server is about to send back. The server stays the
+      // authority -- this bubble is replaced by the swapped fragment.
+      var kb = Math.max(1, Math.floor((file.size + 512) / 1024));
+      return "[image: " + file.name + ", " + kb + " KB]";
+    }
+
+    function syncFileInput() {
+      if (!fileInput) return;
+      var transfer = new DataTransfer();
+      pending.forEach(function (file) { transfer.items.add(file); });
+      fileInput.files = transfer.files;
+    }
+
+    function releaseThumbUrls() {
+      thumbUrls.forEach(function (url) { URL.revokeObjectURL(url); });
+      thumbUrls = [];
+    }
+
+    function renderThumbs() {
+      if (!thumbStrip) return;
+      // Detach the <img> elements BEFORE revoking their object URLs --
+      // revoking one that a live <img> still points at makes the browser
+      // re-resolve it and log an ERR_FILE_NOT_FOUND for a blob: URL that no
+      // longer exists. Harmless, but it fills the console with noise that
+      // looks like a real failure.
+      thumbStrip.textContent = "";
+      releaseThumbUrls();
+      pending.forEach(function (file, index) {
+        var url = URL.createObjectURL(file);
+        thumbUrls.push(url);
+        var wrap = document.createElement("div");
+        wrap.className = "thumb";
+        var img = document.createElement("img");
+        img.src = url;
+        img.alt = file.name;
+        wrap.appendChild(img);
+        var remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "thumb-remove";
+        remove.textContent = "×";
+        remove.setAttribute("aria-label", "Remove " + file.name);
+        remove.addEventListener("click", function () {
+          pending.splice(index, 1);
+          syncFileInput();
+          renderThumbs();
+          showAttachError("");
+        });
+        wrap.appendChild(remove);
+        thumbStrip.appendChild(wrap);
+      });
+      thumbStrip.hidden = pending.length === 0;
+    }
+
+    function clearAttachments() {
+      pending = [];
+      syncFileInput();
+      renderThumbs();
+      showAttachError("");
+    }
+
+    function addFiles(files) {
+      var reason = "";
+      for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        // An empty `type` (some drag sources report none) is left to the
+        // server, which decides on magic bytes anyway -- rejecting here
+        // would refuse a real PNG the server would have accepted.
+        if (file.type && ALLOWED_MIMES.indexOf(file.type) === -1) {
+          reason = BAD_TYPE;
+          continue;
+        }
+        if (file.size > MAX_IMAGE_BYTES) {
+          reason = TOO_LARGE;
+          continue;
+        }
+        if (pending.length >= MAX_IMAGES) {
+          reason = TOO_MANY;
+          continue;
+        }
+        pending.push(file);
+      }
+      syncFileInput();
+      renderThumbs();
+      showAttachError(reason);
+    }
+
+    if (attachButton && fileInput) {
+      attachButton.addEventListener("click", function () { fileInput.click(); });
+      fileInput.addEventListener("change", function () {
+        // Snapshot before syncFileInput() overwrites `fileInput.files`
+        // with the merged set -- iterating the live list while replacing
+        // it would drop the newly picked files.
+        addFiles(Array.prototype.slice.call(fileInput.files));
+      });
+    }
+
+    // Paste anywhere on the page: a screenshot in the clipboard is the
+    // single most common way this feature gets used, and requiring focus
+    // in the text box first is a step nobody discovers.
+    document.addEventListener("paste", function (evt) {
+      if (!evt.clipboardData || !evt.clipboardData.files.length) return;
+      evt.preventDefault();
+      addFiles(evt.clipboardData.files);
+    });
+
+    if (form) {
+      form.addEventListener("dragover", function (evt) {
+        evt.preventDefault();
+        form.classList.add("dropping");
+      });
+      form.addEventListener("dragleave", function () {
+        form.classList.remove("dropping");
+      });
+      form.addEventListener("drop", function (evt) {
+        if (!evt.dataTransfer || !evt.dataTransfer.files.length) return;
+        evt.preventDefault();
+        form.classList.remove("dropping");
+        addFiles(evt.dataTransfer.files);
+      });
+    }
+    {% if hint_import %}
+    // Arrived from the wizard's "Open Chat" link (/chat?hint=import): the
+    // user came here to import a screenshot, so the attach control -- not
+    // the text box's `autofocus` -- is what should be under the cursor.
+    if (attachButton) attachButton.focus();
+    {% endif %}
+
     function buildUserBubble(text) {
       // textContent only -- raw HTML assignment is deliberately avoided --
       // so the user's own typed text can't become an XSS vector in this
@@ -77,6 +262,16 @@ approval on the <a href="/reviews">Pending</a> page.</p>
       span.textContent = text;
       wrap.appendChild(span);
       return wrap;
+    }
+
+    function echoText(text) {
+      // What the optimistic bubble shows: the same placeholder-prefixed
+      // line attachments.display_for() builds server-side, including the
+      // "Here is an image." default the route substitutes for an
+      // images-only message.
+      if (!pending.length) return text;
+      var prefix = pending.map(placeholderFor).join(" ");
+      return prefix + " " + (text || "Here is an image.");
     }
 
     function buildThinkingIndicator() {
@@ -94,7 +289,9 @@ approval on the <a href="/reviews">Pending</a> page.</p>
     window.chatOnBeforeRequest = function (evt) {
       var input = document.getElementById("chat-input");
       var text = input ? input.value.trim() : "";
-      if (!input || !text) {
+      // Images alone are a valid message (spec ③) -- only a request with
+      // neither text nor attachments is a no-op worth cancelling.
+      if (!input || (!text && pending.length === 0)) {
         evt.preventDefault();
         return;
       }
@@ -102,7 +299,7 @@ approval on the <a href="/reviews">Pending</a> page.</p>
       form.dataset.lastMessage = input.value;
       var messages = document.getElementById("messages");
       if (messages) {
-        lastBubble = buildUserBubble(text);
+        lastBubble = buildUserBubble(echoText(text));
         lastIndicator = buildThinkingIndicator();
         messages.appendChild(lastBubble);
         messages.appendChild(lastIndicator);
@@ -125,12 +322,55 @@ approval on the <a href="/reviews">Pending</a> page.</p>
       input.value = "";
     };
 
+    // A 400 from /chat/send is a REJECTED ATTACHMENT, not a broken request:
+    // the server still rendered the #messages fragment, with the reason in
+    // it and the transcript untouched. htmx does not swap error responses
+    // by default, so without this the user would get the generic "could not
+    // reach the agent" copy below and never learn why the image was
+    // refused.
+    //
+    // Bound on `document` rather than as an `hx-on::before-swap` on the
+    // form because htmx fires `htmx:beforeSwap` on the SWAP TARGET
+    // (#messages), not on the element that made the request -- verified
+    // against the bundled htmx 2.0.4 (`he(l,"htmx:beforeSwap",m)`, where
+    // `l` is the target) and in a browser. The form is a sibling of
+    // #messages, so the event never reaches an attribute handler there.
+    // `requestPath` is what scopes this back to the one route.
+    document.addEventListener("htmx:beforeSwap", function (evt) {
+      var info = evt.detail.pathInfo;
+      if (!info || info.requestPath !== "/chat/send") return;
+      if (evt.detail.xhr && evt.detail.xhr.status === 400) {
+        evt.detail.shouldSwap = true;
+        evt.detail.isError = false;
+      }
+    });
+
     window.chatOnAfterRequest = function (evt) {
       var form = evt.target;
+      // The rejected-attachment case is checked FIRST, ahead of
+      // `successful`: the htmx:beforeSwap listener above deliberately
+      // clears `isError` for it, so this branch must not be reachable only
+      // through the failure path.
+      if (evt.detail.xhr && evt.detail.xhr.status === 400) {
+        // The fragment (with its `notice`) has already replaced #messages,
+        // taking the optimistic bubble and the thinking indicator with it.
+        // Hand the typed text back and KEEP the attachments -- fixing the
+        // selection (drop one, swap a file) is exactly what the user has to
+        // do next, and is impossible if we throw it away.
+        lastBubble = null;
+        lastIndicator = null;
+        var typed = document.getElementById("chat-input");
+        if (typed) typed.value = form.dataset.lastMessage || typed.value;
+        return;
+      }
       if (evt.detail.successful) {
         lastBubble = null;
         lastIndicator = null;
         form.reset();
+        // `form.reset()` empties the file input but not `pending`, which
+        // is the array the input mirrors -- clear both, or the next send
+        // would silently re-upload the images that just went out.
+        clearAttachments();
         return;
       }
       // Error path (network drop, a non-2xx status): htmx does not swap
