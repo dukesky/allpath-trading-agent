@@ -577,6 +577,11 @@ def dashboard(request: Request,
     # (T4) -- not the bare legacy key, so the dashboard's heartbeat line
     # always reflects the account currently being viewed, not always
     # paper's own pass regardless of which account is on screen.
+    # setup-wizard T1/T4: shared by the heartbeat line below AND the
+    # broker-failure slot's guidance card further down -- both need to
+    # single out "not configured yet" from every other broker failure, and
+    # must agree on the same check rather than risk drifting apart.
+    broker_unconfigured = isinstance(b.broker, UnconfiguredBroker)
     sentinel_status = sentinel_heartbeat_status(
         c.app_state.get(f"{SENTINEL_HEARTBEAT_KEY}:{b.account}"),
         c.settings.sentinel_interval_minutes,
@@ -589,7 +594,7 @@ def dashboard(request: Request,
         # while the keys are missing (scheduler.py's `_run_sentinel_pass`),
         # so the heartbeat below it must say so rather than reporting on
         # ticks that deliberately checked nothing.
-        broker_unconfigured=isinstance(b.broker, UnconfiguredBroker))
+        broker_unconfigured=broker_unconfigured)
 
     # Same is_market_hours the scheduler/sentinel gate their pass on (see
     # allpath_trade/scheduler.py) -- reused rather than reimplemented so the
@@ -656,7 +661,8 @@ def dashboard(request: Request,
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
         "price_as_of": price_as_of,
-        "broker_error": broker_error, "strategy_cards": strategy_cards,
+        "broker_error": broker_error, "broker_unconfigured": broker_unconfigured,
+        "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": b.journal.recent(limit=8),
         "sentinel_status": sentinel_status, "market_open": market_open,
         "range": range_key, "range_labels": _RANGE_LABELS,

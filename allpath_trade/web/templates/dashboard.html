@@ -4,7 +4,18 @@
 <h1>Dashboard {% include "_account_chip.html" %}</h1>
 <p class="{{ 'warn' if sentinel_status.warn else 'muted' }}">{{ sentinel_status.text }} <span class="chip market-pill {{ 'open' if market_open else 'closed' }}"><span class="dot">●</span> Market {{ 'open' if market_open else 'closed' }}</span></p>
 
-{% if broker_error %}<p class="error">{{ broker_error }}</p>{% endif %}
+{% if broker_error %}
+<p class="error">{{ broker_error }}</p>
+{% if broker_unconfigured %}
+{# setup-wizard T4: "not configured" is a setup step, not an outage --
+   the generic error line above is still shown (it's the same slot every
+   other broker failure uses), but this account specifically also gets a
+   pointer at exactly what to do next. #}
+<div class="card">
+  <p>Connect your Alpaca paper account → <a href="/setup?step=2">Setup step 2</a></p>
+</div>
+{% endif %}
+{% endif %}
 {% if account %}
 <div class="metrics">
   <div class="card metric"><div class="label">Equity</div><div class="value">{{ account.equity | money }}</div></div>
@@ -52,7 +63,7 @@
 {% elif current_account == 'shadow' %}
 <div class="card">
   <p>Your shadow ledger has no positions yet.</p>
-  <p class="muted">Import your positions — tell the agent in <a href="/chat">Chat</a> or upload a CSV in <a href="/settings">Settings</a>.</p>
+  <p class="muted">Import your positions — tell the agent in <a href="/chat">Chat</a>, upload a CSV in <a href="/settings">Settings</a>, or attach a screenshot in Chat.</p>
 </div>
 {% else %}<p class="muted">No open positions.</p>{% endif %}
 

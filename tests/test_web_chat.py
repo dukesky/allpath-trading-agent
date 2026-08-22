@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.broker.base import Order, OrderStatus
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient, LLMResponse
+from allpath_trade.web.account_ctx import ACCOUNT_COOKIE
 from allpath_trade.web.app import create_app
 from tests.helpers import CONFIGURED_KEYS, assert_english_only, dismiss_setup
 from tests.test_agent_loop import ScriptedLLM, tool_response
@@ -745,3 +746,81 @@ def test_chat_service_accepts_known_accounts():
     for account in ("paper", "shadow"):
         service = ChatService(holder=None, account=account)
         assert service.account == account
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T4: per-account onboarding hints on the chat empty state.
+# ---------------------------------------------------------------------------
+
+def test_empty_shadow_conversation_shows_onboarding_card_with_examples(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [])
+    client.cookies.set(ACCOUNT_COOKIE, "shadow")
+
+    body = client.get("/chat").text
+
+    assert "Tell me what you hold" in body
+    assert ("Paste your positions, type them, or attach a screenshot of "
+            "your brokerage — every change is queued for your approval.") in body
+    assert "I own 10 NVDA at 118.40 and 5,000 cash." in body
+    assert "Here is my portfolio: AAPL 20 @ 180, MSFT 5 @ 410, cash 12,000." in body
+    assert "Set my cash to 25,000." in body
+    assert body.count('class="example"') == 3
+    assert_english_only(body)
+
+
+def test_empty_paper_conversation_shows_onboarding_card(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [])
+
+    body = client.get("/chat").text
+
+    assert "Ask me anything about the market" in body
+    assert ("I can look at a ticker, draft a strategy, or explain what I "
+            "can do.") in body
+    assert "What do you think of TSLA right now?" in body
+    assert "Draft a strategy that buys NVDA on a 5% dip." in body
+    assert "What can you do?" in body
+    # The shadow-only copy must not leak onto paper's card.
+    assert "Tell me what you hold" not in body
+    assert_english_only(body)
+
+
+def test_non_empty_conversation_shows_no_onboarding_card(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hello there")])
+    client.post("/chat/send", data={"message": "hi"})
+
+    body = client.get("/chat").text
+
+    assert "Ask me anything about the market" not in body
+    assert "Tell me what you hold" not in body
+
+
+def test_hint_import_shows_onboarding_card_even_with_existing_turns(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="hello there")])
+    client.cookies.set(ACCOUNT_COOKIE, "shadow")
+    client.post("/chat/send", data={"message": "hi"})
+
+    body = client.get("/chat?hint=import").text
+
+    assert "Tell me what you hold" in body
+
+
+def test_onboarding_card_still_renders_when_llm_is_unconfigured(tmp_path, monkeypatch):
+    # setup-wizard T4 brief: `_render` may hit LLMConfigError before the
+    # onboarding card is even computed from `messages` -- the card must
+    # still render (it needs no LLM), pointing the user at what to type,
+    # even while the "add a key" banner also shows.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret")
+    client = TestClient(create_app(settings, broker=FakeBroker()))
+    client.post("/login", data={"token": "secret"})
+    dismiss_setup(client)
+
+    body = client.get("/chat").text
+
+    assert "Ask me anything about the market" in body
+    assert "OPENROUTER_API_KEY" in body

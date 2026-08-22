@@ -178,6 +178,15 @@ button.danger { border-color:var(--down); color:var(--down); }
 button.danger:hover { background:var(--down-soft); }
 button:disabled, .btn:disabled { opacity:.5; cursor:default; }
 
+/* setup-wizard T4: the chat onboarding card's clickable example prompts --
+   full-width, left-aligned, stacked rows read as "pick one of these" more
+   clearly than the centered/inline default `button` styling above, which
+   is built for short single-word actions (Send, Approve). */
+.onboarding-card .examples { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+.onboarding-card .example { text-align:left; font-size:13.5px; color:var(--muted);
+  padding:9px 12px; white-space:normal; }
+.onboarding-card .example:hover { color:var(--text); }
+
 input, select, textarea { background:var(--surface); color:var(--text);
   border:1px solid var(--line); border-radius:var(--radius-sm); padding:9px 11px;
   font:inherit; font-size:14px; width:100%; transition:border-color .15s ease; }

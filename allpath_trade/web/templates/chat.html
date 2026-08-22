@@ -5,6 +5,42 @@
    equivalent (spec §⑥). #}
 <p class="row" style="margin:0 0 10px">{% include "_account_chip.html" %}</p>
 {% include "_chat_messages.html" %}
+{% if onboarding %}
+{# setup-wizard T4: per-account onboarding hint, above the input. Renders
+   even when `llm_error` is set (outside the `{% if not llm_error %}` block
+   below) -- it needs no LLM call, and it's the one thing on this page
+   telling a first-time user what to actually type. #}
+<div class="card onboarding-card" style="margin:12px 0">
+  {% if current_account == 'shadow' %}
+  <p><strong>Tell me what you hold</strong></p>
+  <p class="muted">Paste your positions, type them, or attach a screenshot of your brokerage — every change is queued for your approval.</p>
+  <div class="examples">
+    <button type="button" class="example" data-fill="I own 10 NVDA at 118.40 and 5,000 cash.">I own 10 NVDA at 118.40 and 5,000 cash.</button>
+    <button type="button" class="example" data-fill="Here is my portfolio: AAPL 20 @ 180, MSFT 5 @ 410, cash 12,000.">Here is my portfolio: AAPL 20 @ 180, MSFT 5 @ 410, cash 12,000.</button>
+    <button type="button" class="example" data-fill="Set my cash to 25,000.">Set my cash to 25,000.</button>
+  </div>
+  {% else %}
+  <p><strong>Ask me anything about the market</strong></p>
+  <p class="muted">I can look at a ticker, draft a strategy, or explain what I can do.</p>
+  <div class="examples">
+    <button type="button" class="example" data-fill="What do you think of TSLA right now?">What do you think of TSLA right now?</button>
+    <button type="button" class="example" data-fill="Draft a strategy that buys NVDA on a 5% dip.">Draft a strategy that buys NVDA on a 5% dip.</button>
+    <button type="button" class="example" data-fill="What can you do?">What can you do?</button>
+  </div>
+  {% endif %}
+</div>
+<script>
+  // Fills #chat-input with an example's text and focuses it -- a no-op
+  // when the form isn't on the page (the llm_error branch below omits it),
+  // which is fine: there's nothing to fill in that state either.
+  document.querySelectorAll('.onboarding-card .example').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var input = document.getElementById('chat-input');
+      if (input) { input.value = btn.dataset.fill; input.focus(); }
+    });
+  });
+</script>
+{% endif %}
 {% if not llm_error %}
 <form id="chat-form" hx-post="/chat/send" hx-target="#messages" hx-swap="outerHTML"
       hx-disabled-elt="#chat-send, #chat-input"

@@ -1170,6 +1170,10 @@ def test_dashboard_shadow_empty_ledger_shows_guidance_card(client):
     assert "Import your positions" in body
     assert 'href="/chat"' in body
     assert 'href="/settings"' in body
+    # setup-wizard T4: the shadow ledger's import path also accepts a
+    # screenshot of the brokerage (attached in Chat), not just typed
+    # positions or a CSV upload -- the empty-ledger card must say so.
+    assert "attach a screenshot in Chat" in body
 
 
 def test_dashboard_shadow_position_never_priced_shows_never_recorded(client):
@@ -1339,4 +1343,18 @@ def test_dashboard_renders_with_an_unconfigured_broker(unconfigured_client):
     body = response.text
     assert "Broker unavailable" in body
     assert "paper broker not configured" in body
+    assert_english_only(body)
+
+
+def test_dashboard_unconfigured_broker_shows_guidance_card_with_step2_link(
+        unconfigured_client):
+    # setup-wizard T4: the generic "Broker unavailable" line (above) tells
+    # the user something is wrong, but not what to do about it -- an
+    # UnconfiguredBroker specifically means "finish setup", so the
+    # broker-failure slot also gets a guidance card pointing at the wizard's
+    # paper-account step rather than leaving the user to guess.
+    body = unconfigured_client.get("/").text
+
+    assert "Connect your Alpaca paper account" in body
+    assert 'href="/setup?step=2"' in body
     assert_english_only(body)

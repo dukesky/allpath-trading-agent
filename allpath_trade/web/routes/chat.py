@@ -49,6 +49,15 @@ def _render(request: Request, template: str, *, include_activity: bool) -> HTMLR
     # hours later -- would show the previous turn's tool names as if they
     # were still in flight. Only the response to the POST /chat/send that
     # populated it shows it; every other render gets an empty list.
+    # setup-wizard T4: the per-account onboarding card above the input.
+    # `hint_import` is the wizard's own "Open Chat" link (routes/setup.py's
+    # shadow-account step redirects to `/chat?hint=import`) -- it forces the
+    # card back on even for an account that already has turns, since
+    # arriving from that link means the user came here specifically to
+    # start importing, not to read back old messages. Computed from the
+    # request directly (not from `messages` below) so it stays correct
+    # whether or not `service.messages()` below succeeds.
+    hint_import = request.query_params.get("hint") == "import"
     messages: list[dict] = []
     activity: list[str] = []
     llm_error: str | None = None
@@ -64,9 +73,15 @@ def _render(request: Request, template: str, *, include_activity: bool) -> HTMLR
         # serve, open Chat") is a stack trace instead of a pointer to
         # Settings.
         llm_error = str(exc)
+    # `messages` is still `[]` on the LLMConfigError path above (never
+    # reassigned past the point of the raise), so an unconfigured LLM
+    # naturally satisfies `len(messages) == 0` here too -- the card needs no
+    # LLM call to render, so it isn't gated behind `llm_error` at all.
+    onboarding = len(messages) == 0 or hint_import
     return templates.TemplateResponse(request, template, {
         "page": "chat", "messages": messages,
         "activity": activity, "pending": pending, "llm_error": llm_error,
+        "onboarding": onboarding,
         **nav_context(request)})
 
 
