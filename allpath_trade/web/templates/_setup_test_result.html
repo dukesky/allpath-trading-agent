@@ -1,0 +1,8 @@
+{# setup-wizard T3: htmx-swapped result of a Test button on the wizard.
+   Same shape as _settings_test_result.html, different follow-up sentence
+   (the wizard's save button is "Save & continue", not "Save settings").
+   `message` is always one of routes/setup.py's own strings or a sanitized
+   exception -- never the key that was typed, which `_sanitize_error`
+   redacts before this is ever rendered. #}
+<p class="{{ 'up' if ok else 'down' }}">{{ message }}</p>
+{% if ok %}<p class="hint" style="margin-top:2px">Working. Click "Save &amp; continue" to keep it.</p>{% endif %}

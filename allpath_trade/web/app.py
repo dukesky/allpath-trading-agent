@@ -408,6 +408,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
         memory,
         reports,
         reviews,
+        setup,
         strategies,
     )
     from allpath_trade.web.routes import settings as settings_routes
@@ -421,6 +422,7 @@ def create_app(settings: Settings, broker: Broker | None = None,
     app.include_router(memory.router)
     app.include_router(reports.router)
     app.include_router(settings_routes.router)
+    app.include_router(setup.router)
 
     @app.get("/healthz")
     def healthz() -> dict:

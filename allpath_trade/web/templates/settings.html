@@ -58,7 +58,19 @@
   </section>
 
   <section data-panel="brokerage"{% if active_tab != 'brokerage' %} hidden{% endif %}>
-  <h2>Brokerage</h2>
+  <div class="row section-header" style="margin:0 0 14px">
+    <h2 style="margin:0">Brokerage</h2>
+    {# setup-wizard T3 (spec §②): the same four signup steps the wizard's
+       step 2 shows, from the one shared include -- someone who skipped the
+       wizard and came straight here needs them just as much. #}
+    <details class="help-toggle">
+      <summary aria-label="Setup help">?</summary>
+      <div class="hint">
+        <p>Where these keys come from:</p>
+        {% include "_alpaca_signup_steps.html" %}
+      </div>
+    </details>
+  </div>
   <div class="card">
     <p class="muted">Alpaca · {{ 'paper' if s.alpaca_paper else 'LIVE' }}</p>
     <label>API key <span class="muted">{{ masks['alpaca_api_key'] or 'not set' }}</span></label>

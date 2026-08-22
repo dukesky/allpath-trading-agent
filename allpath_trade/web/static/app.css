@@ -489,6 +489,56 @@ details.agent-analysis[open] summary::before { content:"▾ "; }
 .turn-text { white-space:pre-wrap; word-wrap:break-word; max-width:720px; line-height:1.6; }
 .turn-line { color:var(--muted-2); font-size:13px; font-family:var(--mono); }
 
+/* --- First-run wizard (/setup, setup-wizard T3) -------------------------
+   Everything here is built from the existing tokens only (--surface,
+   --line, --accent, --muted), so both themes are covered by the same
+   rules -- no hardcoded color appears below. */
+
+/* Progress header: the four step names, the current one highlighted, the
+   ones behind it marked done. A list, not a row of links: steps are
+   reached by finishing or skipping them, never by clicking the header. */
+.setup-progress { list-style:none; display:flex; flex-wrap:wrap; gap:8px;
+  margin:0 0 22px; padding:0; }
+.setup-progress .step { display:flex; align-items:center; gap:8px;
+  padding:7px 13px 7px 8px; border:1px solid var(--line); border-radius:999px;
+  color:var(--muted-2); font-size:12.5px; background:var(--surface); }
+.setup-progress .step .n { display:inline-block; width:19px; height:19px;
+  line-height:18px; text-align:center; border-radius:999px; font-size:11px;
+  border:1px solid var(--line); color:var(--muted); }
+.setup-progress .step.done { color:var(--muted); }
+.setup-progress .step.done .n { border-color:var(--muted-2); color:var(--muted); }
+.setup-progress .step.on { color:var(--text); border-color:var(--accent);
+  background:var(--accent-soft); }
+.setup-progress .step.on .n { border-color:var(--accent); color:var(--accent); }
+
+/* Step 1's "where to get a key" cards, one under each provider radio. */
+.key-source { border-left:2px solid var(--line); margin:0 0 6px 24px;
+  padding:2px 0 2px 14px; }
+.key-source p { margin:0 0 4px; font-size:12.5px; color:var(--muted);
+  line-height:1.55; }
+.key-source p:last-child { margin-bottom:0; }
+
+/* The shared Alpaca signup steps (_alpaca_signup_steps.html), used both in
+   the wizard's step 2 and inside Settings' Brokerage help toggle -- so the
+   rule has to read well against a card AND against the toggle's hint
+   text, which is why the numbers are the list's own markers rather than
+   card chrome of their own. */
+.signup-steps { margin:14px 0 0; padding:0 0 0 22px; }
+.signup-steps li { margin:0 0 9px; font-size:13px; color:var(--muted);
+  line-height:1.6; }
+.signup-steps li:last-child { margin-bottom:0; }
+.help-toggle .signup-steps { margin-top:8px; font-size:12.5px; }
+
+.setup-checklist { margin:14px 0 0; padding:0 0 0 20px; }
+.setup-checklist li { margin:0 0 9px; font-size:13.5px; color:var(--muted);
+  line-height:1.6; }
+
+/* "Skip for now" is a real escape hatch on every step, but never the
+   thing the eye lands on first -- quieter than the step's own primary
+   button, and set apart from it. */
+.setup-skip { margin-top:20px; }
+.setup-skip button { color:var(--muted); font-size:13px; padding:6px 12px; }
+
 @media (max-width:640px) {
   nav { gap:14px; padding:13px 16px; }
   main { padding:20px 16px 48px; }

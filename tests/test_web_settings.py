@@ -897,8 +897,10 @@ def test_help_toggles_present_with_key_setup_phrases(client):
     body = client.get("/settings").text
     assert "<details" in body
     # F5: each `?` disclosure toggle needs an accessible name -- a bare "?"
-    # glyph means nothing to a screen reader.
-    assert body.count('<summary aria-label="Setup help">?</summary>') == 3
+    # glyph means nothing to a screen reader. Four since setup-wizard T3
+    # added one to Brokerage (the shared Alpaca signup steps), alongside
+    # Email, Push and Telegram.
+    assert body.count('<summary aria-label="Setup help">?</summary>') == 4
     # Email help: Gmail app-password setup, the most-common-failure hint,
     # and the grouping-space strip save() already implements.
     assert "myaccount.google.com/apppasswords" in body
@@ -997,6 +999,22 @@ def test_push_test_button_scopes_via_hx_params_allowlist(client):
     assert 'hx-params="ntfy_url"' in body
     assert "topic name is effectively a password" in body
     assert "Self-hosted ntfy servers work too" in body
+
+
+# --- setup-wizard T3: the shared Alpaca signup steps ------------------------
+
+def test_brokerage_help_toggle_carries_the_shared_signup_steps(client):
+    """Same include as the wizard's step 2 (_alpaca_signup_steps.html), so
+    someone who skipped the wizard and came straight to Settings gets the
+    same four steps rather than a key field with no explanation."""
+    body = client.get("/settings").text
+    brokerage = body[body.index('data-panel="brokerage"'):body.index('data-panel="email"')]
+    assert '<ol class="signup-steps">' in brokerage
+    assert "https://alpaca.markets" in brokerage
+    assert "Paper Trading" in brokerage
+    assert "Generate New Keys" in brokerage
+    assert "the secret is shown once" in brokerage
+    assert_english_only(body)
 
 
 # --- Item 2: settings page tabs --------------------------------------------

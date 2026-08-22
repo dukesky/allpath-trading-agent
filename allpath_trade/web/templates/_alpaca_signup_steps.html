@@ -1,0 +1,11 @@
+{# setup-wizard T3: the four Alpaca signup steps, shared verbatim by the
+   wizard's step 2 and the Settings -> Brokerage help toggle (spec §①: "one
+   shared include"). Deliberately a plain <ol> with no card/section chrome
+   of its own so it drops into both hosts unchanged -- the wizard styles it
+   through `.signup-steps`, the help toggle through `.help-toggle`. #}
+<ol class="signup-steps">
+  <li>Create a free account at <a href="https://alpaca.markets" target="_blank" rel="noopener noreferrer">https://alpaca.markets</a>.</li>
+  <li>In the dashboard, switch the top-right toggle to <strong>Paper Trading</strong>.</li>
+  <li>Open <em>API Keys</em> → <strong>Generate New Keys</strong>; copy both values now (the secret is shown once).</li>
+  <li>Paste them below.</li>
+</ol>
