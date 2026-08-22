@@ -115,7 +115,23 @@ approval on the <a href="/reviews">Pending</a> page.</p>
     var attachError = document.getElementById("attach-error");
     var form = document.getElementById("chat-form");
 
+    function dismissServerNotice() {
+      // The 400 fragment's own `notice` inside #messages. It and
+      // #attach-error are two renderings of ONE thing -- "the last
+      // attachment you offered was refused, here is why" -- so a fresh
+      // client-side reason must retire the stale server one instead of
+      // stacking a second red line under it. Removed rather than hidden:
+      // the next swap re-renders #messages from scratch either way.
+      var notice = document.getElementById("chat-notice");
+      if (notice && notice.parentNode) notice.parentNode.removeChild(notice);
+    }
+
     function showAttachError(reason) {
+      // Only a NEW reason retires the server notice -- clearing (`""`) must
+      // not, or the 400 branch of chatOnAfterRequest (which calls this to
+      // drop the stale client-side reason) would delete the very notice
+      // that just swapped in.
+      if (reason) dismissServerNotice();
       if (!attachError) return;
       attachError.textContent = reason || "";
       attachError.hidden = !reason;
@@ -185,29 +201,36 @@ approval on the <a href="/reviews">Pending</a> page.</p>
     }
 
     function addFiles(files) {
-      var reason = "";
+      // Every distinct reason, not just the last one: dropping a 6 MB PNG
+      // together with a PDF used to report only whichever happened to come
+      // second, so the user fixed one problem and hit the other. Deduped
+      // (three oversized files are ONE sentence, not three).
+      var reasons = [];
+      function refuse(reason) {
+        if (reasons.indexOf(reason) === -1) reasons.push(reason);
+      }
       for (var i = 0; i < files.length; i++) {
         var file = files[i];
         // An empty `type` (some drag sources report none) is left to the
         // server, which decides on magic bytes anyway -- rejecting here
         // would refuse a real PNG the server would have accepted.
         if (file.type && ALLOWED_MIMES.indexOf(file.type) === -1) {
-          reason = BAD_TYPE;
+          refuse(BAD_TYPE);
           continue;
         }
         if (file.size > MAX_IMAGE_BYTES) {
-          reason = TOO_LARGE;
+          refuse(TOO_LARGE);
           continue;
         }
         if (pending.length >= MAX_IMAGES) {
-          reason = TOO_MANY;
+          refuse(TOO_MANY);
           continue;
         }
         pending.push(file);
       }
       syncFileInput();
       renderThumbs();
-      showAttachError(reason);
+      showAttachError(reasons.join(" · "));
     }
 
     if (attachButton && fileInput) {
@@ -225,22 +248,56 @@ approval on the <a href="/reviews">Pending</a> page.</p>
     // in the text box first is a step nobody discovers.
     document.addEventListener("paste", function (evt) {
       if (!evt.clipboardData || !evt.clipboardData.files.length) return;
+      // Only images are ours. A pasted PDF/zip/text file must fall through
+      // untouched -- `preventDefault()` on it would swallow a paste this
+      // feature has no use for and silently eat the user's clipboard. An
+      // empty `type` counts as a candidate for the same reason addFiles
+      // accepts it: only the server's magic-byte sniff can really say.
+      var images = Array.prototype.slice.call(evt.clipboardData.files).filter(
+        function (file) { return !file.type || file.type.indexOf("image/") === 0; });
+      if (!images.length) return;
       evt.preventDefault();
-      addFiles(evt.clipboardData.files);
+      addFiles(images);
     });
 
     if (form) {
-      form.addEventListener("dragover", function (evt) {
+      // `dragenter`/`dragleave` fire as a PAIR for every element crossed,
+      // including children -- moving the pointer from the form onto
+      // #chat-input fires a leave for the form before the enter for the
+      // input, so removing the class on any leave makes the outline strobe
+      // across the composer. Counting depth and only clearing at zero is
+      // the standard fix.
+      var dragDepth = 0;
+
+      function endDrag() {
+        dragDepth = 0;
+        form.classList.remove("dropping");
+      }
+
+      form.addEventListener("dragenter", function (evt) {
         evt.preventDefault();
+        dragDepth += 1;
         form.classList.add("dropping");
       });
+      form.addEventListener("dragover", function (evt) {
+        // Required on EVERY dragover, or the form is not a drop target at
+        // all and the browser handles the drop itself (i.e. navigates).
+        evt.preventDefault();
+      });
       form.addEventListener("dragleave", function () {
-        form.classList.remove("dropping");
+        dragDepth -= 1;
+        if (dragDepth <= 0) endDrag();
       });
       form.addEventListener("drop", function (evt) {
-        if (!evt.dataTransfer || !evt.dataTransfer.files.length) return;
+        // preventDefault FIRST, unconditionally, and before the files
+        // guard below. A drag from another browser tab carries
+        // `text/uri-list`/`text/html` and NO files: returning early without
+        // preventing the default made the browser navigate /chat to that
+        // URL, throwing away the transcript and whatever the user had
+        // typed -- and leaving `.dropping` stuck on the way out.
         evt.preventDefault();
-        form.classList.remove("dropping");
+        endDrag();
+        if (!evt.dataTransfer || !evt.dataTransfer.files.length) return;
         addFiles(evt.dataTransfer.files);
       });
     }
@@ -361,6 +418,10 @@ approval on the <a href="/reviews">Pending</a> page.</p>
         lastIndicator = null;
         var typed = document.getElementById("chat-input");
         if (typed) typed.value = form.dataset.lastMessage || typed.value;
+        // The server's `notice` is now the current word on this selection;
+        // a leftover client-side reason underneath it would be a second,
+        // possibly contradictory red line about the same files.
+        showAttachError("");
         return;
       }
       if (evt.detail.successful) {

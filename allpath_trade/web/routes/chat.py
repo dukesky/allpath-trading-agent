@@ -17,6 +17,7 @@ from allpath_trade.agent.attachments import (
     ImageAttachment,
     validate_images,
 )
+from allpath_trade.config import normalize_llm_provider
 from allpath_trade.llm.factory import LLMConfigError
 from allpath_trade.web import models_catalog
 from allpath_trade.web.account_ctx import bundle, current_account
@@ -51,7 +52,13 @@ def _vision_hint(chat_model: str, provider: str) -> bool:
     `models_catalog.cached_input_modalities`, which never touches the
     network -- /chat renders on every turn and cannot own an HTTP call).
     """
-    modalities = models_catalog.cached_input_modalities(provider, chat_model)
+    # Normalized the same way `llm/factory.py` and `web/setup_status.py`
+    # read LLM_PROVIDER (config.normalize_llm_provider) -- an `.env` with
+    # `LLM_PROVIDER=OpenRouter` builds an OpenRouter client and passes the
+    # setup gate, so it must consult the OpenRouter catalog here too rather
+    # than falling into the "unknown provider" silence.
+    modalities = models_catalog.cached_input_modalities(
+        normalize_llm_provider(provider), chat_model)
     return modalities is None or "image" in modalities
 
 

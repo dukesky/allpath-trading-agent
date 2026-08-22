@@ -1083,3 +1083,19 @@ def test_the_vision_hint_appears_only_when_the_catalog_says_the_model_is_blind(
     # Unknown model (nothing fetched yet) -> informational only, stays quiet.
     monkeypatch.setattr(models_catalog, "_input_modalities", {})
     assert "may not be able to read images" not in client.get("/chat").text
+
+
+def test_the_vision_hint_normalizes_a_mixed_case_provider(tmp_path, monkeypatch):
+    # `LLM_PROVIDER=OpenRouter` builds an OpenRouter client and passes the
+    # setup gate (config.normalize_llm_provider), so the hint has to read
+    # the OpenRouter catalog for it too rather than treating it as an
+    # unknown provider and staying silent.
+    from allpath_trade.web import models_catalog
+
+    client = make_client(tmp_path, monkeypatch, [])
+    settings = client.app.state.holder.get().settings
+    monkeypatch.setattr(settings, "llm_provider", "OpenRouter")
+    monkeypatch.setattr(models_catalog, "_input_modalities",
+                        {settings.chat_model: ["text"]})
+
+    assert "may not be able to read images" in client.get("/chat").text
