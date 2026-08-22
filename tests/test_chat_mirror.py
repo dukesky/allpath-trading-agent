@@ -250,3 +250,35 @@ def test_a_web_upload_mirrors_the_placeholder_text_and_never_bytes(
     # a Telegram sendMessage, and a stray `bytes` here would either crash it
     # or push the raw screenshot into the paired chat.
     assert not any(isinstance(v, bytes) for v in (source, text, reply))
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T7: the Telegram-sourced image turn.
+# ---------------------------------------------------------------------------
+
+def test_a_telegram_image_turn_mirrors_placeholders_only_and_is_not_pushed_back(
+        tmp_path, monkeypatch):
+    # The poller calls `send(..., source="telegram", images=[...])` and
+    # replies in-channel itself; `_mirror_to_telegram`'s direction policy
+    # (tests/test_web_app_telegram.py) then no-ops on that source. What this
+    # proves is what the hook is HANDED for such a turn: the same
+    # placeholder text the transcript shows, never the bytes.
+    from allpath_trade.agent.attachments import validate_images
+    from tests.test_web_chat import PNG_BYTES
+
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="two positions")])
+    seen = []
+    client.app.state.chat_service.set_mirror(
+        lambda source, text, reply: seen.append((source, text, reply)))
+
+    images = validate_images([(PNG_BYTES, "screenshot.png")])
+    client.app.state.chat_service.send("what is this", source="telegram", images=images)
+
+    [(source, text, reply)] = seen
+    assert source == "telegram"
+    assert text == "[image: screenshot.png, 2 KB] what is this"
+    assert reply == "two positions"
+    assert not any(isinstance(v, bytes) for v in (source, text, reply))
+    # And nothing durable holds the bytes either.
+    history = client.app.state.chat_service.messages()
+    assert not any(isinstance(v, bytes) for m in history for v in m.values())

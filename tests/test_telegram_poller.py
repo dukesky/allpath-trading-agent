@@ -27,6 +27,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from allpath_trade.agent.attachments import (
+    BAD_TYPE_MESSAGE,
+    IMAGES_ONLY_TEXT,
+    TOO_LARGE_MESSAGE,
+    TOO_MANY_MESSAGE,
+)
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.store.app_state import (
     TELEGRAM_ACCOUNT_KEY,
@@ -37,7 +43,12 @@ from allpath_trade.store.app_state import (
 )
 from allpath_trade.store.db import connect
 from allpath_trade.store.reviews import ReviewError, ReviewQueue, RevisionValidationError
-from allpath_trade.telegram import TelegramAPI, TelegramPoller
+from allpath_trade.telegram import (
+    DOWNLOAD_FAILED_MESSAGE,
+    FileTooLarge,
+    TelegramAPI,
+    TelegramPoller,
+)
 from tests.test_sentinel import SpyExecutor
 
 WEB_TOKEN = "correct-horse-battery-staple"
@@ -113,10 +124,18 @@ class FakeTelegramAPI:
     `self.api._scrub` unconditionally -- any test that triggers a poller
     stderr line needs this to exist."""
 
-    def __init__(self, batches=None, on_get_updates=None, token="fake-bot-token"):
+    def __init__(self, batches=None, on_get_updates=None, token="fake-bot-token",
+                 files=None):
         self._batches = list(batches or [])
         self._on_get_updates = on_get_updates
         self.token = token
+        # setup-wizard T7: `{file_id: bytes | None}`. A file_id absent from
+        # the dict makes `get_file` fail (Telegram couldn't resolve it); a
+        # `None` value makes the download itself fail; oversize bytes make
+        # `download_file` raise `FileTooLarge`, exactly like the real one.
+        self.files = dict(files or {})
+        self.get_file_calls: list[str] = []
+        self.download_calls: list[tuple[str, int]] = []
         self.get_updates_offsets: list[int] = []
         self.sent_messages: list[tuple[str, str]] = []
         self.sent_markups: list[dict | None] = []
@@ -150,6 +169,20 @@ class FakeTelegramAPI:
     def edit_message_reply_markup(self, chat_id: str, message_id: int, reply_markup=None) -> None:
         self.edited_markups.append((chat_id, message_id, reply_markup))
 
+    def get_file(self, file_id: str):
+        self.get_file_calls.append(file_id)
+        return f"photos/{file_id}.bin" if file_id in self.files else None
+
+    def download_file(self, file_path: str, max_bytes: int):
+        self.download_calls.append((file_path, max_bytes))
+        file_id = file_path.removeprefix("photos/").removesuffix(".bin")
+        data = self.files.get(file_id)
+        if data is None:
+            return None
+        if len(data) > max_bytes:
+            raise FileTooLarge("too big")
+        return data
+
     def _scrub(self, text: str) -> str:
         if not self.token:
             return text
@@ -167,8 +200,8 @@ class FakeChatService:
         self.resolutions: list[dict] = []
         self._log = log
 
-    def send(self, text: str, source: str = "web") -> str:
-        self.calls.append({"text": text, "source": source})
+    def send(self, text: str, source: str = "web", images=None) -> str:
+        self.calls.append({"text": text, "source": source, "images": images})
         if self._log is not None:
             self._log.append(("chat_service.send", text))
         return self.reply
@@ -377,7 +410,7 @@ def test_paired_chat_message_with_matching_chat_and_user_id_is_handled(tmp_path)
 
     poller.poll_once()
 
-    assert chat_service.calls == [{"text": "hi", "source": "telegram"}]
+    assert chat_service.calls == [{"text": "hi", "source": "telegram", "images": None}]
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +426,7 @@ def test_starting_prefix_is_not_treated_as_start_command(tmp_path):
 
     poller.poll_once()
 
-    assert chat_service.calls == [{"text": "/starting a position in AAPL", "source": "telegram"}]
+    assert chat_service.calls == [{"text": "/starting a position in AAPL", "source": "telegram", "images": None}]
     assert app_state.get(TELEGRAM_CHAT_ID_KEY) == "111"  # unchanged, no re-pairing attempted
 
 
@@ -537,7 +570,7 @@ def test_paired_text_sends_typing_then_calls_chat_service_with_telegram_source(t
     poller.poll_once()
 
     assert api.typing_calls == ["111"]
-    assert chat_service.calls == [{"text": "what's my position", "source": "telegram"}]
+    assert chat_service.calls == [{"text": "what's my position", "source": "telegram", "images": None}]
     assert api.sent_messages == [("111", "[Shadow] you own 10 AAPL")]
 
 
@@ -651,7 +684,7 @@ def test_one_malformed_update_does_not_stop_the_rest_of_the_batch(tmp_path, caps
 
     poller.poll_once()  # must not raise
 
-    assert chat_service.calls == [{"text": "hello for real", "source": "telegram"}]
+    assert chat_service.calls == [{"text": "hello for real", "source": "telegram", "images": None}]
     assert api.sent_messages == [("111", "[Shadow] hi back")]
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) >= 1
@@ -1354,7 +1387,7 @@ def test_account_switch_routes_subsequent_chat_text_to_that_account(tmp_path):
 
     poller.poll_once()
 
-    assert paper_chat.calls == [{"text": "what's my position", "source": "telegram"}]
+    assert paper_chat.calls == [{"text": "what's my position", "source": "telegram", "images": None}]
     assert shadow_chat.calls == []
     assert api.sent_messages == [("111", "[Paper] paper says hi")]
 
@@ -1590,3 +1623,361 @@ def test_shadow_approve_callback_says_recorded_and_prefixes_the_toast(tmp_path):
         {"line": f"You resolved #{review_id}. Result: order recorded in your "
                  f"shadow ledger — place it in your brokerage now",
          "source": "telegram"}]
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T7: photos and image documents from the paired chat.
+# ---------------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"0" * 40
+JPEG_BYTES = b"\xff\xd8\xff" + b"1" * 40
+WEBP_BYTES = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"2" * 40
+GIF_BYTES = b"GIF89a" + b"3" * 40
+
+
+def _photo_update(update_id, chat_id, file_id="f1", caption=None, from_id=None,
+                  media_group_id=None, photo=None):
+    """A `message.photo` update -- Telegram sends the SAME image as a list of
+    `PhotoSize`s in ascending size order, so the last entry is the largest
+    and the only one worth downloading."""
+    message = {
+        "message_id": update_id,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": chat_id if from_id is None else from_id},
+        "photo": photo if photo is not None else [
+            {"file_id": f"{file_id}-thumb", "width": 90, "height": 90},
+            {"file_id": f"{file_id}-mid", "width": 320, "height": 320},
+            {"file_id": file_id, "width": 1280, "height": 1280},
+        ],
+    }
+    if caption is not None:
+        message["caption"] = caption
+    if media_group_id is not None:
+        message["media_group_id"] = media_group_id
+    return {"update_id": update_id, "message": message}
+
+
+def _document_update(update_id, chat_id, file_id="d1", mime_type="image/webp",
+                     file_name="chart.webp", caption=None, from_id=None):
+    message = {
+        "message_id": update_id,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": chat_id if from_id is None else from_id},
+        "document": {"file_id": file_id, "mime_type": mime_type,
+                     "file_name": file_name},
+    }
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
+def test_photo_from_paired_chat_downloads_and_sends_one_image(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService(reply="looks like a chart")
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111, caption="what is this?")]],
+                          files={"f1": PNG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    # Largest PhotoSize only -- the thumbnails are never fetched.
+    assert api.get_file_calls == ["f1"]
+    assert api.download_calls == [("photos/f1.bin", 5 * 1024 * 1024)]
+    assert len(chat.calls) == 1
+    call = chat.calls[0]
+    assert call["text"] == "what is this?"
+    assert call["source"] == "telegram"
+    assert len(call["images"]) == 1
+    image = call["images"][0]
+    # Mime comes from the magic bytes, never from Telegram's own labelling.
+    assert image.mime == "image/png"
+    assert image.data == PNG_BYTES
+    assert api.sent_messages == [("111", "[Shadow] looks like a chart")]
+    # Once before the download starts, once when the turn itself begins --
+    # the download is seconds of silence otherwise.
+    assert api.typing_calls == ["111", "111"]
+
+
+def test_photo_with_no_caption_uses_the_images_only_default_text(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111)]], files={"f1": JPEG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls[0]["text"] == IMAGES_ONLY_TEXT
+    assert chat.calls[0]["images"][0].mime == "image/jpeg"
+
+
+def test_image_document_is_accepted_like_a_photo(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_document_update(1, 111, caption="positions")]],
+                          files={"d1": WEBP_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert api.get_file_calls == ["d1"]
+    assert chat.calls[0]["text"] == "positions"
+    image = chat.calls[0]["images"][0]
+    assert image.mime == "image/webp"
+    # The document's own filename rides into the transcript placeholder.
+    assert image.name == "chart.webp"
+
+
+def test_pdf_document_is_ignored_exactly_as_before(tmp_path, capsys):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _document_update(1, 111, mime_type="application/pdf", file_name="report.pdf")]],
+        files={"d1": PNG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.get_file_calls == []
+    assert api.sent_messages == []
+    # Not a "dropped" update either -- an unsupported attachment from the
+    # paired user is simply not something this bot understands.
+    assert capsys.readouterr().err.strip() == ""
+
+
+def test_unpaired_sender_photo_is_dropped_and_never_downloaded(tmp_path, capsys):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 999, caption="hi")]],
+                          files={"f1": PNG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.sent_messages == []
+    # The download never happens for a stranger: the pairing gate runs first.
+    assert api.get_file_calls == []
+    assert api.download_calls == []
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1
+    assert "dropped" in err[0]
+
+
+def test_photo_from_paired_chat_but_wrong_user_is_dropped(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111", user_id="111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111, from_id=222)]],
+                          files={"f1": PNG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.get_file_calls == []
+
+
+def test_album_of_two_becomes_one_turn_with_both_images(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(1, 111, file_id="a", media_group_id="mg1"),
+        _photo_update(2, 111, file_id="b", media_group_id="mg1", caption="both charts"),
+    ]], files={"a": PNG_BYTES, "b": JPEG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert len(chat.calls) == 1
+    call = chat.calls[0]
+    # First non-empty caption in the group wins -- Telegram puts it on
+    # whichever message of the album the sender attached it to.
+    assert call["text"] == "both charts"
+    assert [i.mime for i in call["images"]] == ["image/png", "image/jpeg"]
+    assert api.get_file_calls == ["a", "b"]
+    # One reply for the whole album, not one per photo.
+    assert len(api.sent_messages) == 1
+
+
+def test_album_of_five_is_refused_with_the_cap_message_and_nothing_downloaded(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(i, 111, file_id=f"p{i}", media_group_id="mg1") for i in range(1, 6)
+    ]], files={f"p{i}": PNG_BYTES for i in range(1, 6)})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.sent_messages == [("111", TOO_MANY_MESSAGE)]
+    assert api.get_file_calls == []
+    assert api.download_calls == []
+
+
+def test_album_of_four_is_accepted(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(i, 111, file_id=f"p{i}", media_group_id="mg1") for i in range(1, 5)
+    ]], files={f"p{i}": PNG_BYTES for i in range(1, 5)})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert len(chat.calls) == 1
+    assert len(chat.calls[0]["images"]) == 4
+
+
+def test_two_separate_albums_in_one_batch_stay_separate_turns(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(1, 111, file_id="a", media_group_id="mg1"),
+        _photo_update(2, 111, file_id="b", media_group_id="mg2"),
+    ]], files={"a": PNG_BYTES, "b": PNG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert len(chat.calls) == 2
+
+
+def test_oversize_image_replies_with_the_size_message_and_runs_no_turn(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111)]],
+                          files={"f1": b"\x89PNG\r\n\x1a\n" + b"0" * (5 * 1024 * 1024)})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.sent_messages == [("111", TOO_LARGE_MESSAGE)]
+
+
+def test_get_file_failure_replies_with_the_download_failure_message(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    # No `files` entry at all -> the fake's `get_file` returns None, the way
+    # the real one does for a network/HTTP failure or an `ok: false` body.
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111)]], files={})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.sent_messages == [("111", DOWNLOAD_FAILED_MESSAGE)]
+    assert api.download_calls == []
+
+
+def test_download_failure_replies_with_the_download_failure_message(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111)]], files={"f1": None})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.sent_messages == [("111", DOWNLOAD_FAILED_MESSAGE)]
+
+
+def test_document_claiming_an_image_mime_but_holding_a_gif_is_refused(tmp_path):
+    # The declared `mime_type` is sender-controlled; only the magic bytes
+    # decide, and GIF is deliberately not in ALLOWED_MIMES.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _document_update(1, 111, mime_type="image/png", file_name="fake.png")]],
+        files={"d1": GIF_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.sent_messages == [("111", BAD_TYPE_MESSAGE)]
+
+
+def test_photo_caption_that_looks_like_a_command_is_not_run_as_one(tmp_path):
+    # A caption is chat text about the image, not a command line: "/account"
+    # under a photo must not pop the account keyboard and swallow the image.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111, caption="/account")]],
+                          files={"f1": PNG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert api.sent_markups == [None]
+    assert chat.calls[0]["text"] == "/account"
+    assert len(chat.calls[0]["images"]) == 1
+
+
+def test_sticker_and_other_non_image_messages_are_still_ignored(tmp_path, capsys):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[{
+        "update_id": 1,
+        "message": {"message_id": 1, "chat": {"id": 111, "type": "private"},
+                    "from": {"id": 111}, "sticker": {"file_id": "s1"}},
+    }]])
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.sent_messages == []
+    assert capsys.readouterr().err.strip() == ""
+
+
+def test_photo_with_no_usable_file_id_is_ignored(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_photo_update(1, 111, photo=[{"width": 90}])]])
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert chat.calls == []
+    assert api.get_file_calls == []
+
+
+def test_text_only_turn_still_calls_send_without_an_images_argument(tmp_path):
+    # The poller's ChatService is duck-typed; a text-only turn keeps the
+    # exact pre-T7 call shape so an implementation without the keyword
+    # (every pre-T7 fake in this file) stays valid.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    seen = {}
+
+    class TextOnlyService:
+        def send(self, text, source="web"):
+            seen["text"] = text
+            seen["source"] = source
+            return "ok"
+
+    api = FakeTelegramAPI(batches=[[_update(1, 111, "hello")]])
+    poller = make_poller(api, TextOnlyService(), app_state)
+
+    poller.poll_once()
+
+    assert seen == {"text": "hello", "source": "telegram"}
