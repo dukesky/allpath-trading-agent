@@ -483,9 +483,35 @@ def _image_ref(message: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
-def _index_albums(updates: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """`{media_group_id: [message, ...]}` for the image-bearing messages of
-    this ONE `getUpdates` batch, in arrival order.
+def _album_key(chat_id: Any, from_id: Any, group_id: Any) -> tuple[str, str, str] | None:
+    """The album bucket a message belongs to, or `None` when it belongs to
+    no album (no usable `media_group_id`, or an origin this poller could not
+    identify).
+
+    Keyed on `(chat_id, from_id, media_group_id)`, NOT on `media_group_id`
+    alone (round-1 Important). `media_group_id` is scoped to the sender that
+    minted it, so two different chats can present the same value in one
+    batch -- and only ONE member of a group is pairing-checked (the one that
+    triggers dispatch). Keying on the id alone therefore let a batch of
+    `[stranger's photo(mg1), paired user's photo(mg1)]` splice the
+    stranger's image into the paired user's turn -- the stranger's bytes
+    downloaded and handed to the model, past a gate they never cleared --
+    and, with the order reversed, made the paired user's own album vanish
+    with no reply and no turn (dispatch fell to the stranger's message,
+    which the gate then dropped). Both halves close the moment a group can
+    only ever contain messages from one chat AND one sender."""
+    if chat_id is None or from_id is None:
+        return None
+    if not isinstance(group_id, str) or not group_id:
+        return None
+    return str(chat_id), str(from_id), group_id
+
+
+def _index_albums(updates: list[dict[str, Any]]) -> dict[tuple[str, str, str],
+                                                         list[dict[str, Any]]]:
+    """`{(chat_id, from_id, media_group_id): [message, ...]}` for the
+    image-bearing messages of this ONE `getUpdates` batch, in arrival order.
+    See `_album_key` for why the key is a triple.
 
     Telegram delivers an album as N separate updates that share a
     `media_group_id`; they have to be collected before the turn can run, or
@@ -495,12 +521,19 @@ def _index_albums(updates: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     half-collected album can ever be left in memory: the group is processed
     when its LAST message in the batch is reached.
 
+    ORDERING: because an album is dispatched at its LAST member, a plain
+    text message sitting between an album's first and last part in the same
+    batch runs BEFORE the album does, even though the user sent the photos
+    first. Accepted -- the alternative is buffering the whole batch and
+    re-ordering it, and both turns still happen, in one poll, serialized by
+    `ChatService._turn_lock`.
+
     KNOWN LIMIT (accepted, spec-level): an album SPLIT across two
     `getUpdates` batches -- possible when Telegram delivers the parts across
     a poll boundary -- becomes two turns. Buffering across polls would mean
     holding image bytes and a timer between polls, which is a materially
     bigger change than the failure mode is worth."""
-    groups: dict[str, list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for update in updates:
         # This pre-pass runs OUTSIDE `poll_once`'s per-update try/except, so
         # a malformed batch entry (Telegram sending something that isn't an
@@ -512,9 +545,13 @@ def _index_albums(updates: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         message = update.get("message")
         if not isinstance(message, dict) or _image_ref(message) is None:
             continue
-        group_id = message.get("media_group_id")
-        if isinstance(group_id, str) and group_id:
-            groups.setdefault(group_id, []).append(message)
+        chat = message.get("chat")
+        from_ = message.get("from")
+        key = _album_key(chat.get("id") if isinstance(chat, dict) else None,
+                         from_.get("id") if isinstance(from_, dict) else None,
+                         message.get("media_group_id"))
+        if key is not None:
+            groups.setdefault(key, []).append(message)
     return groups
 
 
@@ -706,8 +743,10 @@ class TelegramPoller:
             return True
         return False
 
-    def _handle_update(self, update: dict[str, Any],
-                       albums: dict[str, list[dict[str, Any]]] | None = None) -> str | None:
+    def _handle_update(
+            self, update: dict[str, Any],
+            albums: dict[tuple[str, str, str], list[dict[str, Any]]] | None = None,
+    ) -> str | None:
         """Returns `"dropped"` when the update was a text or image message
         (or an Approve/Reject button tap) from an unpaired/unmatched sender,
         or a failed `/start` pairing attempt (so `poll_once` can count it
@@ -788,8 +827,12 @@ class TelegramPoller:
             return None
 
         if image is not None:
-            group_id = message.get("media_group_id")
-            group = (albums or {}).get(group_id) if isinstance(group_id, str) else None
+            # `chat_id`/`from_id` here are this message's own, already
+            # checked against the pairing above -- so the group this looks
+            # up can only ever hold messages from the same cleared
+            # chat+sender (see `_album_key`).
+            key = _album_key(chat_id, from_id, message.get("media_group_id"))
+            group = (albums or {}).get(key) if key is not None else None
             if group is None:
                 self._handle_image_message(chat_id, [message])
             elif message is group[-1]:

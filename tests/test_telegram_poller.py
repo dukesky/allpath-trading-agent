@@ -20,6 +20,7 @@ could catch on its own.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import urllib.error
@@ -1981,3 +1982,173 @@ def test_text_only_turn_still_calls_send_without_an_images_argument(tmp_path):
     poller.poll_once()
 
     assert seen == {"text": "hello", "source": "telegram"}
+
+
+# ---------------------------------------------------------------------------
+# Round-1 Important: an album is keyed by (chat, sender, media_group_id), so a
+# stranger sharing a media_group_id can neither splice their image into the
+# paired user's turn nor swallow the paired user's album.
+# ---------------------------------------------------------------------------
+
+def test_stranger_sharing_a_media_group_id_cannot_splice_into_the_paired_turn(
+        tmp_path, capsys):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    # Stranger FIRST, paired user second: the paired user's message is the
+    # one that reaches dispatch, and a media_group_id-only index would have
+    # handed it the stranger's photo too.
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(1, 999, file_id="evil", media_group_id="mg1"),
+        _photo_update(2, 111, file_id="mine", media_group_id="mg1", caption="mine"),
+    ]], files={"evil": PNG_BYTES, "mine": JPEG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert len(chat.calls) == 1
+    call = chat.calls[0]
+    assert call["text"] == "mine"
+    # Exactly the paired user's own image -- the stranger's is not in the
+    # turn and was never even fetched.
+    assert [i.mime for i in call["images"]] == ["image/jpeg"]
+    assert api.get_file_calls == ["mine"]
+    assert "evil" not in str(api.download_calls)
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1
+    assert "dropped" in err[0]
+
+
+def test_stranger_sharing_a_media_group_id_cannot_swallow_the_paired_album(
+        tmp_path, capsys):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    # Paired user FIRST, stranger last: with a media_group_id-only index the
+    # group's last member was the stranger's message, so dispatch fell to it,
+    # the gate dropped it, and the paired user's album vanished silently.
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(1, 111, file_id="mine", media_group_id="mg1", caption="mine"),
+        _photo_update(2, 999, file_id="evil", media_group_id="mg1"),
+    ]], files={"mine": JPEG_BYTES, "evil": PNG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert len(chat.calls) == 1
+    assert chat.calls[0]["text"] == "mine"
+    assert [i.mime for i in chat.calls[0]["images"]] == ["image/jpeg"]
+    assert api.get_file_calls == ["mine"]
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_same_media_group_id_from_a_different_user_in_the_paired_chat_is_separate(
+        tmp_path):
+    # Same chat id, different `from` id (a forwarded post or an anonymous
+    # admin in the paired chat) -- the sender is part of the key too, so the
+    # groups never merge; the non-matching sender is dropped by the gate.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111", user_id="111")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(1, 111, file_id="other", from_id=222, media_group_id="mg1"),
+        _photo_update(2, 111, file_id="mine", media_group_id="mg1"),
+    ]], files={"other": PNG_BYTES, "mine": JPEG_BYTES})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert len(chat.calls) == 1
+    assert [i.mime for i in chat.calls[0]["images"]] == ["image/jpeg"]
+    assert api.get_file_calls == ["mine"]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end through the REAL TelegramAPI (fake urlopen), mirroring
+# test_real_telegram_api_offline_transport_backs_off_instead_of_hot_looping:
+# the FakeTelegramAPI stand-in models getFile/download_file by hand, so the
+# actual two-round-trip download is only proven here.
+# ---------------------------------------------------------------------------
+
+class _ScriptedTelegramTransport:
+    """A fake `urlopen` speaking enough of the Bot API for one photo turn:
+    `getUpdates` delivers `batch` once and then nothing, `getFile` resolves
+    any file_id to a path, `sendMessage`/`sendChatAction` succeed, and the
+    file endpoint serves `file_bytes`."""
+
+    def __init__(self, batch, file_bytes):
+        self.batch = batch
+        self.file_bytes = file_bytes
+        self.urls: list[str] = []
+        self.sent: list[dict] = []
+        self._delivered = False
+
+    def __call__(self, req, timeout=None):
+        url = req.full_url
+        self.urls.append(url)
+        if url.endswith("/getUpdates"):
+            result, self._delivered = ([] if self._delivered else self.batch), True
+            return _ScriptedResponse(json.dumps({"ok": True, "result": result}).encode())
+        if url.endswith("/getFile"):
+            file_id = json.loads(req.data)["file_id"]
+            return _ScriptedResponse(json.dumps(
+                {"ok": True, "result": {"file_path": f"photos/{file_id}.jpg"}}).encode())
+        if url.endswith("/sendMessage"):
+            self.sent.append(json.loads(req.data))
+            return _ScriptedResponse(json.dumps({"ok": True, "result": {}}).encode())
+        if url.endswith("/sendChatAction"):
+            return _ScriptedResponse(json.dumps({"ok": True, "result": True}).encode())
+        if "/file/bot" in url:
+            return _ScriptedResponse(self.file_bytes)
+        raise AssertionError(f"unexpected url {url}")
+
+
+class _ScriptedResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, amount=None):
+        return self._body if amount is None else self._body[:amount]
+
+
+def test_real_api_end_to_end_photo_turn(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService(reply="that is a chart")
+    transport = _ScriptedTelegramTransport(
+        [_photo_update(1, 111, caption="what is this?")], PNG_BYTES)
+    api = TelegramAPI("real-looking-token", urlopen=transport)
+    poller = TelegramPoller(api, chat, FakeHolder(app_state, WEB_TOKEN), threading.Event())
+
+    assert poller.poll_once() == "ok"
+
+    assert ("https://api.telegram.org/file/botreal-looking-token/photos/f1.jpg"
+            in transport.urls)
+    assert len(chat.calls) == 1
+    assert chat.calls[0]["text"] == "what is this?"
+    assert chat.calls[0]["images"][0].data == PNG_BYTES
+    assert chat.calls[0]["images"][0].mime == "image/png"
+    assert [m["text"] for m in transport.sent] == ["[Shadow] that is a chart"]
+
+
+def test_real_api_end_to_end_oversize_photo_is_refused(tmp_path):
+    # The bounded `read(max_bytes + 1)` + FileTooLarge path, all the way
+    # through the real transport to the fixed reply copy.
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    chat = FakeChatService()
+    transport = _ScriptedTelegramTransport(
+        [_photo_update(1, 111)], b"\x89PNG\r\n\x1a\n" + b"0" * (5 * 1024 * 1024))
+    api = TelegramAPI("real-looking-token", urlopen=transport)
+    poller = TelegramPoller(api, chat, FakeHolder(app_state, WEB_TOKEN), threading.Event())
+
+    assert poller.poll_once() == "ok"
+
+    assert chat.calls == []
+    assert [m["text"] for m in transport.sent] == [TOO_LARGE_MESSAGE]
