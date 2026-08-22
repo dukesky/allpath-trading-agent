@@ -142,16 +142,39 @@ def _legacy_twin(dst: Path) -> Path:
     return candidate
 
 
-def _move_symlink(src: Path, dst: Path) -> bool:
+def _post_move_path(absolute: str, moves: tuple[tuple[Path, Path], ...]) -> str:
+    """Where `absolute` will live AFTER this migration. A target inside a
+    layer that is itself being moved must be rewritten to its post-move
+    location, not its pre-move one (which stops existing the moment the
+    layer moves -- the first version of this helper anchored there and
+    left every intra-tree link dangling). Longest matching source wins."""
+    best: tuple[Path, Path] | None = None
+    for src_root, dst_root in moves:
+        try:
+            Path(absolute).relative_to(src_root)
+        except ValueError:
+            continue
+        if best is None or len(str(src_root)) > len(str(best[0])):
+            best = (src_root, dst_root)
+    if best is None:
+        return absolute
+    rel = Path(absolute).relative_to(best[0])
+    return str(best[1] / rel)
+
+
+def _move_symlink(src: Path, dst: Path,
+                  moves: tuple[tuple[Path, Path], ...]) -> bool:
     """Move symlink `src` to `dst`, rewriting a RELATIVE target so it still
-    resolves from the new (one level deeper) location. Returns False if the
-    entry was deliberately left in place instead."""
+    resolves from the new (one level deeper) location -- including when the
+    target is moving too (`moves`). Returns False if the entry was
+    deliberately left in place instead."""
     target = os.readlink(src)
     if os.path.isabs(target):
         shutil.move(str(src), str(dst))  # absolute targets survive any move
         return True
     try:
         absolute = os.path.normpath(os.path.join(str(src.parent), target))
+        absolute = _post_move_path(absolute, moves)
         rewritten = os.path.relpath(absolute, str(dst.parent))
         dst.symlink_to(rewritten)
     except (OSError, ValueError) as exc:
@@ -162,7 +185,8 @@ def _move_symlink(src: Path, dst: Path) -> bool:
     return True
 
 
-def _move_or_merge(src: Path, dst: Path) -> None:
+def _move_or_merge(src: Path, dst: Path,
+                   moves: tuple[tuple[Path, Path], ...] = ()) -> None:
     """Move `src` to `dst`, entry by entry. `dst`'s parent is created if
     needed.
 
@@ -178,13 +202,13 @@ def _move_or_merge(src: Path, dst: Path) -> None:
     # Checked BEFORE is_dir(), which follows symlinks: a symlink to a
     # directory must move as a link, not have its contents walked.
     if src.is_symlink():
-        _move_symlink(src, _legacy_twin(dst) if _exists(dst) else dst)
+        _move_symlink(src, _legacy_twin(dst) if _exists(dst) else dst, moves)
         return
 
     if src.is_dir():
         dst.mkdir(parents=True, exist_ok=True)
         for item in sorted(src.iterdir()):
-            _move_or_merge(item, dst / item.name)
+            _move_or_merge(item, dst / item.name, moves)
         try:
             src.rmdir()
         except OSError:
@@ -207,8 +231,9 @@ def _migrate_memory(memory_dir: Path) -> None:
 
     try:
         target_root = memory_dir / DEFAULT_ACCOUNT
+        moves = tuple((memory_dir / name, target_root / name) for name in legacy)
         for name in legacy:
-            _move_or_merge(memory_dir / name, target_root / name)
+            _move_or_merge(memory_dir / name, target_root / name, moves)
     except Exception as exc:
         raise _partial_migration_error(memory_dir, backup, exc) from exc
 
@@ -227,6 +252,7 @@ def _migrate_strategies(strategies_dir: Path) -> None:
     try:
         target = strategies_dir / DEFAULT_ACCOUNT
         target.mkdir(parents=True, exist_ok=True)
+        moves = tuple((path, target / path.name) for path in legacy_files)
         for path in legacy_files:
             # Strategies collision: the existing per-account file keeps its
             # name, the legacy twin is parked beside it as `{name}.legacy`
@@ -235,7 +261,7 @@ def _migrate_strategies(strategies_dir: Path) -> None:
             # this did before -- made detection fire again on the next
             # start, so EVERY build_components() (i.e. every settings save)
             # took another full backup, forever.
-            _move_or_merge(path, target / path.name)
+            _move_or_merge(path, target / path.name, moves)
         leftover = sorted(p.name for p in strategies_dir.glob("*.yaml"))
         if leftover:
             # Post-condition, so the "no legacy yaml at the root" property

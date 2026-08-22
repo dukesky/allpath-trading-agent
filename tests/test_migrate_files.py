@@ -448,3 +448,33 @@ def test_unrewritable_symlink_is_left_in_place_and_named(tmp_path, capsys,
     assert left.resolve() == (memory / "shared_notes").resolve()
     # Everything else still migrated.
     assert (memory / "paper" / "stocks" / "AAPL.md").exists()
+
+
+def test_relative_symlink_whose_target_also_moves_still_resolves(tmp_path):
+    """Regression: a link to a sibling inside a migrated layer (or across
+    layers) must be rewritten to the target's POST-move path."""
+    import os
+
+    from allpath_trade.config import Settings
+    from allpath_trade.migrate_files import migrate_files
+
+    memory = tmp_path / "memory"
+    (memory / "stocks").mkdir(parents=True)
+    (memory / "lessons").mkdir()
+    (memory / "stocks" / "NVDA.md").write_text("- NVDA\n")
+    os.symlink("NVDA.md", memory / "stocks" / "alias.md")
+    os.symlink("../stocks/NVDA.md", memory / "lessons" / "link.md")
+    strategies = tmp_path / "strategies"
+    strategies.mkdir()
+    (strategies / "a.yaml").write_text("id: a\n")
+    os.symlink("a.yaml", strategies / "b.yaml")
+
+    migrate_files(Settings(memory_dir=memory, strategies_dir=strategies,
+                           _env_file=None))
+
+    alias = memory / "paper" / "stocks" / "alias.md"
+    link = memory / "paper" / "lessons" / "link.md"
+    b = strategies / "paper" / "b.yaml"
+    assert alias.is_symlink() and alias.read_text() == "- NVDA\n"
+    assert link.is_symlink() and link.read_text() == "- NVDA\n"
+    assert b.is_symlink() and b.read_text() == "id: a\n"
