@@ -8,7 +8,16 @@ from typing import ClassVar
 
 from fastapi.testclient import TestClient
 
-from allpath_trade.agent.attachments import IMAGE_UNSUPPORTED_REPLY, ImageAttachment
+from allpath_trade.agent.attachments import (
+    IMAGE_UNSUPPORTED_REPLY,
+    IMAGES_ONLY_TEXT,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGES,
+    MAX_NAME_CHARS,
+    MAX_UPLOAD_BYTES,
+    UPLOAD_TOO_LARGE_MESSAGE,
+    ImageAttachment,
+)
 from allpath_trade.broker.base import Order, OrderStatus
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient, LLMImageUnsupported, LLMResponse
@@ -1019,6 +1028,124 @@ def test_a_png_named_file_that_is_not_an_image_is_rejected(tmp_path, monkeypatch
     assert response.status_code == 400
     assert "Only PNG, JPEG, or WebP images are supported." in response.text
     assert client.app.state.chat_service.messages() == []
+
+
+def test_the_composer_script_renders_its_copy_from_the_python_constants(
+        tmp_path, monkeypatch):
+    """Whole-branch review (M3, M11): the optimistic echo mirrors the
+    server's own strings and name-cleaning rules, so a reword on either side
+    can't leave the bubble saying one thing and the swapped-in transcript
+    line another."""
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    body = client.get("/chat").text
+
+    assert f'var IMAGES_ONLY_TEXT = "{IMAGES_ONLY_TEXT}";' in body
+    assert f'var UPLOAD_TOO_LARGE = "{UPLOAD_TOO_LARGE_MESSAGE}";' in body
+    assert f"var MAX_NAME_CHARS = {MAX_NAME_CHARS};" in body
+    # The client-side `_clean_name` mirror itself.
+    assert "function cleanName(name)" in body
+    assert 'return "[image: " + cleanName(file.name) + ", " + kb + " KB]";' in body
+    # And no hand-typed second copy of the default text left behind.
+    assert f'"{IMAGES_ONLY_TEXT}"' not in body.replace(
+        f'var IMAGES_ONLY_TEXT = "{IMAGES_ONLY_TEXT}";', "")
+
+
+# -- the whole-request cap (whole-branch review, Important 3) ---------------
+#
+# The per-part caps in `_read_uploads` only run AFTER FastAPI has parsed the
+# multipart body -- and Starlette spools any part over 1 MB to an unlinked
+# temporary file while doing so. A client sending 500 MB of parts therefore
+# got all 500 MB written to /tmp before a single line of the handler ran.
+# The guard is a middleware, because by the time the handler is entered the
+# parsing has already happened.
+
+
+def _too_big() -> int:
+    return MAX_UPLOAD_BYTES + 1
+
+
+def test_an_oversized_request_is_refused_before_the_form_is_parsed(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+
+    # `content-length` is what the guard reads, and it reads it BEFORE the
+    # body -- so this test states an enormous length without sending one.
+    response = client.post("/chat/send", content=b"x",
+                           headers={"content-length": str(_too_big()),
+                                    "content-type": "multipart/form-data; boundary=b"})
+
+    assert response.status_code == 413
+    assert response.text.strip() == UPLOAD_TOO_LARGE_MESSAGE
+    assert client.app.state.chat_service.messages() == []
+
+
+def test_the_cap_is_the_four_image_budget_plus_room_for_the_rest(
+        tmp_path, monkeypatch):
+    # Exactly at the cap is allowed through to the ordinary parsing path:
+    # the guard exists to stop absurd bodies, not to second-guess the
+    # per-part limits that follow it.
+    assert MAX_UPLOAD_BYTES == MAX_IMAGES * MAX_IMAGE_BYTES + 1024 * 1024
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/chat/send", data={"message": "hi"},
+                           headers={"content-length": str(MAX_UPLOAD_BYTES)})
+
+    assert response.status_code != 413
+
+
+def test_a_request_without_a_length_still_reaches_the_per_part_caps(
+        tmp_path, monkeypatch):
+    # Chunked (or otherwise length-less) uploads cannot be judged up front;
+    # they fall through to `_read_uploads`, which never reads more than
+    # MAX_IMAGE_BYTES + 1 per part.
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+    huge = b"\x89PNG\r\n\x1a\n" + b"\x00" * (6 * 1024 * 1024)
+
+    response = client.post("/chat/send", data={"message": "hello"},
+                           files=[_upload("big.png", huge)],
+                           headers={"transfer-encoding": "chunked"})
+
+    assert response.status_code == 400
+    assert "Image too large (max 5 MB)." in response.text
+
+
+def test_a_garbled_length_is_not_trusted_as_a_pass(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/chat/send", data={"message": "hi"},
+                           headers={"content-length": "not-a-number"})
+
+    # Unparseable: treated as "unknown", i.e. handled downstream, never as
+    # a 500 out of the middleware.
+    assert response.status_code in (200, 400)
+
+
+def test_an_unauthenticated_oversized_post_meets_the_login_gate_first(
+        tmp_path, monkeypatch):
+    # The guard is registered inside the auth middleware, not outside it:
+    # a stranger on the LAN learns nothing about this install's limits.
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="never")])
+    client.cookies.clear()
+
+    response = client.post("/chat/send", content=b"x",
+                           headers={"content-length": str(_too_big())},
+                           follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_other_routes_are_not_capped(tmp_path, monkeypatch):
+    # The guard is scoped to the one route that accepts uploads; a big POST
+    # anywhere else is somebody else's business.
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+
+    response = client.post("/account/switch", data={"account": "shadow"},
+                           headers={"content-length": str(_too_big())},
+                           follow_redirects=False)
+
+    assert response.status_code != 413
 
 
 def test_an_images_only_message_gets_the_default_text(tmp_path, monkeypatch):

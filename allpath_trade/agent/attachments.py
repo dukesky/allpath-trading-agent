@@ -4,11 +4,22 @@ Images are a *transient* input: they ride along on the one user message
 being sent to the model and never touch the history dict at all. The turn's
 attachments are held on the session (`AgentSession._pending_images`, cleared
 in a `finally` on every exit path) and injected into the throwaway message
-list built for each `llm.complete` call by `loop._with_images` -- so nothing
-that reads history, mid-turn or after, can observe bytes. Nothing here
-writes bytes to disk, logs them, or hands them to a store -- the only
-durable trace of an attachment is its `placeholder()` string, which is what
-the transcript, the FTS index, and the Telegram mirror get.
+list built for the turn's FIRST `llm.complete` call by `loop._with_images`
+-- so nothing that reads history, mid-turn or after, can observe bytes.
+
+Nothing an attachment reaches after this module STORES it: no store, no log,
+no file this app writes or keeps. The only durable trace of an attachment is
+its `placeholder()` string, which is what the transcript, the FTS index and
+the Telegram mirror get.
+
+That is a claim about storage, not about every byte's whole journey through
+the process. On the web path the HTTP layer sees the upload first: Starlette
+spools any multipart part over 1 MB to an *unlinked* temporary file while
+parsing the request, before this module (or the route) is reached at all.
+That file has no name in the filesystem, belongs to nothing but the
+in-flight request, and is released the moment the request ends. It is why
+`routes/chat.py` rejects an over-large request from a middleware, on
+`Content-Length`, before the form is parsed -- see MAX_UPLOAD_BYTES below.
 
 Validation is deliberately *not* driven by the declared content type or
 the filename: a browser upload and a Telegram document both let the
@@ -42,12 +53,26 @@ TOO_MANY_MESSAGE = f"Up to {MAX_IMAGES} images per message."
 TOO_LARGE_MESSAGE = f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)."
 BAD_TYPE_MESSAGE = "Only PNG, JPEG, or WebP images are supported."
 
+# The whole-request ceiling (whole-branch review, Important 3): what the
+# four per-part limits add up to, plus a megabyte for the text field, the
+# multipart boundaries and the part headers. Enforced by a middleware on
+# `Content-Length` alone, because the per-part caps in `routes/chat.py`
+# cannot run until FastAPI has already parsed (and spooled) the body.
+#
+# Deliberately generous rather than exact: it is a ceiling on absurdity, not
+# a second validator. Anything under it still faces every check above.
+MAX_UPLOAD_BYTES = MAX_IMAGES * MAX_IMAGE_BYTES + 1024 * 1024
+UPLOAD_TOO_LARGE_MESSAGE = "Upload too large."
+
 # Default text for an images-only message (spec ③ allows empty text). The
 # model gets a real sentence rather than an empty user turn, and the
 # transcript reads as something a human could have typed.
 IMAGES_ONLY_TEXT = "Here is an image."
 
-_MAX_NAME_CHARS = 60
+# Public (whole-branch review, M11): chat.html's optimistic echo mirrors
+# `_clean_name` client-side and needs the same ceiling, rendered from here
+# rather than typed into the template as a second 60.
+MAX_NAME_CHARS = 60
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -95,7 +120,7 @@ def _clean_name(name: str) -> str:
     cleaned = _WHITESPACE.sub(" ", name or "").strip()
     if not cleaned:
         return "image"
-    return cleaned[:_MAX_NAME_CHARS]
+    return cleaned[:MAX_NAME_CHARS]
 
 
 def validate_images(items: list[tuple[bytes, str]]) -> list[ImageAttachment]:

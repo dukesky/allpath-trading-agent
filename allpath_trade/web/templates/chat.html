@@ -102,6 +102,13 @@ approval on the <a href="/reviews">Pending</a> page.</p>
     var TOO_MANY = "Up to " + MAX_IMAGES + " images per message.";
     var TOO_LARGE = "Image too large (max " + Math.floor(MAX_IMAGE_BYTES / 1048576) + " MB).";
     var BAD_TYPE = "Only PNG, JPEG, or WebP images are supported.";
+    // Whole-branch review (M3): the images-only default and the 413 copy
+    // come from the SAME Python constants the server uses
+    // (attachments.IMAGES_ONLY_TEXT / UPLOAD_TOO_LARGE_MESSAGE), not from a
+    // second hand-typed copy that drifts the first time either is reworded.
+    var IMAGES_ONLY_TEXT = {{ images_only_text | tojson }};
+    var UPLOAD_TOO_LARGE = {{ upload_too_large_message | tojson }};
+    var MAX_NAME_CHARS = {{ max_name_chars }};
 
     // The queue of File objects for the NEXT send. The hidden file input is
     // a mirror of this array, not the other way round: picking a second
@@ -137,13 +144,24 @@ approval on the <a href="/reviews">Pending</a> page.</p>
       attachError.hidden = !reason;
     }
 
+    function cleanName(name) {
+      // Whole-branch review (M11): mirrors attachments._clean_name --
+      // collapse every whitespace run to one space, trim, fall back to
+      // "image", then cap the length. Without it a long or newline-bearing
+      // filename echoed one thing optimistically and another once the
+      // server fragment swapped in.
+      var cleaned = String(name || "").replace(/\s+/g, " ").trim();
+      if (!cleaned) return "image";
+      return cleaned.slice(0, MAX_NAME_CHARS);
+    }
+
     function placeholderFor(file) {
       // Mirrors ImageAttachment.placeholder() (half-up KB, never "0 KB")
       // so the optimistic echo below reads exactly like the transcript
       // line the server is about to send back. The server stays the
       // authority -- this bubble is replaced by the swapped fragment.
       var kb = Math.max(1, Math.floor((file.size + 512) / 1024));
-      return "[image: " + file.name + ", " + kb + " KB]";
+      return "[image: " + cleanName(file.name) + ", " + kb + " KB]";
     }
 
     function syncFileInput() {
@@ -324,11 +342,11 @@ approval on the <a href="/reviews">Pending</a> page.</p>
     function echoText(text) {
       // What the optimistic bubble shows: the same placeholder-prefixed
       // line attachments.display_for() builds server-side, including the
-      // "Here is an image." default the route substitutes for an
-      // images-only message.
+      // IMAGES_ONLY_TEXT default the route substitutes for an images-only
+      // message.
       if (!pending.length) return text;
       var prefix = pending.map(placeholderFor).join(" ");
-      return prefix + " " + (text || "Here is an image.");
+      return prefix + " " + (text || IMAGES_ONLY_TEXT);
     }
 
     function buildThinkingIndicator() {
@@ -402,6 +420,20 @@ approval on the <a href="/reviews">Pending</a> page.</p>
       }
     });
 
+    function clearOptimistic() {
+      // Undo the optimistic echo: used by every path where htmx did NOT
+      // swap #messages (a network drop, a 413 refused before parsing), so
+      // the bubble and the "thinking" indicator are still in the DOM.
+      if (lastIndicator && lastIndicator.parentNode) {
+        lastIndicator.parentNode.removeChild(lastIndicator);
+      }
+      if (lastBubble && lastBubble.parentNode) {
+        lastBubble.parentNode.removeChild(lastBubble);
+      }
+      lastIndicator = null;
+      lastBubble = null;
+    }
+
     window.chatOnAfterRequest = function (evt) {
       var form = evt.target;
       // The rejected-attachment case is checked FIRST, ahead of
@@ -424,6 +456,18 @@ approval on the <a href="/reviews">Pending</a> page.</p>
         showAttachError("");
         return;
       }
+      if (evt.detail.xhr && evt.detail.xhr.status === 413) {
+        // Whole-branch review (Important 3): the whole request was refused
+        // on its Content-Length, before any of it was parsed -- so there is
+        // no fragment to swap and #messages is untouched. Clear the
+        // optimistic bubble by hand (nothing replaced it), hand the text
+        // back, and KEEP the attachments: dropping one is exactly the fix.
+        clearOptimistic();
+        var over = document.getElementById("chat-input");
+        if (over) over.value = form.dataset.lastMessage || over.value;
+        showAttachError(UPLOAD_TOO_LARGE);
+        return;
+      }
       if (evt.detail.successful) {
         lastBubble = null;
         lastIndicator = null;
@@ -439,14 +483,7 @@ approval on the <a href="/reviews">Pending</a> page.</p>
       // appended above are still in the DOM and would otherwise be
       // duplicated (or left permanently "thinking") on retry -- remove
       // them by hand and hand the typed text back to the input.
-      if (lastIndicator && lastIndicator.parentNode) {
-        lastIndicator.parentNode.removeChild(lastIndicator);
-      }
-      if (lastBubble && lastBubble.parentNode) {
-        lastBubble.parentNode.removeChild(lastBubble);
-      }
-      lastIndicator = null;
-      lastBubble = null;
+      clearOptimistic();
       var input = document.getElementById("chat-input");
       if (input) input.value = form.dataset.lastMessage || input.value;
       var errorEl = document.getElementById("chat-error");

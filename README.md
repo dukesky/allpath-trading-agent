@@ -336,6 +336,15 @@ sent together as a Telegram album become one turn, just like attaching
 several images at once in web chat. Nothing is stored beyond the turn; the
 transcript and the web mirror both keep only a placeholder line.
 
+To be precise about "not stored": no image is ever written to the database,
+the search index, a log, or any file this app keeps — a turn's only durable
+trace of one is its `[image: name, size]` placeholder. On the web upload
+path the HTTP layer may still spool a large request to an *unlinked*
+temporary file while parsing it, before any of this app's own code runs;
+that file is nameless, belongs to the one request, and is released when the
+request ends. Requests larger than the four-image budget are refused
+outright before they are parsed at all.
+
 ## Two Accounts
 
 `allpath-trade` runs **two practice grounds at once, always active** — not a

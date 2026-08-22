@@ -853,6 +853,13 @@ class TelegramPoller:
         check comes first, before any network call: refusing a 9-photo album
         must not cost nine downloads to discover.
 
+        Whole-branch review (M6): a refusal carries this chat's
+        `[Paper] `/`[Shadow] ` prefix like every other reply the bot sends
+        (`_refuse` below, off `notify.events._prefix` -- the one place that
+        shape is decided). One paired chat serves both accounts, so an
+        unlabelled "Up to 4 images per message." said nothing about which
+        conversation had just turned the screenshot away.
+
         Bytes live in this frame and in the `ImageAttachment`s handed to
         `ChatService.send` -- never written to disk, never logged, never
         stored (see `attachments.py`'s module docstring for where they go
@@ -861,7 +868,7 @@ class TelegramPoller:
         if not refs:
             return
         if len(refs) > MAX_IMAGES:
-            self.api.send_message(chat_id, TOO_MANY_MESSAGE)
+            self._refuse(chat_id, TOO_MANY_MESSAGE)
             return
         # The album's caption: Telegram puts it on whichever part the sender
         # attached it to, so the first non-empty one is the message.
@@ -880,15 +887,15 @@ class TelegramPoller:
         for file_id, name in refs:
             file_path = self.api.get_file(file_id)
             if file_path is None:
-                self.api.send_message(chat_id, DOWNLOAD_FAILED_MESSAGE)
+                self._refuse(chat_id, DOWNLOAD_FAILED_MESSAGE)
                 return
             try:
                 data = self.api.download_file(file_path, MAX_IMAGE_BYTES)
             except FileTooLarge:
-                self.api.send_message(chat_id, TOO_LARGE_MESSAGE)
+                self._refuse(chat_id, TOO_LARGE_MESSAGE)
                 return
             if data is None:
-                self.api.send_message(chat_id, DOWNLOAD_FAILED_MESSAGE)
+                self._refuse(chat_id, DOWNLOAD_FAILED_MESSAGE)
                 return
             items.append((data, name))
 
@@ -898,13 +905,25 @@ class TelegramPoller:
             # `str(exc)` is the same user-facing copy the web form shows --
             # one source of truth for the wording, not a second hand-typed
             # set here.
-            self.api.send_message(chat_id, str(exc))
+            self._refuse(chat_id, str(exc))
             return
 
         # Spec ③: images alone are a legitimate message; the model gets a
         # real sentence rather than an empty user turn, the same default the
         # web route applies.
         self._handle_chat_text(chat_id, text or IMAGES_ONLY_TEXT, images=images)
+
+    def _refuse(self, chat_id: str, message: str) -> None:
+        """A rejected attachment, prefixed for the account this chat is on.
+
+        The prefix comes from `events._prefix` -- the ONE place the
+        bracket/capitalization shape lives, and the reason an unrecognized
+        account degrades to no prefix instead of inventing a label. The copy
+        itself is never rewritten here: it arrives already fixed from
+        `agent/attachments.py` (or `DOWNLOAD_FAILED_MESSAGE`), so the web
+        form and the bot cannot word the same refusal differently.
+        """
+        self.api.send_message(chat_id, _prefix(self._telegram_account()) + message)
 
     def _handle_account_command(self, chat_id: str) -> None:
         """`/account` reply: an inline Paper/Shadow keyboard

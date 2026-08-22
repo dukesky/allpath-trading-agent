@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 
 from allpath_trade.agent.attachments import (
@@ -11,8 +11,11 @@ from allpath_trade.agent.attachments import (
     IMAGES_ONLY_TEXT,
     MAX_IMAGE_BYTES,
     MAX_IMAGES,
+    MAX_NAME_CHARS,
+    MAX_UPLOAD_BYTES,
     TOO_LARGE_MESSAGE,
     TOO_MANY_MESSAGE,
+    UPLOAD_TOO_LARGE_MESSAGE,
     AttachmentError,
     ImageAttachment,
     validate_images,
@@ -28,6 +31,57 @@ from allpath_trade.web.routes.reviews import revision_view
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
+
+# The one route that accepts a body worth capping.
+SEND_PATH = "/chat/send"
+
+
+def install_upload_limit(app: FastAPI) -> None:
+    """Refuse an over-large `POST /chat/send` before its body is parsed.
+
+    Whole-branch review (Important 3). `_read_uploads` below is careful --
+    it counts parts before reading any, and never reads more than
+    MAX_IMAGE_BYTES + 1 from one -- but it runs far too late to matter for
+    the body as a whole: FastAPI parses the multipart form to satisfy the
+    handler's `images: list[UploadFile]` parameter BEFORE the handler is
+    entered, and Starlette's parser spools every part over 1 MB to an
+    unlinked temporary file as it goes. A client posting 500 MB of parts had
+    all 500 MB written out before a single line of this module ran.
+
+    Hence a middleware, and hence `Content-Length` -- the one thing that is
+    known before the body is touched. A request that declares no length
+    (chunked, or a client that omitted it) is let through to the per-part
+    caps, which is exactly what they are for: this guard raises the floor,
+    it does not replace them. A length that doesn't parse is treated the
+    same as an absent one rather than as an error -- the parser downstream
+    will have its own opinion about a body that doesn't match its header.
+
+    Registered BEFORE `install_auth`, so the auth middleware wraps this one
+    and an unauthenticated stranger still meets the login redirect first --
+    a 413 is a fact about this install's limits, and there is no reason to
+    hand it to someone who hasn't signed in.
+    """
+
+    @app.middleware("http")
+    async def limit_upload(request: Request, call_next):
+        if (request.method == "POST"
+                and (request.url.path.rstrip("/") or "/") == SEND_PATH):
+            raw = request.headers.get("content-length")
+            try:
+                length = int(raw) if raw is not None else None
+            except ValueError:
+                length = None
+            if length is not None and length > MAX_UPLOAD_BYTES:
+                # Plain text, not the usual `_chat_messages.html` fragment:
+                # rendering that needs the account's transcript (blocking
+                # sqlite reads, on the event loop, from a middleware), and
+                # swapping a transcript-less fragment into #messages would
+                # wipe the conversation off the screen to report a rejected
+                # upload. chat.html's own htmx hook shows this as the same
+                # inline notice a 400 produces, without swapping.
+                return PlainTextResponse(UPLOAD_TOO_LARGE_MESSAGE,
+                                         status_code=413)
+        return await call_next(request)
 
 
 def _service(request: Request) -> ChatService:
@@ -130,6 +184,12 @@ def _render(request: Request, template: str, *, include_activity: bool,
         "vision_hint": _vision_hint(settings.chat_model, settings.llm_provider),
         "max_images": MAX_IMAGES, "max_image_bytes": MAX_IMAGE_BYTES,
         "allowed_mimes": list(ALLOWED_MIMES),
+        # Whole-branch review (M3, M11, Important 3): the copy and the name
+        # rules the inline script mirrors, from the Python constants rather
+        # than hand-typed into the template a second time.
+        "images_only_text": IMAGES_ONLY_TEXT,
+        "upload_too_large_message": UPLOAD_TOO_LARGE_MESSAGE,
+        "max_name_chars": MAX_NAME_CHARS,
         **nav_context(request)}, status_code=status_code)
 
 
@@ -146,13 +206,21 @@ async def _read_uploads(uploads: list[UploadFile]) -> list[ImageAttachment]:
     authoritative ones:
 
     * the count is checked first, so an over-count request is refused
-      without reading a single byte of any part into memory -- otherwise a
-      client could make the server materialize 100 x 5 MB just to be told
-      "up to 4";
+      without pulling a single part into this process's own memory --
+      otherwise a client could make the handler materialize 100 x 5 MB just
+      to be told "up to 4";
     * each part is read with `read(MAX_IMAGE_BYTES + 1)`, never unbounded.
       The extra byte is exactly enough to distinguish "at the limit" from
-      "over it" without holding the overflow: a 500 MB upload costs 5 MB of
-      memory here, not 500.
+      "over it" without holding the overflow: an over-large part costs 5 MB
+      of memory here, whatever its real size.
+
+    Neither cap is reached before the request has been *parsed*, though --
+    FastAPI resolves `images` (and so runs Starlette's multipart parser,
+    which spools any part over 1 MB to an unlinked temporary file) before
+    this function is entered. `install_upload_limit` above is what stops an
+    absurd body ever getting that far; these caps bound what the handler
+    itself then holds. Neither is a claim that a large upload never touched
+    a file descriptor -- see `agent/attachments.py`'s module docstring.
 
     An empty file part (a browser that submits `<input type=file>` with
     nothing chosen sends one with an empty filename) is skipped rather than

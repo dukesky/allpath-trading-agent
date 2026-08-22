@@ -1819,7 +1819,7 @@ def test_album_of_five_is_refused_with_the_cap_message_and_nothing_downloaded(tm
     poller.poll_once()
 
     assert chat.calls == []
-    assert api.sent_messages == [("111", TOO_MANY_MESSAGE)]
+    assert api.sent_messages == [("111", "[Shadow] " + TOO_MANY_MESSAGE)]
     assert api.get_file_calls == []
     assert api.download_calls == []
 
@@ -1865,7 +1865,7 @@ def test_oversize_image_replies_with_the_size_message_and_runs_no_turn(tmp_path)
     poller.poll_once()
 
     assert chat.calls == []
-    assert api.sent_messages == [("111", TOO_LARGE_MESSAGE)]
+    assert api.sent_messages == [("111", "[Shadow] " + TOO_LARGE_MESSAGE)]
 
 
 def test_get_file_failure_replies_with_the_download_failure_message(tmp_path):
@@ -1880,7 +1880,7 @@ def test_get_file_failure_replies_with_the_download_failure_message(tmp_path):
     poller.poll_once()
 
     assert chat.calls == []
-    assert api.sent_messages == [("111", DOWNLOAD_FAILED_MESSAGE)]
+    assert api.sent_messages == [("111", "[Shadow] " + DOWNLOAD_FAILED_MESSAGE)]
     assert api.download_calls == []
 
 
@@ -1894,7 +1894,27 @@ def test_download_failure_replies_with_the_download_failure_message(tmp_path):
     poller.poll_once()
 
     assert chat.calls == []
-    assert api.sent_messages == [("111", DOWNLOAD_FAILED_MESSAGE)]
+    assert api.sent_messages == [("111", "[Shadow] " + DOWNLOAD_FAILED_MESSAGE)]
+
+
+def test_a_refusal_names_the_account_the_chat_is_on(tmp_path):
+    """Whole-branch review (M6): every other reply this bot sends carries
+    the `[Paper] `/`[Shadow] ` prefix (`notify.events._prefix`, via
+    `prefixed_chunks`). A bare "Up to 4 images per message." in a chat that
+    serves both accounts left the user unable to tell which conversation
+    just refused their screenshot."""
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    app_state.set(TELEGRAM_ACCOUNT_KEY, "paper")
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _photo_update(i, 111, file_id=f"p{i}", media_group_id="mg1") for i in range(1, 6)
+    ]], files={f"p{i}": PNG_BYTES for i in range(1, 6)})
+    poller = make_poller(api, chat, app_state)
+
+    poller.poll_once()
+
+    assert api.sent_messages == [("111", "[Paper] " + TOO_MANY_MESSAGE)]
 
 
 def test_document_claiming_an_image_mime_but_holding_a_gif_is_refused(tmp_path):
@@ -1911,7 +1931,7 @@ def test_document_claiming_an_image_mime_but_holding_a_gif_is_refused(tmp_path):
     poller.poll_once()
 
     assert chat.calls == []
-    assert api.sent_messages == [("111", BAD_TYPE_MESSAGE)]
+    assert api.sent_messages == [("111", "[Shadow] " + BAD_TYPE_MESSAGE)]
 
 
 def test_photo_caption_that_looks_like_a_command_is_not_run_as_one(tmp_path):
@@ -2151,4 +2171,4 @@ def test_real_api_end_to_end_oversize_photo_is_refused(tmp_path):
     assert poller.poll_once() == "ok"
 
     assert chat.calls == []
-    assert [m["text"] for m in transport.sent] == [TOO_LARGE_MESSAGE]
+    assert [m["text"] for m in transport.sent] == ["[Shadow] " + TOO_LARGE_MESSAGE]

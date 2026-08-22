@@ -30,11 +30,23 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
 - **Image attachments in web chat**: a 📎 control (pick, paste, or
   drag-drop) attaches PNG/JPEG/WebP images, up to 5 MB each and 4 per
   message, alongside your text. Images ride the one turn they're sent
-  with and are never persisted — the transcript, the FTS index, and the
-  Telegram mirror all keep only a `[image: name, size]` placeholder. A
-  chat model the OpenRouter catalog positively knows can't read images
-  gets a fixed "switch models or type the positions instead" reply rather
-  than a raw provider error.
+  with — the model sees them on its first reply of that turn — and are
+  never stored: the transcript, the FTS index, and the Telegram mirror all
+  keep only a `[image: name, size]` placeholder, and nothing is written to
+  the database, a log, or any file the app keeps. (The HTTP layer may still
+  spool a large upload to an unlinked temporary file while parsing the
+  request; a request over the four-image budget is refused with 413 before
+  it is parsed at all.)
+- **Vision hint before you send**: when the OpenRouter catalog positively
+  says the configured chat model has no image input, the Chat composer says
+  so up front. Informational only — an unlisted slug, a curated-list
+  provider or an unfetched catalog says nothing rather than warning about a
+  model that may well see fine.
+- **A fixed reply when the model actually refuses an image**: a provider
+  error that says the model can't read images (as opposed to a rate limit
+  or an outage that merely names a vision model) is answered with "switch
+  CHAT_MODEL to a vision-capable model in Settings, or type the positions
+  instead" rather than a raw provider string.
 - **Telegram photo import**: a photo or image document sent to the paired
   bot rides the same chat-turn path as text — the caption becomes the
   message, and up to four images sent together as one Telegram album
