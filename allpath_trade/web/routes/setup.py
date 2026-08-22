@@ -111,13 +111,17 @@ def _page(request: Request, step: int, *, error: str = "",
     c = request.app.state.holder.get()
     s = c.settings
     provider = normalize_llm_provider(s.llm_provider)
+    offered = provider in PROVIDER_KEY_FIELDS
     return templates.TemplateResponse(request, "setup.html", {
         "page": "setup", "step": step, "steps": STEPS, "s": s, "error": error,
-        # Which radio is pre-selected. An install configured for a provider
-        # this page doesn't offer (`openai`) shows the default rather than
-        # no selection at all -- and saving is what would change it, so
-        # simply opening the wizard never rewrites anything.
-        "provider": provider if provider in PROVIDER_KEY_FIELDS else "openrouter",
+        # Which radio is pre-selected -- and, for an install configured for a
+        # provider this page doesn't offer (`openai`), NEITHER of them.
+        # Whole-branch review (Important 1): pre-checking OpenRouter for such
+        # an install made the pre-checked radio a lie about what is
+        # configured, and one blank "Save & continue" away from becoming
+        # true. `other_provider` is what step 1 names instead.
+        "provider": provider if offered else "",
+        "other_provider": "" if offered else provider,
         "masks": {f: _mask(str(getattr(s, f, "") or "")) for f in MASKED_FIELDS},
         # Step 3 is the only step that renders the ledger; three sqlite reads
         # on every other step's GET would buy nothing.
@@ -196,12 +200,29 @@ async def save_llm(request: Request) -> Response:
     if provider not in PROVIDER_KEY_FIELDS:
         return _page(request, 1, status_code=400,
                      error="Choose OpenRouter or Anthropic.")
-    updates = {"llm_provider": provider}
+    current = request.app.state.holder.get().settings
+    field = PROVIDER_KEY_FIELDS[provider]
+    updates: dict[str, str] = {}
     # Blank means "keep what is stored" -- the same rule the settings page's
     # secret fields follow, and the reason the input is never prefilled.
     key = str(form.get("llm_api_key", "")).strip()
     if key:
-        updates[PROVIDER_KEY_FIELDS[provider]] = key
+        updates[field] = key
+
+    # Whole-branch review (Important 1): LLM_PROVIDER is NOT written
+    # unconditionally. This form is reachable from Settings' "Re-run setup"
+    # on an install that is already working, possibly on `openai` -- a
+    # provider this page has no radio for at all -- and a blank submit is
+    # the most natural thing to do on a step you have nothing to change on.
+    # Writing the radio's value there switched a working install to a
+    # provider with no key, which put the setup gate back in front of every
+    # page. So the provider only moves when the submit actually carries the
+    # means to make it work: a key typed right now, or a key already stored
+    # for the provider being switched TO.
+    stored_key = str(getattr(current, field, "") or "").strip()
+    changed = normalize_llm_provider(current.llm_provider) != provider
+    if key or (changed and stored_key):
+        updates["llm_provider"] = provider
     return _save(request, updates, redirect="/setup?step=2", step=1)
 
 
@@ -332,12 +353,19 @@ async def test_llm(request: Request) -> HTMLResponse:
     return _test_fragment(request, ok=True, message=f"OK · {client.model} replied")
 
 
-def _probe_account(key: str, secret: str):
+def _probe_account(key: str, secret: str, paper: bool):
     # Module-global `AlpacaBroker` on purpose (not a local import): it is
     # the seam this route's tests replace. Constructing the broker is part
     # of what runs in the threadpool -- `TradingClient`'s constructor is the
     # SDK's, and nothing guarantees it stays purely local.
-    return AlpacaBroker(key, secret, paper=True).get_account()
+    #
+    # Whole-branch review (M5): `paper` comes from ALPACA_PAPER, not a
+    # hardcoded True. The wizard only ever *onboards* a paper account, but
+    # an install whose `.env` was hand-edited to live trading would
+    # otherwise have its Test button authenticate against a different
+    # endpoint than the app itself uses -- a green "Connected" for keys that
+    # cannot place a single order here.
+    return AlpacaBroker(key, secret, paper=paper).get_account()
 
 
 @router.post("/setup/test-broker", response_class=HTMLResponse)
@@ -353,11 +381,12 @@ async def test_broker(request: Request) -> HTMLResponse:
             request, ok=False,
             message="Enter both the API key and the secret key first.")
     try:
-        account = await run_in_threadpool(_probe_account, key, secret)
+        account = await run_in_threadpool(_probe_account, key, secret,
+                                          bool(current.alpaca_paper))
     except Exception as exc:  # noqa: BLE001 — any failure is a failed test, not a 500
         return _test_fragment(request, ok=False,
                               message=_sanitize_error(exc, key, secret))
-    # paper=True is hardcoded in `_probe_account`: the wizard only ever
-    # onboards a paper account, so this equity is always the paper one.
+    # Whichever environment ALPACA_PAPER selects -- the default, and the only
+    # one this wizard onboards, is the paper one.
     return _test_fragment(request, ok=True,
                           message=f"Connected · equity {money(account.equity)}")

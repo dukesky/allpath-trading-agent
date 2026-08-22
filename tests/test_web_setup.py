@@ -229,6 +229,106 @@ def test_the_saved_key_is_live_without_a_restart(client):
     assert s.anthropic_api_key == "sk-ant-typed"
 
 
+# -- step 1: an install on a provider the wizard doesn't offer ---------------
+#
+# Whole-branch review (Important 1). Settings offers three providers, the
+# wizard's radios offer two. An `openai` install that followed "Re-run
+# setup" landed on step 1 with the OpenRouter radio pre-checked (the old
+# `_page` fallback) and, on a blank "Save & continue", had LLM_PROVIDER
+# rewritten to `openrouter` -- a provider with no key -- which re-gated the
+# whole app behind the setup wizard it had just walked out of.
+
+
+@pytest.fixture
+def openai_install(tmp_path, monkeypatch):
+    """A working install on the one provider the wizard doesn't offer."""
+    monkeypatch.chdir(tmp_path)
+    store = SettingsStore(tmp_path / ".env")
+    store.set("LLM_PROVIDER", "openai")
+    store.set("OPENAI_API_KEY", "sk-openai-stored")
+    with _make_client(tmp_path, llm_provider="openai",
+                      openai_api_key="sk-openai-stored",
+                      alpaca_api_key="alpaca-key",
+                      alpaca_secret_key="alpaca-secret") as c:
+        c.post("/login", data={"token": "secret"})
+        yield c
+
+
+def test_an_openai_install_lands_on_the_shadow_step(openai_install):
+    assert 'data-step="3"' in openai_install.get("/setup").text
+
+
+def test_step_one_names_the_provider_it_cannot_offer(openai_install):
+    body = openai_install.get("/setup?step=1").text
+    assert "Current provider: openai (keys managed in Settings)" in body
+    # And pre-checks NEITHER radio: whichever one was checked is what a
+    # blank submit would switch this install to.
+    assert "checked" not in body
+    assert_english_only(body)
+
+
+def test_a_blank_save_on_an_openai_install_changes_nothing(openai_install, tmp_path):
+    before = dict(dotenv_values(tmp_path / ".env"))
+    r = openai_install.post("/setup/step/1",
+                            data={"llm_provider": "openrouter", "llm_api_key": ""},
+                            follow_redirects=False)
+    assert r.status_code == 303
+    assert dict(dotenv_values(tmp_path / ".env")) == before
+    settings = openai_install.app.state.holder.get().settings
+    assert settings.llm_provider == "openai"
+    assert settings.openai_api_key == "sk-openai-stored"
+
+
+def test_a_blank_save_does_not_re_gate_a_working_install(openai_install):
+    openai_install.post("/setup/step/1",
+                        data={"llm_provider": "openrouter", "llm_api_key": ""})
+    # The gate is what a fresh GET anywhere else would hit.
+    r = openai_install.get("/", follow_redirects=False)
+    assert r.status_code == 200
+
+
+def test_a_typed_key_still_switches_the_provider(openai_install, tmp_path):
+    """The wizard is still how you MOVE an install to one of its two
+    providers -- it just takes a key to do it, not a bare submit."""
+    openai_install.post("/setup/step/1",
+                        data={"llm_provider": "anthropic",
+                              "llm_api_key": "sk-ant-typed"})
+    assert stored(tmp_path, "LLM_PROVIDER") == "anthropic"
+    assert stored(tmp_path, "ANTHROPIC_API_KEY") == "sk-ant-typed"
+    assert stored(tmp_path, "OPENAI_API_KEY") == "sk-openai-stored"
+
+
+def test_switching_to_a_provider_that_already_has_a_key_needs_no_retype(
+        tmp_path, monkeypatch):
+    """The other half of the rule: a blank submit DOES switch provider when
+    the target already has a stored key, so rotating between two configured
+    providers doesn't force a paste."""
+    monkeypatch.chdir(tmp_path)
+    store = SettingsStore(tmp_path / ".env")
+    store.set("LLM_PROVIDER", "openrouter")
+    store.set("OPENROUTER_API_KEY", "sk-or-stored")
+    store.set("ANTHROPIC_API_KEY", "sk-ant-stored")
+    with _make_client(tmp_path, llm_provider="openrouter",
+                      openrouter_api_key="sk-or-stored",
+                      anthropic_api_key="sk-ant-stored") as c:
+        c.post("/login", data={"token": "secret"})
+        c.post("/setup/step/1",
+               data={"llm_provider": "anthropic", "llm_api_key": ""})
+        assert stored(tmp_path, "LLM_PROVIDER") == "anthropic"
+        assert c.app.state.holder.get().settings.llm_provider == "anthropic"
+
+
+def test_a_blank_submit_never_switches_to_a_provider_with_no_key(client, tmp_path):
+    """A fresh install, nothing stored anywhere: "Save & continue" with an
+    empty box must not record a provider whose key is missing -- that is
+    exactly the state the wizard exists to get out of."""
+    r = client.post("/setup/step/1",
+                    data={"llm_provider": "anthropic", "llm_api_key": ""},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert env_keys(tmp_path) == {"WEB_TOKEN"}
+
+
 def test_an_unknown_provider_is_refused_and_writes_nothing(client, tmp_path):
     r = client.post("/setup/step/1",
                     data={"llm_provider": "hotdog", "llm_api_key": "sk-typed"},
@@ -411,6 +511,22 @@ def test_test_broker_falls_back_to_the_stored_pair(configured, monkeypatch):
     configured.post("/setup/test-broker",
                     data={"alpaca_api_key": "", "alpaca_secret_key": ""})
     assert _FakeAlpaca.last == {"key": "alpaca-key", "secret": "alpaca-secret", "paper": True}
+
+
+def test_test_broker_probes_the_environment_this_install_trades_in(
+        tmp_path, monkeypatch):
+    """Whole-branch review (M5): `ALPACA_PAPER=false` is a deliberate
+    hand-edit of `.env`, and the wizard's Test button has to reach the same
+    endpoint the app itself will -- a "Connected · equity ..." read off the
+    paper API tells a live install nothing about the keys it actually uses.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(setup_route, "AlpacaBroker", _FakeAlpaca)
+    with _make_client(tmp_path, alpaca_paper=False) as c:
+        c.post("/login", data={"token": "secret"})
+        c.post("/setup/test-broker",
+               data={"alpaca_api_key": "AK", "alpaca_secret_key": "AS"})
+    assert _FakeAlpaca.last["paper"] is False
 
 
 def test_test_broker_needs_both_halves(client, monkeypatch):

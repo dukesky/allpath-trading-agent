@@ -1295,12 +1295,41 @@ def test_shadow_settings_notice_is_shown_and_english_only(client):
     assert_english_only(r.text)
 
 
+def test_a_capitalized_provider_still_gets_its_own_catalog(tmp_path, monkeypatch):
+    """Whole-branch review (M1): `LLM_PROVIDER=OpenRouter` builds an
+    OpenRouter client and passes the setup gate (both read it through
+    `normalize_llm_provider`), so the model dropdowns and the Provider
+    select have to read it the same way -- otherwise this install silently
+    got the "unknown provider" list and a select with nothing highlighted."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    SettingsStore(tmp_path / ".env").set("WEB_TOKEN", "secret")
+    seen = []
+    monkeypatch.setattr(models_catalog, "list_models",
+                        lambda provider: seen.append(provider) or ["a/b"])
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **{**CONFIGURED_KEYS, "llm_provider": "OpenRouter"})
+    with TestClient(create_app(settings, broker=FakeBroker())) as c:
+        c.post("/login", data={"token": "secret"})
+        body = c.get("/settings").text
+    assert seen == ["openrouter"]
+    assert '<option value="openrouter" selected>' in body
+
+
 def test_access_section_offers_a_re_run_setup_link(client):
     """setup-wizard T2: the wizard is dismissable and, once dismissed, the
     banner is the only pointer back to it -- which disappears the moment
     setup is finished. Settings is the durable way back in (to rotate a key
     through the same guided flow, say)."""
     body = client.get("/settings").text
-    assert 'href="/setup?step=1"' in body
+    # Whole-branch review (Important 1): `/setup`, not `/setup?step=1`.
+    # Pinning step 1 walked an already-configured install back onto the
+    # provider form, where a blank "Save & continue" used to rewrite
+    # LLM_PROVIDER. Bare `/setup` lets `_default_step` land the user on the
+    # first thing that still needs doing (step 3 when nothing does).
+    assert 'href="/setup"' in body
+    assert "/setup?step=" not in body
     assert "Re-run setup" in body
     assert_english_only(body)

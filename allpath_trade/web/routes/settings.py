@@ -16,7 +16,11 @@ from allpath_trade.agent.shadow_tools import (
     parse_shadow_csv,
     preview_import,
 )
-from allpath_trade.config import Settings, describe_validation_error
+from allpath_trade.config import (
+    Settings,
+    describe_validation_error,
+    normalize_llm_provider,
+)
 from allpath_trade.llm.prices import PRICES_UPDATED, estimate_cost
 from allpath_trade.notify import events
 from allpath_trade.notify.dispatch import notify_review_queued
@@ -291,7 +295,15 @@ def settings_page(request: Request, saved: str = "", notice: str = "",
         # covers all three selects. models_catalog.list_models() carries its
         # own timeout and any-failure fallback, so this can never be what
         # makes a GET here hang or 500.
-        "model_options": models_catalog.list_models(s.llm_provider),
+        #
+        # Whole-branch review (M1): normalized the way `llm/factory.py` and
+        # `web/setup_status.py` read LLM_PROVIDER. An `.env` saying
+        # `OpenRouter` builds an OpenRouter client and passes the setup
+        # gate, so the catalog and the Provider select below have to agree
+        # with that rather than treat it as a fourth, unknown provider.
+        "model_options": models_catalog.list_models(
+            normalize_llm_provider(s.llm_provider)),
+        "provider": normalize_llm_provider(s.llm_provider),
         "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
         "tabs": TABS, "active_tab": DEFAULT_TAB,
         **_usage_context(c), **_shadow_context(c), **nav_context(request)})
@@ -352,8 +364,11 @@ async def save(request: Request) -> Response:
             # display.llm_provider, not current.llm_provider -- the user may
             # have changed the provider dropdown in the same submit that
             # failed validation elsewhere; the catalog must match whichever
-            # provider is actually selected on the redisplayed page.
-            "model_options": models_catalog.list_models(display.llm_provider),
+            # provider is actually selected on the redisplayed page. Read
+            # through the same normalization as the GET above (M1).
+            "model_options": models_catalog.list_models(
+                normalize_llm_provider(display.llm_provider)),
+            "provider": normalize_llm_provider(display.llm_provider),
             "telegram_status": _telegram_status(c.app_state.get(TELEGRAM_CHAT_ID_KEY)),
             # Reopen the tab the first invalid field actually lives on --
             # otherwise the error banner at the top of the page points at a

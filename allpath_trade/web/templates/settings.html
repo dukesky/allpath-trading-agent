@@ -41,7 +41,11 @@
     <label>Provider</label>
     <select name="llm_provider">
       {% for p in ['openrouter', 'openai', 'anthropic'] %}
-      <option value="{{ p }}" {{ 'selected' if s.llm_provider == p }}>{{ p }}</option>
+      {# `provider` is LLM_PROVIDER read through config.normalize_llm_provider,
+         the same reading llm/factory.py and the setup gate use (M1) -- an
+         `.env` saying `OpenRouter` must highlight the openrouter option
+         here rather than leave the select showing the first one blind. #}
+      <option value="{{ p }}" {{ 'selected' if provider == p }}>{{ p }}</option>
       {% endfor %}
     </select>
     <label>OpenRouter API key <span class="muted">{{ masks['openrouter_api_key'] or 'not set' }}</span></label>
@@ -237,7 +241,7 @@
   <div class="card">
     <p class="muted">Walk through the guided first-run setup again --
     LLM key, then Alpaca keys. Nothing is cleared by opening it.</p>
-    <p><a href="/setup?step=1">Re-run setup</a></p>
+    <p><a href="/setup">Re-run setup</a></p>
   </div>
   </section>
 

@@ -27,6 +27,16 @@
   <div class="card">
     <p class="muted">AllPath needs one API key to think with. Pick a provider,
     paste its key, and everything else on this page can wait.</p>
+    {# Whole-branch review (Important 1): an install already running on a
+       provider with no radio here (`openai`) must be told so, rather than
+       shown OpenRouter pre-checked as if that were the truth. Neither radio
+       is checked in that case, so nothing is one blank submit away from
+       switching -- and the sentence says where those keys do live. #}
+    {% if other_provider %}
+    <p class="hint">Current provider: {{ other_provider }} (keys managed in Settings).
+    Choosing one below and pasting a key switches to it; leaving this step
+    alone changes nothing.</p>
+    {% endif %}
 
     <label class="check"><input type="radio" name="llm_provider" value="openrouter"
            {{ 'checked' if provider == 'openrouter' }}> OpenRouter</label>
