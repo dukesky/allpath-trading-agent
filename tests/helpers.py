@@ -30,3 +30,36 @@ def assert_english_only(text: str) -> None:
     """
     offending = [ch for ch in text if any(lo <= ch <= hi for lo, hi in _CJK_RANGES)]
     assert not offending, f"unexpected CJK character(s) in user-facing text: {offending!r}"
+
+
+# setup-wizard T2: the key set an install needs before the first-run gate
+# lets go of it. Every web suite that is not ABOUT that gate has to look
+# configured, or `web/auth.py` bounces its every GET to `/setup` -- the
+# behavior tests/test_web_setup_gate.py covers on purpose, and pure noise
+# everywhere else.
+#
+# The values never reach Alpaca or an LLM: these fixtures all inject their
+# own broker (which `app.py::_build_broker` prefers over constructing an
+# `AlpacaBroker`) and either stub the LLM or never call one. A suite that
+# genuinely wants the unconfigured state uses `dismiss_setup` below
+# instead, which keeps the empty keys and only lifts the redirect.
+CONFIGURED_KEYS = {
+    "openrouter_api_key": "test-llm-key",
+    "alpaca_api_key": "test-alpaca-key",
+    "alpaca_secret_key": "test-alpaca-secret",
+}
+
+
+def dismiss_setup(client) -> None:
+    """Mark the first-run wizard as skipped for `client`'s app, exactly as
+    the wizard's own "skip for now" does -- the pages come back (with the
+    "Setup incomplete" banner) while the keys stay empty.
+
+    Preferred over `CONFIGURED_KEYS` wherever a suite's whole point is the
+    unconfigured install, and wherever the suite calls `holder.rebuild()`:
+    the flag lives in the database, so a rebuild that reloads `Settings`
+    from a `.env` written mid-test cannot silently re-arm the gate.
+    """
+    from allpath_trade.web.setup_status import SETUP_DISMISSED_KEY
+
+    client.app.state.holder.get().app_state.set(SETUP_DISMISSED_KEY, "1")

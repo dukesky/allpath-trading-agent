@@ -24,7 +24,7 @@ from allpath_trade.risk.gate import RiskDecision
 from allpath_trade.web.account_ctx import ACCOUNT_COOKIE
 from allpath_trade.web.app import create_app
 from allpath_trade.web.routes import dashboard as dashboard_route
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only
 from tests.test_sentinel import FakeBroker
 from tests.test_web_dashboard import FakeDataSource
 
@@ -63,7 +63,8 @@ def client(tmp_path, monkeypatch):
     (strategies_dir / "shadow" / "shadow-financials.yaml").write_text(SHADOW_STRAT)
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=strategies_dir,
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
         monkeypatch.setattr(c.app.state.holder.get(), "data", FakeDataSource())
         c.post("/login", data={"token": "secret"})

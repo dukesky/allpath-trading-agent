@@ -58,6 +58,22 @@ nav a { color:var(--muted); font-size:14px; padding:4px 0; border-bottom:2px sol
 nav a:hover { color:var(--text); }
 nav a.on { color:var(--text); font-weight:600; border-bottom-color:var(--accent); }
 
+/* setup-wizard T2: the unfinished-setup strip, directly under the nav.
+   Deliberately muted rather than alarm-colored -- an install missing its
+   keys is an unfinished chore, not a fault, and this sits on every page
+   until it's done; --warn/--badge amber is reserved for things that need
+   attention NOW (a triggered rule, a pending approval) and would lose that
+   meaning if a permanent strip also wore it. Every color is a token, so it
+   follows the light-mode overrides at the top of this file with no rules of
+   its own: --surface-2 reads as a recessed band against --bg in both
+   themes, and its own link rule is needed because `main a` (line ~70) does
+   not reach outside <main>, where `a { color:inherit }` would leave the
+   link indistinguishable from the sentence around it. */
+.setup-banner { margin:0; padding:9px 24px; background:var(--surface-2);
+  color:var(--muted); border-bottom:1px solid var(--line); font-size:13px; }
+.setup-banner a { color:var(--accent); font-weight:600; }
+.setup-banner a:hover { text-decoration:underline; }
+
 /* Bare inline text links (Strategies' "View details", a source URL in a
    review's agent analysis) get no other affordance -- .strategy-card is
    also an <a> but is excluded via :not(.card), since a whole card reading

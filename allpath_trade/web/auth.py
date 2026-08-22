@@ -7,6 +7,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from allpath_trade.config import Settings, SettingsStore
+from allpath_trade.web.setup_status import should_redirect_to_setup
 from allpath_trade.web.templating import templates
 
 COOKIE = "allpath_session"
@@ -62,7 +63,8 @@ def install_auth(app: FastAPI) -> None:
         if (normalized in PUBLIC_PATHS or path.startswith(("/static/", "/a/"))):
             return await call_next(request)
 
-        token = request.app.state.holder.settings().web_token
+        components = request.app.state.holder.get()
+        token = components.settings.web_token
         if not _authorized(request, token):
             if request.headers.get("hx-request") == "true":
                 # A plain 303 here is fine for a full page navigation (the
@@ -104,6 +106,22 @@ def install_auth(app: FastAPI) -> None:
                 if origin != expected:
                     return Response("cross-origin request refused",
                                     status_code=403)
+
+        # setup-wizard T2: the first-run gate. Deliberately BELOW the token
+        # check -- an unauthenticated stranger on the LAN gets the login
+        # page and learns nothing about whether this install has its keys
+        # yet. It is also GET-only (see should_redirect_to_setup), so it
+        # sits after the same-origin check rather than in front of it: no
+        # request can reach one branch and skip the other, and the write
+        # path keeps its own protections untouched.
+        #
+        # A plain 302 is enough here, unlike the login redirect above:
+        # nothing in this app issues an htmx GET (every hx-* attribute in
+        # templates/ is an hx-post), so this can only ever interrupt a full
+        # page navigation, which a browser follows on its own.
+        if should_redirect_to_setup(request.method, path, components.settings,
+                                    components.app_state):
+            return RedirectResponse("/setup", status_code=302)
         return await call_next(request)
 
     @app.get("/login", response_class=HTMLResponse)

@@ -24,6 +24,7 @@ from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.account_ctx import bundle, bundle_for, current_account
 from allpath_trade.web.charts import equity_since_caption, equity_svg, signed_money, signed_pct
 from allpath_trade.web.deps import components
+from allpath_trade.web.setup_status import setup_missing
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -73,12 +74,25 @@ def nav_context(request: Request) -> dict:
     pending_count = len(bundle_for(c, current).queue.list())
     other = next(a for a in ACCOUNTS if a != current)
     other_pending = bool(bundle_for(c, other).queue.list())
+    # setup-wizard T2: the banner. Independent of the dismissal flag on
+    # purpose -- the redirect gate (web/auth.py) is what dismissal turns
+    # off, and in practice this only ever renders for someone who DID
+    # dismiss, since anyone who hasn't never reaches a page carrying it.
+    # Suppressed on the wizard's own pages, where a banner pointing at the
+    # page you are already on is just noise.
+    missing = setup_missing(c.settings)
     return {
         "pending_count": pending_count,
         "current_account": current,
         "other_account": other,
         "other_account_pending": other_pending,
+        "setup_missing": missing,
+        "setup_banner": bool(missing) and not _is_setup_path(request.url.path),
     }
+
+
+def _is_setup_path(path: str) -> bool:
+    return path == "/setup" or path.startswith("/setup/")
 
 
 def _with_timeout(fn):

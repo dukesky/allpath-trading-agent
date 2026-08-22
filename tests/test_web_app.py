@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from allpath_trade.config import Settings
 from allpath_trade.web.app import create_app, static_content_hash
+from tests.helpers import CONFIGURED_KEYS
 from tests.test_sentinel import FakeBroker
 
 
@@ -14,7 +15,8 @@ def client(tmp_path, monkeypatch):
     (tmp_path / "strategies").mkdir()
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     app = create_app(settings, broker=FakeBroker())
     with TestClient(app) as c:
         yield c

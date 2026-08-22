@@ -29,6 +29,7 @@ from allpath_trade.web.markdown import (
     split_for_telegram,
     to_telegram_html,
 )
+from tests.helpers import CONFIGURED_KEYS
 from tests.test_sentinel import FakeBroker
 from tests.test_web_chat import make_client
 from tests.test_web_reports import add_report
@@ -47,7 +48,8 @@ def reports_client(tmp_path, monkeypatch):
     (tmp_path / "strategies").mkdir()
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
         c.post("/login", data={"token": "secret"})
         yield c

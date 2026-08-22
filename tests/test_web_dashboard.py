@@ -30,7 +30,7 @@ from allpath_trade.web.routes.dashboard import (
     sentinel_heartbeat_status,
     summarize_strategy,
 )
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only, dismiss_setup
 from tests.test_sentinel import FakeBroker
 
 STRAT = """
@@ -93,7 +93,8 @@ def client(tmp_path, monkeypatch):
     (tmp_path / "strategies" / "semis.yaml").write_text(STRAT)
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
-                        memory_dir=tmp_path / "memory", web_token="secret")
+                        memory_dir=tmp_path / "memory", web_token="secret",
+                        **CONFIGURED_KEYS)
     with TestClient(create_app(settings, broker=FakeBroker())) as c:
         # /login redirects to "/" on success and TestClient follows
         # redirects by default -- that first dashboard render must already
@@ -1322,6 +1323,11 @@ def unconfigured_client(tmp_path, monkeypatch):
     with TestClient(create_app(settings, broker=UnconfiguredBroker())) as c:
         monkeypatch.setattr(c.app.state.holder.get(), "data", FakeDataSource())
         c.post("/login", data={"token": "secret"})
+        # setup-wizard T2: keys still absent (that is the point of this
+        # fixture), wizard skipped -- so the dashboard is reachable and its
+        # unconfigured-broker degradation is what gets exercised, not the
+        # redirect to /setup that tests/test_web_setup_gate.py owns.
+        dismiss_setup(c)
         yield c
 
 

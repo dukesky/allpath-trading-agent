@@ -12,7 +12,7 @@ from allpath_trade.broker.base import Order, OrderStatus
 from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient, LLMResponse
 from allpath_trade.web.app import create_app
-from tests.helpers import assert_english_only
+from tests.helpers import CONFIGURED_KEYS, assert_english_only, dismiss_setup
 from tests.test_agent_loop import ScriptedLLM, tool_response
 from tests.test_sentinel import FakeBroker
 
@@ -35,7 +35,7 @@ def make_client(tmp_path, monkeypatch, responses):
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
                         memory_dir=tmp_path / "memory", web_token="secret",
-                        openrouter_api_key="k")
+                        **CONFIGURED_KEYS)
     llm = ScriptedLLM(responses)
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
                         lambda settings, tier="chat", usage_store=None: llm)
@@ -102,6 +102,12 @@ def test_chat_shows_a_banner_instead_of_500_when_no_llm_key_is_configured(
     # No provider key anywhere -- build_llm raises LLMConfigError.
     client = TestClient(create_app(settings, broker=FakeBroker()))
     client.post("/login", data={"token": "secret"})
+    # setup-wizard T2: with no keys at all this install is also what the
+    # first-run gate exists for, and an ungated GET /chat would be a 302 to
+    # the wizard rather than the banner under test. Skipping the wizard is
+    # exactly the state this test is about: the user chose to go on without
+    # a key, and Chat must degrade instead of 500ing.
+    dismiss_setup(client)
 
     r = client.get("/chat")
 
@@ -119,6 +125,10 @@ def test_chat_send_also_degrades_instead_of_500_when_no_llm_key_is_configured(
                         memory_dir=tmp_path / "memory", web_token="secret")
     client = TestClient(create_app(settings, broker=FakeBroker()))
     client.post("/login", data={"token": "secret"})
+    # Not strictly required (the setup gate is GET-only, so this POST is
+    # never redirected) -- set for the same reason as the GET test above,
+    # so the two halves of the same scenario describe the same install.
+    dismiss_setup(client)
 
     r = client.post("/chat/send", data={"message": "hi"})
 
@@ -648,7 +658,7 @@ def test_a_second_send_waits_for_the_first_turn_to_finish(tmp_path, monkeypatch)
     settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
                         strategies_dir=tmp_path / "strategies",
                         memory_dir=tmp_path / "memory", web_token="secret",
-                        openrouter_api_key="k")
+                        **CONFIGURED_KEYS)
     monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
                         lambda settings, tier="chat", usage_store=None: llm)
     client = TestClient(create_app(settings, broker=FakeBroker()))
