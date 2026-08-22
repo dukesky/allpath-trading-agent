@@ -33,6 +33,25 @@ by attaching a brokerage screenshot to a chat message (web or Telegram).
 
 ---
 
+## ⓪ Prerequisite: `serve` starts without Alpaca keys
+
+Today `allpath-trade serve` exits 2 when `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`
+are empty (`cli.py`, `needs_broker`), so a first-run wizard could never be
+reached. Change: `serve` (and only `serve`) no longer requires them.
+`_build_broker` returns an `UnconfiguredBroker` (`broker/unconfigured.py`)
+for paper when either key is empty; every method raises
+`BrokerNotConfigured(BrokerError)` with the message *Alpaca keys are not
+set — finish setup.* Consequences, all reusing existing failure paths:
+- Dashboard's broker-failure slot shows the guidance card (§②).
+- Paper's sentinel pass catches `BrokerNotConfigured`, prints one stderr
+  line per pass, writes no `sentinel_last_ok`, and the heartbeat reads
+  "Sentinel: paper broker not configured".
+- Paper's reflection / digest skip with a stderr line; shadow runs as
+  usual.
+- Saving keys in the wizard or Settings rebuilds components, which swaps
+  the real `AlpacaBroker` in — no restart.
+The other CLI commands keep the exit-2 behaviour.
+
 ## ① Setup wizard
 
 ### Gating middleware
