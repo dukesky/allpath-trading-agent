@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -369,3 +370,67 @@ def test_a_text_only_turn_is_unchanged_by_the_images_parameter():
     assert s.history[0] == {"role": "user", "content": "hello"}
     assert llm.seen[0] == [{"role": "system", "content": "SYS"},
                            {"role": "user", "content": "hello"}]
+
+
+def test_an_images_only_turn_sends_no_empty_text_part():
+    # Anthropic 400s on an empty text block, with a message that matches no
+    # "unsupported" pattern -- the user would get a raw provider error for
+    # a perfectly ordinary "screenshot, no caption" message.
+    llm = ScriptedLLM([LLMResponse(text="ok")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("", images=[_png()])
+    assert llm.seen[0][-1]["content"] == [
+        {"type": "image", "mime": "image/png", "data": PNG_BYTES}]
+    # ...and the stored display line has no trailing space.
+    assert s.history[0]["display"] == "[image: positions.png, 1 KB]"
+
+
+def _compaction_run(tmp_path, db_name, final_images, monkeypatch):
+    """Drive a session past its context budget, ending on one turn that may
+    carry images, and report what the Compactor actually did plus every
+    message `estimate_tokens` was asked to weigh."""
+    import allpath_trade.agent.compact as compact_mod
+
+    weighed: list[dict] = []
+    real_estimate = compact_mod.estimate_tokens
+
+    def spy(messages):
+        weighed.extend(messages)
+        return real_estimate(messages)
+
+    monkeypatch.setattr(compact_mod, "estimate_tokens", spy)
+    store = ConversationStore(connect(tmp_path / db_name))
+    cid = store.start()
+    flushes: list[int] = []
+    summarizer = ScriptedLLM([LLMResponse(text=f"summary {i}") for i in range(40)])
+    compactor = Compactor(summarizer, store, budget_tokens=1200,
+                          on_before_compact=lambda msgs: flushes.append(len(msgs)))
+    session = AgentSession(ScriptedLLM([LLMResponse(text=f"reply {i}") for i in range(40)]),
+                           make_registry(), "SYS", store=store,
+                           conversation_id=cid, compactor=compactor)
+    for i in range(15):
+        session.run_turn(f"question {i} " + "x" * 600)
+    session.run_turn("last one", images=final_images)
+    return ({"summaries": len(summarizer.seen), "flushes": len(flushes),
+             "context": len(session.history)}, weighed)
+
+
+def test_a_turn_with_huge_images_compacts_exactly_like_the_text_only_baseline(
+        tmp_path, monkeypatch):
+    # Review finding (Important 1): with `images` on the history dict,
+    # estimate_tokens' `json.dumps(m, default=str)` valued a 5 MB
+    # screenshot at millions of tokens, so `_cut_index` never found a
+    # fitting suffix -- compaction AND the on_before_compact memory flush
+    # silently stopped for that turn, after seconds of re-serializing bytes
+    # under ChatService's turn lock.
+    big = [ImageAttachment(data=b"\x89PNG\r\n\x1a\n" + b"\x00" * (5 * 1024 * 1024),
+                           mime="image/png", name=f"shot{i}.png") for i in range(4)]
+    baseline, _ = _compaction_run(tmp_path, "baseline.db", None, monkeypatch)
+    with_images, weighed = _compaction_run(tmp_path, "images.db", big, monkeypatch)
+
+    assert baseline["summaries"] > 0 and baseline["flushes"] > 0  # it really compacted
+    assert with_images == baseline
+    # estimate_tokens never sees an image: no bytes, no `images` key, and
+    # no message anywhere near a megabyte.
+    assert all("images" not in m for m in weighed)
+    assert max(len(json.dumps(m, default=str)) for m in weighed) < 5_000

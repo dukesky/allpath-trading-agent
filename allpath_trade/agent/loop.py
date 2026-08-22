@@ -4,7 +4,7 @@ import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from allpath_trade.agent.attachments import ImageAttachment, placeholders
+from allpath_trade.agent.attachments import ImageAttachment, display_for
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.llm.base import LLMClient, LLMError, LLMImageUnsupported, ToolCall
 from allpath_trade.store.conversations import ConversationStore
@@ -28,23 +28,50 @@ _PROTOCOL_KEYS = ("role", "content", "tool_call_id", "tool_calls")
 
 
 def _protocol_message(message: dict) -> dict:
-    """Project a history entry down to the protocol fields, expanding the
-    transient `images` key (setup-wizard T5) into the unified list-content
-    shape every LLMClient knows how to convert:
+    """Project a history entry down to the protocol fields. Pure: it never
+    looks at, or introduces, anything that isn't already on the history
+    dict -- image bytes are injected downstream, by `_with_images`."""
+    return {k: message[k] for k in _PROTOCOL_KEYS if k in message}
+
+
+def _with_images(messages: list[dict],
+                 images: list[ImageAttachment] | None) -> list[dict]:
+    """Attach the turn's image parts to the LAST user entry of an outgoing
+    request, in the unified shape every LLMClient converts:
     `[{"type": "image", "mime": ..., "data": bytes}, ..., {"type": "text", ...}]`.
 
-    `images` only ever exists on the ONE user message of the turn in
-    flight (`run_turn` pops it in a `finally`), so a text-only message --
-    every message of every other turn -- takes the untouched str-content
-    path and produces a byte-identical request to before this existed."""
-    out = {k: message[k] for k in _PROTOCOL_KEYS if k in message}
-    images = message.get("images")
-    if images:
-        out["content"] = [
-            *({"type": "image", "mime": i.mime, "data": i.data} for i in images),
-            {"type": "text", "text": out.get("content") or ""},
-        ]
-    return out
+    Injecting here -- into the throwaway list built for one `llm.complete`
+    call -- rather than onto the history dict is what keeps the bytes out
+    of everything that reads history. Review finding (Important 1): with
+    `images` on the message, `Compactor.estimate_tokens` (which does
+    `json.dumps(m, default=str)` over every message) valued a 3 MB
+    screenshot at ~3.9M tokens, so `_cut_index` could never find a fitting
+    suffix -- compaction AND the `on_before_compact` memory flush silently
+    stopped happening for that turn, after burning seconds re-serializing
+    the bytes on every iteration, under ChatService's `_turn_lock`. It also
+    means `ChatService.messages()` cannot observe bytes mid-turn.
+
+    Scans backwards for the last `user` entry rather than assuming the last
+    element: within a tool loop the request ends with `tool` results, and
+    the turn's own user message is the newest `user` one either way (an
+    out-of-band `note_resolution` append is blocked behind the same
+    `_turn_lock` for the duration of the turn). An images-only message
+    (empty text -- spec ③ allows it) emits NO text part: Anthropic rejects
+    an empty text block with a 400 that no "unsupported" mapping catches.
+    """
+    if not images:
+        return messages
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") != "user":
+            continue
+        parts: list[dict] = [{"type": "image", "mime": im.mime, "data": im.data}
+                             for im in images]
+        text = messages[i].get("content") or ""
+        if text:
+            parts.append({"type": "text", "text": text})
+        messages[i] = {**messages[i], "content": parts}
+        break
+    return messages
 
 
 class AgentSession:
@@ -65,6 +92,10 @@ class AgentSession:
         self.on_tool = on_tool
         self.compactor = compactor
         self.persistence_failed = False
+        # The in-flight turn's attachments, if any -- see run_turn. Never
+        # on a history dict: only `_with_images` reads this, when it builds
+        # the throwaway `messages` list for one `llm.complete` call.
+        self._pending_images: list[ImageAttachment] | None = None
         self.history: list[dict] = []
         if store is not None and conversation_id is not None:
             _, through = store.summary(conversation_id)
@@ -93,16 +124,16 @@ class AgentSession:
         `note_resolution`'s `kind`/`display`. `run_turn` (not the caller)
         owns the append, so this is the only seam that can attach them.
 
-        `images` are TRANSIENT (spec ③). They are attached to the user
-        message dict only AFTER `_append` has already persisted it, so the
-        `conversations` row, the FTS index, the compactor's summaries and
-        the Telegram mirror never see bytes -- only the `display` string
-        (`placeholders(images) + " " + text`) and the plain-text `content`.
-        The `finally` below pops the key on every exit path (a normal
-        return, the tool-call limit, an LLMError notice, or an exception
-        propagating out), so a later turn can never resend the image
-        either: the model has already turned it into tool calls and prose,
-        and corrections are text."""
+        `images` are TRANSIENT (spec ③) and are deliberately NOT stored on
+        the message dict at all: they are held on the session for the
+        duration of the turn (`self._pending_images`, cleared in the
+        `finally` on every exit path) and injected into each outgoing
+        request by `_with_images`. So the history dict, the `conversations`
+        row, the FTS index, the compactor and the Telegram mirror only ever
+        see `content` (plain text) and `display` (`display_for`, the
+        placeholder line). A later turn cannot resend the image either: the
+        model has already turned it into tool calls and prose, and
+        corrections are text."""
         extra = extra or {}
         # Reviewer-requested (Telegram plan, Task 4 review): an `extra` key
         # that happened to be named `role`/`content`/`tool_call_id`/
@@ -117,14 +148,13 @@ class AgentSession:
         if images:
             # `display` is what the transcript, session search and the
             # mirror show for this turn -- the bytes' only durable trace.
-            message["display"] = f"{placeholders(images)} {user_text}"
+            message["display"] = display_for(images, user_text)
         self._append(message)
-        if images:
-            message["images"] = list(images)
+        self._pending_images = list(images) if images else None
         try:
             return self._run_loop()
         finally:
-            message.pop("images", None)
+            self._pending_images = None
 
     def _run_loop(self) -> str:
         for _ in range(self.max_iters):
@@ -141,7 +171,8 @@ class AgentSession:
                 context, self.history = self.compactor.maybe_compact(
                     self.conversation_id, self.history)
             messages = [{"role": "system", "content": self.system_prompt}, *context]
-            messages = [_protocol_message(m) for m in messages]
+            messages = _with_images([_protocol_message(m) for m in messages],
+                                    self._pending_images)
             try:
                 resp = self.llm.complete(messages, tools=self.registry.specs())
             except LLMImageUnsupported:

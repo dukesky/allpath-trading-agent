@@ -92,9 +92,16 @@ def validate_images(items: list[tuple[bytes, str]]) -> list[ImageAttachment]:
     out: list[ImageAttachment] = []
     for data, name in items:
         if len(data) > MAX_IMAGE_BYTES:
-            raise AttachmentError("Image too large (max 5 MB).")
+            raise AttachmentError(
+                f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB).")
         mime = sniff_mime(data)
-        if mime is None:
+        # Belt and braces: `ALLOWED_MIMES` is the list the web form's
+        # `accept=`, the Telegram document filter and the model-catalog hint
+        # are all written against, so it -- not `sniff_mime`'s own set of
+        # recognized signatures -- is what decides here. Teaching sniff_mime
+        # a fourth format (say GIF) then stays a pure detection change and
+        # cannot silently widen what the chat accepts.
+        if mime is None or mime not in ALLOWED_MIMES:
             raise AttachmentError("Only PNG, JPEG, or WebP images are supported.")
         out.append(ImageAttachment(data=data, mime=mime, name=_clean_name(name)))
     return out
@@ -102,3 +109,16 @@ def validate_images(items: list[tuple[bytes, str]]) -> list[ImageAttachment]:
 
 def placeholders(images: list[ImageAttachment] | None) -> str:
     return " ".join(i.placeholder() for i in images or [])
+
+
+def display_for(images: list[ImageAttachment] | None, text: str) -> str:
+    """The human-facing text for a turn: what the transcript, the FTS index
+    and the Telegram mirror show. One helper so `run_turn`'s stored
+    `display` and `ChatService.send`'s mirror text can never drift apart.
+
+    An images-only message (empty `text`, allowed by spec ③) yields just the
+    placeholders -- no trailing space."""
+    prefix = placeholders(images)
+    if not prefix:
+        return text
+    return f"{prefix} {text}" if text else prefix

@@ -10,7 +10,7 @@ from allpath_trade.agent.action_tools import register_action_tools
 from allpath_trade.agent.attachments import (
     IMAGE_UNSUPPORTED_REPLY,
     ImageAttachment,
-    placeholders,
+    display_for,
 )
 from allpath_trade.agent.compact import Compactor
 from allpath_trade.agent.context import build_system_prompt, load_identity
@@ -214,7 +214,7 @@ class ChatService:
         # The mirror gets the placeholder-prefixed text, the same string the
         # transcript shows -- never the bytes, and never a bare "" for an
         # images-only message.
-        mirror_text = f"{placeholders(images)} {text}" if images else text
+        mirror_text = display_for(images, text)
         # Mirroring happens after `_turn_lock` is released (the `with` block
         # above has already exited) -- Task 5's mirror fn does its own
         # thread-pool submit for the actual Telegram HTTP call, but even the

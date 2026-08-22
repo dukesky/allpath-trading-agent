@@ -95,3 +95,31 @@ def test_validate_images_sanitizes_the_filename():
     assert len(b.name) <= 60
     [c] = validate_images([(PNG, "   ")])
     assert c.name == "image"
+
+
+def test_display_for_covers_the_images_only_case():
+    from allpath_trade.agent.attachments import display_for
+
+    imgs = [ImageAttachment(b"x" * 1024, "image/png", "a.png")]
+    assert display_for(imgs, "what is this?") == "[image: a.png, 1 KB] what is this?"
+    # Images-only: just the placeholders, no trailing space to store/mirror.
+    assert display_for(imgs, "") == "[image: a.png, 1 KB]"
+    assert display_for(None, "plain") == "plain"
+    assert display_for([], "plain") == "plain"
+
+
+def test_validate_images_rejects_a_type_outside_allowed_mimes(monkeypatch):
+    # ALLOWED_MIMES -- not sniff_mime's own set of recognized signatures --
+    # is what decides. Teaching sniff_mime a new format must stay a pure
+    # detection change and never silently widen what chat accepts.
+    monkeypatch.setattr("allpath_trade.agent.attachments.sniff_mime",
+                        lambda data: "image/gif")
+    with pytest.raises(AttachmentError) as exc:
+        validate_images([(b"GIF89a", "anim.gif")])
+    assert str(exc.value) == "Only PNG, JPEG, or WebP images are supported."
+
+
+def test_the_size_error_copy_is_derived_from_the_limit():
+    with pytest.raises(AttachmentError) as exc:
+        validate_images([(PNG + b"\x00" * MAX_IMAGE_BYTES, "big.png")])
+    assert str(exc.value) == f"Image too large (max {MAX_IMAGE_BYTES // 1024 // 1024} MB)."

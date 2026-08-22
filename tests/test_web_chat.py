@@ -909,3 +909,29 @@ def test_an_ordinary_llm_error_still_takes_the_existing_notice_path(
 
     assert reply.startswith("(llm error:") and "upstream hung" in reply
     assert service.messages()[-1]["content"] == reply
+
+
+def test_messages_never_exposes_image_bytes_mid_turn(tmp_path, monkeypatch):
+    # Reviewer minor 4: the transcript is readable by other requests while a
+    # turn holds `_turn_lock` (messages() takes `_lock`, not `_turn_lock`).
+    # Now true by construction -- the attachments live on the session, never
+    # on a history dict -- but pinned, since a "pop it later" implementation
+    # would pass every after-the-turn assertion and still leak here.
+    client = make_client(tmp_path, monkeypatch, [])
+    service = client.app.state.chat_service
+    session = service.session()
+    snapshots = []
+
+    class ProbingLLM:
+        model = "probing"
+
+        def complete(self, messages, tools=None):
+            snapshots.append(service.messages())
+            return LLMResponse(text="ok")
+
+    session.llm = ProbingLLM()
+    service.send("read this", images=[_png()])
+
+    [mid_turn] = snapshots
+    assert mid_turn and all("images" not in m for m in mid_turn)
+    assert all(not isinstance(v, bytes) for m in mid_turn for v in m.values())
