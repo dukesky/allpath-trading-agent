@@ -284,3 +284,33 @@
       出现（订单提案 `propose_order` 目前还没接 email/ntfy 那一条腿——见上面
       Phase 5 遗留段落同一发现——所以暂时只有单条 TG 镜像）。如实记录，供后续
       讨论是否要合并成一条、或至少让两条文案对齐。
+
+## setup-wizard + image-import（Task 8）已知限制
+
+- [ ] **相册跨 poll 批次会拆成两轮**：`TelegramPoller._index_albums`
+      （`telegram.py`）按 `poll_once` 单次抓取的更新批次分组
+      `media_group_id`——同一个 Telegram 相册如果被拆到两次 poll 之间（网络
+      延迟、发送节奏够慢），前半张和后半张会各自成一轮独立的聊天回合，而不是
+      合并成一轮。这是本轮 Task 7（Telegram 图片导入）交付时就接受的限制，不
+      是新发现的 bug；同一批次内的相册（最常见的情况——用户一次性发送）会
+      正确合并成一轮。
+- [ ] **vision hint 只认 OpenRouter 目录**：`web/routes/chat.py` 的
+      `_vision_hint` 靠 `models_catalog.cached_input_modalities` 判断当前
+      `CHAT_MODEL` 是否支持读图，而这个函数只在 provider 为 `openrouter`
+      时才会给出明确答案（见 `cached_input_modalities` 的 `provider !=
+      "openrouter": return None`）——Anthropic/OpenAI 走的是手工维护的静态
+      模型列表（`FALLBACK_MODELS`），没有 input_modalities 数据。所以配置
+      `LLM_PROVIDER=anthropic` 或 `openai` 时，即使实际模型不支持读图，聊天页
+      也不会展示"这个模型可能不能读图"的提示——`_vision_hint` 的默认值是
+      "假设支持"，未知永远不报警。真的发图给一个不支持读图的模型时，
+      `LLMImageUnsupported` 仍然会在服务端兜底，回复固定的
+      `IMAGE_UNSUPPORTED_REPLY`；只是页面上少一道提前的视觉提示。
+- [ ] **图片上传没有整个请求体的总大小上限**：`web/routes/chat.py` 的
+      `_read_uploads` 只在两处设了硬上限——附件数量（`MAX_IMAGES`，读取前就
+      拒绝）和单个文件读取（`upload.read(MAX_IMAGE_BYTES + 1)`，超限即拒）——
+      但整条 multipart 请求体本身没有应用层的总字节数上限。四张刚好卡在
+      5 MB 以内的图片相加已经是可观的体积，且理论上更大的其他表单字段也能
+      拼进同一个请求。目前这类"总请求体太大"的防护完全依赖前面的反向代理
+      /ASGI 服务器自身的限制（如 Nginx 的 `client_max_body_size`），应用代码
+      里没有再加一层。对自托管、单用户场景影响有限，记录在此供后续如果要上
+      公网反向代理时评估是否需要在应用层再加一道总量上限。

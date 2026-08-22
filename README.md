@@ -191,6 +191,12 @@ LLM / strategy rules  →  OrderIntent  →  RiskGate (deterministic)  →  Brok
 
 ## Getting Started
 
+The fastest path: install, then run `serve` and open the URL — a first-run
+setup wizard walks you through an LLM key, then Alpaca paper keys, then
+importing your Shadow positions, so you never have to hand-edit `.env`.
+The steps below are the manual path, still the one `chat`/`status` from the
+terminal need.
+
 ### Prerequisites
 
 - Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/)
@@ -212,7 +218,7 @@ cp .env.example .env
 # Edit .env and set ALPACA_API_KEY / ALPACA_SECRET_KEY
 ```
 
-All credentials stay in this local file. `ALPACA_PAPER=true` is the default; live trading additionally requires enabling `allow_live` in the risk limits.
+All credentials stay in this local file. `ALPACA_PAPER=true` is the default; live trading additionally requires enabling `allow_live` in the risk limits. This step is optional if you're only using the web interface — `serve` starts without Alpaca keys and its setup wizard collects them (see below); the CLI (`status`, `chat`) still reads keys from `.env` directly.
 
 ### Verify
 
@@ -229,7 +235,16 @@ Expected output: your paper account equity, cash, buying power, open positions, 
 uv run allpath-trade serve
 ```
 
-Open `http://localhost:8791`. The access token is printed on startup and
+`serve` starts even without Alpaca keys configured. Open
+`http://localhost:8791` — on a fresh install a first-run setup wizard opens
+automatically and walks you through: an LLM key → Alpaca paper keys (with
+"where to get a key" steps and a Test button for each) → importing your
+Shadow positions → done. Skip any step; every page carries a "Setup
+incomplete" banner with a link back until both keys are saved, and
+Settings → Access has a "Re-run setup" link if you want to revisit it
+later.
+
+The access token is printed on startup and
 stored as `WEB_TOKEN` in `.env`. To reach it from your phone on the same
 network, bind to all interfaces:
 
@@ -252,7 +267,7 @@ is no built-in HTTPS, so only bind `--host 0.0.0.0` on a network you trust.
 | Page | Purpose |
 |---|---|
 | Dashboard | Account equity, positions, active strategies (compact cards), recent trades, and a sentinel heartbeat so you can see at a glance that scheduled monitoring is actually running |
-| Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes; your message appears instantly with a "thinking" indicator while the agent works |
+| Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes; your message appears instantly with a "thinking" indicator while the agent works. Attach images (📎, paste, or drag-drop) alongside your text — useful for a screenshot of positions, see [Two Accounts](#two-accounts) |
 | Pending | The confirmation queue — approve or reject agent-proposed orders and strategy revisions, each with a risk pre-check (orders) or a byte-exact staleness check (revisions) |
 | Reports | One row per day the reflection job ran, with a summary teaser; the detail view shows the full report and proposed revisions raised that day, and a transcript replay shows every tool call the session made |
 | Strategies | Strategy documents, lifecycle badges, and version history, read-only on this page itself, but ask the agent in Chat to draft or revise one — the proposal lands on Pending for your approval |
@@ -315,6 +330,12 @@ for its whole duration, so an Approve/Reject click on the web dashboard
 during that window will simply wait its turn rather than fail — expect a
 brief stall, not an error.
 
+Send a photo (or an image file) in the paired chat and it rides the same
+turn as typing — a caption becomes the message text, and up to four images
+sent together as a Telegram album become one turn, just like attaching
+several images at once in web chat. Nothing is stored beyond the turn; the
+transcript and the web mirror both keep only a placeholder line.
+
 ## Two Accounts
 
 `allpath-trade` runs **two practice grounds at once, always active** — not a
@@ -340,11 +361,14 @@ queue, reports, memory, strategies. The choice is remembered in a cookie
 the account you're *not* looking at means it has something waiting for you.
 
 **Getting your real positions into Shadow** — tell the agent in Chat ("I
-hold 10 AAPL at $180 average cost") or go to Settings → Brokerage → Shadow
-and upload a CSV (`ticker,qty,avg_cost` per line, capped at 2,000 rows).
-Either way it's a normal approval-queue proposal — nothing lands in the
-ledger until you approve it — and a "Reset ledger" button is there if you
-want to start clean.
+hold 10 AAPL at $180 average cost"), attach a screenshot of your positions
+instead (PNG, JPEG, or WebP; up to 5 MB each, up to 4 images per message —
+the agent restates the table it read back to you before queuing anything),
+or go to Settings → Brokerage → Shadow and upload a CSV
+(`ticker,qty,avg_cost` per line, capped at 2,000 rows). Every path is a
+normal approval-queue proposal — nothing lands in the ledger until you
+approve it — and a "Reset ledger" button is there if you want to start
+clean.
 
 **Notifications** — every subject line is prefixed `[Paper]` or `[Shadow]`,
 so a rule trigger, an order receipt, or the daily digest can never be
