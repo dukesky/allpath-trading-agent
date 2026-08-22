@@ -18,6 +18,32 @@ from pydantic import BaseModel, field_validator, model_validator
 _MAX_MAGNITUDE = Decimal("1e12")
 
 
+class BrokerError(Exception):
+    """Base class for every failure that originates in the broker layer.
+
+    Introduced with `BrokerNotConfigured` below rather than as a
+    retrofit of the existing brokers: `AlpacaBroker` still lets the
+    vendor SDK's own exceptions propagate (callers already treat any
+    exception out of a broker call as "broker unavailable"), so this
+    exists so that the ONE broker-layer condition callers must be able to
+    single out -- "not configured yet", a setup state rather than an
+    outage -- has somewhere to hang, without forcing a rewrite of the
+    vendor error surface that nothing needs today.
+    """
+
+
+class BrokerNotConfigured(BrokerError):
+    """The account has no usable credentials yet -- raised by every method
+    of `broker.unconfigured.UnconfiguredBroker`.
+
+    Distinct from every other broker failure because it is not a failure
+    at all: it means the first-run setup wizard has not been completed.
+    Callers that can say something better than "broker unavailable"
+    (the sentinel, the scheduler, the dashboard heartbeat) catch this
+    specifically and point the user at setup instead.
+    """
+
+
 class OrderSide(str, Enum):
     BUY = "buy"
     SELL = "sell"

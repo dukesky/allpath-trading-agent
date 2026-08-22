@@ -133,6 +133,20 @@ def _build_broker(account: str, settings: Settings, conn: sqlite3.Connection,
     if account == DEFAULT_ACCOUNT:
         if broker_override is not None:
             return broker_override
+        # setup-wizard T1: a fresh install has no Alpaca credentials yet,
+        # and `AlpacaBroker`'s constructor needs them -- so paper degrades
+        # to the placeholder rather than making the whole process
+        # unstartable, which is what kept the first-run setup wizard (a
+        # page served by this very process) out of reach. Either key empty
+        # is enough: a half-filled pair cannot authenticate anything, and
+        # letting it through would only trade this clear setup state for an
+        # opaque auth error on the first real call. `broker_override` still
+        # wins above -- an injected broker (tests, `--broker-factory`) is an
+        # explicit choice and says nothing about the .env file.
+        if not (settings.alpaca_api_key and settings.alpaca_secret_key):
+            from allpath_trade.broker.unconfigured import UnconfiguredBroker
+
+            return UnconfiguredBroker()
         from allpath_trade.broker.alpaca import AlpacaBroker
 
         return AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,

@@ -5,7 +5,13 @@ from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel
 
-from allpath_trade.broker.base import Broker, Order, OrderIntent, Position
+from allpath_trade.broker.base import (
+    Broker,
+    BrokerNotConfigured,
+    Order,
+    OrderIntent,
+    Position,
+)
 from allpath_trade.data.base import DataSource
 from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
@@ -89,6 +95,16 @@ class Sentinel:
         try:
             account = self.broker.get_account()
             positions = {p.ticker: p for p in self.broker.get_positions()}
+        except BrokerNotConfigured:
+            # setup-wizard T1: not an outage -- the user simply hasn't
+            # finished setup. Caught BEFORE the generic handler below so the
+            # report carries one flat, actionable line instead of "setup
+            # failed: Alpaca keys are not set — finish setup", whose
+            # "setup failed" prefix reads like something broke. No strategy
+            # is evaluated either way: every rule needs live equity and
+            # positions, so there is nothing meaningful to check.
+            report.errors.append("paper broker not configured")
+            return report
         except Exception as exc:  # noqa: BLE001 — a broken env must surface, not crash
             report.errors.append(f"setup failed: {exc}")
             return report

@@ -1619,3 +1619,80 @@ def test_run_daemon_registers_the_daily_chain_as_its_own_job(monkeypatch):
     assert sched.SENTINEL_JOB_ID in ids
     assert sched.DAILY_JOB_ID in ids
     assert calls == [1]
+
+
+# -- setup-wizard T1: an unconfigured paper broker --
+
+
+def _unconfigured_bundle(**kwargs):
+    from allpath_trade.broker.unconfigured import UnconfiguredBroker
+
+    return _account_bundle(broker=UnconfiguredBroker(), **kwargs)
+
+
+def test_run_sentinel_pass_skips_an_unconfigured_paper_but_still_runs_shadow(
+        monkeypatch, capsys):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    import allpath_trade.scheduler as sched
+
+    paper_sentinel = FakeSentinel()
+    shadow_sentinel = FakeSentinel()
+    app_state = FakeAppState()
+    accounts = {
+        "paper": _unconfigured_bundle(sentinel=paper_sentinel),
+        "shadow": _account_bundle(sentinel=shadow_sentinel),
+    }
+
+    sched._run_sentinel_pass(accounts, app_state=app_state)
+
+    assert paper_sentinel.calls == 0
+    assert shadow_sentinel.calls == 1
+    assert capsys.readouterr().err.count(
+        "[sentinel] paper: Alpaca keys not set — skipping") == 1
+    # The scheduler still ticked for paper (the daemon IS alive), but
+    # nothing was successfully checked, so the success heartbeat must stay
+    # unwritten -- otherwise the dashboard would claim a healthy check.
+    assert app_state.get(f"{sched.SENTINEL_HEARTBEAT_KEY}:paper") is not None
+    assert app_state.get(f"{sched.SENTINEL_LAST_OK_KEY}:paper") is None
+    assert app_state.get(f"{sched.SENTINEL_LAST_OK_KEY}:shadow") is not None
+
+
+def test_run_sentinel_pass_does_not_refresh_fills_on_an_unconfigured_broker(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    import allpath_trade.scheduler as sched
+
+    called = []
+    monkeypatch.setattr("allpath_trade.scheduler.refresh_pending_fills",
+                        lambda journal, broker: called.append(broker))
+
+    sched._run_sentinel_pass({"paper": _unconfigured_bundle(sentinel=FakeSentinel())})
+
+    assert called == []
+
+
+def test_run_account_daily_skips_an_unconfigured_account_and_completes_the_day(capsys):
+    from allpath_trade.config import Settings
+    from allpath_trade.scheduler import _run_account_daily
+
+    reflector = FakeReflector()
+    consolidator = FakeConsolidator()
+    acc = _unconfigured_bundle(reflector=reflector, consolidator=consolidator)
+
+    ok = _run_account_daily("paper", acc, Settings(_env_file=None), verbose=True)
+
+    # True: a not-yet-configured account is a skip, not a failure -- a False
+    # here would make _maybe_run_daily retry (and eventually give up on) the
+    # whole night, shadow's own chain included.
+    assert ok is True
+    assert reflector.calls == 0 and consolidator.calls == 0
+    assert "[daily:paper] skipped (Alpaca keys not set)" in capsys.readouterr().out
+
+
+def test_send_daily_digest_skips_an_unconfigured_account(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    components = _components(sentinel=FakeSentinel())
+    components.accounts = {"paper": _unconfigured_bundle()}
+
+    assert sched._send_daily_digest(components) is True
+    assert components.notifier.sent == []

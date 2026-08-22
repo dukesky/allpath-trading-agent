@@ -1284,3 +1284,53 @@ def test_shadow_dashboard_stays_english_only(client):
     _record_shadow_trade(client)
     client.post("/account/switch", data={"account": "shadow"})
     assert_english_only(client.get("/").text)
+
+
+# -- setup-wizard T1: an unconfigured paper broker --
+
+
+def test_heartbeat_says_the_broker_is_not_configured_and_warns():
+    # Overrides every other heartbeat state: "last check 3m ago" is
+    # technically true while the keys are missing, but it is the wrong thing
+    # to tell the operator -- nothing is being monitored at all until setup
+    # is finished, and that is the only actionable fact.
+    now = datetime.now(UTC)
+    status = sentinel_heartbeat_status(
+        (now - timedelta(minutes=3)).isoformat(), 5,
+        market_open_raw="true", last_ok_raw=(now - timedelta(minutes=3)).isoformat(),
+        now=now, broker_unconfigured=True)
+    assert status == {"text": "Sentinel: paper broker not configured — finish setup",
+                      "warn": True}
+
+
+def test_heartbeat_broker_unconfigured_beats_a_never_ran_heartbeat():
+    status = sentinel_heartbeat_status(None, 5, broker_unconfigured=True)
+    assert status["text"] == "Sentinel: paper broker not configured — finish setup"
+    assert status["warn"] is True
+
+
+@pytest.fixture
+def unconfigured_client(tmp_path, monkeypatch):
+    from allpath_trade.broker.unconfigured import UnconfiguredBroker
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / "semis.yaml").write_text(STRAT)
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory", web_token="secret")
+    with TestClient(create_app(settings, broker=UnconfiguredBroker())) as c:
+        monkeypatch.setattr(c.app.state.holder.get(), "data", FakeDataSource())
+        c.post("/login", data={"token": "secret"})
+        yield c
+
+
+def test_dashboard_renders_with_an_unconfigured_broker(unconfigured_client):
+    # The whole point of T1: with no Alpaca keys the app must still serve a
+    # page (the setup wizard lives behind this server), never a 500.
+    response = unconfigured_client.get("/")
+    assert response.status_code == 200
+    body = response.text
+    assert "Broker unavailable" in body
+    assert "paper broker not configured" in body
+    assert_english_only(body)

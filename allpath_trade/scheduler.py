@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from allpath_trade.broker.unconfigured import UnconfiguredBroker
 from allpath_trade.execution import refresh_pending_fills
 from allpath_trade.notify import events
 from allpath_trade.sentinel import SentinelReport
@@ -22,6 +23,21 @@ from allpath_trade.store.app_state import (
 ET = ZoneInfo("America/New_York")
 OPEN = time(9, 30)
 CLOSE = time(16, 0)
+
+
+def _is_unconfigured(acc) -> bool:
+    """setup-wizard T1: does this account's bundle still carry the
+    placeholder broker (no Alpaca keys yet)?
+
+    One shared predicate for the three scheduled surfaces that must skip
+    such an account -- the sentinel pass, the nightly digest, and the
+    nightly reflection/consolidation chain -- so they can never disagree
+    about what "not configured" means. An isinstance check rather than
+    `getattr(acc.broker, "name", "") == "unconfigured"`: the class is the
+    fact, and a string compare would silently start passing for any future
+    broker that happened to reuse the name. `getattr` on the bundle itself
+    keeps this safe for the lightweight namespaces tests build."""
+    return isinstance(getattr(acc, "broker", None), UnconfiguredBroker)
 
 
 def ts_to_et_date(ts_iso: str) -> str | None:
@@ -177,6 +193,26 @@ def _run_sentinel_pass(accounts: dict,
                 app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:{account}", now_iso)
             except Exception as exc:  # noqa: BLE001 — a failed heartbeat must not stop the pass
                 print(f"[heartbeat] {account} failed: {exc}", file=sys.stderr)
+
+        # setup-wizard T1: an account with no credentials yet is SKIPPED,
+        # not run-and-caught. Letting it fall through would work (every
+        # broker call raises BrokerNotConfigured and the generic handlers
+        # below would catch it), but it would spend a fill-refresh and a
+        # full sentinel pass per tick to reach a foregone conclusion and
+        # print a stack-flavoured "failed:" line for what is really just an
+        # unfinished setup. The heartbeat above IS still written -- the
+        # daemon genuinely is alive and ticking for this account; only the
+        # `sentinel_last_ok` success key below is withheld, because nothing
+        # was actually checked (that key is exactly what stops the
+        # dashboard claiming a healthy monitor here). `on_report(.., None)`
+        # matches the market-closed skip: no report to show.
+        if _is_unconfigured(acc):
+            print(f"[sentinel] {account}: Alpaca keys not set — skipping",
+                  file=sys.stderr)
+            if on_report is not None:
+                on_report(account, None)
+            continue
+
         try:
             refresh_pending_fills(acc.journal, acc.broker)
         except Exception as exc:  # noqa: BLE001 — a dead broker must not stop the pass
@@ -504,6 +540,14 @@ def _send_daily_digest(components) -> bool:
     llm_cost = _llm_cost_line(components)
     all_ok = True
     for account, acc in components.accounts.items():
+        # setup-wizard T1: nothing to report for an account whose keys
+        # aren't set -- its journal and review queue are empty by
+        # construction, so the digest would be a nightly email saying
+        # nothing happened on an account the user hasn't connected yet.
+        # No watermark is stamped either: the day this account IS
+        # configured, that evening's digest must still go out.
+        if _is_unconfigured(acc):
+            continue
         if _last_digest_date(components.app_state, account) == today:
             continue
         try:
@@ -550,6 +594,19 @@ def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> bool:
     retried on a later tick rather than being marked done. A step that was
     deliberately skipped (setting off, no active strategies, no such
     component wired) is not a failure and keeps the return True."""
+    # setup-wizard T1: an account with no Alpaca keys yet has nothing to
+    # reflect on -- `Reflector.run_daily` reads `broker.get_positions()`,
+    # which raises here, and a reflection over zero trades would burn a
+    # real LLM call to conclude nothing either way. Returns True, not
+    # False: an unfinished setup is a SKIP, not a failure, and returning
+    # False would have `_maybe_run_daily` retry the whole night --
+    # shadow's chain included -- three times before giving up, every
+    # single night, until the user finishes setup.
+    if _is_unconfigured(acc):
+        if verbose:
+            print(f"[daily:{account}] skipped (Alpaca keys not set)")
+        return True
+
     ok = True
     reflector = acc.reflector
     if reflector is not None and settings.daily_reflection:
