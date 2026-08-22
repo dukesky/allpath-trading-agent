@@ -44,6 +44,18 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
   least one active strategy, so an empty shadow ledger costs nothing extra
   — but once both accounts have active strategies, nightly LLM spend is
   roughly double running paper alone (visible on Settings → Usage).
+- **Ops hardening from the whole-branch review**: the nightly chain
+  (digest → reflection → consolidation) now runs as its own scheduler job
+  so a slow reflection never stalls sentinel ticks for either account; a
+  per-account wall-clock cap `REFLECTION_DEADLINE_SECONDS` (default 1800,
+  `.env` only) forces a session to wrap up and still write its report; a
+  digest is only marked sent when the channel actually accepted it, and a
+  failed day retries (at most 3 attempts); a failed reflection no longer
+  blocks that account's retry; the dashboard heartbeat distinguishes
+  "last attempted" from "last successful" check. The legacy
+  memory/strategies migration never deletes its backup after moving
+  anything, parks colliding files as `*.legacy` instead of discarding them,
+  and rewrites relative symlinks so they keep resolving.
 - See [Two Accounts](README.md#two-accounts) in the README for the full
   picture, and `docs/superpowers/specs/2026-08-19-shadow-account-design.md`
   / `docs/superpowers/plans/2026-08-19-shadow-dual-active.md` for the
