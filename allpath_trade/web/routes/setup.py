@@ -119,8 +119,25 @@ def _page(request: Request, step: int, *, error: str = "",
         # simply opening the wizard never rewrites anything.
         "provider": provider if provider in PROVIDER_KEY_FIELDS else "openrouter",
         "masks": {f: _mask(str(getattr(s, f, "") or "")) for f in MASKED_FIELDS},
-        "shadow": _shadow_ledger_summary(c.accounts["shadow"]),
+        # Step 3 is the only step that renders the ledger; three sqlite reads
+        # on every other step's GET would buy nothing.
+        "shadow": _shadow_ledger_summary(c.accounts["shadow"]) if step == 3 else None,
         **nav_context(request)}, status_code=status_code)
+
+
+# The steps whose content is links and buttons OUT of the wizard: step 3
+# offers Open Chat and the CSV import (which confirms on /settings), step 4
+# is nothing but links to Settings and Chat. Serving either means the user
+# has already made their choice on both required keys -- entered or skipped
+# -- so the redirect gate has to let go, or every one of those exits would
+# be bounced straight back here and the CSV import's "queued as #N" notice
+# would be lost with it. Steps 1 and 2 have no exit but "Skip for now",
+# which sets the flag itself, so a fresh user loading step 1 stays gated.
+STEPS_THAT_LEAVE_THE_WIZARD = (3, 4)
+
+
+def _set_dismissed(request: Request) -> None:
+    request.app.state.holder.get().app_state.set(SETUP_DISMISSED_KEY, "1")
 
 
 @router.get("/setup", response_class=HTMLResponse)
@@ -130,7 +147,10 @@ def setup_page(request: Request, step: str = "") -> HTMLResponse:
     that bounced you out the moment it had nothing left to ask would make
     rotating a key through the guided flow impossible."""
     settings = request.app.state.holder.get().settings
-    return _page(request, _resolve_step(step, settings))
+    resolved = _resolve_step(step, settings)
+    if resolved in STEPS_THAT_LEAVE_THE_WIZARD:
+        _set_dismissed(request)
+    return _page(request, resolved)
 
 
 def _save(request: Request, updates: dict[str, str], *, redirect: str,
@@ -148,6 +168,13 @@ def _save(request: Request, updates: dict[str, str], *, redirect: str,
     except ValidationError as exc:
         return _page(request, step, status_code=400,
                      error="Could not save: " + describe_validation_error(exc))
+
+    if not updates:
+        # Every field was left blank ("keep what is stored"), so there is
+        # nothing to write -- and rebuilding the whole component graph, plus
+        # dropping every account's cached AgentSession, to install a
+        # configuration identical to the running one would be pure cost.
+        return RedirectResponse(redirect, status_code=303)
 
     store = holder.store()
     for field, value in updates.items():
@@ -189,7 +216,14 @@ async def save_alpaca(request: Request) -> Response:
     # ALPACA_PAPER is deliberately absent here, exactly as it is on the
     # settings page: switching to real money should require editing `.env`
     # by hand, never a control on a page reachable from the LAN.
-    return _save(request, updates, redirect="/setup?step=3", step=2)
+    response = _save(request, updates, redirect="/setup?step=3", step=2)
+    if response.status_code == 303:
+        # Both required keys have now been answered (entered or left as they
+        # were), and the next page is step 3 -- see
+        # STEPS_THAT_LEAVE_THE_WIZARD. Set here as well as on the GET so the
+        # flag does not depend on the redirect actually being followed.
+        _set_dismissed(request)
+    return response
 
 
 @router.post("/setup/step/3")
@@ -201,18 +235,22 @@ def continue_from_shadow() -> Response:
 
 
 @router.post("/setup/open-chat")
-def open_chat() -> Response:
+def open_chat(request: Request) -> Response:
     """Straight into the shadow account's chat, where the import
     conversation happens. Sets the account cookie through `account_ctx`'s
     own setter rather than a second `set_cookie` call, so this cookie can
     never drift from the switcher's (HttpOnly, SameSite=Strict, 1 year)."""
+    # Explicitly, not merely as a side effect of having rendered step 3:
+    # this button's whole purpose is to leave the wizard for a page the gate
+    # would otherwise bounce right back to /setup.
+    _set_dismissed(request)
     response = RedirectResponse("/chat?hint=import", status_code=303)
     set_account_cookie(response, "shadow")
     return response
 
 
 def _dismiss(request: Request) -> Response:
-    request.app.state.holder.get().app_state.set(SETUP_DISMISSED_KEY, "1")
+    _set_dismissed(request)
     return RedirectResponse("/", status_code=303)
 
 

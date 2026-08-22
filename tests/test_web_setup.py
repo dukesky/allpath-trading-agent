@@ -447,3 +447,93 @@ def test_a_broker_failure_in_the_constructor_is_reported_too(client, monkeypatch
                     data={"alpaca_api_key": "AK", "alpaca_secret_key": "AS"})
     assert "ValueError" in r.text
     assert "bad key format" in r.text
+
+
+# -- the wizard's own exits must not be bounced back to it -------------------
+#
+# Review round 2 (Important): step 3 and step 4 are almost entirely links and
+# buttons OUT of the wizard -- Open Chat, the CSV import's confirm (which
+# lands on /settings), and step 4's Telegram/notifications/chat links. While
+# `setup_dismissed` is unset the gate (web/auth.py) 302s every one of those
+# GETs straight back to /setup, so the exits were dead and the CSV import's
+# "queued as #N" notice was lost on the way. Controller ruling: reaching
+# step 3 IS the user's answer on both required keys, so serving step 3 or 4
+# sets the flag. Steps 1-2 have no exit but "Skip for now", which sets it
+# itself -- a fresh user loading step 1 stays gated.
+
+
+def flag(client) -> str | None:
+    return client.app.state.holder.get().app_state.get(SETUP_DISMISSED_KEY)
+
+
+def test_open_chat_actually_reaches_the_chat_page(client):
+    client.post("/setup/open-chat", follow_redirects=False)
+    assert flag(client) == "1"
+    r = client.get("/chat?hint=import", follow_redirects=False)
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize("step", [3, 4])
+def test_rendering_a_step_with_exits_lifts_the_gate(client, step):
+    assert client.get(f"/setup?step={step}").status_code == 200
+    assert flag(client) == "1"
+    # ... and the links on those steps now land where they point.
+    for path in ("/settings", "/chat", "/"):
+        assert client.get(path, follow_redirects=False).status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/setup", "/setup?step=1", "/setup?step=2"])
+def test_the_first_two_steps_leave_a_fresh_user_gated(client, path):
+    """The flag is the wizard's own escape hatch, not a side effect of
+    opening it: someone who loads step 1 and wanders off must still be
+    redirected back here on their next page view."""
+    assert client.get(path).status_code == 200
+    assert flag(client) is None
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/setup"
+
+
+def test_saving_step_two_lifts_the_gate(client):
+    client.post("/setup/step/2",
+                data={"alpaca_api_key": "AK", "alpaca_secret_key": "AS"},
+                follow_redirects=False)
+    assert flag(client) == "1"
+
+
+def test_a_csv_import_started_in_the_wizard_reaches_its_notice(client):
+    """The embedded CSV form previews inline on step 3 but confirms on
+    /settings -- which is exactly the redirect the gate used to eat, taking
+    the "queued as #N" notice with it."""
+    client.get("/setup?step=3")
+    r = client.post("/settings/shadow/csv-confirm",
+                    data={"csv_text": "AAPL,10,150\nCASH,1000\n"})
+    assert r.status_code == 200
+    assert "Ledger import queued for your approval as #1." in r.text
+
+
+# -- nothing typed, nothing rebuilt -----------------------------------------
+
+
+def _count_rebuilds(client, monkeypatch) -> list[int]:
+    calls: list[int] = []
+    holder = client.app.state.holder
+    monkeypatch.setattr(holder, "rebuild", lambda *a, **k: calls.append(1))
+    return calls
+
+
+def test_an_all_blank_step_two_save_rebuilds_nothing(client, monkeypatch):
+    calls = _count_rebuilds(client, monkeypatch)
+    r = client.post("/setup/step/2",
+                    data={"alpaca_api_key": "", "alpaca_secret_key": ""},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/setup?step=3"
+    assert calls == []
+
+
+def test_a_step_two_save_with_a_value_does_rebuild(client, monkeypatch):
+    calls = _count_rebuilds(client, monkeypatch)
+    client.post("/setup/step/2", data={"alpaca_api_key": "AK", "alpaca_secret_key": ""},
+                follow_redirects=False)
+    assert calls == [1]
