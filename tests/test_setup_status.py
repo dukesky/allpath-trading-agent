@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from allpath_trade.config import Settings
+from allpath_trade.llm.factory import LLMConfigError, build_llm
 from allpath_trade.web.setup_status import (
     GATE_EXEMPT_PREFIXES,
     SETUP_DISMISSED_KEY,
@@ -82,6 +83,24 @@ def test_another_providers_key_does_not_satisfy_the_selected_provider(provider, 
 
 def test_llm_key_missing_ignores_whitespace_only_keys():
     assert llm_key_missing(_settings(openrouter_api_key="   ")) is True
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "OpenRouter", "ANTHROPIC",
+                                      " openrouter ", "nonesuch", ""])
+def test_the_gate_and_the_llm_factory_read_llm_provider_the_same_way(provider):
+    """Both go through `config.normalize_llm_provider`. If they didn't, the
+    gate could call an install configured for a provider string `build_llm`
+    then refuses to build any client for -- an unfinishable setup, since
+    finishing it would not change either answer."""
+    settings = _settings(llm_provider=provider, openrouter_api_key="k",
+                         anthropic_api_key="k", openai_api_key="k")
+    try:
+        build_llm(settings)
+    except LLMConfigError:
+        factory_accepts = False
+    else:
+        factory_accepts = True
+    assert factory_accepts is not llm_key_missing(settings)
 
 
 def test_llm_key_missing_treats_an_unknown_provider_as_missing():

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from allpath_trade.config import Settings
+from allpath_trade.config import Settings, normalize_llm_provider
 
 # Written by the wizard's "skip for now" (Task 3) and read here. Lives in
 # `app_state` rather than on `Settings`: it is per-install runtime state,
@@ -39,10 +39,12 @@ SETUP_DISMISSED_KEY = "setup_dismissed"
 GATE_EXEMPT_PREFIXES = ("/setup", "/login", "/logout", "/static", "/a/",
                         "/healthz", "/account/switch")
 
-# The `Settings` field holding each provider's key. An unknown provider has
-# no entry, and so reads as missing -- `llm_provider` is free text (it comes
-# straight out of `.env`), and a typo must not be able to satisfy the check
-# with some other provider's key.
+# The `Settings` field holding each provider's key -- the same three names
+# `llm/factory.py` branches on, keyed by the SAME `normalize_llm_provider`
+# reading of the setting, so the gate and the factory cannot disagree about
+# what provider is selected. An unknown provider has no entry and so reads
+# as missing: `llm_provider` is free text (it comes straight out of `.env`),
+# and a typo must not satisfy the check with some other provider's key.
 _PROVIDER_KEY_FIELDS = {
     "openrouter": "openrouter_api_key",
     "anthropic": "anthropic_api_key",
@@ -60,7 +62,7 @@ def llm_key_missing(settings: Settings) -> bool:
     provider's own field, so counting any-key-anywhere as configured would
     send the user out of the wizard into a chat that fails on its first
     message."""
-    field = _PROVIDER_KEY_FIELDS.get((settings.llm_provider or "").strip().lower())
+    field = _PROVIDER_KEY_FIELDS.get(normalize_llm_provider(settings.llm_provider))
     if field is None:
         return True
     return not (getattr(settings, field) or "").strip()

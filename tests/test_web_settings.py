@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from types import SimpleNamespace
@@ -44,6 +45,24 @@ CONFIGURED_ENV = ('OPENROUTER_API_KEY="sk-or-test-key"\n'
                   'ALPACA_SECRET_KEY="alpaca-test-secret"\n')
 
 
+def mask_for(body: str, field: str) -> str:
+    """The masked value the page renders for ONE named secret field.
+
+    Field-specific on purpose. Every secret input carries a static
+    `placeholder="Replace"`, and `CONFIGURED_ENV` now stores three keys of
+    its own, so a bare `"Replace" in body` or `"•" * 8 in body` passes
+    whether or not the field under test is masked -- or even rendered at
+    all. This pins the mask to the `<span class="muted">` that labels the
+    specific `<input name="...">`, which is the thing those tests are
+    actually about.
+    """
+    match = re.search(
+        r'<span class="muted">([^<]*)</span></label>\s*<input name="'
+        + re.escape(field) + '"', body)
+    assert match is not None, f"no masked secret field named {field!r} on the page"
+    return match.group(1)
+
+
 @pytest.fixture(autouse=True)
 def _fake_model_catalog(monkeypatch):
     # The settings page fetches the model catalog on every GET. Tests must
@@ -84,7 +103,10 @@ def test_secrets_are_never_echoed_back(client, tmp_path):
     client.app.state.holder.rebuild()
     body = client.get("/settings").text
     assert "supersecret" not in body
-    assert "Replace" in body
+    # The stored value is 11 characters, so the mask is the fixed-width run
+    # plus its last 4 -- asserted on the Alpaca secret field itself, not on
+    # "some field somewhere on the page is masked".
+    assert mask_for(body, "alpaca_secret_key") == "•" * 8 + "cret"
 
 
 def test_long_secret_is_never_echoed_back_even_partially_unmasked(client, tmp_path):
@@ -102,7 +124,10 @@ def test_long_secret_is_never_echoed_back_even_partially_unmasked(client, tmp_pa
     assert secret not in body
     assert secret[:6] not in body  # the old leading-character disclosure
     assert secret[-5:] not in body  # no more than 4 trailing characters
-    assert secret[-4:] in body  # a mask is actually rendered, not blank
+    # A mask is actually rendered for THIS field (the fixture stores other
+    # secrets too, so a bare `secret[-4:] in body` would be weaker than it
+    # looks the moment those tails happened to collide).
+    assert mask_for(body, "openrouter_api_key") == "•" * 8 + secret[-4:]
 
 
 def test_a_short_secret_falls_through_to_the_fixed_width_mask(client, tmp_path):
@@ -119,7 +144,11 @@ def test_a_short_secret_falls_through_to_the_fixed_width_mask(client, tmp_path):
     body = client.get("/settings").text
     assert "eightchr" not in body
     assert "chr" not in body  # no trailing slice of it either
-    assert "•" * 8 in body  # the fixed-width mask is still rendered
+    # The fixed-width mask, with NO tail, on the SMTP field itself -- the
+    # other stored secrets are all long enough to show a tail, so a bare
+    # `"•" * 8 in body` would pass on one of those even if this field
+    # leaked outright.
+    assert mask_for(body, "smtp_password") == "•" * 8
 
 
 def test_settings_page_is_english_only(client, tmp_path):

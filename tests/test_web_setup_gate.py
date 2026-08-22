@@ -67,6 +67,28 @@ def test_nothing_is_redirected_once_both_keys_are_present(configured):
     assert configured.get("/", follow_redirects=False).status_code == 200
 
 
+def test_an_htmx_get_gets_hx_redirect_instead_of_a_swappable_body(unconfigured):
+    """htmx follows a 302 inside the same AJAX exchange and swaps whatever
+    comes back into the triggering element -- so a bare redirect here would
+    splice the wizard (or, until Task 3 lands it, a 404 page) into some div
+    with nothing to show the user why. `HX-Redirect` makes the browser
+    navigate for real instead. No template issues an `hx-get` today; this
+    holds the contract for the first one that does, and matches what the
+    login bounce has always done (see web/auth.py::_redirect)."""
+    r = unconfigured.get("/", headers={"HX-Request": "true"},
+                         follow_redirects=False)
+    assert r.status_code == 200
+    assert r.headers["HX-Redirect"] == "/setup"
+    assert r.text == ""  # nothing swappable, even if a handler ignored it
+
+
+def test_an_htmx_get_is_not_redirected_once_configured(configured):
+    r = configured.get("/", headers={"HX-Request": "true"},
+                       follow_redirects=False)
+    assert r.status_code == 200
+    assert "HX-Redirect" not in r.headers
+
+
 def test_a_post_is_never_redirected(unconfigured):
     """A 302 on a POST is re-issued as a GET with the body dropped -- the
     settings save that enters the missing keys would be the first casualty.
