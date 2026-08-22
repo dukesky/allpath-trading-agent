@@ -1,9 +1,10 @@
+import base64
 from types import SimpleNamespace
 
 import pytest
 
 from allpath_trade.llm.anthropic_client import AnthropicClient
-from allpath_trade.llm.base import LLMError, ToolSpec
+from allpath_trade.llm.base import LLMError, LLMImageUnsupported, ToolSpec
 
 TOOL = ToolSpec(name="get_quote", description="quote",
                 parameters={"type": "object", "properties": {}})
@@ -132,3 +133,72 @@ def test_missing_usage_defaults_to_zero_never_raises():
     out = c.complete([{"role": "user", "content": "hello"}])
     assert out.input_tokens == 0
     assert out.output_tokens == 0
+
+
+# -- Image parts (setup-wizard T5) -------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+PNG_B64 = base64.b64encode(PNG_BYTES).decode()
+
+
+def _image_message(text="what is this?"):
+    return {"role": "user",
+            "content": [{"type": "image", "mime": "image/png", "data": PNG_BYTES},
+                        {"type": "text", "text": text}]}
+
+
+def test_list_content_becomes_base64_image_blocks_then_text():
+    c, stub = make([SimpleNamespace(content=[_text_block("two positions")],
+                                    stop_reason="end_turn")])
+    c.complete([{"role": "system", "content": "SYS"}, _image_message()])
+    assert stub.calls[0]["messages"] == [{
+        "role": "user",
+        "content": [
+            {"type": "image",
+             "source": {"type": "base64", "media_type": "image/png", "data": PNG_B64}},
+            {"type": "text", "text": "what is this?"},
+        ],
+    }]
+
+
+def test_a_provider_image_complaint_becomes_llm_image_unsupported():
+    class Rejecting:
+        def __init__(self):
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs):
+            raise RuntimeError("400 messages.0.content.0: image input is not supported")
+
+    c = AnthropicClient("k", "claude-x", client=Rejecting())
+    with pytest.raises(LLMImageUnsupported):
+        c.complete([_image_message()])
+
+
+def test_an_image_complaint_without_images_stays_a_plain_llm_error():
+    # The regex alone must not be enough: a text-only turn that happens to
+    # mention "vision" in an unrelated provider error is an ordinary error.
+    class Rejecting:
+        def __init__(self):
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs):
+            raise RuntimeError("429 vision-preview capacity exceeded")
+
+    c = AnthropicClient("k", "claude-x", client=Rejecting())
+    with pytest.raises(LLMError) as ei:
+        c.complete([{"role": "user", "content": "hi"}])
+    assert not isinstance(ei.value, LLMImageUnsupported)
+
+
+def test_an_unrelated_error_on_an_image_turn_stays_a_plain_llm_error():
+    class Rejecting:
+        def __init__(self):
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs):
+            raise TimeoutError("upstream hung")
+
+    c = AnthropicClient("k", "claude-x", client=Rejecting())
+    with pytest.raises(LLMError) as ei:
+        c.complete([_image_message()])
+    assert not isinstance(ei.value, LLMImageUnsupported)

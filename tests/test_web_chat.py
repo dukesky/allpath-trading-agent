@@ -8,9 +8,10 @@ from typing import ClassVar
 
 from fastapi.testclient import TestClient
 
+from allpath_trade.agent.attachments import IMAGE_UNSUPPORTED_REPLY, ImageAttachment
 from allpath_trade.broker.base import Order, OrderStatus
 from allpath_trade.config import Settings
-from allpath_trade.llm.base import LLMClient, LLMResponse
+from allpath_trade.llm.base import LLMClient, LLMImageUnsupported, LLMResponse
 from allpath_trade.web.account_ctx import ACCOUNT_COOKIE
 from allpath_trade.web.app import create_app
 from tests.helpers import CONFIGURED_KEYS, assert_english_only, dismiss_setup
@@ -824,3 +825,87 @@ def test_onboarding_card_still_renders_when_llm_is_unconfigured(tmp_path, monkey
 
     assert "Ask me anything about the market" in body
     assert "OPENROUTER_API_KEY" in body
+
+
+# ---------------------------------------------------------------------------
+# setup-wizard T5: image attachments ride ONE turn and are never persisted.
+# ---------------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 2048
+
+
+def _png(name="positions.png"):
+    return ImageAttachment(data=PNG_BYTES, mime="image/png", name=name)
+
+
+def test_send_forwards_images_to_the_turn_and_keeps_bytes_out_of_the_store(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="two positions")])
+    service = client.app.state.chat_service
+
+    reply = service.send("what do you make of this?", images=[_png()])
+
+    assert reply == "two positions"
+    llm = service.session().llm
+    user_msg = llm.seen[0][-1]
+    assert user_msg["content"][0] == {"type": "image", "mime": "image/png",
+                                      "data": PNG_BYTES}
+    assert user_msg["content"][1] == {"type": "text",
+                                      "text": "what do you make of this?"}
+    stored = service.messages()[0]
+    assert "images" not in stored
+    assert stored["content"] == "what do you make of this?"
+    assert stored["display"].startswith("[image: positions.png,")
+    conn = client.app.state.holder.get().conn
+    rows = conn.execute("SELECT message FROM conversation_turns").fetchall()
+    assert all("PNG" not in r["message"] and "images" not in r["message"]
+               for r in rows)
+    indexed = conn.execute("SELECT content FROM search_index").fetchall()
+    assert all("PNG" not in r["content"] for r in indexed)
+
+
+def test_mirror_receives_the_placeholder_text_never_bytes(tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [LLMResponse(text="ok")])
+    service = client.app.state.chat_service
+    seen = []
+    service.set_mirror(lambda source, text, reply: seen.append((source, text, reply)))
+
+    service.send("here", images=[_png()])
+
+    [(source, text, reply)] = seen
+    assert source == "web" and reply == "ok"
+    assert text.startswith("[image: positions.png,") and text.endswith(" here")
+
+
+def test_a_model_that_cannot_read_images_gets_the_fixed_reply_recorded(
+        tmp_path, monkeypatch):
+    client = make_client(tmp_path, monkeypatch, [
+        LLMImageUnsupported("llm request failed: image input is not supported")])
+    service = client.app.state.chat_service
+
+    reply = service.send("read this", images=[_png()])
+
+    assert reply == IMAGE_UNSUPPORTED_REPLY
+    history = service.messages()
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert history[-1]["content"] == IMAGE_UNSUPPORTED_REPLY
+    assert all("images" not in m for m in history)
+    # And it survives a reload -- the user sees it in history, not just once.
+    conn = client.app.state.holder.get().conn
+    rows = conn.execute("SELECT message FROM conversation_turns").fetchall()
+    # (json.dumps escapes the em dash, so match an ASCII slice of the copy)
+    assert "vision-capable model in Settings" in rows[-1]["message"]
+    assert all("PNG" not in r["message"] for r in rows)
+
+
+def test_an_ordinary_llm_error_still_takes_the_existing_notice_path(
+        tmp_path, monkeypatch):
+    from allpath_trade.llm.base import LLMError
+
+    client = make_client(tmp_path, monkeypatch, [LLMError("upstream hung")])
+    service = client.app.state.chat_service
+
+    reply = service.send("read this", images=[_png()])
+
+    assert reply.startswith("(llm error:") and "upstream hung" in reply
+    assert service.messages()[-1]["content"] == reply

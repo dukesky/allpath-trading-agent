@@ -45,6 +45,26 @@ The journal's ts is submission time; filled_at/filled_avg_price are the
 execution truth and may lag until the next sentinel pass refreshes them.
 """
 
+# setup-wizard T5 (spec ③): assembled-prompt content, not IDENTITY.md, for
+# the same reason MARKET_MECHANICS_NOTE is -- IDENTITY.md is user-editable
+# and this describes how a *product feature* (image attachments on a chat
+# turn) is meant to be used, which the user isn't expected to have to
+# re-add after replacing that file. Kept account-agnostic: the shadow
+# tools named here simply aren't registered on the paper account (see
+# ChatService._build), which the last line says out loud so the model
+# doesn't promise an import it has no tool to perform.
+SCREENSHOT_NOTE = """\
+
+## Screenshots of positions
+When the user attaches a brokerage screenshot, read every row (ticker,
+quantity, average cost) and the cash balance.
+First restate the table you read so the user can correct it, then call
+shadow_set_position for each row and shadow_set_cash once.
+Never guess a value you cannot read — ask.
+Paper chats have no ledger tools, so a screenshot there can only be
+discussed.
+"""
+
 
 def load_identity(path: Path = Path("IDENTITY.md")) -> str:
     if path.exists():
@@ -89,7 +109,7 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
     before; only callers that already know which account they're running
     against (the Reflector, per shadow-dual-active T4) pass it.
     """
-    parts = [identity, MARKET_MECHANICS_NOTE]
+    parts = [identity, MARKET_MECHANICS_NOTE, SCREENSHOT_NOTE]
     if account is not None:
         parts.append(_account_section(account))
     parts.append("\n## Current snapshot (as of session start)\n")

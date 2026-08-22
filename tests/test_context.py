@@ -180,3 +180,22 @@ def test_system_prompt_shadow_account_section(tmp_path):
     assert "place this order" in prompt
     # Shadow's wording must not carry paper's "actually executed" framing.
     assert "Alpaca paper sandbox" not in prompt
+
+
+def test_system_prompt_includes_screenshot_import_guidance(tmp_path):
+    # setup-wizard T5 (spec ③): the shadow ledger is meant to be filled
+    # from a brokerage screenshot, and the model must restate what it read
+    # before writing anything -- never guess an unreadable number.
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None), account="shadow")
+    assert "## Screenshots of positions" in prompt
+    assert "shadow_set_position" in prompt and "shadow_set_cash" in prompt
+    assert "restate the table you read" in prompt
+    assert "Never guess a value you cannot read" in prompt
+    # Not baked into the user-editable IDENTITY.md fallback.
+    assert "Screenshots of positions" not in DEFAULT_IDENTITY

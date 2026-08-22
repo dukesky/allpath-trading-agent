@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
@@ -32,6 +33,46 @@ class LLMResponse(BaseModel):
 
 class LLMError(Exception):
     pass
+
+
+class LLMImageUnsupported(LLMError):
+    """The request carried image parts and the provider rejected it for
+    that reason -- i.e. the configured chat model has no vision input.
+
+    A subclass of LLMError so every existing `except LLMError` (the CLI,
+    the reflector, the consolidator) keeps degrading exactly as before;
+    only the callers that actually send images (ChatService, via
+    AgentSession.run_turn) single it out, to answer with the fixed
+    "switch CHAT_MODEL" reply instead of a raw provider string."""
+
+
+# Providers word this differently and none of them give a machine-readable
+# code for it: Anthropic says "image input is not supported", OpenAI/
+# OpenRouter say "does not support image input"/"modality", others say
+# "vision". Matching the message is the only signal available -- so it is
+# deliberately paired with `has_image_parts` below, never used alone: a
+# rate-limit error that merely mentions "vision-preview" on a text-only
+# turn must stay an ordinary LLMError.
+_IMAGE_COMPLAINT = re.compile(r"image|vision|modality|multimodal", re.IGNORECASE)
+
+
+def has_image_parts(messages: list[dict]) -> bool:
+    """True when any message uses the unified list-content shape with an
+    `image` part (agent/loop.py's `_protocol_message`)."""
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list) and any(
+                isinstance(p, dict) and p.get("type") == "image" for p in content):
+            return True
+    return False
+
+
+def wrap_request_error(exc: Exception, *, had_images: bool) -> LLMError:
+    """The single place both clients turn a provider exception into ours."""
+    error = LLMError
+    if had_images and _IMAGE_COMPLAINT.search(str(exc)):
+        error = LLMImageUnsupported
+    return error(f"llm request failed: {exc}")
 
 
 class LLMClient(ABC):
