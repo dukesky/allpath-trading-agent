@@ -100,9 +100,10 @@ class MemoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(after)
         self._conn.execute(
-            "INSERT INTO memory_log (ts, layer, key, action, before, after)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (datetime.now(UTC).isoformat(), layer, key, action, before, after))
+            "INSERT INTO memory_log (account, ts, layer, key, action, before, after)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (self.account, datetime.now(UTC).isoformat(), layer, key, action,
+             before, after))
         self._conn.commit()
         rel = path.relative_to(self.root)
         return f"{action} ok: {rel}"
@@ -110,10 +111,20 @@ class MemoryStore:
     def recent_log(self, limit: int = 30) -> list[sqlite3.Row]:
         """The change-audit trail the web memory page renders. Kept behind
         this API like every other store the web layer reads from, rather
-        than a route querying `memory_log` with its own raw SQL."""
+        than a route querying `memory_log` with its own raw SQL.
+
+        Scoped to this store's account: the log rows carry the full `after`
+        text of a note, so an unscoped query hands one account's Changes
+        tab the other account's note bodies verbatim. Note the consequence
+        for the SHARED profile layer -- a profile edit made while viewing
+        shadow is logged under 'shadow' and so only shows up in shadow's
+        Changes tab, even though the file itself is shared. Scoping the
+        audit trail to who made the change is the conservative side of
+        that trade."""
         return list(self._conn.execute(
             "SELECT ts, layer, key, action, after FROM memory_log"
-            " ORDER BY id DESC LIMIT ?", (limit,)))
+            " WHERE account = ? ORDER BY id DESC LIMIT ?",
+            (self.account, limit)))
 
     def render_for_context(self, layer: str, key: str | None = None,
                            budget: int | None = None) -> str:

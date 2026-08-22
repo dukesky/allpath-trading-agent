@@ -13,7 +13,7 @@ from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.web.order_sink import QueueingOrderSink
 
 SNAPSHOT_TTL_SECONDS = 30 * 60
@@ -49,6 +49,8 @@ class ChatService:
     isolated" design."""
 
     def __init__(self, holder, account: str = DEFAULT_ACCOUNT) -> None:
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self.holder = holder
         self.account = account
         self._lock = threading.Lock()

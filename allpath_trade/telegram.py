@@ -34,6 +34,7 @@ from collections.abc import Callable
 from typing import Any
 
 from allpath_trade.execution import ExecutionError
+from allpath_trade.notify.events import _prefix
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.store.app_state import (
     TELEGRAM_ACCOUNT_KEY,
@@ -50,6 +51,41 @@ from allpath_trade.web.markdown import (
 
 _API_URL = "https://api.telegram.org/bot{token}/{method}"
 _TOKEN_MASK = "***"
+
+# Telegram's hard per-message ceiling (`sendMessage` rejects anything longer)
+# and the much smaller one on `answerCallbackQuery`'s toast text.
+TELEGRAM_MESSAGE_LIMIT = 4096
+TELEGRAM_TOAST_LIMIT = 200
+
+
+def prefixed_chunks(account: str, html: str) -> list[str]:
+    """Split already-converted `html` into sendable chunks with the
+    `[Paper] `/`[Shadow] ` prefix on the FIRST chunk only (a prefix repeated
+    on every chunk of one logical reply reads as noise).
+
+    I2: the prefix's own length is subtracted from the split limit BEFORE
+    splitting, not added to chunk 0 afterwards. Prefixing after the split
+    was a silent truncation bug: `split_for_telegram` packs greedily up to
+    exactly 4096, so a reply that filled a chunk to the ceiling became 4105
+    characters once `[Shadow] ` was glued on, and Telegram rejected THAT
+    chunk while happily delivering the rest -- a reply arriving with its
+    head missing and nothing in the logs saying why.
+
+    I3: takes HTML, never raw Markdown. The prefix has to go on after
+    `to_telegram_html` has run, or the converter sees a line that starts
+    with `[Shadow] ` and the markdown construct it was supposed to parse --
+    a fenced code block, an ATX heading, a table row -- is no longer at the
+    start of the line, so it isn't recognized at all.
+
+    An unknown account degrades to no prefix (see `events._prefix`), which
+    makes the limit arithmetic a no-op and this identical to a bare
+    `split_for_telegram`."""
+    prefix = _prefix(account)
+    chunks = split_for_telegram(html, limit=TELEGRAM_MESSAGE_LIMIT - len(prefix))
+    if not chunks:
+        return []
+    return [prefix + chunks[0], *chunks[1:]]
+
 
 # sendMessage/sendChatAction are single, quick calls -- 10s matches the
 # timeout ntfy.py already uses for the same shape of one-call HTTP POST.
@@ -687,7 +723,12 @@ class TelegramPoller:
         chat -- so switching is never silent."""
         self.app_state.set(TELEGRAM_ACCOUNT_KEY, account)
         if isinstance(callback_id, str):
-            self.api.answer_callback_query(callback_id, f"Switched to {account.capitalize()}")
+            # Prefixed like every other callback toast, and from the same
+            # `events._prefix` -- an invalid account (already gated by
+            # `_ACCOUNT_CALLBACK_RE` before reaching here) degrades to no
+            # prefix instead of inventing a label for it.
+            toast = f"Switched to {account.capitalize()}"
+            self.api.answer_callback_query(callback_id, toast[:TELEGRAM_TOAST_LIMIT])
         if isinstance(message_id, int):
             self.api.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
         self.api.send_message(
@@ -730,24 +771,37 @@ class TelegramPoller:
         `.queue`/`.strategies` (the paper-only legacy alias), regardless of
         which account this Telegram chat is currently on. `outcome_line` is
         prefixed `[Paper]`/`[Shadow]` for the ROW's account -- the account
-        concerned, which may differ from `self._telegram_account()`."""
+        concerned, which may differ from `self._telegram_account()`. So is
+        the `toast`: with one paired chat serving both accounts, a bare
+        "Approved" pop-up on a tap made from the other account's view says
+        nothing about WHICH account just moved. `_toast` caps it at
+        Telegram's own `answerCallbackQuery` ceiling, which is far shorter
+        than a message's -- an over-long toast is dropped entirely."""
         c = self.holder.get()
         located = c.queue.locate(review_id)
         if located is None:
+            # No row, so no account to name -- the toast stays bare.
             return "That review no longer exists.", "Not found", False
         account = located[0]
         bundle = c.accounts[account] if account != DEFAULT_ACCOUNT else c
         queue = bundle.queue
-        prefix = f"[{account.capitalize()}] "
+        # `events._prefix` is the ONE place the bracket/capitalization shape
+        # of an account label is derived, here as everywhere else -- an
+        # unknown account degrades to no prefix rather than inventing one.
+        prefix = _prefix(account)
+
+        def _toast(text: str) -> str:
+            return (prefix + text)[:TELEGRAM_TOAST_LIMIT]
+
         try:
             row = queue.get(review_id)
         except ReviewError:
-            return "That review no longer exists.", "Not found", False
+            return "That review no longer exists.", _toast("Not found"), False
 
         stored_nonce = (row["approval_token_hash"] or "")[:16]
         if row["status"] != "pending" or not hmac.compare_digest(stored_nonce, nonce):
             message = "That item is no longer pending, or this button has expired."
-            return message, "Already resolved", False
+            return message, _toast("Already resolved"), False
 
         row_source = row["source"]
 
@@ -792,9 +846,9 @@ class TelegramPoller:
             try:
                 queue.reject(review_id, note="rejected via Telegram")
             except ReviewError as exc:
-                return f"{prefix}Not processed: {exc}", "Not processed", True
+                return f"{prefix}Not processed: {exc}", _toast("Not processed"), True
             _echo("rejected (rejected via Telegram)")
-            return f"{prefix}❌ Rejected #{review_id}.", "Rejected", True
+            return f"{prefix}❌ Rejected #{review_id}.", _toast("Rejected"), True
 
         # action == "approve"
         try:
@@ -816,19 +870,19 @@ class TelegramPoller:
             # explanation reads as a stuck bot, not a stuck review.
             message = (f"{prefix}⚠️ {noun} #{review_id} failed re-validation "
                       f"({exc}) and stayed pending — reopen from the app.")
-            return message, "Left pending: re-validation failed", True
+            return message, _toast("Left pending: re-validation failed"), True
         except ReviewError as exc:
-            return f"{prefix}Not processed: {exc}", "Not processed", True
+            return f"{prefix}Not processed: {exc}", _toast("Not processed"), True
         except ExecutionError as exc:
             _echo(f"execution failed: {exc}")
             message = f"{prefix}⚠️ Review #{review_id} claimed, but execution failed: {exc}"
-            return message, "Execution failed", True
+            return message, _toast("Execution failed"), True
 
         if row["kind"] == "strategy_revision":
             message = (f"Revision applied to {row['strategy_id']}."
                       + bundle.strategies.rearm_warning(row['strategy_id']))
             _echo(f"revision applied to {row['strategy_id']}")
-            return f"{prefix}✅ Approved #{review_id} — {message}", "Approved", True
+            return f"{prefix}✅ Approved #{review_id} — {message}", _toast("Approved"), True
 
         if row["kind"] == "shadow_edit":
             # shadow-dual-active T6: mirrors the strategy_revision branch
@@ -836,15 +890,28 @@ class TelegramPoller:
             # write the applier already made.
             _echo(f"{row['action']} applied")
             message = f"{prefix}✅ Approved #{review_id} — {row['action']} applied to the shadow ledger."
-            return message, "Approved", True
+            return message, _toast("Approved"), True
 
         if not result.submitted:
             reasons = "; ".join(result.decision.reasons)
             _echo(f"blocked by the risk gate ({reasons})")
             return (f"{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
-                    "Blocked by risk gate", True)
+                    _toast("Blocked by risk gate"), True)
+        if account == "shadow":
+            # C3: approving a shadow order writes a ledger row -- nothing was
+            # routed to a brokerage (broker/shadow.py has none behind it), so
+            # the tap has left the user with an order they still have to
+            # place by hand. Both the chat message and the receipt `_echo`
+            # feeds back to the agent have to say that, not "submitted".
+            summary = ("order recorded in your shadow ledger — place it in "
+                       "your brokerage now")
+            _echo(summary)
+            message = (f"{prefix}✅ Approved #{review_id} — order recorded in "
+                       f"your shadow ledger. Place it in your brokerage now.")
+            return message, _toast("Recorded"), True
         _echo("order submitted")
-        return f"{prefix}✅ Approved #{review_id} — order submitted.", "Approved", True
+        return (f"{prefix}✅ Approved #{review_id} — order submitted.",
+                _toast("Approved"), True)
 
     def _handle_chat_text(self, chat_id: str, text: str) -> None:
         # Captured once, up front: this chat's account decides BOTH which
@@ -883,14 +950,18 @@ class TelegramPoller:
             stop_typing.set()
             ticker.join(timeout=1)
 
-        html = to_telegram_html(reply)
-        chunks = split_for_telegram(html)
+        # shadow-dual-active T5: every bot message concerning one account
+        # carries its `[Paper]`/`[Shadow]` prefix -- the account concerned is
+        # whichever this turn was routed to. I2: `prefixed_chunks` budgets
+        # for that prefix inside the split rather than gluing it on after,
+        # so a reply packed to Telegram's ceiling can't be pushed over it.
+        chunks = prefixed_chunks(account, to_telegram_html(reply))
         if not chunks:
             # `split_for_telegram` returns `[]` for empty input -- an empty
             # or whitespace-only agent reply must still tell the user
             # *something* happened, not leave them staring at a typing
             # indicator that silently vanishes.
-            chunks = ["(empty reply)"]
+            chunks = prefixed_chunks(account, "(empty reply)")
         if len(chunks) > MAX_TELEGRAM_REPLY_CHUNKS:
             # Defensive belt (Finding 1): `split_for_telegram` is now proven
             # correct for the corpus this codebase's tests exercise, but if
@@ -901,12 +972,6 @@ class TelegramPoller:
                 f"reply split into {len(chunks)} chunks (cap "
                 f"{MAX_TELEGRAM_REPLY_CHUNKS}); truncating")
             chunks = [*chunks[:MAX_TELEGRAM_REPLY_CHUNKS], "(reply truncated: too long for Telegram)"]
-        # shadow-dual-active T5: every bot message concerning one account
-        # carries its `[Paper]`/`[Shadow]` prefix -- applied to the FIRST
-        # chunk only (not every split chunk of one logical reply, which
-        # would read as noisy repetition) -- the account concerned is
-        # whichever this turn was routed to.
-        chunks[0] = f"[{account.capitalize()}] {chunks[0]}"
         for chunk in chunks:
             self.api.send_message(chat_id, chunk)
 

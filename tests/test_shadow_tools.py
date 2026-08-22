@@ -244,6 +244,31 @@ def test_terminal_mode_confirmed_applies_directly(tmp_path):
     assert "Set position AAPL" in prompts[0]
 
 
+def test_terminal_mode_set_position_zero_qty_removes_existing_position(tmp_path):
+    reg, ledger, _, _, prompts = make(tmp_path, queue=None, answers=[True])
+    ledger.set_position("AAPL", Decimal(10), Decimal(100))
+    out = call(reg, "shadow_set_position", ticker="AAPL", qty="0", avg_cost="100")
+    assert out.startswith("applied:")
+    assert ledger.get_positions() == []  # removed, not a phantom qty-0 row
+    assert "none (removed)" in prompts[0]
+
+
+def test_web_mode_set_position_zero_qty_records_removal_as_after_state(tmp_path):
+    from allpath_trade.store.db import connect
+
+    conn = connect(tmp_path / "q.db")
+    queue = ReviewQueue(conn, None, account="shadow")
+    reg, ledger, _, _, _ = make(tmp_path, queue=queue)
+    ledger.set_position("AAPL", Decimal(10), Decimal(100))
+
+    out = call(reg, "shadow_set_position", ticker="AAPL", qty="0", avg_cost="100")
+
+    assert "queued for your approval as #" in out
+    row = queue.list()[0]
+    snapshot = row["snapshot"]
+    assert '"after": null' in snapshot
+
+
 def test_terminal_mode_declined_never_mutates(tmp_path):
     reg, ledger, _, _, _ = make(tmp_path, queue=None, answers=[False])
     out = call(reg, "shadow_set_position", ticker="AAPL", qty="10", avg_cost="100")
@@ -374,6 +399,18 @@ def test_apply_remove_position_writes_the_ledger(tmp_path):
     assert position_snapshot(ledger, "AAPL") is None
 
 
+def test_apply_set_position_zero_qty_removes_rather_than_writes_a_phantom_row(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path)
+    ledger.set_position("AAPL", Decimal(10), Decimal(100))
+    before = position_snapshot(ledger, "AAPL")
+    apply = apply_shadow_edit_factory(ledger, conn)
+
+    apply("set_position", {"ticker": "AAPL", "qty": "0", "avg_cost": "100"}, before)
+
+    assert position_snapshot(ledger, "AAPL") is None
+    assert ledger.get_positions() == []
+
+
 def test_apply_stale_before_state_raises_and_leaves_ledger_untouched(tmp_path):
     ledger, conn, _ = make_ledger(tmp_path)
     apply = apply_shadow_edit_factory(ledger, conn)
@@ -398,6 +435,31 @@ def test_apply_set_position_stale_after_a_concurrent_change(tmp_path):
 
     # Unchanged from the concurrent edit -- the stale proposal never applied.
     assert position_snapshot(ledger, "AAPL") == {"qty": "5", "avg_cost": "50"}
+
+
+def test_apply_set_position_not_stale_when_decimal_reprs_differ(tmp_path):
+    """'10' vs '10.00' are the same qty, just different str(Decimal(...))
+    outputs -- a `before` snapshot recorded one way and a CURRENT ledger
+    read that happens to format the other way must not false-refuse the
+    edit as stale."""
+    ledger, conn, _ = make_ledger(tmp_path)
+    before = {"qty": "10", "avg_cost": "100"}
+    ledger.set_position("AAPL", Decimal("10.00"), Decimal("100.00"))
+    apply = apply_shadow_edit_factory(ledger, conn)
+
+    apply("set_position", {"ticker": "AAPL", "qty": "20", "avg_cost": "150"}, before)
+
+    assert position_snapshot(ledger, "AAPL") == {"qty": "20", "avg_cost": "150"}
+
+
+def test_apply_set_cash_still_catches_a_real_change_after_normalizing(tmp_path):
+    ledger, conn, _ = make_ledger(tmp_path, cash="1")
+    before = cash_snapshot(ledger)
+    ledger.set_cash(Decimal(50))  # genuinely different value
+    apply = apply_shadow_edit_factory(ledger, conn)
+
+    with pytest.raises(RevisionValidationError):
+        apply("set_cash", {"amount": "999"}, before)
 
 
 def test_apply_record_fill_intervening_sell_raises_revision_validation_error(tmp_path):
@@ -541,14 +603,16 @@ def test_set_position_rejects_magnitude_over_1e12(tmp_path):
 
 
 def test_set_position_normalizes_negative_zero_qty(tmp_path):
-    # -0 < 0 is False (a legit qty=0 no-op-ish "flatten to zero" case) --
-    # but the STORED value must be plain "0", not the surprising literal
-    # "-0", so a later snapshot string-compare (staleness) is predictable.
+    # -0 < 0 is False (a legit qty=0 "flatten to zero" case, which now means
+    # remove -- see set_position's own qty==0 handling) -- `_parse_money`
+    # normalizes it to plain Decimal(0) before that check runs, so this
+    # takes the same removal path a literal "0" would, not an error and not
+    # a phantom "-0" position.
     reg, ledger, _, _, _ = make(tmp_path, queue=None, answers=[True])
+    ledger.set_position("AAPL", Decimal(10), Decimal(100))
     out = call(reg, "shadow_set_position", ticker="AAPL", qty="-0", avg_cost="1")
     assert out.startswith("applied:")
-    [pos] = ledger.get_positions()
-    assert str(pos.qty) == "0"
+    assert ledger.get_positions() == []
 
 
 @pytest.mark.parametrize("bad", _BAD_NUMBERS)

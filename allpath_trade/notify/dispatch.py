@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.events import _prefix
+from allpath_trade.store.accounts import ACCOUNTS
 from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
 from allpath_trade.store.reviews import ReviewError, ReviewQueue
 from allpath_trade.telegram import TelegramAPI
@@ -47,14 +48,18 @@ def _prefixed_for_telegram(account: str, body: str) -> str:
 
     Reuses `events._prefix` (the exact same helper every subject prefix in
     this codebase now comes from) rather than re-deriving the bracket/
-    capitalization shape here, and guards against DOUBLE-prefixing a body
-    a caller already prefixed itself (defensive -- no caller in this
-    codebase does that today, since `events.py` only ever prefixes
-    `subject`, never `body`, but a body starting with the exact same
-    prefix this call would add is left alone rather than getting a second
-    copy)."""
+    capitalization shape here, and treats an ALREADY-PREFIXED body as
+    final: a body opening with ANY known account's prefix is returned
+    untouched, not just one opening with the prefix this call was about to
+    add. The narrower same-prefix-only guard this replaces turned a
+    `("shadow", "[Paper] ...")` call into `"[Shadow] [Paper] ..."` -- two
+    contradictory account labels on one message, with the wrong one
+    leading. Whoever labelled the body knew which account it concerned;
+    this function's `account` argument is the weaker guess of the two."""
     prefix = _prefix(account)
-    if not prefix or body.startswith(prefix):
+    if not prefix:
+        return body
+    if any(body.startswith(_prefix(known)) for known in ACCOUNTS):
         return body
     return prefix + body
 

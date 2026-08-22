@@ -1054,7 +1054,7 @@ def test_paired_approve_callback_approves_order_and_removes_buttons(tmp_path):
 
     assert queue.get(review_id)["status"] == "approved"
     assert api.edited_markups == [("111", 42, None)]
-    assert api.answered_callbacks == [("cb1", "Approved")]
+    assert api.answered_callbacks == [("cb1", "[Paper] Approved")]
     assert any("order submitted" in html for _cid, html in api.sent_messages)
     assert chat_service.resolutions == [
         {"line": f"You resolved #{review_id}. Result: order submitted",
@@ -1132,7 +1132,7 @@ def test_wrong_nonce_is_ignored_review_stays_pending(tmp_path):
     poller.poll_once()
 
     assert queue.get(review_id)["status"] == "pending"
-    assert api.answered_callbacks == [("cb1", "Already resolved")]
+    assert api.answered_callbacks == [("cb1", "[Paper] Already resolved")]
     # No buttons removed, no chat receipt -- nothing was actually resolved.
     assert api.edited_markups == []
     assert chat_service.resolutions == []
@@ -1153,7 +1153,7 @@ def test_non_pending_review_callback_is_ignored(tmp_path):
     poller.poll_once()
 
     assert queue.get(review_id)["status"] == "rejected"  # unchanged
-    assert api.answered_callbacks == [("cb1", "Already resolved")]
+    assert api.answered_callbacks == [("cb1", "[Paper] Already resolved")]
     assert chat_service.resolutions == []
 
 
@@ -1171,7 +1171,7 @@ def test_execution_error_gives_honest_message(tmp_path):
     poller.poll_once()
 
     assert queue.get(review_id)["status"] == "approved"  # claimed before the failure
-    assert api.answered_callbacks == [("cb1", "Execution failed")]
+    assert api.answered_callbacks == [("cb1", "[Paper] Execution failed")]
     assert any("execution failed" in html for _cid, html in api.sent_messages)
     assert chat_service.resolutions == [
         {"line": f"You resolved #{review_id}. Result: execution failed: boom",
@@ -1387,11 +1387,14 @@ def test_row_bound_shadow_review_resolves_through_shadow_queue_while_telegram_on
     with pytest.raises(ReviewError):
         paper_queue.get(review_id)  # never existed in paper's own view
     # Outcome message is labelled for the ROW's account (shadow), not the
-    # chat's current account (paper).
-    assert any("[Shadow]" in html and "order submitted" in html
+    # chat's current account (paper) -- and C3: a shadow approval records a
+    # ledger row, it does not submit anything, so this message must say so.
+    assert any("[Shadow]" in html and "recorded in your shadow ledger" in html
               for _cid, html in api.sent_messages)
+    assert not any("order submitted" in html for _cid, html in api.sent_messages)
     # The receipt lands in shadow's own conversation, never paper's.
     assert shadow_chat.resolutions
+    assert "order submitted" not in shadow_chat.resolutions[0]["line"]
     assert paper_chat.resolutions == []
 
 
@@ -1511,3 +1514,79 @@ def test_paired_approve_callback_shadow_edit_stale_stays_pending(tmp_path):
     # reopen_from_the_app, which covers the strategy_revision wording).
     assert any("Ledger change" in html and "Revision" not in html
               for _cid, html in api.sent_messages)
+
+
+# ---------------------------------------------------------------------------
+# I2: the account prefix has to be budgeted for BEFORE splitting.
+#
+# The prefix used to be glued onto chunk 0 after `split_for_telegram` had
+# already packed it to exactly Telegram's 4096-character ceiling, pushing
+# that chunk to 4105 -- rejected by the API, so the head of a long reply
+# silently vanished while the rest of it arrived.
+# ---------------------------------------------------------------------------
+
+def test_reply_at_exactly_the_telegram_limit_still_fits_after_prefixing(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    api = FakeTelegramAPI(batches=[[_update(1, 111, "hi")]])
+    # Plain text, so `to_telegram_html` neither escapes nor wraps: the
+    # reply's length IS the html's length, exactly at the ceiling.
+    chat_service = FakeChatService(reply="x" * 4096)
+    poller = make_poller(api, chat_service, app_state)
+
+    poller.poll_once()
+
+    sent = [html for _cid, html in api.sent_messages]
+    assert sent, "the reply must not be dropped"
+    assert all(len(html) <= 4096 for html in sent)
+    assert sent[0].startswith("[Shadow] ")
+    # Nothing was lost to the ceiling: every 'x' still arrives.
+    assert sum(html.count("x") for html in sent) == 4096
+
+
+def test_multi_chunk_reply_prefixes_only_the_first_chunk(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    api = FakeTelegramAPI(batches=[[_update(1, 111, "hi")]])
+    paragraph = "y" * 3000
+    chat_service = FakeChatService(reply=f"{paragraph}\n\n{paragraph}")
+    poller = make_poller(api, chat_service, app_state)
+
+    poller.poll_once()
+
+    sent = [html for _cid, html in api.sent_messages]
+    assert len(sent) > 1
+    assert sent[0].startswith("[Shadow] ")
+    assert not any(html.startswith("[Shadow] ") for html in sent[1:])
+
+
+# ---------------------------------------------------------------------------
+# C3 + toast prefixes on the callback path.
+# ---------------------------------------------------------------------------
+
+def test_shadow_approve_callback_says_recorded_and_prefixes_the_toast(tmp_path):
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    app_state.set(TELEGRAM_ACCOUNT_KEY, "paper")
+    conn = connect(tmp_path / "reviews.db")
+    paper_queue = make_order_queue(tmp_path, conn=conn, account="paper")
+    shadow_queue = make_order_queue(tmp_path, conn=conn, account="shadow")
+    review_id = queue_order_review(shadow_queue)
+    nonce = nonce_for(shadow_queue, review_id)
+    shadow_chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{review_id}:{nonce}")]])
+    poller = make_review_poller(
+        api, {"paper": FakeChatService(), "shadow": shadow_chat}, app_state,
+        paper_queue, shadow_queue=shadow_queue)
+
+    poller.poll_once()
+
+    # The toast names the ROW's account, not the chat's current one -- and
+    # says what actually happened to a shadow row: recorded, not submitted.
+    assert api.answered_callbacks == [("cb1", "[Shadow] Recorded")]
+    assert all(len(text) <= 200 for _cid, text in api.answered_callbacks)
+    assert shadow_chat.resolutions == [
+        {"line": f"You resolved #{review_id}. Result: order recorded in your "
+                 f"shadow ledger — place it in your brokerage now",
+         "source": "telegram"}]

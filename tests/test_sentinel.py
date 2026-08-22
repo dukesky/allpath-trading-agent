@@ -106,14 +106,16 @@ class SpyNotifier:
         self.sent.append((subject, body))
 
 
-def make(tmp_path: Path, yaml_text: str, *, price="200", qty="10", fail=False):
+def make(tmp_path: Path, yaml_text: str, *, price="200", qty="10", fail=False,
+         account="paper"):
     (tmp_path / "t.yaml").write_text(yaml_text)
     conn = connect(tmp_path / "db.sqlite")
     store = StrategyStore(tmp_path, conn)
     executor = SpyExecutor(fail=fail)
-    queue = ReviewQueue(conn, executor)
+    queue = ReviewQueue(conn, executor, account=account)
     notifier = SpyNotifier()
-    s = Sentinel(store, FakeData(price), FakeBroker(qty), executor, queue, notifier)
+    s = Sentinel(store, FakeData(price), FakeBroker(qty), executor, queue, notifier,
+                 account=account)
     return s, store, executor, queue, notifier
 
 
@@ -597,3 +599,48 @@ def test_hard_auto_gate_rejected_notification_uses_order_result_event(tmp_path):
     [(subject, body)] = n.sent
     assert "order not submitted" in subject
     assert "exceeds max position size" in body
+
+
+# ---------------------------------------------------------------------------
+# C3: a shadow Sentinel's `detail` is the string that reaches the notification
+# body, the TriggerOutcome, and (through it) the run report -- "submitted" in
+# any of them claims an order was routed, which the shadow ledger never does.
+# ---------------------------------------------------------------------------
+
+def test_hard_auto_shadow_detail_and_notification_say_recorded(tmp_path):
+    s, _store, ex, _q, n = make(tmp_path, strategy_yaml(), account="shadow")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "executed"
+    assert o.detail == "recorded"
+    assert len(ex.calls) == 1
+    subject, body = n.sent[0]
+    assert "submitted" not in subject
+    assert "submitted" not in body
+    assert "recorded in your shadow ledger" in body
+
+
+def test_hard_auto_paper_detail_still_says_submitted(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(), account="paper")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.detail == "submitted"
+    assert "order submitted" in n.sent[0][0]
+
+
+def test_auto_soft_agent_approved_shadow_detail_says_recorded(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(rule_type="soft"),
+                                 account="shadow")
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    [o] = report.outcomes
+    assert o.disposition == "executed"
+    assert o.detail == "agent-approved; recorded"
+    assert "submitted" not in n.sent[-1][1]
+
+
+def test_auto_soft_agent_approved_paper_detail_still_says_submitted(tmp_path):
+    s, _store, _ex, _q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent("execute")
+    report = s.run_once()
+    assert report.outcomes[0].detail == "agent-approved; submitted"

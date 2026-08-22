@@ -14,7 +14,7 @@ from allpath_trade.agent.readonly_tools import register_readonly_tools
 from allpath_trade.agent.reflection_tools import register_reflection_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.config import Settings
-from allpath_trade.llm.base import LLMClient
+from allpath_trade.llm.base import LLMClient, LLMResponse
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
 from allpath_trade.scheduler import ET, ts_to_et_date
@@ -54,6 +54,64 @@ MAX_SUMMARY_CHARS = 600
 # render "n/a" (the same fallback an individual quote failure already used)
 # rather than block indefinitely.
 QUOTES_BUDGET_SECONDS = 10
+
+
+def _monotonic() -> float:
+    """Indirection over `time.monotonic` for I8's reflection deadline, so
+    tests can drive it by hand (the dashboard's `_utcnow` pattern) instead
+    of sleeping through a real 30-minute budget."""
+    return time_module.monotonic()
+
+
+# The text a deadline-expired iteration returns in place of a provider call
+# (see _DeadlineGuard). Deliberately NOT a REPORT/SUMMARY-shaped string: it
+# has to fail `_parse_report` so `_run` falls into exactly the same
+# corrective-wrap-up branch AgentSession's own LIMIT_NOTICE already
+# triggers, rather than needing a second, parallel wrap-up path.
+DEADLINE_NOTICE = "(stopped: reflection time budget reached — wrapping up)"
+
+
+class _DeadlineGuard:
+    """Wraps this pass's LLMClient to give the reflection session a
+    wall-clock bound (I8, `Settings.reflection_deadline_seconds`) alongside
+    its tool-call bound.
+
+    Why a wrapper and not a check inside AgentSession's loop: the loop is
+    the SHARED agent machine (agent/loop.py, also driving live chat), and
+    the deadline is a reflection-specific policy -- a chat session has a
+    human watching it and no nightly chain queued behind it. `complete` is
+    called exactly once per loop iteration, at the top, so checking here IS
+    the "between iterations" check, and it also catches time burned by a
+    slow TOOL round-trip, not just by the provider.
+
+    Once expired, `complete` returns `DEADLINE_NOTICE` WITHOUT calling the
+    provider: the iteration cap's own exit path (unparseable text -> one
+    corrective wrap-up turn) is reused verbatim, so a timed-out pass still
+    produces a real report. `_run` clears `enforcing` before that wrap-up
+    turn -- the whole point of the deadline is to reach the wrap-up, so
+    gating the wrap-up on the same expired deadline would turn every
+    timeout into a `failed` row.
+
+    Everything other than `complete` (`model`, and anything a future client
+    exposes) forwards to the wrapped client via `__getattr__`."""
+
+    def __init__(self, inner: LLMClient, deadline_seconds: int) -> None:
+        self._inner = inner
+        self._deadline = (_monotonic() + deadline_seconds
+                          if deadline_seconds > 0 else None)
+        self.enforcing = True
+        self.expired = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def complete(self, messages: list[dict], tools: Any = None):
+        if (self.enforcing and self._deadline is not None
+                and _monotonic() >= self._deadline):
+            self.expired = True
+            return LLMResponse(text=DEADLINE_NOTICE)
+        return self._inner.complete(messages, tools=tools)
+
 
 _TRUNCATION_NOTE = "\n... (truncated)"
 _FRONT_TRUNCATION_NOTE = "... (older observations truncated)\n"
@@ -372,7 +430,13 @@ class Reflector:
         # trading day (or a re-invoked headless `run`) must never spend a
         # second LLM call, let alone produce a second reports row that
         # would violate the `date` UNIQUE constraint.
-        if reports.exists(et_date):
+        # I9: `exists_ok`, not `exists` -- a `status="failed"` row (see
+        # `_fail`: LLM down, or output unparseable twice) records an
+        # ATTEMPT, not a result. Guarding on bare existence let one bad
+        # 16:05 minute lock the account out of reflection for the whole
+        # calendar day, with nothing to retry into; `ReportStore.add`'s
+        # UPSERT is what lets the retry replace that row.
+        if reports.exists_ok(et_date):
             return f"already ran ({et_date})"
         return self._run(et_date)
 
@@ -417,8 +481,14 @@ class Reflector:
 
         compactor = Compactor(self.llm, conversations,
                               budget_tokens=self.settings.context_budget_tokens)
+        # I8: the session talks to the provider THROUGH the deadline guard;
+        # the compactor deliberately does not (a compaction is bookkeeping
+        # the pass needs to keep its own history coherent, and handing it a
+        # DEADLINE_NOTICE in place of a summary would corrupt the stored
+        # conversation, not shorten the night).
+        guard = _DeadlineGuard(self.llm, self.settings.reflection_deadline_seconds)
         session = AgentSession(
-            self.llm, registry, system_prompt, store=conversations,
+            guard, registry, system_prompt, store=conversations,
             conversation_id=conversation_id,
             max_iters=self.settings.reflection_max_iters, compactor=compactor)
 
@@ -447,6 +517,13 @@ class Reflector:
             # to extract/reformat what the transcript already holds, not to
             # do more research, so one iteration is always enough.
             session.max_iters = 1
+            # I8: the wrap-up turn is exempt from the wall-clock deadline
+            # -- reaching it is the entire point of the deadline, and a
+            # pass that timed out has an even better reason than a
+            # cap-hit one to be asked for the report the transcript
+            # already holds. One iteration, so the exemption can't extend
+            # the night by more than a single provider call.
+            guard.enforcing = False
             text = session.run_turn(CORRECTIVE_PROMPT)
             if text.startswith("(llm error:"):
                 return self._fail(

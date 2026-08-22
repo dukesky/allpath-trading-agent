@@ -7,6 +7,16 @@ from enum import Enum
 
 from pydantic import BaseModel, field_validator, model_validator
 
+# Sane upper bound for any order size this app ever deals with -- a value
+# like 1e400 IS finite per Decimal.is_finite() (pydantic's own
+# `finite_number` check on the Decimal fields below already rejects
+# Infinity/NaN, but lets a huge-but-finite magnitude straight through), and
+# is exactly as bricking once it flows into equity/market_value arithmetic
+# downstream. The single definition every numeric-input guard across the
+# app shares -- shadow_tools.py's `_parse_money` imports this constant
+# rather than keeping its own independent copy.
+_MAX_MAGNITUDE = Decimal("1e12")
+
 
 class OrderSide(str, Enum):
     BUY = "buy"
@@ -61,6 +71,8 @@ class OrderIntent(BaseModel):
         for val in (self.qty, self.notional):
             if val is not None and val <= 0:
                 raise ValueError("order size must be positive")
+            if val is not None and val.copy_abs() > _MAX_MAGNITUDE:
+                raise ValueError(f"order size {val} exceeds max magnitude {_MAX_MAGNITUDE}")
         return self
 
 

@@ -680,7 +680,10 @@ def test_approve_link_for_a_shadow_row_resolves_through_shadow_queue(client, mon
     r = client.post(f"/a/{rid}/approve", data={"k": rid.token})
 
     assert r.status_code == 200
-    assert "Order submitted" in r.text
+    # C3: nothing was routed anywhere -- the shadow "executor" only wrote a
+    # ledger row, so this surface must not say "submitted" either.
+    assert "Order recorded in your shadow ledger" in r.text
+    assert "submitted" not in r.text
     spy.assert_called_once()
     assert shadow_bundle.queue.get(rid)["status"] == "approved"
     # Paper's own queue never saw this id at all -- it belongs to shadow.

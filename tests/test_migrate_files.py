@@ -271,3 +271,180 @@ def test_strategy_store_for_account_rejects_invalid(tmp_path):
         StrategyStore.for_account(tmp_path / "strategies",
                                   connect(tmp_path / "db.sqlite"),
                                   account="unknown")
+
+
+# --- T6 review: failure handling, collisions, symlinks -----------------------
+
+def test_move_failure_keeps_the_backup_and_says_how_to_restore(tmp_path, capsys,
+                                                               monkeypatch):
+    # C2: the post-move failure handler used to rmtree the backup -- after
+    # legacy files had ALREADY been moved out of the live tree. That is the
+    # one moment the backup is the only surviving copy of the original
+    # layout, so it must never be deleted there.
+    _write_legacy_memory(tmp_path)
+    settings = _settings(tmp_path)
+
+    from allpath_trade import migrate_files as mf
+    real_move = mf.shutil.move
+    calls = {"n": 0}
+
+    def flaky_move(src, dst):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("disk full")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(mf.shutil, "move", flaky_move)
+
+    with pytest.raises(RuntimeError):
+        migrate_files(settings)
+
+    backups = list(tmp_path.glob("memory.bak-*"))
+    assert len(backups) == 1, "the backup must survive a post-move failure"
+    # ...with the complete original layout inside it.
+    assert (backups[0] / "stocks" / "AAPL.md").read_text() == "- strong cash flow\n"
+    assert (backups[0] / "strategies" / "momentum.md").exists()
+    assert (backups[0] / "lessons" / "overtrading.md").exists()
+    assert (backups[0] / "user_profile.md").exists()
+
+    out = capsys.readouterr().out
+    assert "partially migrated" in out
+    assert backups[0].name in out
+    assert "nothing was moved" not in out
+
+
+def test_copytree_failure_removes_the_partial_backup_and_moves_nothing(tmp_path,
+                                                                      capsys,
+                                                                      monkeypatch):
+    # I5: the backup step is the ONE place where deleting a partial backup
+    # is safe -- nothing has been moved yet, so the live tree is still the
+    # complete original. OSError (not just shutil.Error) must be caught.
+    _write_legacy_memory(tmp_path)
+    settings = _settings(tmp_path)
+
+    from allpath_trade import migrate_files as mf
+
+    def failing_copytree(src, dst, **kwargs):
+        Path(dst).mkdir(parents=True, exist_ok=True)
+        (Path(dst) / "half-copied.md").write_text("partial\n")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mf.shutil, "copytree", failing_copytree)
+
+    with pytest.raises(RuntimeError, match="Migration failed"):
+        migrate_files(settings)
+
+    assert list(tmp_path.glob("memory.bak-*")) == []  # partial backup cleaned up
+    # Live tree completely untouched -- still the legacy layout.
+    assert (tmp_path / "memory" / "stocks" / "AAPL.md").read_text() == \
+        "- strong cash flow\n"
+    assert not (tmp_path / "memory" / "paper").exists()
+    assert "nothing was moved" in capsys.readouterr().out
+
+
+def test_memory_collision_parks_the_legacy_twin_instead_of_deleting_it(tmp_path):
+    # C2: the merge path used to `rmtree(src)`, destroying every colliding
+    # legacy file in the LIVE tree (only the backup kept a copy). The
+    # existing new-layout file still wins its name; the legacy twin is
+    # parked beside it.
+    _write_legacy_memory(tmp_path)
+    already = tmp_path / "memory" / "paper" / "stocks"
+    already.mkdir(parents=True)
+    (already / "AAPL.md").write_text("- new-layout note\n")
+
+    migrate_files(_settings(tmp_path))
+
+    assert (already / "AAPL.md").read_text() == "- new-layout note\n"
+    twin = already / "AAPL.md.legacy"
+    assert twin.read_text() == "- strong cash flow\n"
+    # Parked, not live: no glob in the codebase (`*.md`) picks it up.
+    assert sorted(p.name for p in already.glob("*.md")) == ["AAPL.md"]
+    # And the legacy directory is gone, so a second run is a no-op.
+    assert not (tmp_path / "memory" / "stocks").exists()
+
+
+def test_strategies_collision_is_idempotent_across_repeated_runs(tmp_path):
+    # I1: a colliding legacy yaml left at the strategies root made EVERY
+    # build_components() (i.e. every settings save) take a fresh full
+    # backup, forever.
+    _write_legacy_strategies(tmp_path)
+    paper = tmp_path / "strategies" / "paper"
+    paper.mkdir(parents=True)
+    (paper / "a.yaml").write_text("name: A-new\nstatus: active\n")
+    settings = _settings(tmp_path)
+
+    for _ in range(3):
+        migrate_files(settings)
+
+    assert len(list(tmp_path.glob("strategies.bak-*"))) == 1
+    # Post-condition: nothing loadable is left at the legacy root.
+    assert list((tmp_path / "strategies").glob("*.yaml")) == []
+    assert (paper / "a.yaml").read_text() == "name: A-new\nstatus: active\n"
+    assert (paper / "a.yaml.legacy").read_text() == "name: A\nstatus: active\n"
+    assert (paper / "b.yaml").read_text() == "name: B\nstatus: draft\n"
+    # StrategyStore.load_all globs *.yaml -- the parked twin must not be
+    # loaded as a second, duplicate strategy.
+    assert sorted(p.name for p in paper.glob("*.yaml")) == ["a.yaml", "b.yaml"]
+
+
+def test_relative_symlink_is_rewritten_to_survive_the_move(tmp_path):
+    # I6: memory/{layer}/ moves one level deeper, so a relative symlink
+    # inside it stops resolving unless its target text is rewritten.
+    _write_legacy_memory(tmp_path)
+    memory = tmp_path / "memory"
+    shared = memory / "shared_notes"
+    shared.mkdir()
+    (shared / "note.md").write_text("- shared note\n")
+    (memory / "stocks" / "shared").symlink_to("../shared_notes")
+
+    migrate_files(_settings(tmp_path))
+
+    moved = memory / "paper" / "stocks" / "shared"
+    assert moved.is_symlink()
+    assert moved.resolve() == shared.resolve()
+    assert (moved / "note.md").read_text() == "- shared note\n"
+    assert not (memory / "stocks").exists()
+
+
+def test_absolute_symlink_target_is_left_alone(tmp_path):
+    _write_legacy_memory(tmp_path)
+    memory = tmp_path / "memory"
+    target = tmp_path / "outside.md"
+    target.write_text("- outside\n")
+    (memory / "stocks" / "abs").symlink_to(target)
+
+    migrate_files(_settings(tmp_path))
+
+    moved = memory / "paper" / "stocks" / "abs"
+    assert moved.is_symlink()
+    assert moved.read_text() == "- outside\n"
+
+
+def test_unrewritable_symlink_is_left_in_place_and_named(tmp_path, capsys,
+                                                         monkeypatch):
+    # A relative link whose target can't be re-expressed from the new
+    # location is left where it is rather than moved broken -- and the
+    # migration says which entry it skipped.
+    _write_legacy_memory(tmp_path)
+    memory = tmp_path / "memory"
+    (memory / "shared_notes").mkdir()
+    (memory / "stocks" / "shared").symlink_to("../shared_notes")
+
+    from allpath_trade import migrate_files as mf
+
+    def no_relpath(path, start):
+        raise ValueError("path is on mount 'A', start on mount 'B'")
+
+    monkeypatch.setattr(mf.os.path, "relpath", no_relpath)
+
+    migrate_files(_settings(tmp_path))
+
+    out = capsys.readouterr().out
+    assert "[migrate] skipped" in out
+    assert "shared" in out
+    # Left in place, still resolving, never deleted.
+    left = memory / "stocks" / "shared"
+    assert left.is_symlink()
+    assert left.resolve() == (memory / "shared_notes").resolve()
+    # Everything else still migrated.
+    assert (memory / "paper" / "stocks" / "AAPL.md").exists()

@@ -1,14 +1,21 @@
 """Shadow-ledger editing tools (shadow-dual-active T6, spec §④).
 
-The shadow ledger's ONLY write paths are `Broker.submit_order` (via the risk
-gate, same as paper) and the four `ShadowLedger` mutation helpers
-(`set_position`/`set_cash`/`remove_position`/`record_fill`) -- and per T3's
-own docstring, those four are "the human-approval-gated write path", never
-called by the agent directly. This module is the tool layer that lets the
-shadow-account agent PROPOSE a ledger edit; the actual mutation always goes
-through either a human `confirm()` (terminal) or the `pending_reviews`
-approval queue (web/Telegram, `kind="shadow_edit"` -- see
-`store/reviews.py`'s `add_shadow_edit`/`_approve_shadow_edit`).
+The shadow ledger's write paths that change what a position/cash balance
+IS are `Broker.submit_order` (via the risk gate, same as paper) and the
+four `ShadowLedger` mutation helpers (`set_position`/`set_cash`/
+`remove_position`/`record_fill`) -- and per T3's own docstring, those four
+are "the human-approval-gated write path", never called by the agent
+directly. This module is the tool layer that lets the shadow-account agent
+PROPOSE a ledger edit; the actual mutation always goes through either a
+human `confirm()` (terminal) or the `pending_reviews` approval queue (web/
+Telegram, `kind="shadow_edit"` -- see `store/reviews.py`'s
+`add_shadow_edit`/`_approve_shadow_edit`). Separately (and deliberately
+outside this gated path -- see `ShadowLedger.get_account`'s own docstring
+and `store/db.py`'s schema comment), every `get_account()` call --
+including a bare read, e.g. from a chat turn's context build -- also
+best-effort upserts today's `shadow_equity_daily` row; that snapshot write
+is not a ledger edit (it changes no position/cash value) and is untouched
+by anything in this module.
 
 `register_shadow_tools` is wired ONLY into the shadow account's tool
 registries (`web/chat_service.py`'s `ChatService._build` when
@@ -35,6 +42,7 @@ from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
+from allpath_trade.broker.base import _MAX_MAGNITUDE
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued
@@ -67,8 +75,9 @@ def _valid_ticker(raw: str) -> str | None:
 # nothing to reject and closes off the "huge-but-finite" half of the
 # Infinity bug (a value like 1e999 IS finite per Decimal.is_finite(), but
 # is exactly as ledger-bricking once it flows into equity/market_value
-# arithmetic -- see _parse_money's docstring).
-_MAX_MAGNITUDE = Decimal("1e12")
+# arithmetic -- see _parse_money's docstring). Imported from broker/base.py
+# (`OrderIntent`'s own qty/notional cap) rather than redefined here, so the
+# two guards can never quietly drift apart.
 
 # CSV import cap (M6): a personal ledger's import file is a handful to a
 # few hundred rows at most -- these are generous ceilings that exist only
@@ -302,8 +311,31 @@ def parse_shadow_csv(text: str) -> tuple[list[dict], Decimal | None, list[str]]:
 
 # --- Approval applier (wired via ReviewQueue.set_shadow_edit_applier) ------
 
+def _normalize_snapshot(value: object) -> object:
+    """Recursively normalizes the Decimal-shaped strings inside a snapshot
+    (see `position_snapshot`/`cash_snapshot`/`order_snapshot`/
+    `full_snapshot`) so `_stale_check`'s equality compares NUMERIC value,
+    not string repr -- `'10'` and `'10.00'` are the same qty but different
+    `str(Decimal(...))` outputs (e.g. a plain manual edit vs. a
+    weighted-average recompute), and a bare `!=` on the raw dicts falsely
+    refused an unchanged position as "stale". Every string a snapshot dict
+    can contain is either such a Decimal-shaped field (qty/avg_cost/cash/
+    fill_price) or a non-numeric one (ticker/side) that `Decimal(...)`
+    simply can't parse -- caught by `InvalidOperation` and passed through
+    unchanged, so this is safe to apply blindly to every string value
+    without knowing which key it came from."""
+    if isinstance(value, dict):
+        return {k: _normalize_snapshot(v) for k, v in value.items()}
+    if isinstance(value, str):
+        try:
+            return str(Decimal(value).normalize())
+        except InvalidOperation:
+            return value
+    return value
+
+
 def _stale_check(current: object, before: object) -> None:
-    if current != before:
+    if _normalize_snapshot(current) != _normalize_snapshot(before):
         raise RevisionValidationError(
             "ledger changed since this proposal — re-propose")
 
@@ -480,13 +512,18 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
             return "error: avg_cost must be > 0"
 
         before = position_snapshot(ledger, ticker_u)
-        after = {"qty": str(qty_d), "avg_cost": str(avg_cost_d)}
+        # A qty-0 edit is a removal, not a phantom zero-qty position (see
+        # ShadowLedger.set_position) -- reflect that honestly in the
+        # approval card's after-state rather than showing a "qty: 0" that
+        # will never actually be written to the ledger.
+        after = None if qty_d == 0 else {"qty": str(qty_d), "avg_cost": str(avg_cost_d)}
+        after_display = after if after is not None else "none (removed)"
         title = f"Set position {ticker_u}"
         return _queue_or_confirm(
             op="set_position", ticker=ticker_u, action_title=title,
             args={"ticker": ticker_u, "qty": str(qty_d), "avg_cost": str(avg_cost_d)},
             before=before, after=after,
-            confirm_prompt=f"{title}: {before or 'no position'} -> {after}?",
+            confirm_prompt=f"{title}: {before or 'no position'} -> {after_display}?",
             apply_direct=lambda: ledger.set_position(ticker_u, qty_d, avg_cost_d))
 
     def shadow_set_cash(amount: str) -> str:
@@ -547,8 +584,10 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
         "Set a position in the shadow ledger (your real-brokerage mirror) to "
         "an exact quantity and average cost -- use this to match what you "
         "actually hold (a manual buy/sell at your real broker, or a "
-        "first-time import). In web/Telegram chat this queues the edit for "
-        "your approval on the Pending page; in a terminal session you "
+        "first-time import). A qty of 0 removes the position entirely "
+        "(same effect as shadow_remove_position) rather than recording a "
+        "zero-quantity holding. In web/Telegram chat this queues the edit "
+        "for your approval on the Pending page; in a terminal session you "
         "confirm inline before it's applied. Never invents a position: "
         "always reflects what you tell it.",
         {"type": "object", "properties": {

@@ -1060,6 +1060,35 @@ def test_approve_shadow_edit_validation_error_leaves_row_pending(shadow_queue):
     assert shadow_queue.get(rid)["status"] == "rejected"
 
 
+def test_approve_shadow_edit_validation_error_restores_the_approve_token(shadow_queue):
+    """A staleness rollback means nothing was actually written to the
+    ledger -- this proposal is still exactly as approvable as it was before
+    `approve()` was called. The claim step nulls `approval_token_hash`/
+    `token_expires_ts` unconditionally, so the rollback branch must restore
+    them, or the row goes back to "pending" while its own approve-by-link
+    token is permanently dead -- silently breaking a not-yet-clicked email/
+    Telegram notification link even though nothing changed."""
+    def boom(op, args, before):
+        raise RevisionValidationError("ledger changed since this proposal")
+
+    shadow_queue.set_shadow_edit_applier(boom)
+    handle = add_shadow_edit(shadow_queue)
+    token = handle.token
+
+    with pytest.raises(RevisionValidationError):
+        shadow_queue.approve(handle)
+
+    row = shadow_queue.get(handle)
+    assert row["status"] == "pending"
+    assert row["approval_token_hash"] is not None
+    assert row["token_expires_ts"] is not None
+
+    # The ORIGINAL token minted at propose time still consumes.
+    consumed = shadow_queue.consume_token(handle, token)
+    assert consumed is not None
+    assert consumed["id"] == handle
+
+
 def test_approve_shadow_edit_runtime_error_recorded_and_reraised(shadow_queue):
     def boom(op, args, before):
         raise RuntimeError("disk full")

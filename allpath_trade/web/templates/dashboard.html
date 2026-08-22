@@ -107,10 +107,15 @@
 {% else %}<p class="muted">No strategies yet. Ask the agent to draft one in <a href="/chat">Chat</a> — it lands on Pending for your approval and starts as a draft until you activate it.</p>{% endfor %}
 {% for e in strategy_errors %}<p class="error">{{ e }}</p>{% endfor %}
 
-<h2>Recent trades</h2>
+{# C3: on shadow, nothing in this table was ever submitted from here -- each
+   row is a ledger entry the user placed (or still has to place) in their own
+   brokerage, and the timestamp is when it was RECORDED, not when an order
+   went out. The per-row `status`/"fill pending" wording below is the shadow
+   ledger's own state machine and reads correctly for both accounts. #}
+<h2>{{ 'Recent ledger entries' if current_account == 'shadow' else 'Recent trades' }}</h2>
 {% if trades %}
 <table>
-  <tr><th>Submitted</th><th>Side</th><th>Ticker</th><th>Status</th><th>Reason</th></tr>
+  <tr><th>{{ 'Recorded' if current_account == 'shadow' else 'Submitted' }}</th><th>Side</th><th>Ticker</th><th>Status</th><th>Reason</th></tr>
   {% for t in trades %}
   <tr><td class="muted">{{ t['ts'] | ago }}</td><td>{{ t['side'] }}</td><td>{{ t['ticker'] }}</td><td>{{ t['status'] }}{% if t['status'] == 'filled' %} &middot; filled{% if t['filled_at'] %} {{ t['filled_at'] | ago }}{% endif %} @ {{ t['filled_avg_price'] }}{% elif t['status'] == 'partially_filled' %} &middot; partially filled {{ t['filled_qty'] }} @ {{ t['filled_avg_price'] }} so far{% elif t['status'] == 'submitted' %}{% if t['ts'] | is_recent_submission %} &middot; fill pending{% else %} &middot; status unconfirmed{% endif %}{% endif %}</td><td class="muted">{{ t['reason'] }}</td></tr>
   {% endfor %}

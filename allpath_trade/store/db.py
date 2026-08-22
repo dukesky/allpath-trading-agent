@@ -85,8 +85,15 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     message TEXT NOT NULL
 );
 
+-- shadow-dual-active T6 review (C1): `account` scopes the memory change
+-- audit trail the same way it scopes `observations`. Without it the web
+-- Memory page's Changes tab (routes/memory.py -> MemoryStore.recent_log)
+-- rendered the OTHER account's `after` text -- the full note body -- to
+-- whichever account was being viewed. No constraint to rebuild here, so a
+-- plain ALTER in `_MIGRATIONS` backfills legacy rows 'paper'.
 CREATE TABLE IF NOT EXISTS memory_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',
     ts TEXT NOT NULL,
     layer TEXT NOT NULL,
     key TEXT,
@@ -272,6 +279,12 @@ _MIGRATIONS = [
     # (FTS5) needs the rebuild treatment instead; see
     # `_rebuild_search_index` below.
     "ALTER TABLE observations ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    # shadow-dual-active T6 review (C1): same plain-ALTER treatment for
+    # `memory_log` -- see the SCHEMA comment above it. Every legacy row was
+    # written before the shadow account existed, so 'paper' is the correct
+    # backfill, and the Changes tab stops showing one account the other's
+    # note text.
+    "ALTER TABLE memory_log ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)
@@ -487,11 +500,27 @@ def _rebuild_reports(conn: LockedConnection) -> None:
             " status TEXT NOT NULL DEFAULT 'ok',"
             " created_at TEXT NOT NULL,"
             " UNIQUE (account, date))")
-        conn.execute(
-            "INSERT INTO reports_v2 (id, account, date, body, summary,"
-            " conversation_id, model, tokens_used, status, created_at)"
-            " SELECT id, account, date, body, summary, conversation_id,"
-            " model, tokens_used, status, created_at FROM reports")
+        try:
+            conn.execute(
+                "INSERT INTO reports_v2 (id, account, date, body, summary,"
+                " conversation_id, model, tokens_used, status, created_at)"
+                " SELECT id, account, date, body, summary, conversation_id,"
+                " model, tokens_used, status, created_at FROM reports")
+        except sqlite3.IntegrityError as exc:
+            # A DB old enough to predate even the UNIQUE(date) constraint
+            # can hold two rows for one date, which the new UNIQUE(account,
+            # date) key rejects. Say WHICH dates rather than surfacing a
+            # bare "UNIQUE constraint failed" out of `connect()` -- the
+            # savepoint rollback leaves every original row intact, so the
+            # user can delete the duplicate they don't want and restart.
+            dupes = ", ".join(sorted(
+                row["date"] for row in conn.execute(
+                    "SELECT date FROM reports GROUP BY account, date"
+                    " HAVING COUNT(*) > 1")))
+            raise RuntimeError(
+                "cannot migrate `reports`: duplicate rows for"
+                f" {dupes or 'an unknown date'} — delete the extra report"
+                " row(s) for those dates and restart") from exc
         conn.execute("DROP TABLE reports")
         conn.execute("ALTER TABLE reports_v2 RENAME TO reports")
 

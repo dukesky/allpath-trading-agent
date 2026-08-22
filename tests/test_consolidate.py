@@ -542,3 +542,50 @@ def test_turn_marker_seeds_paper_from_legacy_key_shadow_starts_at_zero(tmp_path)
     # never consulted again even if the legacy key still holds a value.
     app_state.set(_turn_marker_key("paper"), "100")
     assert paper._last_turn_marker() == 100
+
+
+def test_turn_marker_legacy_key_is_migrated_then_deleted(tmp_path):
+    """Review Minor: the legacy seed must MIGRATE, not just read. Left in
+    place, the legacy row keeps shadowing the per-account key forever -- a
+    later reset of `consolidator_last_turn_id:paper` would silently
+    resurrect the stale global watermark and skip every turn below it."""
+    from allpath_trade.memory.consolidate import TURN_MARKER_KEY, _turn_marker_key
+
+    conn = connect(tmp_path / "db.sqlite")
+    app_state = AppState(conn)
+    app_state.set(TURN_MARKER_KEY, "42")
+
+    paper = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="paper"),
+        ObservationLog(conn, account="paper"), TradeJournal(conn, account="paper"),
+        conn, conversations=ConversationStore(conn, account="paper"),
+        app_state=app_state, account="paper")
+
+    assert paper._last_turn_marker() == 42
+    assert app_state.get(_turn_marker_key("paper")) == "42"   # carried over
+    assert app_state.get(TURN_MARKER_KEY) is None             # and cleaned up
+
+    # After a reset of the per-account key there is no legacy row left to
+    # resurrect: the account genuinely starts from 0.
+    app_state.delete(_turn_marker_key("paper"))
+    assert paper._last_turn_marker() == 0
+
+
+def test_turn_marker_migration_failure_still_returns_the_legacy_value(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    app_state = AppState(conn)
+    app_state.set("consolidator_last_turn_id", "7")
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("disk full")
+
+    app_state.set = boom
+    c = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="paper"),
+        ObservationLog(conn, account="paper"), TradeJournal(conn, account="paper"),
+        conn, conversations=ConversationStore(conn, account="paper"),
+        app_state=app_state, account="paper")
+
+    # A failed migration must degrade to "read the legacy value and carry
+    # on" -- never to re-consuming every turn from id 0.
+    assert c._last_turn_marker() == 7

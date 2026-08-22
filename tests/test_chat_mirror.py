@@ -144,3 +144,82 @@ def test_note_resolution_without_a_mirror_is_zero_behavior_change(tmp_path, monk
     service.note_resolution("You resolved #1. Result: order submitted")
     messages = service.messages()
     assert any(m.get("kind") == "system_note" for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# I3: the web->Telegram mirror must convert Markdown to HTML FIRST and only
+# then prefix.
+#
+# Prefixing the raw Markdown moved every block construct off the start of its
+# line, so `to_telegram_html` stopped recognizing it: a fenced code block
+# mirrored as literal backticks followed by an empty `<pre></pre>`, a heading
+# lost its `<b>`, and a table was mangled into a column of its own prefix.
+# ---------------------------------------------------------------------------
+
+from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
+from allpath_trade.store.db import connect
+from allpath_trade.web.app import _mirror_to_telegram
+
+
+class _ImmediateQueue:
+    def submit(self, fn, *args):
+        fn(*args)
+
+
+class _FakeMirrorAPI:
+    token = "t"
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    def send_message(self, chat_id: str, html: str, reply_markup=None) -> bool:
+        self.sent.append((chat_id, html))
+        return True
+
+    def _scrub(self, text: str) -> str:
+        return text
+
+
+def _paired(tmp_path):
+    app_state = AppState(connect(tmp_path / "mirror.db"))
+    app_state.set(TELEGRAM_CHAT_ID_KEY, "555")
+    return app_state
+
+
+def _mirror_reply(tmp_path, reply, account="shadow"):
+    api = _FakeMirrorAPI()
+    _mirror_to_telegram("web", "ask", reply, api=api, app_state=_paired(tmp_path),
+                        mirror_queue=_ImmediateQueue(), account=account)
+    # [0] is the "You (web): ..." echo; [1] is the reply under test.
+    return [html for _cid, html in api.sent]
+
+
+def test_mirrored_fenced_code_block_keeps_its_pre_tag_behind_the_prefix(tmp_path):
+    sent = _mirror_reply(tmp_path, "```python\nx = 1\n```")
+    assert sent[-1] == "[Shadow] <pre>x = 1</pre>"
+
+
+def test_mirrored_heading_is_still_converted(tmp_path):
+    sent = _mirror_reply(tmp_path, "## Heading\n\ntext")
+    assert sent[-1] == "[Shadow] <b>Heading</b>\n\ntext"
+
+
+def test_mirrored_table_is_not_mangled_by_the_prefix(tmp_path):
+    sent = _mirror_reply(tmp_path, "| a | b |\n| --- | --- |\n| 1 | 2 |")
+    assert sent[-1] == "[Shadow] <pre>a | b\n--+--\n1 | 2</pre>"
+
+
+def test_mirrored_plain_reply_wording_is_unchanged(tmp_path):
+    # Regression guard for the existing shape: a prefix, then the text.
+    sent = _mirror_reply(tmp_path, "noted", account="paper")
+    assert sent == ["[Paper] You (web): ask", "[Paper] noted"]
+
+
+def test_mirrored_reply_at_the_telegram_limit_still_fits_after_prefixing(tmp_path):
+    # I2's fix is shared with the poller: the prefix is budgeted for inside
+    # the split, so no chunk can exceed Telegram's ceiling.
+    sent = _mirror_reply(tmp_path, "x" * 4096)
+    reply_chunks = sent[1:]
+    assert all(len(html) <= 4096 for html in sent)
+    assert reply_chunks[0].startswith("[Shadow] ")
+    assert sum(html.count("x") for html in reply_chunks) == 4096

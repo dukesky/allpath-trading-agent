@@ -702,3 +702,36 @@ def test_chat_service_is_a_single_shared_instance_built_at_startup(tmp_path, mon
 
     assert seen_first is from_startup
     assert seen_second is from_startup
+
+
+# ---------------------------------------------------------------------------
+# `account` validation: ChatService accepts an `account` string from the
+# same kind of external boundary (app.py's per-ACCOUNTS-entry construction
+# today, but the constructor itself has no way to know that) that
+# store.accounts.is_valid_account exists to gate -- an unvalidated value
+# would silently build a service for a nonexistent account rather than
+# failing fast, same reasoning as every other account-scoped store
+# constructor (TradeJournal, ReviewQueue, ...).
+# ---------------------------------------------------------------------------
+
+def test_chat_service_rejects_invalid_account():
+    import pytest
+
+    from allpath_trade.web.chat_service import ChatService
+
+    with pytest.raises(ValueError):
+        ChatService(holder=None, account="../..")
+    with pytest.raises(ValueError):
+        ChatService(holder=None, account="PAPER")
+    with pytest.raises(ValueError):
+        ChatService(holder=None, account="")
+    with pytest.raises(ValueError):
+        ChatService(holder=None, account=None)
+
+
+def test_chat_service_accepts_known_accounts():
+    from allpath_trade.web.chat_service import ChatService
+
+    for account in ("paper", "shadow"):
+        service = ChatService(holder=None, account=account)
+        assert service.account == account

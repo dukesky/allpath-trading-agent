@@ -609,11 +609,21 @@ def test_set_position_rejects_non_positive_avg_cost(tmp_path):
         ledger.set_position("AAPL", Decimal(10), Decimal(-5))
 
 
-def test_set_position_allows_zero_qty_with_positive_avg_cost(tmp_path):
+def test_set_position_zero_qty_is_a_no_op_when_no_position_exists(tmp_path):
+    # M-set_position-0: qty=0 is never rejected (unlike a negative qty), but
+    # it must not create a phantom zero-qty row either -- "set to 0" means
+    # "I don't hold this", the same as remove_position on a ticker with
+    # nothing to remove.
     ledger, _conn, _ = make_ledger(tmp_path, prices={})
     ledger.set_position("AAPL", Decimal(0), Decimal(90))  # not rejected
-    [pos] = ledger.get_positions()
-    assert pos.qty == Decimal(0)
+    assert ledger.get_positions() == []
+
+
+def test_set_position_zero_qty_removes_an_existing_position(tmp_path):
+    ledger, _conn, _ = make_ledger(tmp_path, prices={})
+    ledger.set_position("AAPL", Decimal(10), Decimal(90))
+    ledger.set_position("AAPL", Decimal(0), Decimal(90))
+    assert ledger.get_positions() == []
 
 
 # -- Minor 5: notional too small for one 6dp share -----------------------------

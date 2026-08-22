@@ -147,6 +147,16 @@ def test_propose_notification_failure_does_not_break_the_proposal(tmp_path):
     assert len(queue.list("pending")) == 1
 
 
+def test_queueing_order_sink_rejects_invalid_account(tmp_path):
+    conn = connect(tmp_path / "t3.db")
+    queue = ReviewQueue(conn, None)
+    args = (queue, RiskGate(RiskLimits()), FakeBroker(), FakeData(),
+            TradeJournal(conn))
+    for bad in ("../..", "PAPER", "", None):
+        with pytest.raises(ValueError):
+            QueueingOrderSink(*args, account=bad)
+
+
 def test_notional_preview_needs_no_quote(tmp_path):
     """A notional-sized order converts straight to order_value (no shares to
     price), so the gate needs no quote at all — this must produce a real

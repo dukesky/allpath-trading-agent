@@ -14,7 +14,11 @@ from allpath_trade.broker.base import Broker, Position
 from allpath_trade.data.base import DataSource, Quote
 from allpath_trade.scheduler import is_market_hours, today_et_date
 from allpath_trade.store.accounts import ACCOUNTS
-from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
+from allpath_trade.store.app_state import (
+    SENTINEL_HEARTBEAT_KEY,
+    SENTINEL_LAST_OK_KEY,
+    SENTINEL_MARKET_OPEN_KEY,
+)
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
 from allpath_trade.web.account_ctx import bundle, bundle_for, current_account
 from allpath_trade.web.charts import equity_since_caption, equity_svg, signed_money, signed_pct
@@ -424,6 +428,7 @@ def _parse_heartbeat_ts(raw: str) -> datetime:
 
 def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
                               market_open_raw: str | None = None,
+                              last_ok_raw: str | None = None,
                               now: datetime | None = None) -> dict:
     """Pure function -- takes already-read `app_state.get(...)` values, no
     I/O, so it's testable without a store (same shape as summarize_strategy
@@ -440,20 +445,52 @@ def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
     existed -- treated as open, i.e. today's copy, rather than guessing.
     The staleness warning still keys off tick age either way: the tick
     itself is real proof of life regardless of whether the market was open
-    when it landed."""
+    when it landed.
+
+    `last_ok_raw` is SENTINEL_LAST_OK_KEY's per-account value (I7), written
+    only after `sentinel.run_once()` actually returned. The heartbeat above
+    is written BEFORE the check runs -- deliberately, it is the "scheduler
+    is alive" signal -- which meant a sentinel raising on every single tick
+    (dead data source, expired broker credentials) still rendered a
+    perfectly reassuring "last check 0m ago" indefinitely. Two independent
+    warnings now: the tick itself going stale (a dead daemon), and the tick
+    running while the CHECK keeps failing. The second gets one interval of
+    slack, because a single failed pass between two ticks is ordinary
+    transient noise, and is suppressed entirely while the market is closed,
+    where a lagging last-ok is the expected state rather than a fault
+    (warning every weekend would just train the operator to ignore it).
+    Missing or unparseable `last_ok_raw` reads as "no successful check
+    recorded" and warns -- unlike `market_open_raw`, absence here is not
+    ambiguous: an account whose sentinel has ever completed a pass during
+    market hours has this key."""
     if raw is None:
         return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
     try:
         last = _parse_heartbeat_ts(raw)
     except (TypeError, ValueError):
         return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
-    elapsed = (now or _utcnow()) - last
+    now = now or _utcnow()
+    elapsed = now - last
     minutes = max(0, int(elapsed.total_seconds() // 60))
     warn = minutes > 2 * interval_minutes
     if market_open_raw == "false":
         text = f"Sentinel: monitoring paused (market closed) · last tick {minutes}m ago"
-    else:
-        text = f"Sentinel: last check {minutes}m ago · interval {interval_minutes}m"
+        return {"text": text, "warn": warn}
+
+    last_ok = None
+    if last_ok_raw is not None:
+        try:
+            last_ok = _parse_heartbeat_ts(last_ok_raw)
+        except (TypeError, ValueError):
+            last_ok = None
+    if last_ok is None:
+        return {"text": (f"Sentinel: last check {minutes}m ago"
+                        " · no successful check recorded"), "warn": True}
+    ok_minutes = max(0, int((now - last_ok).total_seconds() // 60))
+    if ok_minutes - minutes > interval_minutes:
+        return {"text": (f"Sentinel: last check {minutes}m ago"
+                        f" · last successful {ok_minutes}m ago"), "warn": True}
+    text = f"Sentinel: last check {minutes}m ago · interval {interval_minutes}m"
     return {"text": text, "warn": warn}
 
 
@@ -514,7 +551,11 @@ def dashboard(request: Request,
     sentinel_status = sentinel_heartbeat_status(
         c.app_state.get(f"{SENTINEL_HEARTBEAT_KEY}:{b.account}"),
         c.settings.sentinel_interval_minutes,
-        market_open_raw=c.app_state.get(SENTINEL_MARKET_OPEN_KEY))
+        market_open_raw=c.app_state.get(SENTINEL_MARKET_OPEN_KEY),
+        # I7: the per-account SUCCESS heartbeat, read alongside the plain
+        # one -- the heartbeat proves the scheduler ticked, this proves the
+        # tick actually evaluated anything.
+        last_ok_raw=c.app_state.get(f"{SENTINEL_LAST_OK_KEY}:{b.account}"))
 
     # Same is_market_hours the scheduler/sentinel gate their pass on (see
     # allpath_trade/scheduler.py) -- reused rather than reimplemented so the

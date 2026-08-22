@@ -55,6 +55,13 @@ class Sentinel:
         # `Account` balance object, an unrelated pre-existing local) --
         # `self.account` is always the plain account STRING.
         self.account = account
+        # C3: the one word this module uses for "the executor accepted it".
+        # For shadow that executor is `ShadowExecutor` writing a ledger row
+        # (broker/shadow.py has no brokerage behind it), so "submitted" --
+        # which travels into the notification body, the `TriggerOutcome`
+        # detail, and through that the run report and CLI output -- would
+        # claim an order exists somewhere that it does not.
+        self._placed = "recorded" if account == "shadow" else "submitted"
         self.strategies = strategies
         self.data = data
         self.broker = broker
@@ -181,10 +188,10 @@ class Sentinel:
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                       disposition="error", detail=str(exc))
             if result.submitted:
-                self._notify_order(doc, ticker, intent.side.value, True, "submitted",
+                self._notify_order(doc, ticker, intent.side.value, True, self._placed,
                                    order=result.order)
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                                      disposition="executed", detail="submitted")
+                                      disposition="executed", detail=self._placed)
             detail = "; ".join(result.decision.reasons)
             self._notify_order(doc, ticker, intent.side.value, False, detail)
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
@@ -248,7 +255,7 @@ class Sentinel:
                 detail = f"review already resolved elsewhere: {exc}"
                 self._notify_order(doc, ticker, intent.side.value, False, detail)
                 return TriggerOutcome(**base, disposition="error", detail=detail)
-            detail = ("agent-approved; submitted" if result.submitted else
+            detail = (f"agent-approved; {self._placed}" if result.submitted else
                       "agent-approved; risk gate rejected: "
                       + "; ".join(result.decision.reasons))
             disposition = "executed" if result.submitted else "rejected"

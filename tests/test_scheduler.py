@@ -45,13 +45,28 @@ def test_boundary_open_and_close():
 
 class ImmediateScheduler:
     """Runs the job on a non-main thread, like APScheduler's worker pool,
-    so we exercise real sqlite thread-affinity behavior."""
+    so we exercise real sqlite thread-affinity behavior.
+
+    I8 split the one combined tick into TWO registered jobs (sentinel, and
+    the nightly chain) -- every registered job is collected and run here, in
+    registration order, so a test that used to see one combined tick still
+    sees the same total work happen.
+    """
 
     def __init__(self):
-        self.fn = None
+        self.fns = []
+        self.registered = []
 
     def add_job(self, fn, *args, **kwargs):
-        self.fn = fn
+        self.fns.append(fn)
+        self.registered.append(kwargs)
+
+    @property
+    def fn(self):
+        def run_all():
+            for fn in self.fns:
+                fn()
+        return run_all
 
     def start(self):
         t = threading.Thread(target=self.fn)
@@ -109,17 +124,35 @@ def test_run_daemon_fires_daily_job_after_close(monkeypatch):
 
 
 class FakeScheduler:
-    """Records the job APScheduler would have scheduled, without running it."""
+    """Records the jobs APScheduler would have scheduled, without running
+    them.
+
+    I8: `build_jobs` now registers TWO interval jobs -- the sentinel tick
+    and, separately, the nightly chain, so a slow reflection can no longer
+    starve monitoring. `.job()` runs every registered job in registration
+    order, which is exactly the work the single pre-I8 combined job did, so
+    the existing tests below keep asserting the same end state. `.trigger`/
+    `.kwargs` keep describing the FIRST (sentinel) job, the one those tests
+    were written against; `.jobs` exposes all of them by id.
+    """
 
     def __init__(self):
-        self.job = None
+        self.jobs = []
         self.trigger = None
         self.kwargs = None
 
     def add_job(self, fn, trigger, **kwargs):
-        self.job = fn
-        self.trigger = trigger
-        self.kwargs = kwargs
+        self.jobs.append(SimpleNamespace(fn=fn, trigger=trigger, kwargs=kwargs))
+        if len(self.jobs) == 1:
+            self.trigger = trigger
+            self.kwargs = kwargs
+
+    def by_id(self, job_id):
+        return next(j for j in self.jobs if j.kwargs.get("id") == job_id)
+
+    def job(self):
+        for j in self.jobs:
+            j.fn()
 
 
 class FakeSentinel:
@@ -251,6 +284,9 @@ class FakeAppState:
 
     def get(self, key):
         return self.values.get(key)
+
+    def delete(self, key):
+        self.values.pop(key, None)
 
 
 class DigestNotifier:
@@ -1176,3 +1212,410 @@ def test_run_daily_jobs_runs_both_accounts_the_same_night_isolated(capsys):
     stderr = capsys.readouterr().err
     assert "[reflection:paper] failed" in stderr
     assert "[reflection:shadow] failed" not in stderr
+
+
+# ---------------------------------------------------------------------------
+# I4(a): the digest watermark follows the SEND, not the attempt
+# ---------------------------------------------------------------------------
+
+class FailingDigestNotifier:
+    """`Notifier.send` is non-raising by contract (notify/base.py) -- it
+    reports failure by returning False, which is easy to drop on the floor."""
+
+    def __init__(self, fail_times=1):
+        self.sent = []
+        self.fail_times = fail_times
+
+    def send(self, subject, body):
+        self.sent.append((subject, body))
+        return len(self.sent) > self.fail_times
+
+
+def _digest_components(monkeypatch, notifier, **kwargs):
+    import allpath_trade.scheduler as sched
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    return _components(sentinel=None, notifier=notifier, **kwargs)
+
+
+def test_digest_watermark_not_written_when_the_send_fails(monkeypatch, capsys):
+    """I4: `notifier.send` returning False means nothing was delivered.
+    Writing `digest_last_date` anyway made the failure permanent -- the day
+    was marked done and the digest was unreachable for the rest of it."""
+    notifier = FailingDigestNotifier()
+    components = _digest_components(monkeypatch, notifier)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    assert len(notifier.sent) == 1
+    assert components.app_state.get("digest_last_date:paper") is None
+    assert "digest" in capsys.readouterr().err
+
+
+def test_digest_resends_next_tick_after_a_failed_send_then_marks_it(monkeypatch):
+    notifier = FailingDigestNotifier(fail_times=1)
+    components = _digest_components(monkeypatch, notifier)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()   # send fails -> no watermark
+    scheduler.job()   # retry -> succeeds, watermark written
+    scheduler.job()   # already done today -> no third send
+
+    assert len(notifier.sent) == 2
+    today = datetime.now(UTC).astimezone(
+        __import__("zoneinfo").ZoneInfo("America/New_York")).date().isoformat()
+    assert components.app_state.get("digest_last_date:paper") == today
+
+
+def test_one_accounts_failed_digest_does_not_block_the_others(monkeypatch):
+    """Per-account isolation, I4 edition: shadow's dead channel must not
+    leave paper's digest unsent or unmarked, and vice versa."""
+    import allpath_trade.scheduler as sched
+
+    class PerAccountNotifier:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, subject, body):
+            self.sent.append(subject)
+            return "[Shadow]" not in subject
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = PerAccountNotifier()
+    accounts = {"paper": _account_bundle(), "shadow": _account_bundle()}
+    components = _components(sentinel=None, notifier=notifier, accounts=accounts)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    assert components.app_state.get("digest_last_date:paper") is not None
+    assert components.app_state.get("digest_last_date:shadow") is None
+    scheduler.job()
+    # paper is done for the day; shadow keeps being retried.
+    assert sum(1 for s in notifier.sent if "[Paper]" in s) == 1
+    assert sum(1 for s in notifier.sent if "[Shadow]" in s) == 2
+
+
+# ---------------------------------------------------------------------------
+# I4(b): the in-memory once-per-day guard means "succeeded", not "attempted"
+# ---------------------------------------------------------------------------
+
+def test_maybe_run_daily_retries_on_the_next_tick_after_a_failure(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    calls = []
+
+    def daily_job():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("digest store down")
+
+    state = sched.new_daily_state()
+    sched._maybe_run_daily(daily_job, state)   # fails
+    sched._maybe_run_daily(daily_job, state)   # retries, succeeds
+    sched._maybe_run_daily(daily_job, state)   # day is done: no third run
+    assert len(calls) == 2
+
+
+def test_maybe_run_daily_retries_when_the_job_reports_partial_failure(monkeypatch):
+    """`run_daily_jobs` returns False when any account's chain failed --
+    a partial night must not mark the day done either."""
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    results = [False, True]
+    calls = []
+
+    def daily_job():
+        calls.append(1)
+        return results.pop(0)
+
+    state = sched.new_daily_state()
+    sched._maybe_run_daily(daily_job, state)
+    sched._maybe_run_daily(daily_job, state)
+    sched._maybe_run_daily(daily_job, state)
+    assert len(calls) == 2
+
+
+def test_maybe_run_daily_stops_hammering_after_the_attempt_cap(monkeypatch, capsys):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    calls = []
+
+    def daily_job():
+        calls.append(1)
+        raise RuntimeError("still broken")
+
+    state = sched.new_daily_state()
+    for _ in range(10):
+        sched._maybe_run_daily(daily_job, state)
+    assert len(calls) == sched.MAX_DAILY_ATTEMPTS
+    assert "giving up" in capsys.readouterr().err
+
+
+def test_maybe_run_daily_attempt_budget_resets_on_a_new_day(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    calls = []
+    state = sched.new_daily_state()
+
+    def daily_job():
+        calls.append(1)
+        raise RuntimeError("broken")
+
+    for _ in range(5):
+        sched._maybe_run_daily(daily_job, state)
+    assert len(calls) == sched.MAX_DAILY_ATTEMPTS
+
+    # A new ET day: the budget is per-day, so yesterday's exhausted
+    # attempts must not silently disable tonight's run too.
+    state["attempt_date"] = "1999-01-01"
+    sched._maybe_run_daily(daily_job, state)
+    assert len(calls) == sched.MAX_DAILY_ATTEMPTS + 1
+
+
+def test_run_daily_jobs_reports_success_and_failure(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    ok = _components(sentinel=None, reflector=FakeReflector(),
+                     consolidator=FakeConsolidator())
+    assert run_daily_jobs(ok) is True
+
+    broken = _components(sentinel=None, reflector=FakeReflector(fail=True),
+                         consolidator=FakeConsolidator())
+    assert run_daily_jobs(broken) is False
+
+
+def test_run_daily_jobs_one_accounts_failure_does_not_block_the_others_retry(
+        monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    monkeypatch.setattr("allpath_trade.scheduler._is_after_close",
+                        lambda now=None: True)
+    paper_reflector = FakeReflector(fail=True)
+    shadow_reflector = FakeReflector()
+    accounts = {
+        "paper": _account_bundle(reflector=paper_reflector,
+                                 consolidator=FakeConsolidator()),
+        "shadow": _account_bundle(reflector=shadow_reflector,
+                                  consolidator=FakeConsolidator()),
+    }
+    components = _components(sentinel=None, accounts=accounts)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+    assert shadow_reflector.calls == 1
+    # The night wasn't fully successful, so the next tick retries it --
+    # each sub-step's own persisted idempotency (report row, digest
+    # watermark, consolidator marker) is what makes the retry cheap.
+    scheduler.job()
+    assert paper_reflector.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# I7: sentinel_last_ok -- proof the CHECK ran, not just the tick
+# ---------------------------------------------------------------------------
+
+class FailingSentinel:
+    def __init__(self):
+        self.calls = 0
+
+    def run_once(self):
+        self.calls += 1
+        raise RuntimeError("data source down")
+
+
+def test_sentinel_last_ok_written_only_after_a_successful_run_once(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    app_state = FakeAppState()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FakeSentinel(),
+                                                 app_state=app_state)))
+    scheduler.job()
+    assert app_state.get("sentinel_last_pass:paper") is not None
+    assert app_state.get("sentinel_last_ok:paper") is not None
+
+
+def test_sentinel_last_ok_absent_when_the_pass_raises(monkeypatch, capsys):
+    """I7: the heartbeat is written BEFORE the check runs, so it proves the
+    scheduler is alive and nothing more. A sentinel that raises every tick
+    kept the dashboard reading a perfectly fresh "last check 0m ago"."""
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    app_state = FakeAppState()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FailingSentinel(),
+                                                 app_state=app_state)))
+    scheduler.job()
+    assert app_state.get("sentinel_last_pass:paper") is not None
+    assert app_state.get("sentinel_last_ok:paper") is None
+    assert "[sentinel] paper failed" in capsys.readouterr().err
+
+
+def test_sentinel_last_ok_is_per_account(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: True)
+    app_state = FakeAppState()
+    accounts = {"paper": _account_bundle(sentinel=FailingSentinel()),
+                "shadow": _account_bundle(sentinel=FakeSentinel())}
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=None, accounts=accounts,
+                                                 app_state=app_state)))
+    scheduler.job()
+    assert app_state.get("sentinel_last_ok:paper") is None
+    assert app_state.get("sentinel_last_ok:shadow") is not None
+
+
+def test_sentinel_last_ok_not_written_when_market_closed(monkeypatch):
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    monkeypatch.setattr("allpath_trade.scheduler._is_after_close",
+                        lambda now=None: False)
+    app_state = FakeAppState()
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=RaisingSentinel(),
+                                                 app_state=app_state)))
+    scheduler.job()
+    # The tick happened (heartbeat), but nothing was evaluated -- claiming
+    # a successful check here would be a lie the dashboard then repeats.
+    assert app_state.get("sentinel_last_pass:paper") is not None
+    assert app_state.get("sentinel_last_ok:paper") is None
+
+
+# ---------------------------------------------------------------------------
+# Minor: legacy (un-suffixed) app_state keys are consumed, then removed
+# ---------------------------------------------------------------------------
+
+def test_legacy_sentinel_heartbeat_row_is_deleted(monkeypatch):
+    """Nothing has read the bare `sentinel_last_pass` row since T7. Left in
+    place it is an orphan that looks like live state to anyone reading the
+    table."""
+    monkeypatch.setattr("allpath_trade.scheduler.is_market_hours", lambda: False)
+    monkeypatch.setattr("allpath_trade.scheduler._is_after_close",
+                        lambda now=None: False)
+    app_state = FakeAppState()
+    app_state.set("sentinel_last_pass", "2020-01-01T00:00:00+00:00")
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FakeSentinel(),
+                                                 app_state=app_state)))
+    scheduler.job()
+    assert app_state.get("sentinel_last_pass") is None
+    assert app_state.get("sentinel_last_pass:paper") is not None
+
+
+def test_legacy_digest_key_seeds_paper_once_then_is_deleted(monkeypatch):
+    """The seed is a one-time carry-over. Leaving the legacy row behind
+    means a later `delete` of the per-account key resurrects a stale date
+    and silently suppresses a digest."""
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    app_state = FakeAppState()
+    app_state.set("digest_last_date", "2020-01-01")
+    notifier = DigestNotifier()
+    components = _components(sentinel=None, notifier=notifier, app_state=app_state)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    assert app_state.get("digest_last_date") is None
+    assert len(notifier.sent) == 1     # 2020 is not today: the digest still went
+
+
+# ---------------------------------------------------------------------------
+# I8(a): the nightly chain is its own job, not part of the sentinel tick
+# ---------------------------------------------------------------------------
+
+def test_build_jobs_registers_the_daily_chain_as_its_own_job():
+    from allpath_trade.scheduler import DAILY_JOB_ID
+
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(_components(sentinel=FakeSentinel())))
+
+    assert [j.kwargs.get("id") for j in scheduler.jobs] == [
+        SENTINEL_JOB_ID, DAILY_JOB_ID]
+    daily = scheduler.by_id(DAILY_JOB_ID)
+    assert daily.trigger == "interval"
+    # A nightly chain that runs for an hour must not stack up behind itself
+    # or replay every tick it missed while it ran.
+    assert daily.kwargs["max_instances"] == 1
+    assert daily.kwargs["coalesce"] is True
+
+
+def test_sentinel_job_body_no_longer_runs_the_daily_chain(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: True)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    reflector = FakeReflector()
+    components = _components(sentinel=FakeSentinel(), reflector=reflector,
+                             accounts={"paper": _account_bundle(
+                                 sentinel=FakeSentinel(), reflector=reflector,
+                                 consolidator=FakeConsolidator())})
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.by_id(SENTINEL_JOB_ID).fn()
+    assert reflector.calls == 0        # the sentinel tick is monitoring only
+    scheduler.by_id(sched.DAILY_JOB_ID).fn()
+    assert reflector.calls == 1
+
+
+def test_sentinel_keeps_ticking_while_a_slow_daily_chain_runs(monkeypatch):
+    """I8: the whole point of the split. A reflection that blocks for an
+    hour used to hold the ONE interval job, so no account's monitoring ran
+    until it finished."""
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: True)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    started, release = threading.Event(), threading.Event()
+
+    class BlockingReflector:
+        calls = 0
+
+        def run_daily(self):
+            BlockingReflector.calls += 1
+            started.set()
+            release.wait(timeout=5)
+            return "ok"
+
+    sentinel = FakeSentinel()
+    bundle = _account_bundle(sentinel=sentinel, reflector=BlockingReflector(),
+                             consolidator=FakeConsolidator())
+    components = _components(sentinel=sentinel, accounts={"paper": bundle})
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    daily = threading.Thread(target=scheduler.by_id(sched.DAILY_JOB_ID).fn)
+    daily.start()
+    assert started.wait(timeout=5)
+    # The nightly chain is parked mid-reflection; sentinel ticks still run.
+    scheduler.by_id(SENTINEL_JOB_ID).fn()
+    scheduler.by_id(SENTINEL_JOB_ID).fn()
+    assert sentinel.calls == 2
+    release.set()
+    daily.join(timeout=5)
+    assert not daily.is_alive()
+
+
+def test_run_daemon_registers_the_daily_chain_as_its_own_job(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    calls = []
+    scheduler = ImmediateScheduler()
+    run_daemon(dict, 60, scheduler_cls=lambda: scheduler,
+               daily_job=lambda: calls.append(1))
+
+    ids = [k.get("id") for k in scheduler.registered]
+    assert sched.SENTINEL_JOB_ID in ids
+    assert sched.DAILY_JOB_ID in ids
+    assert calls == [1]

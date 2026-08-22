@@ -1152,3 +1152,100 @@ def test_reset_card_does_not_list_tickers(client):
 
     assert f"#{rid}" in body
     assert "Tickers" not in body
+
+
+# ---------------------------------------------------------------------------
+# C3: the chat receipt for an approved SHADOW order must not say "submitted"
+# -- the shadow executor only wrote a ledger row, and this line is what the
+# agent (and the user) reads back later as the record of what happened.
+# ---------------------------------------------------------------------------
+
+class _RecordingChat:
+    def __init__(self) -> None:
+        self.notes: list[str] = []
+
+    def note_resolution(self, text: str, source: str = "web") -> None:
+        self.notes.append(text)
+
+
+def _queue_chat_order(queue):
+    return queue.add(
+        strategy_id="", rule_id="", ticker="AAPL", rule_type="soft",
+        condition="chat", action="sell all", snapshot={"price": "99"},
+        intent=OrderIntent(ticker="AAPL", side=OrderSide.SELL, qty="1",
+                           reason="chat"),
+        source="chat")
+
+
+def _wire_chats(client):
+    chats = {"paper": _RecordingChat(), "shadow": _RecordingChat()}
+    client.app.state.chat_services = chats
+    return chats
+
+
+def _stub_executor(monkeypatch, bundle):
+    # A submitted-and-clean ExecutionResult, so the echo under test is the
+    # success line rather than a broker/quote failure -- and so the shadow
+    # case never reaches the real (network-backed) quote lookup its own
+    # ledger write would otherwise make.
+    from allpath_trade.execution import ExecutionResult
+    from allpath_trade.risk import RiskDecision
+    monkeypatch.setattr(
+        bundle.executor, "execute",
+        lambda intent: ExecutionResult(submitted=True, order=None,
+                                       decision=RiskDecision(approved=True)))
+
+
+def test_shadow_order_approval_echoes_recorded_not_submitted(client, monkeypatch):
+    comp = client.app.state.holder.get()
+    shadow = comp.accounts["shadow"]
+    _stub_executor(monkeypatch, shadow)
+    rid = _queue_chat_order(shadow.queue)
+    chats = _wire_chats(client)
+
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    expected = (f"You resolved #{rid}. Result: order recorded in your shadow "
+                f"ledger — place it in your brokerage now")
+    assert chats["shadow"].notes == [expected]
+    assert chats["paper"].notes == []
+
+
+def test_paper_order_approval_still_echoes_order_submitted(client, monkeypatch):
+    comp = client.app.state.holder.get()
+    _stub_executor(monkeypatch, comp)
+    rid = _queue_chat_order(comp.queue)
+    chats = _wire_chats(client)
+
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert chats["paper"].notes == [f"You resolved #{rid}. Result: order submitted"]
+
+
+def test_resolved_shadow_order_card_says_recorded_not_submitted(client, monkeypatch):
+    # C3: the resolved card is the durable record on the reviews page --
+    # "Order submitted" there outlives the one-off approval message and is
+    # the wording a user checking back a day later reads.
+    comp = client.app.state.holder.get()
+    shadow = comp.accounts["shadow"]
+    _stub_executor(monkeypatch, shadow)
+    rid = _queue_chat_order(shadow.queue)
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert "Order recorded (shadow)" in body
+    assert "Order submitted" not in body
+
+
+def test_resolved_paper_order_card_still_says_submitted(client, monkeypatch):
+    comp = client.app.state.holder.get()
+    _stub_executor(monkeypatch, comp)
+    rid = _queue_chat_order(comp.queue)
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    body = client.get("/reviews").text
+
+    assert "Order submitted" in body
+    assert "Order recorded (shadow)" not in body

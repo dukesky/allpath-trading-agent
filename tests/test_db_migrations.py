@@ -8,6 +8,8 @@ T1's review rather than pinned as tests."""
 
 import sqlite3
 
+import pytest
+
 from allpath_trade.store.db import SCHEMA, _table_has_column, connect
 
 
@@ -279,3 +281,65 @@ def test_observations_account_column_backfills_paper_on_legacy_table(tmp_path):
     row = conn.execute("SELECT account, text FROM observations").fetchone()
     assert row["account"] == "paper"
     assert row["text"] == "legacy note"
+
+
+def test_memory_log_account_column_backfills_paper_on_legacy_table(tmp_path):
+    # C1: legacy `memory_log` rows pre-date the account dimension; the
+    # plain ALTER's DEFAULT backfills them 'paper' (the only account that
+    # could have written them).
+    path = tmp_path / "t.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE memory_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts TEXT NOT NULL, layer TEXT NOT NULL, key TEXT, action TEXT NOT NULL,"
+        " before TEXT, after TEXT)")
+    raw.execute(
+        "INSERT INTO memory_log (ts, layer, key, action, before, after)"
+        " VALUES ('2026-08-01T00:00:00+00:00', 'stock', 'AAPL', 'add', '',"
+        " '- legacy note')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT account, after FROM memory_log").fetchone()
+    assert row["account"] == "paper"
+    assert row["after"] == "- legacy note"
+
+
+def test_fresh_memory_log_has_the_account_column(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    assert _table_has_column(conn, "memory_log", "account")
+
+
+def test_duplicate_legacy_report_dates_raise_a_named_runtime_error(tmp_path):
+    # Minor: a legacy `reports` table with no UNIQUE constraint at all can
+    # hold two rows for the same date; the UNIQUE(account, date) rebuild's
+    # INSERT ... SELECT then failed with a bare, opaque IntegrityError.
+    path = tmp_path / "t.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE reports (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " date TEXT NOT NULL, body TEXT NOT NULL, summary TEXT NOT NULL,"
+        " conversation_id INTEGER, model TEXT NOT NULL DEFAULT '',"
+        " tokens_used INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ok',"
+        " created_at TEXT NOT NULL)")
+    for body in ("first", "second"):
+        raw.execute(
+            "INSERT INTO reports (date, body, summary, created_at)"
+            " VALUES ('2026-08-01', ?, 's', '2026-08-01T00:00:00+00:00')", (body,))
+    raw.execute(
+        "INSERT INTO reports (date, body, summary, created_at)"
+        " VALUES ('2026-08-02', 'unique', 's', '2026-08-02T00:00:00+00:00')")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RuntimeError) as ei:
+        connect(path)
+    message = str(ei.value)
+    assert "2026-08-01" in message          # names the offending date
+    assert "2026-08-02" not in message      # and only the offending one
+
+    # Nothing was destroyed: the rows are all still there to be fixed by hand.
+    raw = sqlite3.connect(str(path))
+    assert raw.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 3
+    raw.close()

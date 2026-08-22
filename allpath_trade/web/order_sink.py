@@ -10,7 +10,7 @@ from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued
 from allpath_trade.risk.gate import RiskGate
-from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.reviews import ReviewQueue
@@ -31,6 +31,8 @@ class QueueingOrderSink:
                  app_state: AppState | None = None,
                  telegram_bot_token: str = "", web_base_url: str = "",
                  account: str = DEFAULT_ACCOUNT) -> None:
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self.queue = queue
         self.gate = gate
         self.broker = broker

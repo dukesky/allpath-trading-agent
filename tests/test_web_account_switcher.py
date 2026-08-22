@@ -217,6 +217,20 @@ def test_memory_page_shows_only_current_account_dossier(client):
     assert "PAPRSTOCKMARK" not in body
 
 
+def test_memory_changes_tab_shows_only_current_account_edits(client):
+    # T6 review C1: `memory_log` had no account column, so the Changes tab
+    # rendered the other account's note text (the `after` column carries
+    # the full note body) to whichever account was being viewed.
+    _seed(client)
+    body = _get(client, "/memory?tab=changes", "paper")
+    assert "PAPRSTOCKMARK" in body
+    assert "SHDWSTOCKMARK" not in body
+
+    body = _get(client, "/memory?tab=changes", "shadow")
+    assert "SHDWSTOCKMARK" in body
+    assert "PAPRSTOCKMARK" not in body
+
+
 def test_reports_page_shows_only_current_account_report(client):
     _seed(client)
     body = _get(client, "/reports", "paper")

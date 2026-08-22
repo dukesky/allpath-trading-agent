@@ -202,6 +202,19 @@ class ShadowLedger(Broker):
         if avg_cost <= 0:
             raise ValueError(f"set_position: avg_cost must be > 0 (got {avg_cost})")
         ticker = ticker.strip().upper()
+        if qty == 0:
+            # A zero-qty position isn't a real holding -- "set to 0" means
+            # "I no longer hold this", i.e. remove_position, not a phantom
+            # shadow_positions row that then shows up everywhere a real
+            # position would (get_positions, the dashboard, get_account's
+            # equity sum) contributing exactly nothing but still needing to
+            # be filtered/ignored by every reader. remove_position is
+            # already a safe no-op when there's nothing to remove, so this
+            # covers both "correcting an existing position to zero" and "a
+            # qty-0 edit against a ticker with no position at all" the same
+            # way.
+            self.remove_position(ticker)
+            return
         now = datetime.now(UTC)
         with self._conn.transaction():
             existing = self._conn.execute(

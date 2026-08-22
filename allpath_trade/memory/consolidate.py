@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
@@ -182,12 +183,35 @@ class Consolidator:
         value = self.app_state.get(_turn_marker_key(self.account))
         if value is None and self.account == DEFAULT_ACCOUNT:
             # shadow-dual-active T4 CRITICAL carry: seed paper's new
-            # per-account key from the pre-dual-active global key, ONE TIME
-            # -- once run_daily below writes the new per-account key (any
-            # day with turns to consume), this fallback is never consulted
-            # again. `shadow` has no legacy history to seed from, so it
-            # simply starts at 0, same as a brand-new account should.
+            # per-account key from the pre-dual-active global key, ONE TIME.
+            # `shadow` has no legacy history to seed from, so it simply
+            # starts at 0, same as a brand-new account should.
+            #
+            # Review Minor: the seed MIGRATES -- it writes the per-account
+            # key and deletes the legacy row here, rather than waiting for
+            # `run_daily` to happen to write the new key on some later day
+            # with turns to consume. Two reasons. Until that write lands the
+            # fallback is live on every call, so the "ONE TIME" above was
+            # only true in the happy path; and leaving the legacy row in
+            # place forever means any later deletion of the per-account key
+            # (an operator resetting the watermark, a future account-reset)
+            # silently resurrects the stale global value and skips every
+            # turn below it. Migrating makes the legacy key genuinely
+            # consumed: read once, moved, gone.
+            #
+            # A failed migration write degrades to "return the legacy value
+            # anyway": re-consuming every turn from id 0 (an expensive
+            # memory-tier prompt over the entire history) would be a far
+            # worse response to a transient store error than simply trying
+            # the migration again on the next call.
             value = self.app_state.get(TURN_MARKER_KEY)
+            if value is not None:
+                try:
+                    self.app_state.set(_turn_marker_key(self.account), value)
+                    self.app_state.delete(TURN_MARKER_KEY)
+                except Exception as exc:  # noqa: BLE001 — see comment above
+                    print(f"[consolidate] legacy turn-marker migration failed: "
+                          f"{exc}", file=sys.stderr)
         return int(value) if value else 0
 
     def _turn_lines(self) -> tuple[list[str], int | None]:

@@ -16,13 +16,12 @@ from allpath_trade.broker.base import Broker
 from allpath_trade.config import Settings
 from allpath_trade.store.accounts import ACCOUNTS, DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
-from allpath_trade.telegram import TelegramAPI, TelegramPoller
+from allpath_trade.telegram import TelegramAPI, TelegramPoller, prefixed_chunks
 from allpath_trade.web.auth import install_auth
 from allpath_trade.web.chat_service import ChatService
 from allpath_trade.web.deps import ComponentHolder
 from allpath_trade.web.markdown import (
     MAX_TELEGRAM_REPLY_CHUNKS,
-    split_for_telegram,
     to_telegram_html,
 )
 
@@ -115,7 +114,8 @@ class _MirrorQueue:
             self._thread.join(timeout=2)
 
 
-def _send_mirror_text(api: TelegramAPI, app_state: AppState, text: str) -> None:
+def _send_mirror_text(api: TelegramAPI, app_state: AppState, text: str,
+                      account: str = DEFAULT_ACCOUNT) -> None:
     """Runs on the `_MirrorQueue` worker thread -- never on the
     request/turn thread that queued it. Re-reads the paired chat id on
     *every* call rather than once when the mirror fn was registered: pairing
@@ -129,13 +129,22 @@ def _send_mirror_text(api: TelegramAPI, app_state: AppState, text: str) -> None:
     nothing watching it for an uncaught exception (same reasoning as
     TelegramPoller.run_forever's own top-level catch) -- a formatting bug in
     `to_telegram_html`/`split_for_telegram` must degrade to one scrubbed
-    stderr line, never take the worker down or (worse) go unnoticed."""
+    stderr line, never take the worker down or (worse) go unnoticed.
+
+    I3: `text` arrives as raw Markdown and the `[Paper] `/`[Shadow] ` prefix
+    is applied HERE, after `to_telegram_html` has run -- never by the caller
+    beforehand. Prefixing the Markdown pushed every block construct off the
+    start of its line, so the converter no longer recognized it: a fenced
+    code block mirrored as literal backticks plus an empty `<pre></pre>`, a
+    heading lost its `<b>`, and a table was re-parsed with the prefix as its
+    first cell. `prefixed_chunks` (telegram.py, shared with the poller's own
+    reply path) also budgets the prefix's length into the split limit -- see
+    its docstring for I2."""
     try:
         chat_id = app_state.get(TELEGRAM_CHAT_ID_KEY)
         if not chat_id:
             return
-        html = to_telegram_html(text)
-        chunks = split_for_telegram(html)
+        chunks = prefixed_chunks(account, to_telegram_html(text))
         if len(chunks) > MAX_TELEGRAM_REPLY_CHUNKS:
             # Defensive belt (Finding 1), mirrored from
             # `TelegramPoller._handle_chat_text`'s own cap -- see its
@@ -189,13 +198,17 @@ def _mirror_to_telegram(source: str, text: str, reply: str, *,
     always passes it explicitly."""
     if source != "web":
         return
-    prefix = f"[{account.capitalize()}] "
+    # I3: `account` is handed DOWN to `_send_mirror_text` rather than being
+    # turned into a prefix string here -- the prefix can only be applied
+    # after `to_telegram_html` has converted the Markdown (see that
+    # function's docstring), and it comes from `events._prefix` there rather
+    # than being re-derived as an f-string in a third place.
     if reply:
         mirror_queue.submit(_send_mirror_text, api, app_state,
-                            f"{prefix}You (web): {text}")
-        mirror_queue.submit(_send_mirror_text, api, app_state, f"{prefix}{reply}")
+                            f"You (web): {text}", account)
+        mirror_queue.submit(_send_mirror_text, api, app_state, reply, account)
     else:
-        mirror_queue.submit(_send_mirror_text, api, app_state, f"{prefix}{text}")
+        mirror_queue.submit(_send_mirror_text, api, app_state, text, account)
 
 
 def static_content_hash(path: Path) -> str:

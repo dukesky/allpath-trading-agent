@@ -312,6 +312,16 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
         reasons = "; ".join(result.decision.reasons)
         return _result_page(request, ok=False, account=b.account,
                             message=f"Rejected by the risk gate: {reasons}")
+    if b.account == "shadow":
+        # C3: `ShadowExecutor` wrote a ledger row; it did not route an order
+        # anywhere (broker/shadow.py has no brokerage behind it). This is
+        # the LAST screen the user sees on the approve-by-link flow -- often
+        # on a phone, away from the app -- so it is also the last chance to
+        # tell them the trade still needs placing by hand.
+        return _result_page(
+            request, ok=True, account=b.account,
+            message=("Order recorded in your shadow ledger — place it in "
+                     "your brokerage now."))
     return _result_page(request, ok=True, account=b.account,
                         message="Order submitted.")
 

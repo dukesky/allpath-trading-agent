@@ -512,7 +512,13 @@ def approve(request: Request, review_id: int) -> Response:
         _echo_resolution(request, account, review_id, row_source,
                          f"blocked by the risk gate ({reasons})")
         return _back_to_reviews(f"Rejected by the risk gate: {reasons}")
-    _echo_resolution(request, account, review_id, row_source, "order submitted")
+    # C3: for shadow, nothing was routed anywhere -- the executor wrote a
+    # ledger row. This line is read back by the agent as the record of what
+    # happened on this turn, so "submitted" here would leave the model
+    # believing a real order exists.
+    summary = ("order recorded in your shadow ledger — place it in your "
+               "brokerage now") if account == "shadow" else "order submitted"
+    _echo_resolution(request, account, review_id, row_source, summary)
     return _back_to_reviews()
 
 

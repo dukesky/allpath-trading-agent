@@ -38,13 +38,56 @@ def test_exists(tmp_path):
     assert store.exists("2026-08-10") is True
 
 
-def test_add_duplicate_date_raises(tmp_path):
+def test_add_duplicate_date_replaces_the_existing_row(tmp_path):
+    """I9: `add` UPSERTs on (account, date) rather than raising -- a night
+    that stored a `failed` row must be replaceable by a later successful
+    retry for the same ET day, and the (account, date) UNIQUE constraint
+    means the retry has nowhere else to put it. Still exactly one row per
+    (account, date); the id is stable across the replace."""
     store = make_store(tmp_path)
-    store.add(date="2026-08-10", body="b", summary="s", conversation_id=None,
+    first = store.add(date="2026-08-10", body="b", summary="s", conversation_id=None,
+             model="opus", tokens_used=1, status="failed")
+    second = store.add(date="2026-08-10", body="b2", summary="s2", conversation_id=7,
+             model="opus", tokens_used=2)
+    assert second == first
+    assert len(store.list()) == 1
+    row = store.get("2026-08-10")
+    assert row["status"] == "ok"
+    assert row["body"] == "b2"
+    assert row["summary"] == "s2"
+    assert row["conversation_id"] == 7
+
+
+def test_add_replace_leaves_the_other_accounts_row_alone(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper, shadow = ReportStore(conn), ReportStore(conn, account="shadow")
+    paper.add(date="2026-08-10", body="paper", summary="s", conversation_id=None,
+             model="opus", tokens_used=1, status="failed")
+    shadow.add(date="2026-08-10", body="shadow", summary="s", conversation_id=None,
+              model="opus", tokens_used=1)
+    paper.add(date="2026-08-10", body="paper retry", summary="s",
+             conversation_id=None, model="opus", tokens_used=1)
+    assert paper.get("2026-08-10")["body"] == "paper retry"
+    assert shadow.get("2026-08-10")["body"] == "shadow"
+    assert shadow.get("2026-08-10")["status"] == "ok"
+
+
+def test_exists_ok_ignores_a_failed_row(tmp_path):
+    """I9: `exists` is the "is there any row" question -- a `failed` row
+    answers it True and would block the day's retry forever. `exists_ok`
+    is the question the reflection idempotency guard actually wants."""
+    store = make_store(tmp_path)
+    store.add(date="2026-08-10", body="b", summary="", conversation_id=None,
+             model="opus", tokens_used=1, status="failed")
+    assert store.exists("2026-08-10") is True
+    assert store.exists_ok("2026-08-10") is False
+    store.add(date="2026-08-10", body="b2", summary="s", conversation_id=None,
              model="opus", tokens_used=1)
-    with pytest.raises(sqlite3.IntegrityError):
-        store.add(date="2026-08-10", body="b2", summary="s2", conversation_id=None,
-                 model="opus", tokens_used=1)
+    assert store.exists_ok("2026-08-10") is True
+
+
+def test_exists_ok_false_when_no_row_at_all(tmp_path):
+    assert make_store(tmp_path).exists_ok("2026-08-10") is False
 
 
 def test_list_orders_newest_date_first(tmp_path):
@@ -98,13 +141,20 @@ def test_same_date_two_accounts_both_allowed(tmp_path):
 
 
 def test_same_date_same_account_still_unique(tmp_path):
+    # I9 turned `add` into an UPSERT, so it no longer raises on a repeat --
+    # assert the (account, date) UNIQUE constraint itself is still there, on
+    # a raw INSERT that has no ON CONFLICT clause to absorb it. Without the
+    # constraint the "one row per (account, ET day)" invariant every reader
+    # (`get`, the Reports page) relies on would quietly disappear.
     conn = connect(tmp_path / "t.db")
     paper = ReportStore(conn)
     paper.add(date="2026-08-10", body="b", summary="s", conversation_id=None,
              model="opus", tokens_used=1)
     with pytest.raises(sqlite3.IntegrityError):
-        paper.add(date="2026-08-10", body="b2", summary="s2", conversation_id=None,
-                  model="opus", tokens_used=1)
+        conn.execute(
+            "INSERT INTO reports (account, date, body, summary, model,"
+            " tokens_used, status, created_at) VALUES"
+            " ('paper', '2026-08-10', 'b2', 's2', 'opus', 1, 'ok', 'now')")
 
 
 def test_list_and_list_between_scoped_to_account(tmp_path):

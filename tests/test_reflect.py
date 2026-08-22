@@ -830,3 +830,140 @@ def test_reflection_registry_excludes_order_and_confirm_tools(tmp_path):
         "list_strategies", "read_strategy", "list_pending_reviews",
         "memory_update", "memory_read", "session_search",
         "propose_strategy_revision"}
+
+
+# ---------------------------------------------------------------------------
+# I9: a `failed` row must not block the day's retry
+# ---------------------------------------------------------------------------
+
+def test_run_daily_retries_after_a_failed_row_and_replaces_it(tmp_path):
+    """I9: the idempotency guard reads `exists_ok`, not `exists` -- a night
+    whose first attempt stored `status="failed"` (LLM down at 16:05) must
+    still be retried by the next tick, and the successful retry replaces
+    the failed row instead of dying on the (account, date) UNIQUE."""
+    components = make_components(tmp_path)
+    failing = ScriptedLLM([LLMError("provider down")])
+    Reflector(llm=failing, components=components, settings=make_settings()
+              ).run_daily(now=NOW)
+    assert components.reports.get(ET_DATE)["status"] == "failed"
+
+    retry = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    status = Reflector(llm=retry, components=components, settings=make_settings()
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(retry.seen) == 1          # the retry really did call the LLM
+    rows = components.reports.list()
+    assert len(rows) == 1                # still one row for the day
+    assert rows[0]["status"] == "ok"
+    assert "Day summary" in rows[0]["body"]
+
+
+def test_run_daily_still_skips_when_an_ok_row_exists(tmp_path):
+    """The other half of I9: `exists_ok` must not weaken the guard for the
+    case it was written for -- a stored SUCCESS still costs no LLM call."""
+    components = make_components(tmp_path)
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings())
+    reflector.run_daily(now=NOW)
+    assert reflector.run_daily(now=NOW).startswith("already ran")
+    assert len(llm.seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# I8: per-account wall-clock deadline on the reflection pass
+# ---------------------------------------------------------------------------
+
+class FakeClock:
+    """A monotonic clock the test drives by hand -- no real sleeps, so the
+    deadline tests stay instant and deterministic."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class SlowLLM(ScriptedLLM):
+    """ScriptedLLM that burns `seconds_per_call` of fake wall clock on every
+    completion, standing in for a genuinely slow provider/tool round-trip."""
+
+    def __init__(self, clock, seconds_per_call, responses):
+        super().__init__(responses)
+        self.clock = clock
+        self.seconds_per_call = seconds_per_call
+
+    def complete(self, messages, tools=None):
+        self.clock.advance(self.seconds_per_call)
+        return super().complete(messages, tools=tools)
+
+
+def test_run_daily_deadline_forces_the_wrap_up_prompt(tmp_path, monkeypatch):
+    """I8: a slow reflection must be bounded by wall clock, not only by the
+    tool-call cap -- one hung account otherwise holds up the whole nightly
+    chain. Crossing the deadline ends the research turn exactly the way the
+    iteration cap does: unparseable text, then the one corrective wrap-up
+    turn -- which is deliberately NOT deadline-gated, so the day still gets
+    a real report instead of a `failed` row."""
+    components = make_components(tmp_path)
+    clock = FakeClock()
+    monkeypatch.setattr(reflect_module, "_monotonic", clock)
+    llm = SlowLLM(clock, 400, [
+        tool_response("get_portfolio", {}),   # t+400, still inside 600s
+        tool_response("get_portfolio", {}),   # t+800, deadline now blown
+        LLMResponse(text=REPORT_TEXT),        # the wrap-up turn's answer
+    ])
+    settings = make_settings(reflection_max_iters=12,
+                             reflection_deadline_seconds=600)
+
+    status = Reflector(llm=llm, components=components, settings=settings
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert components.reports.get(ET_DATE)["status"] == "ok"
+    # Exactly 3 provider calls: two research iterations, then the wrap-up.
+    # The deadline-expired third iteration never reached the provider --
+    # without the deadline the cap would have allowed 12.
+    assert len(llm.seen) == 3
+    assert any(m["role"] == "user" and "Reproduce it now" in m["content"]
+               for m in llm.seen[-1])
+
+
+def test_run_daily_deadline_not_reached_leaves_the_pass_alone(tmp_path, monkeypatch):
+    components = make_components(tmp_path)
+    clock = FakeClock()
+    monkeypatch.setattr(reflect_module, "_monotonic", clock)
+    llm = SlowLLM(clock, 10, [
+        tool_response("get_portfolio", {}),
+        LLMResponse(text=REPORT_TEXT),
+    ])
+    settings = make_settings(reflection_deadline_seconds=600)
+
+    status = Reflector(llm=llm, components=components, settings=settings
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(llm.seen) == 2            # no corrective turn was needed
+
+
+def test_run_daily_deadline_zero_disables_the_deadline(tmp_path, monkeypatch):
+    """A deadline of 0 means "no wall-clock bound" -- the tool-call cap is
+    then the only limit, exactly as it was before I8."""
+    components = make_components(tmp_path)
+    clock = FakeClock()
+    monkeypatch.setattr(reflect_module, "_monotonic", clock)
+    llm = SlowLLM(clock, 100_000, [
+        tool_response("get_portfolio", {}),
+        LLMResponse(text=REPORT_TEXT),
+    ])
+    settings = make_settings(reflection_deadline_seconds=0)
+
+    status = Reflector(llm=llm, components=components, settings=settings
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(llm.seen) == 2

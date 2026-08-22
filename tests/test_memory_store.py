@@ -156,3 +156,39 @@ def test_stock_and_lesson_layers_are_isolated_per_account(tmp_path):
     assert paper.path_for("stock", "AAPL") != shadow.path_for("stock", "AAPL")
     assert paper.path_for("stock", "AAPL").exists()
     assert shadow.path_for("stock", "AAPL").exists()
+
+
+def test_memory_log_rows_carry_the_writing_store_account(tmp_path):
+    # C1: `memory_log` had no `account` column, so the web Memory page's
+    # Changes tab rendered the other account's note text verbatim.
+    conn = connect(tmp_path / "db.sqlite")
+    paper = MemoryStore(tmp_path / "memory", conn)
+    shadow = MemoryStore(tmp_path / "memory", conn, account="shadow")
+
+    paper.apply("stock", "AAPL", "add", text="paper: strong cash flow")
+    shadow.apply("stock", "AAPL", "add", text="shadow: too richly valued")
+
+    rows = [(r["account"], r["after"]) for r in
+            conn.execute("SELECT account, after FROM memory_log ORDER BY id")]
+    assert [a for a, _ in rows] == ["paper", "shadow"]
+    assert "paper: strong cash flow" in rows[0][1]
+    assert "shadow: too richly valued" in rows[1][1]
+
+
+def test_recent_log_never_returns_the_other_accounts_rows(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = MemoryStore(tmp_path / "memory", conn)
+    shadow = MemoryStore(tmp_path / "memory", conn, account="shadow")
+
+    paper.apply("stock", "AAPL", "add", text="PAPERONLYMARK")
+    shadow.apply("stock", "AAPL", "add", text="SHADOWONLYMARK")
+    paper.apply("lesson", "overtrading", "add", text="PAPERLESSONMARK")
+
+    shadow_log = "\n".join(r["after"] for r in shadow.recent_log())
+    assert "SHADOWONLYMARK" in shadow_log
+    assert "PAPERONLYMARK" not in shadow_log
+    assert "PAPERLESSONMARK" not in shadow_log
+
+    paper_log = "\n".join(r["after"] for r in paper.recent_log())
+    assert "PAPERONLYMARK" in paper_log and "PAPERLESSONMARK" in paper_log
+    assert "SHADOWONLYMARK" not in paper_log

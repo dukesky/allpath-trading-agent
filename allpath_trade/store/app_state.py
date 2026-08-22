@@ -3,6 +3,16 @@ from __future__ import annotations
 import sqlite3
 
 SENTINEL_HEARTBEAT_KEY = "sentinel_last_pass"
+# I7: written (per account, `sentinel_last_ok:{account}`) ONLY after that
+# account's `sentinel.run_once()` returns without raising -- the companion
+# to SENTINEL_HEARTBEAT_KEY, which is written BEFORE the check runs and so
+# only ever proved the scheduler was alive. Without this pair, a sentinel
+# raising on every tick (dead data source, bad credentials) left the
+# dashboard reporting a perfectly fresh "last check 0m ago" while nothing
+# had actually been evaluated for hours. The dashboard compares the two:
+# `last_ok` missing, or lagging `last_pass` by more than one interval, is
+# the warning condition (see sentinel_heartbeat_status).
+SENTINEL_LAST_OK_KEY = "sentinel_last_ok"
 # Written alongside SENTINEL_HEARTBEAT_KEY on every scheduler tick, market
 # open or closed -- "true"/"false" -- so a reader of the heartbeat can tell
 # a real sentinel evaluation from a tick where the daemon proved it was

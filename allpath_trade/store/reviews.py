@@ -653,6 +653,17 @@ class ReviewQueue:
             raise ReviewError(
                 f"review {review_id} has corrupt snapshot: {exc}") from exc
 
+        # Captured BEFORE the claim below clears them -- a stale-ledger
+        # RevisionValidationError (unlike a corrupt-snapshot or "already
+        # resolved" failure above) means nothing was actually written, so
+        # this proposal is still exactly as approvable as it was a moment
+        # ago; the rollback branch below restores these so the same
+        # approve-by-link token still consumes on retry, instead of dying
+        # here and forcing a brand-new proposal for what may be a purely
+        # transient staleness race.
+        token_hash = row["approval_token_hash"]
+        token_expires = row["token_expires_ts"]
+
         resolved_ts = datetime.now(UTC).isoformat()
         cur = self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?,"
@@ -673,10 +684,20 @@ class ReviewQueue:
             # staleness/bad-arg/ledger-ValueError check runs (and raises
             # this, and only this) before its own `conn.transaction()`
             # block ever opens, so there is nothing on the ledger to undo.
+            #
+            # Also restores the approval-link token captured above -- the
+            # claim UPDATE just cleared it, but nothing actually applied, so
+            # leaving it cleared would kill the approve link permanently
+            # while the message ("re-propose") reads like the row is still
+            # actionable. Restoring it means the SAME link still consumes on
+            # a retry (e.g. once the ledger settles back to what the
+            # proposal expected), rather than only a brand-new proposal
+            # working.
             self._conn.execute(
-                "UPDATE pending_reviews SET status=?, resolved_ts=?"
+                "UPDATE pending_reviews SET status=?, resolved_ts=?,"
+                " approval_token_hash=?, token_expires_ts=?"
                 " WHERE id=? AND account=?",
-                ("pending", None, review_id, self._account))
+                ("pending", None, token_hash, token_expires, review_id, self._account))
             self._conn.commit()
             raise
         except Exception as exc:

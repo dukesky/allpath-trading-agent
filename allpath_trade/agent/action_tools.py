@@ -198,7 +198,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         except ExecutionError as exc:
             return f"execution error: {exc}"
         if result.submitted:
-            return f"submitted order {result.order.id if result.order else ''}".strip()
+            oid = result.order.id if result.order else ""
+            if account == "shadow":
+                return (f"recorded order {oid} in the shadow ledger — the user must "
+                        "place it in their brokerage themselves").strip()
+            return f"submitted order {oid}".strip()
         return "rejected by risk gate: " + "; ".join(result.decision.reasons)
 
     t = "string"

@@ -278,3 +278,31 @@ def test_push_telegram_review_queued_prefixes_body_for_shadow(tmp_path, monkeypa
     [api] = FakeTelegramAPI.instances
     _chat_id, html, _markup = api.sent[0]
     assert html.startswith("[Shadow] ")
+
+
+# ---------------------------------------------------------------------------
+# `_prefixed_for_telegram`: an already-prefixed body is FINAL, whichever
+# account's prefix it carries.
+#
+# The old guard only recognized the prefix it was about to add, so a body
+# that already said "[Paper] ..." came back as "[Shadow] [Paper] ..." -- two
+# contradictory account labels on one message, with the WRONG one leading.
+# Any known-account prefix now means "the caller already labelled this",
+# and the body is returned untouched.
+# ---------------------------------------------------------------------------
+
+def test_body_already_prefixed_for_the_same_account_is_left_alone():
+    assert dispatch._prefixed_for_telegram("shadow", "[Shadow] x") == "[Shadow] x"
+
+
+def test_body_already_prefixed_for_another_account_is_not_double_prefixed():
+    assert dispatch._prefixed_for_telegram("shadow", "[Paper] x") == "[Paper] x"
+    assert dispatch._prefixed_for_telegram("paper", "[Shadow] x") == "[Shadow] x"
+
+
+def test_unprefixed_body_still_gets_this_accounts_prefix():
+    assert dispatch._prefixed_for_telegram("shadow", "x") == "[Shadow] x"
+
+
+def test_unknown_account_leaves_the_body_unprefixed():
+    assert dispatch._prefixed_for_telegram("bogus", "x") == "x"

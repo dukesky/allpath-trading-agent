@@ -92,10 +92,18 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
     covers both. A rejected/errored shadow order (`submitted=False`)
     never reached the ledger at all, so it keeps the same generic
     "not submitted" wording paper gets -- there is nothing to go place
-    anywhere."""
+    anywhere.
+
+    C3: the SUBJECT carries the same honesty as the body. It is also the
+    ntfy push title -- the one string a phone lockscreen shows -- so a
+    subject reading "order submitted" over a body reading "place it
+    yourself" would still tell the lie on the surface most readers see
+    first, and only ever see."""
     outcome = "submitted" if submitted else "not submitted"
-    subject = f"{_prefix(account)}[AllPath] {ticker}: order {outcome}"
-    if account == "shadow" and submitted:
+    shadow_order = account == "shadow" and submitted
+    headline = "order recorded — place it yourself" if shadow_order else f"order {outcome}"
+    subject = f"{_prefix(account)}[AllPath] {ticker}: {headline}"
+    if shadow_order:
         fill = ""
         if filled_qty is not None and filled_avg_price is not None:
             fill = f": {side.upper()} {filled_qty} {ticker} @ ~${filled_avg_price:,.2f}"

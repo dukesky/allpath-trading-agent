@@ -14,6 +14,7 @@ from allpath_trade.sentinel import SentinelReport
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import (
     SENTINEL_HEARTBEAT_KEY,
+    SENTINEL_LAST_OK_KEY,
     SENTINEL_MARKET_OPEN_KEY,
     AppState,
 )
@@ -58,6 +59,17 @@ def today_et_date(now: datetime | None = None) -> str:
 # add a second one alongside it (see reschedule_sentinel_job below).
 SENTINEL_JOB_ID = "sentinel_pass"
 
+# I8: the after-close chain (digest -> reflection -> consolidation) is its
+# own interval job, separate from the sentinel tick -- see build_jobs. Its
+# cadence is NOT the user-configurable sentinel interval: this job is a
+# cheap "is it after close, and is today still unfinished?" poll
+# (_maybe_run_daily returns immediately in almost every call), so it wants a
+# fixed, frequent cadence -- 5 minutes bounds how long after 16:05 the
+# night's chain starts, and how long after a failed attempt the retry lands,
+# regardless of whether the operator set the sentinel to 5 minutes or 60.
+DAILY_CHECK_INTERVAL_MINUTES = 5
+DAILY_JOB_ID = "daily_chain"
+
 
 def is_market_hours(now: datetime | None = None) -> bool:
     """US regular session, no holiday calendar yet (see docs/TODO.md)."""
@@ -74,6 +86,27 @@ def _is_after_close(now: datetime | None = None) -> bool:
         now = now.replace(tzinfo=UTC)
     et = now.astimezone(ET)
     return et.weekday() < 5 and et.time() >= time(16, 5)
+
+
+def _drop_legacy_heartbeat(app_state: AppState) -> None:
+    """Delete the orphan pre-dual-active `sentinel_last_pass` row.
+
+    T7 stopped writing the bare (un-suffixed) key and the dashboard stopped
+    reading it, but an install that ran before T7 still has the row sitting
+    in `app_state`, frozen at whatever timestamp the last pre-T7 tick wrote.
+    Anyone reading the table (a support session, a future feature keying off
+    "is the daemon alive") sees what looks like live state and is years out
+    of date. Reads first and deletes only when it's actually there, so the
+    steady state -- every install, every tick after the first -- is one
+    cheap SELECT and no write at all, rather than a DELETE+commit per tick.
+
+    Never raises: this is housekeeping, and a locked/broken store must not
+    be what stops a monitoring pass."""
+    try:
+        if app_state.get(SENTINEL_HEARTBEAT_KEY) is not None:
+            app_state.delete(SENTINEL_HEARTBEAT_KEY)
+    except Exception as exc:  # noqa: BLE001 — housekeeping must not stop the pass
+        print(f"[heartbeat] legacy row cleanup failed: {exc}", file=sys.stderr)
 
 
 # shadow-dual-active T4: `accounts` is a `dict[str, app.AccountComponents]`
@@ -132,6 +165,7 @@ def _run_sentinel_pass(accounts: dict,
                           "true" if is_market_hours() else "false")
         except Exception as exc:  # noqa: BLE001 — a failed flag write must not stop the pass
             print(f"[heartbeat] market-open flag failed: {exc}", file=sys.stderr)
+        _drop_legacy_heartbeat(app_state)
 
     for account, acc in accounts.items():
         if app_state is not None:
@@ -155,26 +189,92 @@ def _run_sentinel_pass(accounts: dict,
             except Exception as exc:  # noqa: BLE001 — one account's sentinel
                 # failing must never take the other account's pass down too.
                 print(f"[sentinel] {account} failed: {exc}", file=sys.stderr)
+            else:
+                # I7: the SUCCESS heartbeat, written only once run_once has
+                # returned -- see SENTINEL_LAST_OK_KEY. Deliberately inside
+                # the market-hours branch and in the `else` of the
+                # try/except: a tick that evaluated nothing (market closed)
+                # or whose evaluation raised has not successfully checked
+                # anything, and must not be able to claim it did.
+                if app_state is not None:
+                    try:
+                        app_state.set(f"{SENTINEL_LAST_OK_KEY}:{account}",
+                                      datetime.now(UTC).isoformat())
+                    except Exception as exc:  # noqa: BLE001 — see above
+                        print(f"[heartbeat] {account} last-ok failed: {exc}",
+                              file=sys.stderr)
         if on_report is not None:
             on_report(account, report)
 
 
-def _maybe_run_daily(daily_job: Callable[[], None] | None, state: dict) -> None:
-    """Run `daily_job` at most once per ET calendar day, after close.
+# I4(b): how many times one ET day's nightly chain may be attempted before
+# the in-memory guard stops retrying it. Retrying at all is the point (a
+# failed or partial night must not be unreachable until tomorrow), but an
+# unbounded retry would re-run the chain on EVERY tick of a day whose
+# failure is permanent -- a dead LLM provider, a full disk -- and each
+# attempt costs real work (and, once past the digest, real LLM calls). Three
+# attempts is enough to ride out a transient outage without turning a
+# genuinely broken night into an all-night loop; the operator's signal is
+# the "giving up" stderr line the third failure prints.
+MAX_DAILY_ATTEMPTS = 3
 
-    `state` is a `{"last_daily": ...}` dict owned by the caller, so both
-    `run_daemon` and `build_jobs` can each keep their own once-per-day
-    tracking across repeated calls."""
+
+def new_daily_state() -> dict:
+    """The `state` dict `_maybe_run_daily` owns across ticks -- one per
+    caller (`run_daemon`, `build_jobs`), so each entry point keeps its own
+    once-per-day tracking. Constructed here rather than inline at each call
+    site so the three keys can never drift apart between them."""
+    return {"last_daily": None, "attempt_date": None, "attempts": 0}
+
+
+def _maybe_run_daily(daily_job: Callable[[], object] | None, state: dict) -> None:
+    """Run `daily_job` at most once SUCCESSFULLY per ET calendar day, after
+    close, and at most `MAX_DAILY_ATTEMPTS` times in total.
+
+    I4(b): `state["last_daily"]` used to be stamped BEFORE the call, so it
+    meant "attempted today". Any failure -- a raised exception, or a partial
+    night where one account's chain blew up (`run_daily_jobs` returns False
+    for that) -- was therefore permanent: the day was marked done and no
+    later tick would ever try again, even though the failure was often a
+    transient outage minutes long. It now means "completed today", stamped
+    only after a clean return.
+
+    Retrying is safe precisely because every sub-step carries its OWN
+    persisted idempotency: the digest's `digest_last_date:{account}`
+    watermark (now written only on a real send, see `_send_one_digest`),
+    reflection's `reports.exists_ok(et_date)` row, and the consolidator's
+    turn marker. A retry re-walks the chain and no-ops through everything
+    that already succeeded, so the only work it repeats is the work that
+    failed.
+
+    `daily_job` may report a partial failure by returning False (that's
+    `run_daily_jobs`'s contract); any other return value -- including the
+    `None` a caller's own callable returns by default -- counts as success,
+    so a caller that doesn't participate in this protocol behaves exactly as
+    it did before."""
     if daily_job is None or not _is_after_close():
         return
     today = datetime.now(UTC).astimezone(ET).date().isoformat()
     if state["last_daily"] == today:
         return
-    state["last_daily"] = today
+    if state.get("attempt_date") != today:
+        # A new ET day: the attempt budget is per-day, so a night that
+        # burned all three attempts must not disable tomorrow's run too.
+        state["attempt_date"] = today
+        state["attempts"] = 0
+    if state["attempts"] >= MAX_DAILY_ATTEMPTS:
+        return
+    state["attempts"] += 1
     try:
-        daily_job()
+        ok = daily_job() is not False
     except Exception as exc:  # noqa: BLE001 — a failed digest must not stop the loop
         print(f"[daily] failed: {exc}")
+        ok = False
+    if ok:
+        state["last_daily"] = today
+    elif state["attempts"] >= MAX_DAILY_ATTEMPTS:
+        print(f"[daily] giving up on {today} after {state['attempts']} attempts",
+              file=sys.stderr)
 
 
 def run_daemon(get_accounts: Callable[[], dict], interval_minutes: int,
@@ -188,7 +288,7 @@ def run_daemon(get_accounts: Callable[[], dict], interval_minutes: int,
     returns the same dict every time) rather than a single sentinel/
     journal/broker triple -- `_run_sentinel_pass` iterates it, one pass per
     account, each isolated in its own try/except."""
-    state = {"last_daily": None}
+    state = new_daily_state()
 
     def report_progress(account: str, report: SentinelReport | None) -> None:
         if report is None:
@@ -205,11 +305,19 @@ def run_daemon(get_accounts: Callable[[], dict], interval_minutes: int,
     def job() -> None:
         _run_sentinel_pass(get_accounts(), app_state=app_state,
                            on_report=report_progress)
+
+    def daily() -> None:
         _maybe_run_daily(daily_job, state)
 
     scheduler = scheduler_cls()
     scheduler.add_job(job, "interval", minutes=interval_minutes,
-                      next_run_time=datetime.now(UTC))
+                      next_run_time=datetime.now(UTC), id=SENTINEL_JOB_ID)
+    # I8: the nightly chain is its own job here too, not a tail call on the
+    # sentinel tick -- `run` and `serve` must not drift apart on this (see
+    # build_jobs's own registration for the full reasoning).
+    scheduler.add_job(daily, "interval", minutes=DAILY_CHECK_INTERVAL_MINUTES,
+                      next_run_time=datetime.now(UTC), id=DAILY_JOB_ID,
+                      max_instances=1, coalesce=True)
     print(f"[allpath-trade] sentinel daemon: every {interval_minutes}min "
           "during US market hours (Ctrl-C to stop)")
     scheduler.start()
@@ -236,15 +344,31 @@ def _digest_date_key(account: str) -> str:
 
 
 def _last_digest_date(app_state: AppState, account: str) -> str | None:
+    """This account's digest watermark, seeding paper's per-account key from
+    the pre-dual-active global key exactly once.
+
+    Minor (review): the seed now MIGRATES rather than merely reads -- it
+    copies the legacy value into the per-account key and deletes the legacy
+    row in the same breath. Leaving the legacy row behind meant the fallback
+    stayed live forever: any later deletion of `digest_last_date:paper` (an
+    operator resetting the watermark to force a re-send, a future
+    account-reset feature) would silently resurrect a stale date from the
+    legacy row and suppress the digest instead. `shadow` has no legacy
+    history to seed from and simply starts unsent, same as a brand-new
+    account should.
+
+    Never raises on the migration write: a failed seed must degrade to
+    "read the legacy value and carry on", not cancel the digest."""
     value = app_state.get(_digest_date_key(account))
     if value is None and account == DEFAULT_ACCOUNT:
-        # One-time fallback to the pre-dual-active global key, exactly like
-        # Consolidator._last_turn_marker's own paper-only seed -- once
-        # today's per-account key is written below (any day the digest
-        # actually sends), this is never consulted again. `shadow` has no
-        # legacy history to seed from and simply starts unsent, same as a
-        # brand-new account should.
         value = app_state.get(DIGEST_LAST_DATE_KEY)
+        if value is not None:
+            try:
+                app_state.set(_digest_date_key(account), value)
+                app_state.delete(DIGEST_LAST_DATE_KEY)
+            except Exception as exc:  # noqa: BLE001 — see docstring
+                print(f"[digest] legacy watermark migration failed: {exc}",
+                      file=sys.stderr)
     return value
 
 
@@ -268,10 +392,12 @@ def _llm_cost_line(components) -> str:
     Never raises: reading usage is best-effort here, the same way
     recording it already is (`LLMUsage.record`'s own docstring) -- this
     runs synchronously before `notifier.send` inside `_send_daily_digest`,
-    which already marks `digest_last_date` done regardless of outcome, so
-    an unhandled exception here would silently cancel the ENTIRE digest for
-    the day (trigger/trade/pending counts included) over what's ultimately
-    just one optional line."""
+    so an unhandled exception here would cancel the ENTIRE digest for every
+    account (trigger/trade/pending counts included) over what's ultimately
+    just one optional line. (Since I4 an undelivered digest is at least
+    retried on the next tick rather than being marked done -- but a retry
+    that re-raises here would just fail again, three times, and then be
+    given up on.)"""
     try:
         from allpath_trade.llm.prices import estimate_cost
         from allpath_trade.web.format import money
@@ -300,7 +426,8 @@ def _llm_cost_line(components) -> str:
         return ""
 
 
-def _send_one_digest(components, account: str, acc, today: str, llm_cost: str) -> None:
+def _send_one_digest(components, account: str, acc, today: str,
+                     llm_cost: str) -> bool:
     """One account's digest -- `trades` comes from `TradeJournal.
     trades_today()` — the journal's real accessor (there is no `journal.
     today()`). `triggers` counts today's "sentinel"-sourced rows in THIS
@@ -325,11 +452,22 @@ def _send_one_digest(components, account: str, acc, today: str, llm_cost: str) -
     subject, body = events.daily_digest(
         account=account, triggers=triggers, trades=acc.journal.trades_today(),
         pending=len(acc.queue.list()), llm_cost=llm_cost)
-    components.notifier.send(subject, body)
+    # I4: `Notifier.send` is non-raising by contract (notify/base.py) and
+    # reports failure by RETURNING False -- a dead SMTP server, an ntfy
+    # topic that 404s. Stamping the watermark regardless made that failure
+    # permanent: the day was marked sent, and no later tick could reach the
+    # digest again. Write it only on a real delivery; an undelivered digest
+    # stays pending and the next tick retries it (bounded, in practice, by
+    # the day itself -- the watermark is per ET day).
+    if not components.notifier.send(subject, body):
+        print(f"[digest:{account}] not sent (notifier reported failure); "
+              "will retry on the next tick", file=sys.stderr)
+        return False
     components.app_state.set(_digest_date_key(account), today)
+    return True
 
 
-def _send_daily_digest(components) -> None:
+def _send_daily_digest(components) -> bool:
     """One digest per account (shadow-dual-active T7, spec §⑤: every event
     prefixed `[Paper]`/`[Shadow]` -- the digest used to be one email
     combining both accounts, before this task split it), each sent at most
@@ -340,7 +478,7 @@ def _send_daily_digest(components) -> None:
     is in-memory only: a `serve` restart after 16:05 forgets today's
     digest already went out and would otherwise re-send it on the next
     tick. Reflection doesn't have this problem — `Reflector.run_daily`
-    (reflect.py) checks `reports.exists(et_date)`, a persisted table row —
+    (reflect.py) checks `reports.exists_ok(et_date)`, a persisted table row —
     and consolidation tracks its own turn marker the same way; this
     mirrors that pattern for the digest specifically, without touching
     `_maybe_run_daily` itself.
@@ -356,17 +494,26 @@ def _send_daily_digest(components) -> None:
     building or sending shadow's digest (a dead notifier, a broken store)
     must never prevent paper's from going out, or from being marked done
     for the day, and vice versa -- same isolation discipline as
-    `_run_sentinel_pass`'s per-account loop and `run_daily_jobs`'s own."""
+    `_run_sentinel_pass`'s per-account loop and `run_daily_jobs`'s own.
+
+    Returns whether EVERY account that still needed a digest today got one
+    (I4): `run_daily_jobs` folds that into its own return, which is what
+    lets `_maybe_run_daily` retry a night whose digest silently failed
+    instead of marking the day done."""
     today = datetime.now(UTC).astimezone(ET).date().isoformat()
     llm_cost = _llm_cost_line(components)
+    all_ok = True
     for account, acc in components.accounts.items():
         if _last_digest_date(components.app_state, account) == today:
             continue
         try:
-            _send_one_digest(components, account, acc, today, llm_cost)
+            all_ok = _send_one_digest(components, account, acc, today,
+                                      llm_cost) and all_ok
         except Exception as exc:  # noqa: BLE001 — one account's digest must
             # never take the other account's down.
             print(f"[digest:{account}] failed: {exc}", file=sys.stderr)
+            all_ok = False
+    return all_ok
 
 
 def _account_has_active_strategy(strategies) -> bool:
@@ -386,7 +533,7 @@ def _account_has_active_strategy(strategies) -> bool:
         return False
 
 
-def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> None:
+def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> bool:
     """One account's reflection -> consolidation pair (shadow-dual-active
     T4, spec §③). Order matches `run_daily_jobs`'s own docstring: reflection
     before consolidation, so the same night's consolidation pass can pick up
@@ -396,7 +543,14 @@ def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> None:
     since this whole function is called once per account from a loop, a
     failure inside it (there shouldn't be one left uncaught, but belt and
     suspenders) must never be allowed to stop the OTHER account's nightly
-    chain either; see run_daily_jobs's own per-account try/except."""
+    chain either; see run_daily_jobs's own per-account try/except.
+
+    Returns whether both steps completed without an error (I4b) -- swallowed
+    exceptions still get REPORTED upward as False, so a partial night is
+    retried on a later tick rather than being marked done. A step that was
+    deliberately skipped (setting off, no active strategies, no such
+    component wired) is not a failure and keeps the return True."""
+    ok = True
     reflector = acc.reflector
     if reflector is not None and settings.daily_reflection:
         if _account_has_active_strategy(acc.strategies):
@@ -406,6 +560,7 @@ def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> None:
                     print(f"[reflection:{account}] {status}")
             except Exception as exc:  # noqa: BLE001 — must not stop consolidation
                 print(f"[reflection:{account}] failed: {exc}", file=sys.stderr)
+                ok = False
         elif verbose:
             print(f"[reflection:{account}] skipped (no active strategies)")
 
@@ -417,9 +572,11 @@ def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> None:
                 print(f"[memory:{account}] {status}")
         except Exception as exc:  # noqa: BLE001 — see comment above
             print(f"[consolidation:{account}] failed: {exc}")
+            ok = False
+    return ok
 
 
-def run_daily_jobs(components, verbose: bool = False) -> None:
+def run_daily_jobs(components, verbose: bool = False) -> bool:
     """The after-close daily sequence, shared by `build_jobs` (`serve`) and
     `cli.py`'s `run` daemon so the two entry points can't drift out of sync
     again (docs/TODO.md's Phase 5 leftover: `run` used to skip the digest
@@ -445,44 +602,81 @@ def run_daily_jobs(components, verbose: bool = False) -> None:
     Callers are expected to wrap this in their own once-per-day gate (see
     `_maybe_run_daily`) -- this function itself is state-free.
 
+    Returns whether the whole night completed cleanly: False if the digest
+    failed to send for any account, or if any account's reflection or
+    consolidation raised. Every failure is still swallowed and printed (one
+    account's bad night must not take the other's down), but I4b needs the
+    outcome REPORTED so `_maybe_run_daily` can leave the day open for a
+    retry instead of stamping it done. The retry is cheap because each
+    sub-step has its own persisted idempotency marker.
+
     `verbose=True` restores the success-path prints the headless `run`
     daemon had before this helper was extracted: `run` has no web UI, so
     its stdout is the operator's only window into whether the nightly
     chain did anything. `serve` keeps verbose=False -- its operator reads
     the Reports page, and the pre-refactor daily() never printed on
     success there either."""
+    ok = True
     try:
-        _send_daily_digest(components)
+        ok = _send_daily_digest(components)
     except Exception as exc:  # noqa: BLE001 — a failed digest must not stop the rest
         print(f"[digest] failed: {exc}")
+        ok = False
 
     for account, acc in components.accounts.items():
         try:
-            _run_account_daily(account, acc, components.settings, verbose=verbose)
+            ok = _run_account_daily(account, acc, components.settings,
+                                    verbose=verbose) and ok
         except Exception as exc:  # noqa: BLE001 — one account's nightly chain
             # must never take the other account's down (belt and
             # suspenders: _run_account_daily already catches its own two
             # steps individually, so this is not expected to be reachable).
             print(f"[daily:{account}] failed: {exc}", file=sys.stderr)
+            ok = False
+    return ok
 
 
 def build_jobs(scheduler, holder) -> None:
     """Attach the sentinel and the after-close daily jobs to a scheduler
     owned by someone else (the `serve` process).
 
-    Same job body as `run_daemon` (see `_run_sentinel_pass` /
+    Same job bodies as `run_daemon` (see `_run_sentinel_pass` /
     `_maybe_run_daily`), minus the terminal progress lines — the server
-    process has no one to print them to."""
-    state = {"last_daily": None}
+    process has no one to print them to.
+
+    I8: these are TWO independent interval jobs, not one tick that calls
+    the nightly chain at the end of itself. APScheduler runs a job with
+    `max_instances=1` (the default) strictly serially, so while the old
+    combined job sat inside a reflection -- an LLM session that can
+    legitimately run for many minutes, times however many accounts -- every
+    sentinel tick behind it was swallowed: no fill refresh, no strategy
+    evaluation, no heartbeat, for either account, until the night finished.
+    Monitoring and the nightly chain are different jobs with different
+    cadences and different failure modes; splitting them lets the sentinel
+    keep its interval while reflection takes as long as it takes.
+
+    The daily job carries `max_instances=1` + `coalesce=True` explicitly
+    rather than relying on defaults, because both matter here and are worth
+    stating: a chain that overruns its own interval must queue exactly one
+    successor, not stack up, and a chain that overran by an hour must run
+    ONCE when it finishes, not replay every tick it missed.
+    """
+    state = new_daily_state()
 
     def job() -> None:
         components = holder.get()
         _run_sentinel_pass(components.accounts, app_state=components.app_state)
+
+    def daily() -> None:
+        components = holder.get()
         _maybe_run_daily(lambda: run_daily_jobs(components), state)
 
     scheduler.add_job(job, "interval",
                       minutes=holder.settings().sentinel_interval_minutes,
                       next_run_time=datetime.now(UTC), id=SENTINEL_JOB_ID)
+    scheduler.add_job(daily, "interval", minutes=DAILY_CHECK_INTERVAL_MINUTES,
+                      next_run_time=datetime.now(UTC), id=DAILY_JOB_ID,
+                      max_instances=1, coalesce=True)
 
 
 def reschedule_sentinel_job(scheduler, minutes: int) -> None:

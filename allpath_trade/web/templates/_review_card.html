@@ -202,7 +202,12 @@
     {% elif er and er.get('error') %}
     Execution failed (review claimed, order status unknown) — {{ er['error'] }}
     {% elif er and er.get('submitted') %}
-    Order submitted
+    {# C3: a shadow row's "execution" was a ledger write, never a routed
+       order -- and this card is the durable record someone reads back days
+       later, long after the approval message is gone. It reads the ROW's
+       own account (never `current_account`): the reviews page can only
+       ever list one account's rows, but the two must not be able to drift. #}
+    {% if item['account'] == 'shadow' %}Order recorded (shadow){% else %}Order submitted{% endif %}
     {% elif er and not er.get('submitted', True) %}
     Blocked by the risk gate — {{ er.get('decision', {}).get('reasons', []) | join('; ') }}
     {% else %}

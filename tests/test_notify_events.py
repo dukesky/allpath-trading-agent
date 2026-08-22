@@ -239,3 +239,62 @@ def test_missing_account_degrades_to_no_prefix_not_a_crash():
         account="", strategy_id="s", rule_id="r", ticker="AAPL",
         condition="c", disposition="queued")
     assert subject == "[AllPath] AAPL: rule r triggered"
+
+
+# ---------------------------------------------------------------------------
+# C3: the shadow "recorded, not submitted" wording has to reach the SUBJECT
+# too (the ntfy title is the same string) -- a body that says "place it
+# yourself" under a subject that says "order submitted" is still a lie on
+# the surface most readers see first.
+# ---------------------------------------------------------------------------
+
+def test_order_result_shadow_subject_never_says_submitted():
+    subject, _body = events.order_result(
+        account="shadow", ticker="AAPL", side="buy", submitted=True,
+        detail="agent-approved; recorded")
+    assert subject == "[Shadow] [AllPath] AAPL: order recorded — place it yourself"
+    assert "submitted" not in subject
+
+
+def test_order_result_paper_subject_unchanged():
+    subject, _body = events.order_result(
+        account="paper", ticker="AAPL", side="buy", submitted=True,
+        detail="filled 3 @ 220.15")
+    assert subject == "[Paper] [AllPath] AAPL: order submitted"
+
+
+def test_order_result_shadow_rejected_subject_keeps_generic_wording():
+    subject, _body = events.order_result(
+        account="shadow", ticker="AAPL", side="buy", submitted=False,
+        detail="risk gate rejected")
+    assert subject == "[Shadow] [AllPath] AAPL: order not submitted"
+
+
+def test_every_builder_is_english_only_for_both_accounts():
+    # C3: the shadow variants added by this task (em dashes, "place it
+    # yourself", the ledger digest line) go through the same sweep every
+    # paper variant already did, so a future edit can't slip CJK into a
+    # shadow-only branch that nothing checks.
+    for account in ("paper", "shadow"):
+        for subject, body in [
+            events.rule_triggered(account=account, strategy_id="s", rule_id="r",
+                                  ticker="AAPL", condition="price < 100",
+                                  disposition="queued"),
+            events.order_result(account=account, ticker="AAPL", side="buy",
+                                submitted=True, detail="filled 3 @ 220.15"),
+            events.order_result(account=account, ticker="AAPL", side="buy",
+                                submitted=False, detail="risk gate rejected"),
+            events.review_queued(account=account, review_id=12, ticker="AAPL",
+                                 action="sell 50%", strategy_id="s1",
+                                 recommendation="execute", trigger_price="$204.50",
+                                 est_shares="2.44"),
+            events.review_queued(account=account, review_id=13, ticker="",
+                                 action="Reset ledger", strategy_id="",
+                                 kind="shadow_edit"),
+            events.daily_digest(account=account, triggers=2, trades=1, pending=3,
+                                llm_cost="$0.42"),
+            events.daily_report(account=account, date="2026-08-21",
+                                summary="s", body="b"),
+        ]:
+            for text in (subject, body):
+                assert_english_only(text)
