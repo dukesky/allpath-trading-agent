@@ -40,6 +40,11 @@ def _with_images(messages: list[dict],
     request, in the unified shape every LLMClient converts:
     `[{"type": "image", "mime": ..., "data": bytes}, ..., {"type": "text", ...}]`.
 
+    Called with the turn's images exactly ONCE -- on the first
+    `llm.complete` of the turn, after which `_run_loop` drops them (see
+    there for why). Every later iteration passes `images=None` and gets the
+    list back untouched.
+
     Injecting here -- into the throwaway list built for one `llm.complete`
     call -- rather than onto the history dict is what keeps the bytes out
     of everything that reads history. Review finding (Important 1): with
@@ -94,7 +99,8 @@ class AgentSession:
         self.persistence_failed = False
         # The in-flight turn's attachments, if any -- see run_turn. Never
         # on a history dict: only `_with_images` reads this, when it builds
-        # the throwaway `messages` list for one `llm.complete` call.
+        # the throwaway `messages` list for the turn's first `llm.complete`
+        # call, which is also where it is consumed.
         self._pending_images: list[ImageAttachment] | None = None
         self.history: list[dict] = []
         if store is not None and conversation_id is not None:
@@ -125,12 +131,12 @@ class AgentSession:
         owns the append, so this is the only seam that can attach them.
 
         `images` are TRANSIENT (spec ③) and are deliberately NOT stored on
-        the message dict at all: they are held on the session for the
-        duration of the turn (`self._pending_images`, cleared in the
-        `finally` on every exit path) and injected into each outgoing
-        request by `_with_images`. So the history dict, the `conversations`
-        row, the FTS index, the compactor and the Telegram mirror only ever
-        see `content` (plain text) and `display` (`display_for`, the
+        the message dict at all: they are held on the session
+        (`self._pending_images`), injected by `_with_images` into the FIRST
+        outgoing request of the turn and dropped there, and cleared again by
+        the `finally` below on every exit path. So the history dict, the
+        `conversations` row, the FTS index, the compactor and the Telegram
+        mirror only ever see `content` (plain text) and `display` (`display_for`, the
         placeholder line). A later turn cannot resend the image either: the
         model has already turned it into tool calls and prose, and
         corrections are text."""
@@ -173,6 +179,18 @@ class AgentSession:
             messages = [{"role": "system", "content": self.system_prompt}, *context]
             messages = _with_images([_protocol_message(m) for m in messages],
                                     self._pending_images)
+            # Whole-branch review (Important 4): the FIRST call of the turn
+            # carries the bytes, and only that one. Re-attaching on every
+            # iteration re-uploaded the same payload per tool round-trip
+            # (4 images x 5 MB x 6 iterations = 120 MB of upload for one
+            # screenshot import, paid for again in provider image tokens).
+            # The system prompt makes the model restate the table it read
+            # before it calls anything (agent/context.py's SCREENSHOT_NOTE),
+            # so its own restatement is in the history every later iteration
+            # sends -- the picture doesn't have to be. Consumed here rather
+            # than in `run_turn`'s `finally`, which still clears it on every
+            # exit path (including this one having already done so).
+            self._pending_images = None
             try:
                 resp = self.llm.complete(messages, tools=self.registry.specs())
             except LLMImageUnsupported:

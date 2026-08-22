@@ -58,8 +58,11 @@ SCREENSHOT_NOTE = """\
 ## Screenshots of positions
 When the user attaches a brokerage screenshot, read every row (ticker,
 quantity, average cost) and the cash balance.
-First restate the table you read so the user can correct it, then call
-shadow_set_position for each row and shadow_set_cash once.
+The image is only visible to you on your FIRST reply of this turn — restate
+every row in that reply, in full, before calling any tool. After that the
+picture is gone and your own restatement is the only record of it, so
+anything you left out is lost for the rest of the turn.
+Then call shadow_set_position for each row and shadow_set_cash once.
 Never guess a value you cannot read — ask.
 Paper chats have no ledger tools, so a screenshot there can only be
 discussed.

@@ -195,7 +195,12 @@ def test_system_prompt_includes_screenshot_import_guidance(tmp_path):
         queue=ReviewQueue(conn, executor=None), account="shadow")
     assert "## Screenshots of positions" in prompt
     assert "shadow_set_position" in prompt and "shadow_set_cash" in prompt
-    assert "restate the table you read" in prompt
+    assert "restate\nevery row in that reply" in prompt
     assert "Never guess a value you cannot read" in prompt
+    # Whole-branch review (Important 4): the bytes ride only the FIRST
+    # `complete()` of the turn now (agent/loop.py), so the prompt has to say
+    # that out loud -- a model that deferred reading the table until after
+    # its first tool call would be looking at nothing.
+    assert "only visible to you on your FIRST reply of this turn" in prompt
     # Not baked into the user-editable IDENTITY.md fallback.
     assert "Screenshots of positions" not in DEFAULT_IDENTITY

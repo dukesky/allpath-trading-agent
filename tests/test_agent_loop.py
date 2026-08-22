@@ -301,14 +301,46 @@ def test_images_reach_the_llm_as_list_content_image_parts_then_text():
     }
 
 
-def test_images_ride_along_on_every_iteration_of_a_tool_loop():
-    # Anthropic rejects a history whose earlier user turn changes shape
-    # between calls; the parts must be identical on the follow-up call.
+def _image_parts(messages):
+    """The image parts of the newest user entry of one outgoing request."""
+    user = next(m for m in reversed(messages) if m["role"] == "user")
+    content = user["content"]
+    if not isinstance(content, list):
+        return []
+    return [p for p in content if p.get("type") == "image"]
+
+
+def test_only_the_first_call_of_a_turn_carries_the_image_bytes():
+    # Whole-branch review (Important 4): re-attaching on every iteration
+    # meant a 4-image turn with three tool round-trips uploaded the same
+    # 20 MB four times. The model restates the table it read on its first
+    # reply (agent/context.py's SCREENSHOT_NOTE says so explicitly), and
+    # that restatement is in the history every later iteration sends.
+    llm = ScriptedLLM([tool_response("echo", {"a": 1}, id_="c1"),
+                       tool_response("echo", {"a": 2}, id_="c2"),
+                       tool_response("echo", {"a": 3}, id_="c3"),
+                       LLMResponse(text="done")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("read this", images=[_png()])
+    assert len(llm.seen) == 4
+    assert len(_image_parts(llm.seen[0])) == 1
+    assert [_image_parts(call) for call in llm.seen[1:]] == [[], [], []]
+
+
+def test_later_iterations_send_the_users_text_unchanged():
     llm = ScriptedLLM([tool_response("echo", {"a": 1}), LLMResponse(text="done")])
     s = AgentSession(llm, make_registry(), "SYS")
     s.run_turn("read this", images=[_png()])
-    first_user = next(m for m in llm.seen[1] if m["role"] == "user")
-    assert first_user["content"][0]["type"] == "image"
+    user = next(m for m in llm.seen[1] if m["role"] == "user")
+    assert user["content"] == "read this"
+
+
+def test_a_second_turn_never_resurrects_the_first_turns_images():
+    llm = ScriptedLLM([LLMResponse(text="one"), LLMResponse(text="two")])
+    s = AgentSession(llm, make_registry(), "SYS")
+    s.run_turn("here", images=[_png()])
+    s.run_turn("and this?")
+    assert _image_parts(llm.seen[1]) == []
 
 
 def test_images_are_never_kept_on_the_history_message(tmp_path):
