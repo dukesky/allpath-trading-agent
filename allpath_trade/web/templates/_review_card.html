@@ -1,4 +1,5 @@
 {% from "_split_diff.html" import split_diff %}
+{% from "_shadow_diff.html" import shadow_before_after %}
 <div class="card" id="review-{{ item['id'] }}" style="margin-bottom:12px">
   <div class="row">
     {# A chat-sourced row's `action` is the LLM's free-text reason (see
@@ -14,10 +15,26 @@
        proposal "revise strategy · TICKER". The headline for a revision
        row is now derived from the row's own `is_new` flag instead of
        echoing that sentinel. #}
-    <strong>{% if item['kind'] == 'strategy_revision' %}{{ 'new strategy' if item['is_new'] else 'revise strategy' }}{% elif item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}</strong>
+    {# shadow_edit's own `action` IS the human title (store/reviews.py's
+       add_shadow_edit, built by agent/shadow_tools.py) -- rendered
+       verbatim, same as an order row's free-text reason, and WITHOUT a
+       trailing "· TICKER" (a bulk import/reset has no single ticker). #}
+    <strong>
+    {%- if item['kind'] == 'shadow_edit' -%}
+    {{ item['action'] }}
+    {%- else -%}
+    {% if item['kind'] == 'strategy_revision' %}{{ 'new strategy' if item['is_new'] else 'revise strategy' }}{% elif item['source'] == 'chat' %}Proposed trade{% else %}{{ item['action'] }}{% endif %} · {{ item['ticker'] }}
+    {%- endif -%}
+    </strong>
     <span class="muted">#{{ item['id'] }}</span>
     <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
   </div>
+  {% if item['kind'] == 'shadow_edit' %}
+  <p class="muted" style="font-size:13px;margin:6px 0">Shadow ledger edit from your chat.</p>
+  <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+    {{ shadow_before_after(item['snapshot']['before'], item['snapshot']['after'], item['snapshot'].get('op', '')) }}
+  </div>
+  {% endif %}
   {% if item['kind'] == 'strategy_revision' %}
   {# Proposer chip + New-strategy badge: who made this proposal, and
      whether it's a brand-new strategy (spec §②) rather than a revision of
@@ -34,6 +51,13 @@
     {% if item['is_new'] %}<span class="badge">New strategy</span>{% endif %}
   </div>
   {% endif %}
+  {# M1: shadow_edit already got its own "Shadow ledger edit from your
+     chat." line + before/after table above -- this block's "From chat —
+     triggered on <code>{op name}</code>" would just be a second, more
+     confusing copy of the exact same fact (item['condition'] IS the op
+     name for a shadow_edit row, see add_shadow_edit), so it's skipped
+     here entirely rather than gated per-branch. #}
+  {% if item['kind'] != 'shadow_edit' %}
   <p class="muted" style="font-size:13px;margin:6px 0">
     {% if item['kind'] == 'strategy_revision' %}
     {% if item['source'] == 'chat' %}
@@ -47,12 +71,16 @@
     {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
     {% endif %}
   </p>
+  {% endif %}
   {# Minor 2: a strategy_revision row's `action` is the fixed "revise
      strategy" sentinel, not free-text worth echoing as a reason -- the
      revision block below already shows the real rationale
      (item['snapshot']['rationale']). Only an order-kind chat proposal's
-     `action` (the LLM's free-text reason, order_sink.py) belongs here. #}
-  {% if item['source'] == 'chat' and item['kind'] != 'strategy_revision' and item['action'] %}
+     `action` (the LLM's free-text reason, order_sink.py) belongs here.
+     M1: a shadow_edit row's `action` is ALSO excluded -- it's already the
+     card's own headline (the `<strong>` block above), so echoing it again
+     here would be the same duplicate-copy problem. #}
+  {% if item['source'] == 'chat' and item['kind'] not in ('strategy_revision', 'shadow_edit') and item['action'] %}
   <p class="review-reason">{{ item['action'] }}</p>
   {% endif %}
   {% if item['intent'] %}
@@ -161,10 +189,25 @@
     {% else %}
     {{ item['status'] }}
     {% endif %}
+    {% elif item['kind'] == 'shadow_edit' %}
+    {# Same shape as strategy_revision above: execution_result is either
+       {"applied": true} or {"error": ...} -- no order/risk-gate outcome. #}
+    {% if er and er.get('applied') %}
+    Applied to the shadow ledger
+    {% elif er and er.get('error') %}
+    Failed after approval — {{ er['error'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
     {% elif er and er.get('error') %}
     Execution failed (review claimed, order status unknown) — {{ er['error'] }}
     {% elif er and er.get('submitted') %}
-    Order submitted
+    {# C3: a shadow row's "execution" was a ledger write, never a routed
+       order -- and this card is the durable record someone reads back days
+       later, long after the approval message is gone. It reads the ROW's
+       own account (never `current_account`): the reviews page can only
+       ever list one account's rows, but the two must not be able to drift. #}
+    {% if item['account'] == 'shadow' %}Order recorded (shadow){% else %}Order submitted{% endif %}
     {% elif er and not er.get('submitted', True) %}
     Blocked by the risk gate — {{ er.get('decision', {}).get('reasons', []) | join('; ') }}
     {% else %}

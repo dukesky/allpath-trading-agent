@@ -1,4 +1,5 @@
 {% from "_split_diff.html" import split_diff %}
+{% from "_shadow_diff.html" import shadow_before_after %}
 <!doctype html>
 <html lang="en">
 <head>
@@ -10,9 +11,25 @@
 <body class="centered">
   <div class="card" style="max-width:420px;width:100%">
     <h1>Review #{{ review_id }}</h1>
+    <p class="row" style="margin:0 0 6px">
+      <span class="chip {{ 'chip-shadow' if account == 'shadow' else 'chip-paper' }}">{{ account | capitalize }}</span>
+    </p>
     <p><strong>{{ side }} {{ ticker }}</strong>{% if amount_label %} · {{ amount_label }}{% endif %}</p>
     {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}
 
+    {% if kind == "shadow_edit" %}
+    <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+      {{ shadow_before_after(shadow_before, shadow_after, shadow_op) }}
+      {% if stale %}
+      {# M4: same staleness compare `apply_shadow_edit_factory` itself runs
+         at approval time (web/routes/approve.py's `current_shadow_state`
+         call) -- an unauthenticated one-click confirm page is, if
+         anything, the MORE important place to warn: a visitor here may
+         never have seen the in-app /reviews card at all. #}
+      <p class="warn" style="font-size:13px;margin:8px 0 0">The ledger has changed since this proposal — approving will fail safely; re-propose or reject.</p>
+      {% endif %}
+    </div>
+    {% endif %}
     {% if kind == "order" %}
     <div class="review-price-context" style="margin:10px 0">
       {% if trigger_price is not none %}<span class="muted">Triggered at {{ trigger_price | money }}</span>{% endif %}

@@ -14,12 +14,11 @@ from allpath_trade.agent.readonly_tools import register_readonly_tools
 from allpath_trade.agent.reflection_tools import register_reflection_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.config import Settings
-from allpath_trade.llm.base import LLMClient
-from allpath_trade.memory.search import SessionSearch
+from allpath_trade.llm.base import LLMClient, LLMResponse
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
 from allpath_trade.scheduler import ET, ts_to_et_date
-from allpath_trade.store.conversations import ConversationStore
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
@@ -55,6 +54,64 @@ MAX_SUMMARY_CHARS = 600
 # render "n/a" (the same fallback an individual quote failure already used)
 # rather than block indefinitely.
 QUOTES_BUDGET_SECONDS = 10
+
+
+def _monotonic() -> float:
+    """Indirection over `time.monotonic` for I8's reflection deadline, so
+    tests can drive it by hand (the dashboard's `_utcnow` pattern) instead
+    of sleeping through a real 30-minute budget."""
+    return time_module.monotonic()
+
+
+# The text a deadline-expired iteration returns in place of a provider call
+# (see _DeadlineGuard). Deliberately NOT a REPORT/SUMMARY-shaped string: it
+# has to fail `_parse_report` so `_run` falls into exactly the same
+# corrective-wrap-up branch AgentSession's own LIMIT_NOTICE already
+# triggers, rather than needing a second, parallel wrap-up path.
+DEADLINE_NOTICE = "(stopped: reflection time budget reached — wrapping up)"
+
+
+class _DeadlineGuard:
+    """Wraps this pass's LLMClient to give the reflection session a
+    wall-clock bound (I8, `Settings.reflection_deadline_seconds`) alongside
+    its tool-call bound.
+
+    Why a wrapper and not a check inside AgentSession's loop: the loop is
+    the SHARED agent machine (agent/loop.py, also driving live chat), and
+    the deadline is a reflection-specific policy -- a chat session has a
+    human watching it and no nightly chain queued behind it. `complete` is
+    called exactly once per loop iteration, at the top, so checking here IS
+    the "between iterations" check, and it also catches time burned by a
+    slow TOOL round-trip, not just by the provider.
+
+    Once expired, `complete` returns `DEADLINE_NOTICE` WITHOUT calling the
+    provider: the iteration cap's own exit path (unparseable text -> one
+    corrective wrap-up turn) is reused verbatim, so a timed-out pass still
+    produces a real report. `_run` clears `enforcing` before that wrap-up
+    turn -- the whole point of the deadline is to reach the wrap-up, so
+    gating the wrap-up on the same expired deadline would turn every
+    timeout into a `failed` row.
+
+    Everything other than `complete` (`model`, and anything a future client
+    exposes) forwards to the wrapped client via `__getattr__`."""
+
+    def __init__(self, inner: LLMClient, deadline_seconds: int) -> None:
+        self._inner = inner
+        self._deadline = (_monotonic() + deadline_seconds
+                          if deadline_seconds > 0 else None)
+        self.enforcing = True
+        self.expired = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def complete(self, messages: list[dict], tools: Any = None):
+        if (self.enforcing and self._deadline is not None
+                and _monotonic() >= self._deadline):
+            self.expired = True
+            return LLMResponse(text=DEADLINE_NOTICE)
+        return self._inner.complete(messages, tools=tools)
+
 
 _TRUNCATION_NOTE = "\n... (truncated)"
 _FRONT_TRUNCATION_NOTE = "... (older observations truncated)\n"
@@ -283,7 +340,8 @@ def _format_target(position: Any) -> str:
 
 def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict],
                    positions: list[dict], pending_counts: dict[str, int],
-                   strategies: list[dict] | None = None) -> str:
+                   strategies: list[dict] | None = None,
+                   account: str = DEFAULT_ACCOUNT) -> str:
     """Pure, deterministic seed briefing -- no LLM, no I/O. `trades` /
     `observations` / `positions` / `strategies` are already-fetched plain
     dicts (the Reflector does the DB/broker/data-source/YAML reads); this
@@ -291,7 +349,14 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
     `fence_external`-wrapped independently (spec §②: "全部 fence_external
     围栏") since every value inside ultimately traces back to model-authored
     strings (trade `reason`, observation `text`, strategy `thesis`) or a
-    remote price feed -- data, not instructions."""
+    remote price feed -- data, not instructions.
+
+    `account` defaults to `DEFAULT_ACCOUNT` ("paper") so every existing
+    direct-format test that predates the shadow account keeps passing
+    unchanged; the Reflector's own `_build_briefing` always passes its
+    bundle's real account explicitly. Rendered plainly in the header, not
+    fenced -- unlike the blocks below it never traces back to model- or
+    feed-authored content, it's a fact this function itself is asserting."""
     strategies_block = "\n".join(_format_strategy(s) for s in (strategies or []))
     strategies_block = strategies_block or "no active strategies"
 
@@ -311,6 +376,7 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
 
     return "\n".join([
         f"# Daily reflection seed briefing -- {et_date}",
+        f"Account: {account}",
         "\n## Strategies (thesis & rules)",
         fence_external(_cap_chars(strategies_block, MAX_STRATEGY_CHARS)),
         "\n## Today's trades",
@@ -341,9 +407,12 @@ class Reflector:
     """
 
     llm: LLMClient
-    # Duck-typed rather than `app.Components` -- see class docstring. Only
-    # `.reports .conn .journal .observations .broker .data .strategies
-    # .queue .memory` are ever read.
+    # shadow-dual-active T4: an `app.AccountComponents` bundle (one
+    # account's own broker/journal/queue/strategies/memory/observations/
+    # search/conn) -- duck-typed rather than importing that type here (see
+    # class docstring) to avoid a reflect.py <-> app.py import cycle. Only
+    # `.reports .conn .conversations .journal .observations .search .broker
+    # .data .strategies .queue .memory` are ever read.
     components: Any
     settings: Settings
     # Optional, defaulting to None, so Task 4's tests (which construct a
@@ -361,37 +430,65 @@ class Reflector:
         # trading day (or a re-invoked headless `run`) must never spend a
         # second LLM call, let alone produce a second reports row that
         # would violate the `date` UNIQUE constraint.
-        if reports.exists(et_date):
+        # I9: `exists_ok`, not `exists` -- a `status="failed"` row (see
+        # `_fail`: LLM down, or output unparseable twice) records an
+        # ATTEMPT, not a result. Guarding on bare existence let one bad
+        # 16:05 minute lock the account out of reflection for the whole
+        # calendar day, with nothing to retry into; `ReportStore.add`'s
+        # UPSERT is what lets the retry replace that row.
+        if reports.exists_ok(et_date):
             return f"already ran ({et_date})"
         return self._run(et_date)
 
     def _run(self, et_date: str) -> str:
         c = self.components
-        conversations = ConversationStore(c.conn)
+        # shadow-dual-active T4: `c.conversations` is already this
+        # account's own ConversationStore (built once in app.py's per-
+        # account bundle), not a fresh unscoped instance constructed here
+        # -- constructing a bare `ConversationStore(c.conn)` would default
+        # to the paper account regardless of which account this Reflector
+        # actually belongs to.
+        conversations = c.conversations
         conversation_id = conversations.start(kind="reflection")
 
         registry = ToolRegistry()
         register_readonly_tools(registry, data=c.data, broker=c.broker,
                                 journal=c.journal, strategies=c.strategies,
                                 queue=c.queue)
-        # search=SessionSearch(c.conn) so session_search -- advertised right
-        # in REFLECTION_INSTRUCTIONS's tool list -- actually exists in the
-        # registry (mirrors web/chat_service.py's wiring). Without it the
+        # search=c.search (this account's own SessionSearch, built in
+        # app.py) so session_search -- advertised right in
+        # REFLECTION_INSTRUCTIONS's tool list -- actually exists in the
+        # registry (mirrors web/chat_service.py's wiring) AND stays scoped
+        # to this account: a bare `SessionSearch(c.conn)` would default to
+        # paper and leak the other account's turns/observations into this
+        # session's search results. Without registering it at all, the
         # first call the model makes to it burns an iteration on
         # "error: unknown tool" out of the 12-call session budget.
-        register_memory_tools(registry, memory=c.memory, search=SessionSearch(c.conn))
+        register_memory_tools(registry, memory=c.memory, search=c.search)
         register_reflection_tools(registry, strategies=c.strategies, queue=c.queue)
 
         identity = load_identity()
         base_prompt = build_system_prompt(
             identity=identity, broker=c.broker, journal=c.journal,
-            strategies=c.strategies, queue=c.queue, memory=c.memory)
+            strategies=c.strategies, queue=c.queue, memory=c.memory,
+            # Important 1: the Reflector always knows its own account (this
+            # bundle) -- pass it so the system prompt carries the
+            # paper/shadow section (agent/context.py's ACCOUNT_NOTES),
+            # never omitted here the way an as-yet-unwired chat caller
+            # might leave it.
+            account=c.account)
         system_prompt = f"{base_prompt}\n{REFLECTION_INSTRUCTIONS}"
 
         compactor = Compactor(self.llm, conversations,
                               budget_tokens=self.settings.context_budget_tokens)
+        # I8: the session talks to the provider THROUGH the deadline guard;
+        # the compactor deliberately does not (a compaction is bookkeeping
+        # the pass needs to keep its own history coherent, and handing it a
+        # DEADLINE_NOTICE in place of a summary would corrupt the stored
+        # conversation, not shorten the night).
+        guard = _DeadlineGuard(self.llm, self.settings.reflection_deadline_seconds)
         session = AgentSession(
-            self.llm, registry, system_prompt, store=conversations,
+            guard, registry, system_prompt, store=conversations,
             conversation_id=conversation_id,
             max_iters=self.settings.reflection_max_iters, compactor=compactor)
 
@@ -420,6 +517,13 @@ class Reflector:
             # to extract/reformat what the transcript already holds, not to
             # do more research, so one iteration is always enough.
             session.max_iters = 1
+            # I8: the wrap-up turn is exempt from the wall-clock deadline
+            # -- reaching it is the entire point of the deadline, and a
+            # pass that timed out has an even better reason than a
+            # cap-hit one to be asked for the report the transcript
+            # already holds. One iteration, so the exemption can't extend
+            # the night by more than a single provider call.
+            guard.enforcing = False
             text = session.run_turn(CORRECTIVE_PROMPT)
             if text.startswith("(llm error:"):
                 return self._fail(
@@ -449,7 +553,7 @@ class Reflector:
             # actionable for the user to act on at 4am, and paging them for
             # a broken-LLM night would just be noise they'd learn to ignore.
             subject, full_body = events.daily_report(
-                date=et_date, summary=summary, body=body)
+                account=c.account, date=et_date, summary=summary, body=body)
             # Push failure must never fail the *run* -- the report is
             # already durably stored above; a dead notification channel is
             # a notify-layer problem, not a reflection-layer one. The bool
@@ -475,7 +579,8 @@ class Reflector:
             trades=self._trades_today(et_date),
             observations=self._observations_today(et_date),
             positions=self._positions_with_change(),
-            pending_counts=self._pending_counts())
+            pending_counts=self._pending_counts(),
+            account=self.components.account)
 
     def _strategies_today(self) -> list[dict]:
         try:

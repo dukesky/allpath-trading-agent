@@ -261,9 +261,12 @@ class _FakeRunConsolidator:
 
 
 def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
-    def fake_run_daemon(sentinel_factory, interval, daily_job=None, app_state=None,
-                        journal=None, broker=None):
+    # shadow-dual-active T4: run_daemon's first positional param is now
+    # `get_accounts` (a callable returning the current accounts dict), not
+    # a single sentinel factory -- see scheduler.run_daemon's own docstring.
+    def fake_run_daemon(get_accounts, interval, daily_job=None, app_state=None):
         captured["daily_job"] = daily_job
+        captured["get_accounts"] = get_accounts
         if daily_job is not None:
             daily_job()
 
@@ -272,7 +275,8 @@ def _patch_run_daemon_to_call_daily_job(monkeypatch, captured):
 
 def _fake_run_components(reflector=None, consolidator=None, daily_reflection=True,
                          daily_consolidation=True, notifier=None, journal=None,
-                         queue=None, observations=None, app_state=None):
+                         queue=None, observations=None, app_state=None,
+                         strategies=None):
     from types import SimpleNamespace
 
     from tests.test_scheduler import (
@@ -281,20 +285,37 @@ def _fake_run_components(reflector=None, consolidator=None, daily_reflection=Tru
         FakeJournal,
         FakeObservations,
         FakeQueue,
+        FakeSchedulerBroker,
+        FakeStrategies,
     )
 
-    return SimpleNamespace(
-        strategies=None, sentinel=None, broker=None,
+    shared_app_state = app_state if app_state is not None else FakeAppState()
+    account_bundle = SimpleNamespace(
+        strategies=strategies if strategies is not None else FakeStrategies(),
+        sentinel=None, broker=FakeSchedulerBroker(),
         queue=queue if queue is not None else FakeQueue(),
         journal=journal if journal is not None else FakeJournal(),
-        app_state=app_state if app_state is not None else FakeAppState(),
-        notifier=notifier if notifier is not None else DigestNotifier(),
         observations=observations if observations is not None else FakeObservations(),
+        reflector=reflector, consolidator=consolidator)
+    return SimpleNamespace(
+        strategies=account_bundle.strategies, sentinel=None, broker=account_bundle.broker,
+        queue=account_bundle.queue, journal=account_bundle.journal,
+        app_state=shared_app_state,
+        notifier=notifier if notifier is not None else DigestNotifier(),
+        observations=account_bundle.observations,
         # `_llm_cost_line`'s only touch point -- empty by default (no LLM
         # usage recorded), same as every test here before this feature
         # existed (no cost line in the digest).
-        llm_usage=SimpleNamespace(summary=lambda days: []),
+        llm_usage=SimpleNamespace(summary_for_day=lambda date_utc=None: []),
         reflector=reflector, consolidator=consolidator,
+        # shadow-dual-active T4: `run_daily_jobs` now iterates
+        # `components.accounts` -- a single-account (paper-only) dict is
+        # enough for these CLI-parity tests, which only care that `run`
+        # wires digest/reflection/consolidation through the shared
+        # scheduler.run_daily_jobs helper the same way build_jobs does
+        # (that per-account behavior itself is covered by
+        # test_scheduler.py).
+        accounts={"paper": account_bundle},
         settings=SimpleNamespace(daily_reflection=daily_reflection,
                                  daily_consolidation=daily_consolidation))
 
@@ -318,7 +339,7 @@ def test_run_daily_job_runs_reflection_before_consolidation_isolated(
     # a broken reflection must not silently swallow consolidation.
     assert reflector.calls == 1
     assert consolidator.calls == 1
-    assert "[reflection] failed" in capsys.readouterr().err
+    assert "[reflection:paper] failed" in capsys.readouterr().err
 
 
 def test_run_daily_job_skips_reflection_when_setting_disabled(tmp_path, monkeypatch):
@@ -414,6 +435,49 @@ def test_run_daily_job_digest_deduped_across_a_simulated_restart(tmp_path, monke
     main(["run"], broker_factory=lambda settings: FakeBroker())
 
     assert len(notifier.sent) == 1
+
+
+def test_run_wires_both_accounts_to_the_daemon(tmp_path, monkeypatch):
+    # shadow-dual-active T4 review Minor 6: cli.py's `run` command passes
+    # `lambda: components.accounts` straight through to run_daemon's
+    # `get_accounts` param -- this pins that wiring against a regression
+    # that narrows it back down to a single hardcoded account (e.g.
+    # `{"paper": components.accounts["paper"]}`), which would silently
+    # stop shadow's sentinel pass and nightly chain from ever running
+    # under the headless `run` daemon even though `serve`'s build_jobs
+    # still covered both accounts.
+    monkeypatch.chdir(tmp_path)
+    from types import SimpleNamespace
+
+    from tests.test_scheduler import (
+        FakeJournal,
+        FakeObservations,
+        FakeQueue,
+        FakeSchedulerBroker,
+        FakeStrategies,
+    )
+
+    fake_components = _fake_run_components()
+    shadow_bundle = SimpleNamespace(
+        strategies=FakeStrategies(), sentinel=None, broker=FakeSchedulerBroker(),
+        queue=FakeQueue(), journal=FakeJournal(), observations=FakeObservations(),
+        reflector=None, consolidator=None)
+    # `.accounts` is the only thing this test cares about -- everything
+    # else on `fake_components` stays exactly what `_fake_run_components`
+    # already builds for the other `run`-parity tests above.
+    fake_components.accounts = {**fake_components.accounts, "shadow": shadow_bundle}
+    monkeypatch.setattr("allpath_trade.app.build_components",
+                        lambda settings, broker=None: fake_components)
+    captured = {}
+    _patch_run_daemon_to_call_daily_job(monkeypatch, captured)
+
+    main(["run"], broker_factory=lambda settings: FakeBroker())
+
+    assert "get_accounts" in captured
+    accounts = captured["get_accounts"]()
+    assert set(accounts) == {"paper", "shadow"}
+    assert accounts["shadow"] is shadow_bundle
+    assert accounts["paper"] is fake_components.accounts["paper"]
 
 
 class SpyCompactor:
@@ -594,3 +658,192 @@ def test_chat_consolidation_survives_a_mid_session_compaction(tmp_path, monkeypa
         "post-chat consolidation never ran -- the stale initial_len slice "
         "silently dropped this session's only new turn")
     assert "dividends" in memory_file.read_text()
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T5: `--account paper|shadow` on account-scoped commands.
+# ---------------------------------------------------------------------------
+
+PAPER_STRAT = """
+name: "Paper strat PAPRSTRATMARK"
+status: active
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+SHADOW_STRAT = """
+name: "Shadow strat SHDWSTRATMARK"
+status: active
+position: {ticker: TSLA, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 50", action: "sell all"}
+"""
+
+
+def test_account_flag_defaults_to_paper(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    (tmp_path / "strategies" / "paper" / "p.yaml").write_text(PAPER_STRAT)
+
+    code = main(["strategies"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "PAPRSTRATMARK" in out
+
+
+def test_account_flag_scopes_strategies_command(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    (tmp_path / "strategies" / "shadow").mkdir(parents=True)
+    (tmp_path / "strategies" / "paper" / "p.yaml").write_text(PAPER_STRAT)
+    (tmp_path / "strategies" / "shadow" / "s.yaml").write_text(SHADOW_STRAT)
+
+    code = main(["strategies", "--account", "shadow"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "SHDWSTRATMARK" in out
+    assert "PAPRSTRATMARK" not in out
+
+    code = main(["strategies", "--account", "paper"])
+    out = capsys.readouterr().out
+    assert "PAPRSTRATMARK" in out
+    assert "SHDWSTRATMARK" not in out
+
+
+def test_account_flag_scopes_reviews_list(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+
+    conn = connect(tmp_path / "allpath-trade.db")
+    paper_q = ReviewQueue(conn, None)
+    shadow_q = ReviewQueue(conn, None, account="shadow")
+    paper_q.add(strategy_id="s1", rule_id="r1", ticker="AAPL", rule_type="soft",
+               condition="c", action="PAPRACTIONMARK", snapshot={}, intent=None)
+    shadow_q.add(strategy_id="s2", rule_id="r2", ticker="TSLA", rule_type="soft",
+                condition="c", action="SHDWACTIONMARK", snapshot={}, intent=None)
+    conn.close()
+
+    code = main(["reviews", "--account", "shadow", "list"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "SHDWACTIONMARK" in out
+    assert "PAPRACTIONMARK" not in out
+
+    code = main(["reviews", "list"])
+    out = capsys.readouterr().out
+    assert "PAPRACTIONMARK" in out
+    assert "SHDWACTIONMARK" not in out
+
+
+def test_status_account_flag_shows_shadow_ledger_not_paper_broker(tmp_path, capsys, monkeypatch):
+    # `broker_factory` always stands in for PAPER's own broker construction
+    # (see `_build_broker`) -- `--account shadow` must still report the
+    # real ShadowLedger (name="shadow"), never the injected fake.
+    monkeypatch.chdir(tmp_path)
+    code = main(["status", "--account", "shadow"],
+               broker_factory=lambda settings: FakeBroker())
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "[shadow" in out
+    assert "[fake" not in out
+
+
+def test_status_account_flag_paper_still_uses_the_injected_broker(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    code = main(["status"], broker_factory=lambda settings: FakeBroker())
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "[fake" in out
+
+
+def test_account_flag_scopes_rearm(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    (tmp_path / "strategies" / "shadow").mkdir(parents=True)
+    (tmp_path / "strategies" / "shadow" / "s.yaml").write_text(SHADOW_STRAT)
+
+    code = main(["rearm", "--account", "shadow", "s", "r1"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "re-armed" in out
+
+    # The same strategy id doesn't exist on paper's own side.
+    code = main(["rearm", "--account", "paper", "s", "r1"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "not found" in err
+
+
+def test_chat_account_flag_scopes_conversations_search_and_system_prompt(
+        tmp_path, monkeypatch):
+    """shadow-dual-active T5 review Critical: `cmd_chat` used to build
+    `ConversationStore(components.conn)` and `SessionSearch(components.conn)`
+    with no `account=` at all -- both silently defaulted to DEFAULT_ACCOUNT
+    ("paper") regardless of which account's bundle `_cli_chat_bundle` handed
+    in. A `cli chat --account shadow` turn landed in paper's `conversations`
+    table (which paper's web chat would then resume as its own history),
+    and the shadow terminal agent's own `session_search` tool read paper's
+    FTS index straight into its context. This also pins Important 3: the
+    terminal agent's system prompt must carry the shadow account section
+    (`build_system_prompt(..., account="shadow")`), matching
+    `ChatService._build`'s own `account=self.account`.
+    """
+    from allpath_trade.agent import loop as loop_mod
+    from allpath_trade.app import build_components
+    from allpath_trade.cli import _cli_chat_bundle
+    from allpath_trade.llm.base import LLMResponse
+    from allpath_trade.memory import search as search_mod
+    from tests.test_agent_loop import ScriptedLLM
+
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory",
+                        openrouter_api_key="k")
+    settings.strategies_dir.mkdir()
+    llm = ScriptedLLM([LLMResponse(text="hi there")])
+    monkeypatch.setattr("allpath_trade.llm.factory.build_llm",
+                        lambda settings, tier="chat", usage_store=None: llm)
+    components = build_components(settings, broker=FakeBroker())
+
+    # Spy on SessionSearch so the test can inspect what `.account` the one
+    # cmd_chat actually wires into the memory-search tool was built with,
+    # without needing a real search call.
+    captured: dict = {}
+    RealSessionSearch = search_mod.SessionSearch
+
+    class SpySessionSearch(RealSessionSearch):
+        def __init__(self, conn, account="paper"):
+            super().__init__(conn, account=account)
+            captured["search"] = self
+
+    monkeypatch.setattr("allpath_trade.memory.search.SessionSearch", SpySessionSearch)
+
+    # Same idea for AgentSession, to capture the assembled system prompt --
+    # cmd_chat never returns the session object itself.
+    RealAgentSession = loop_mod.AgentSession
+
+    class SpyAgentSession(RealAgentSession):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            captured["system_prompt"] = self.system_prompt
+
+    monkeypatch.setattr("allpath_trade.agent.loop.AgentSession", SpyAgentSession)
+
+    bundle = _cli_chat_bundle(components, "shadow")
+    inputs = iter(["hello", "/exit"])
+    code = cmd_chat(bundle, llm, new=False, account="shadow",
+                    input_fn=lambda prompt="": next(inputs))
+
+    assert code == 0
+
+    # Every conversations row this turn created landed under account
+    # "shadow", not the DEFAULT_ACCOUNT ("paper") ConversationStore() would
+    # have silently defaulted to.
+    rows = components.conn.execute("SELECT account FROM conversations").fetchall()
+    assert rows
+    assert all(row["account"] == "shadow" for row in rows)
+
+    assert captured["search"].account == "shadow"
+    assert "ACCOUNT: shadow" in captured["system_prompt"]

@@ -638,3 +638,151 @@ def test_confirm_page_omits_draft_status_hint_when_landing_active(client):
     rid = queue_revision(client)  # status: active on both sides
     body = client.get(approve_url(rid), params={"k": rid.token}).text
     assert DRAFT_HINT not in body
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T5 (row-bound, CARRIED from T4's review): a shadow
+# row's /a/ link must resolve through SHADOW's own queue/executor, not
+# paper's -- the approve-link surface has no session/cookie at all, so
+# there is no "current view" to accidentally fall back to; this is exactly
+# the bug T4's review flagged as blocking merge until T5 landed.
+# ---------------------------------------------------------------------------
+
+def queue_shadow_order(client, **over):
+    q = client.app.state.holder.get().accounts["shadow"].queue
+    kwargs = {"strategy_id": "s1", "rule_id": "r1", "ticker": "AAPL",
+              "rule_type": "soft", "condition": "price < 100",
+              "action": "sell all", "snapshot": {"price": "99"},
+              "intent": OrderIntent(ticker="AAPL", side=OrderSide.SELL,
+                                    qty="1", reason="rule r1")}
+    kwargs.update(over)
+    return q.add(**kwargs)
+
+
+def test_confirm_page_shows_the_rows_own_account_chip(client):
+    rid = queue_shadow_order(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert 'class="chip chip-shadow"' in body
+    assert ">Shadow<" in body
+
+
+def test_approve_link_for_a_shadow_row_resolves_through_shadow_queue(client, monkeypatch):
+    from unittest.mock import Mock
+
+    from allpath_trade.store.reviews import ReviewError
+
+    shadow_bundle = client.app.state.holder.get().accounts["shadow"]
+    result = ExecutionResult(submitted=True, decision=RiskDecision(approved=True), order=None)
+    spy = Mock(return_value=result)
+    monkeypatch.setattr(shadow_bundle.executor, "execute", spy)
+
+    rid = queue_shadow_order(client)
+    r = client.post(f"/a/{rid}/approve", data={"k": rid.token})
+
+    assert r.status_code == 200
+    # C3: nothing was routed anywhere -- the shadow "executor" only wrote a
+    # ledger row, so this surface must not say "submitted" either.
+    assert "Order recorded in your shadow ledger" in r.text
+    assert "submitted" not in r.text
+    spy.assert_called_once()
+    assert shadow_bundle.queue.get(rid)["status"] == "approved"
+    # Paper's own queue never saw this id at all -- it belongs to shadow.
+    with pytest.raises(ReviewError):
+        client.app.state.holder.get().queue.get(rid)
+
+
+def test_approve_link_for_a_paper_row_still_works_unchanged(client):
+    # Symmetric sanity check: the row-bound rewrite must not have broken
+    # the ordinary (paper) case every other test in this file exercises.
+    rid = queue_one(client)
+    r = client.post(f"/a/{rid}/approve", data={"k": rid.token})
+    assert r.status_code == 200
+    assert client.app.state.holder.get().queue.get(rid)["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: shadow_edit rows on the approve-link surface
+# (source="chat", always -- a shadow edit is always user-initiated). Uses
+# `client` (logged-in, real shadow ShadowLedger via build_components).
+# ---------------------------------------------------------------------------
+
+def queue_shadow_edit(client, **over):
+    from allpath_trade.agent.shadow_tools import cash_snapshot
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = cash_snapshot(b.broker)
+    kwargs = {"op": "set_cash", "ticker": "", "action": "Set cash",
+              "args": {"amount": "444"}, "before": before,
+              "after": {"cash": "444"}}
+    kwargs.update(over)
+    return b.queue.add_shadow_edit(**kwargs)
+
+
+def test_confirm_page_shows_shadow_edit_before_after(client):
+    rid = queue_shadow_edit(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "Set cash" in body
+    assert "444" in body
+    assert_english_only(body)
+
+
+def test_confirm_page_shows_shadow_chip_for_a_shadow_edit(client):
+    rid = queue_shadow_edit(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert 'class="chip chip-shadow"' in body
+
+
+def test_post_approve_shadow_edit_applies_to_the_ledger(client):
+    rid = queue_shadow_edit(client)
+    b = client.app.state.holder.get().accounts["shadow"]
+
+    r = client.post(f"{approve_url(rid)}/approve", data={"k": rid.token})
+
+    assert r.status_code == 200
+    assert "applied to the shadow ledger" in r.text
+    assert b.broker.get_account().cash == 444
+    assert b.queue.get(rid)["status"] == "approved"
+
+
+def test_post_reject_shadow_edit_leaves_ledger_untouched(client):
+    rid = queue_shadow_edit(client)
+    b = client.app.state.holder.get().accounts["shadow"]
+    before_cash = b.broker.get_account().cash
+
+    r = client.post(f"{approve_url(rid)}/reject", data={"k": rid.token})
+
+    assert r.status_code == 200
+    assert b.broker.get_account().cash == before_cash
+    assert b.queue.get(rid)["status"] == "rejected"
+
+
+def test_confirm_page_warns_when_shadow_edit_has_gone_stale(client):
+    # M4: the applier's own staleness check compares the CURRENT ledger
+    # state to the proposal's recorded `before` -- the confirm page must
+    # show the exact same warning strategy_revision's confirm page already
+    # gets, computed via current_shadow_state (the SAME snapshot lookup
+    # apply_shadow_edit_factory uses).
+    rid = queue_shadow_edit(client, before={"cash": "999999"})  # never real
+
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+
+    assert "changed since this proposal" in body
+
+
+def test_confirm_page_no_stale_warning_when_shadow_edit_is_fresh(client):
+    rid = queue_shadow_edit(client)  # before == actual current cash snapshot
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "changed since this proposal" not in body
+
+
+def test_post_approve_stale_shadow_edit_says_ledger_change_not_revision(client):
+    # M3: apply_shadow_edit_factory raises the exact same
+    # RevisionValidationError strategy_revision's applier does -- this
+    # unauthenticated one-click surface must not call a ledger edit a
+    # "Revision".
+    rid = queue_shadow_edit(client, before={"cash": "999999"})
+
+    r = client.post(f"{approve_url(rid)}/approve", data={"k": rid.token})
+
+    assert "Ledger change failed re-validation" in r.text
+    assert "Revision failed re-validation" not in r.text

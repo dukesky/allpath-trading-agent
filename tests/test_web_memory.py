@@ -40,8 +40,17 @@ def test_memory_page_is_english_only(client):
     assert_english_only(client.get("/memory").text)
 
 
+def _main_content(body: str) -> str:
+    # shadow-dual-active T5: `<nav>` now legitimately carries its own
+    # `<form>` (the global account switcher, base.html) on every page --
+    # scoping the "no edit controls" checks to `<main>` keeps proving what
+    # they're actually meant to (the memory PAGE's own content has no
+    # write path), without a false failure over unrelated nav chrome.
+    return body.split("<main>", 1)[1].split("</main>", 1)[0]
+
+
 def test_page_has_no_edit_controls(client):
-    body = client.get("/memory").text.lower()
+    body = _main_content(client.get("/memory").text.lower())
     assert "<textarea" not in body
     assert "delete" not in body
     assert "<form" not in body
@@ -93,7 +102,7 @@ def test_stray_file_with_invalid_key_name_is_skipped(client):
     # every write. The route must skip the bad file, not 500 the page.
     c = client.app.state.holder.get()
     c.memory.apply("stock", "aapl", "add", text="strong cash flow")
-    stray = c.memory.root / "stocks" / "stray backup.md"
+    stray = c.memory.root / c.memory.account / "stocks" / "stray backup.md"
     stray.write_text("not a valid key")
     r = client.get("/memory?tab=stock")
     assert r.status_code == 200
@@ -210,7 +219,7 @@ def test_memory_page_with_tabs_has_no_edit_controls(client):
     c.memory.apply("stock", "aapl", "add", text="stock content")
     # Check all tabs for edit controls
     for tab in ["profile", "strategy", "stock", "lesson", "changes"]:
-        body = client.get(f"/memory?tab={tab}").text.lower()
+        body = _main_content(client.get(f"/memory?tab={tab}").text.lower())
         assert "<textarea" not in body
         assert "delete" not in body
         assert "<form" not in body

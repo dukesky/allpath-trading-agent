@@ -3,6 +3,16 @@ from __future__ import annotations
 import sqlite3
 
 SENTINEL_HEARTBEAT_KEY = "sentinel_last_pass"
+# I7: written (per account, `sentinel_last_ok:{account}`) ONLY after that
+# account's `sentinel.run_once()` returns without raising -- the companion
+# to SENTINEL_HEARTBEAT_KEY, which is written BEFORE the check runs and so
+# only ever proved the scheduler was alive. Without this pair, a sentinel
+# raising on every tick (dead data source, bad credentials) left the
+# dashboard reporting a perfectly fresh "last check 0m ago" while nothing
+# had actually been evaluated for hours. The dashboard compares the two:
+# `last_ok` missing, or lagging `last_pass` by more than one interval, is
+# the warning condition (see sentinel_heartbeat_status).
+SENTINEL_LAST_OK_KEY = "sentinel_last_ok"
 # Written alongside SENTINEL_HEARTBEAT_KEY on every scheduler tick, market
 # open or closed -- "true"/"false" -- so a reader of the heartbeat can tell
 # a real sentinel evaluation from a tick where the daemon proved it was
@@ -24,6 +34,16 @@ TELEGRAM_OFFSET_KEY = "telegram_update_offset"
 # belt-and-suspenders against a forwarded/anonymous-admin message inside the
 # right chat but from the wrong sender.
 TELEGRAM_USER_ID_KEY = "telegram_user_id"
+
+# shadow-dual-active T5: which account ("paper"/"shadow") the ONE paired
+# Telegram chat currently talks to -- switched via the `/account` command
+# (inline Paper/Shadow buttons), independent of the web UI's own `account`
+# cookie (spec: "手机和电脑各自有上下文"). Unset (a fresh pairing, or a
+# pre-T5 pairing that predates this key) reads as "shadow" -- the spec's
+# chosen default for the Telegram surface -- via TelegramPoller's own
+# fallback, not a default baked in here, since this module has no opinion on
+# which account string is valid (that's store/accounts.py's job).
+TELEGRAM_ACCOUNT_KEY = "telegram_account"
 
 
 class AppState:

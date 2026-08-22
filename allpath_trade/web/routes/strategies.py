@@ -12,6 +12,8 @@ from allpath_trade.strategy.loader import (
     parse_strategy_text,
 )
 from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
+from allpath_trade.web.account_ctx import bundle
+from allpath_trade.web.deps import components
 from allpath_trade.web.routes import dashboard as dashboard_route
 from allpath_trade.web.routes.dashboard import (
     cached_quote,
@@ -62,7 +64,7 @@ def _chips_by_id(c, docs: list[StrategyDoc]) -> dict[str, list[str]]:
     return {doc.id: _lifecycle_chips(doc, doc.id in pending_strategy_ids) for doc in docs}
 
 
-def _cards_by_id(c, docs: list[StrategyDoc]) -> dict[str, dict]:
+def _cards_by_id(data, docs: list[StrategyDoc]) -> dict[str, dict]:
     """Price + signed day-change per card, reusing the dashboard's own
     cached-quote lookup and summarize_strategy shape rather than
     duplicating either (see dashboard.py's cached_quote/summarize_strategy
@@ -72,7 +74,13 @@ def _cards_by_id(c, docs: list[StrategyDoc]) -> dict[str, dict]:
     whole and let the template pick the fields it needs, same as the
     dashboard card does. No position/equity here: this page has no broker
     call of its own, and weight-vs-target isn't part of this card's design
-    (see strategies.html)."""
+    (see strategies.html).
+
+    `data` (shadow-dual-active T5): the data SOURCE, not an account bundle
+    -- `Components.data` is genuinely shared across both accounts (see
+    account_ctx.bundle_for's docstring), so callers pass
+    `components(request).data` directly rather than either account
+    bundle's own `.data` reference."""
     # Read at call time, not bound at import -- dashboard_route.py documents
     # QUOTES_BUDGET_SECONDS as a module attribute tests monkeypatch to a
     # tiny value (see its own docstring), which only works if callers look
@@ -81,7 +89,7 @@ def _cards_by_id(c, docs: list[StrategyDoc]) -> dict[str, dict]:
     quote_deadline = time.monotonic() + dashboard_route.QUOTES_BUDGET_SECONDS
     cards = {}
     for doc in docs:
-        quote = (cached_quote(c.data, doc.position.ticker)
+        quote = (cached_quote(data, doc.position.ticker)
                  if time.monotonic() < quote_deadline else None)
         cards[doc.id] = summarize_strategy(doc, None, quote)
     return cards
@@ -98,7 +106,7 @@ def _find_doc(c, strategy_id: str) -> StrategyDoc | None:
     return None
 
 
-def _not_found(request: Request, c, message: str) -> HTMLResponse:
+def _not_found(request: Request, b, message: str) -> HTMLResponse:
     # Every other "resource not found" outcome on this page stays inside the
     # app chrome (this module's own rearm redirects, reviews.py's
     # _back_to_reviews) -- raising a bare HTTPException here was the one
@@ -109,27 +117,29 @@ def _not_found(request: Request, c, message: str) -> HTMLResponse:
     # -- unlike the POST-only rearm cases below, a GET to a missing resource
     # should still answer 404, just from inside the app's own template.
     errors: list[str] = []
-    docs = c.strategies.load_all(status=None, errors=errors)
+    docs = b.strategies.load_all(status=None, errors=errors)
     return templates.TemplateResponse(request, "strategies.html", {
         "page": "strategies", "docs": docs, "errors": errors,
-        "chips": _chips_by_id(c, docs), "cards": _cards_by_id(c, docs),
-        "error": message, **nav_context(c)}, status_code=404)
+        "chips": _chips_by_id(b, docs),
+        "cards": _cards_by_id(components(request).data, docs),
+        "error": message, **nav_context(request)}, status_code=404)
 
 
 @router.get("/strategies", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
-    c = request.app.state.holder.get()
+    b = bundle(request)
     errors: list[str] = []
-    docs = c.strategies.load_all(status=None, errors=errors)
+    docs = b.strategies.load_all(status=None, errors=errors)
     return templates.TemplateResponse(request, "strategies.html", {
         "page": "strategies", "docs": docs, "errors": errors,
-        "chips": _chips_by_id(c, docs), "cards": _cards_by_id(c, docs),
-        "error": request.query_params.get("error"), **nav_context(c)})
+        "chips": _chips_by_id(b, docs),
+        "cards": _cards_by_id(components(request).data, docs),
+        "error": request.query_params.get("error"), **nav_context(request)})
 
 
 @router.get("/strategies/{strategy_id}", response_class=HTMLResponse)
 def detail(request: Request, strategy_id: str) -> HTMLResponse:
-    c = request.app.state.holder.get()
+    c = bundle(request)
     if not is_valid_strategy_id(strategy_id):
         return _not_found(request, c, "Strategy not found")
     # A strategy whose YAML is missing, unparseable, or fails validation is
@@ -153,12 +163,12 @@ def detail(request: Request, strategy_id: str) -> HTMLResponse:
         "yaml_text": path.read_text() if path.exists() else "",
         "versions": c.strategies.versions(strategy_id)[:_MAX_VERSIONS_SHOWN],
         "pending_revisions": pending_revisions,
-        "error": request.query_params.get("error"), **nav_context(c)})
+        "error": request.query_params.get("error"), **nav_context(request)})
 
 
 @router.post("/strategies/{strategy_id}/notify-email")
 def toggle_notify_email(request: Request, strategy_id: str) -> Response:
-    c = request.app.state.holder.get()
+    c = bundle(request)
     if not is_valid_strategy_id(strategy_id):
         return _not_found(request, c, "Strategy not found")
     # Same existence check the detail page uses -- an id that is well-formed
@@ -184,7 +194,7 @@ def toggle_notify_email(request: Request, strategy_id: str) -> Response:
 
 @router.post("/strategies/{strategy_id}/status")
 def change_status(request: Request, strategy_id: str, to: str = Form("")) -> Response:
-    c = request.app.state.holder.get()
+    c = bundle(request)
     if not is_valid_strategy_id(strategy_id):
         return _not_found(request, c, "Strategy not found")
     # Same id-gate -> find-doc -> 404 shape as notify_email's toggle above,
@@ -232,7 +242,7 @@ def change_status(request: Request, strategy_id: str, to: str = Form("")) -> Res
 
 @router.post("/strategies/{strategy_id}/rules/{rule_id}/rearm")
 def rearm(request: Request, strategy_id: str, rule_id: str) -> Response:
-    c = request.app.state.holder.get()
+    c = bundle(request)
     if not is_valid_strategy_id(strategy_id):
         return _not_found(request, c, "Strategy not found")
     # set_rule_state is a raw upsert keyed on (strategy_id, rule_id) with no

@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from allpath_trade.agent.tools import fence_external
 from allpath_trade.memory.search import SessionSearch
 from allpath_trade.store.conversations import ConversationStore
@@ -148,3 +150,93 @@ def test_a_system_note_is_indexed_by_its_readable_display_text(tmp_path):
         "SELECT content FROM search_index WHERE kind = 'turn'").fetchone()
     assert row["content"] == line
     assert "external-content" not in row["content"]
+
+
+# --- shadow-dual-active T1: account scoping -------------------------------
+
+def test_two_account_interleave_isolated(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = ConversationStore(conn)
+    shadow = ConversationStore(conn, account="shadow")
+
+    pcid = paper.start()
+    scid = shadow.start()
+    paper.append(pcid, {"role": "user", "content": "paper turn"})
+    shadow.append(scid, {"role": "user", "content": "shadow turn"})
+
+    assert [m["content"] for m in paper.history(pcid)] == ["paper turn"]
+    assert [m["content"] for m in shadow.history(scid)] == ["shadow turn"]
+    # A conversation started under the other account is invisible to
+    # history/latest -- id collisions across accounts never leak turns.
+    assert paper.history(scid) == []
+    assert shadow.history(pcid) == []
+    assert paper.latest() == pcid
+    assert shadow.latest() == scid
+
+
+def test_append_to_foreign_account_conversation_raises(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = ConversationStore(conn)
+    shadow = ConversationStore(conn, account="shadow")
+    scid = shadow.start()
+    with pytest.raises(ValueError):
+        paper.append(scid, {"role": "user", "content": "should not land"})
+    assert shadow.history(scid) == []
+
+
+def test_turns_since_scoped_to_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = ConversationStore(conn)
+    shadow = ConversationStore(conn, account="shadow")
+    pcid = paper.start()
+    scid = shadow.start()
+    paper.append(pcid, {"role": "user", "content": "paper turn"})
+    shadow.append(scid, {"role": "user", "content": "shadow turn"})
+
+    paper_turns = paper.turns_since(0)
+    shadow_turns = shadow.turns_since(0)
+    assert [m["content"] for _tid, _kind, m in paper_turns] == ["paper turn"]
+    assert [m["content"] for _tid, _kind, m in shadow_turns] == ["shadow turn"]
+
+
+def test_summary_scoped_to_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = ConversationStore(conn)
+    shadow = ConversationStore(conn, account="shadow")
+    pcid = paper.start()
+    scid = shadow.start()
+    paper.set_summary(pcid, "paper summary", 1)
+
+    assert paper.summary(pcid) == ("paper summary", 1)
+    # shadow's instance can't read/overwrite paper's summary via its id.
+    assert shadow.summary(pcid) == ("", 0)
+    shadow.set_summary(pcid, "should not apply", 5)
+    assert paper.summary(pcid) == ("paper summary", 1)
+    assert shadow.summary(scid) == ("", 0)
+
+
+def test_legacy_conversations_row_defaults_account_paper_after_migration(tmp_path):
+    # Simulate a pre-shadow-dual-active database: `conversations` exists
+    # without an `account` column.
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " started_ts TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',"
+        " kind TEXT NOT NULL DEFAULT 'chat', summary TEXT NOT NULL DEFAULT '',"
+        " summarized_through INTEGER NOT NULL DEFAULT 0)")
+    raw.execute("INSERT INTO conversations (started_ts) VALUES ('2020-01-01T00:00:00+00:00')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT account FROM conversations").fetchone()
+    assert row["account"] == "paper"
+
+    store = ConversationStore(conn)
+    assert store.latest() is not None
+
+
+def test_constructor_rejects_invalid_account(tmp_path):
+    with pytest.raises(ValueError, match="invalid account"):
+        ConversationStore(connect(tmp_path / "t.db"), account="evil")

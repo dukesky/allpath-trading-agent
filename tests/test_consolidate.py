@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
 from allpath_trade.llm.base import LLMResponse
 from allpath_trade.memory.consolidate import Consolidator
@@ -222,9 +224,10 @@ def test_daily_consolidation_reads_web_turns_since_last_marker(tmp_path):
     assert "ladder into TSM" in prompt
     # both markers advanced: the observation marker (existing invariant)...
     assert any(r["source"] == "consolidator" for r in _obs_rows(c))
-    # ...and the new turn-id watermark in app_state.
-    from allpath_trade.memory.consolidate import TURN_MARKER_KEY
-    assert app_state.get(TURN_MARKER_KEY) is not None
+    # ...and the new turn-id watermark in app_state (per-account key --
+    # shadow-dual-active T4 -- `make()` below defaults to the paper account).
+    from allpath_trade.memory.consolidate import _turn_marker_key
+    assert app_state.get(_turn_marker_key("paper")) is not None
 
     # second run: nothing new since the marker -- no LLM call at all.
     c.llm = ScriptedLLM([])
@@ -282,7 +285,7 @@ def test_daily_consolidation_excludes_tool_messages_and_preserves_fencing(tmp_pa
 
 def test_daily_consolidation_llm_failure_leaves_both_markers_unmoved(tmp_path):
     from allpath_trade.llm.base import LLMError
-    from allpath_trade.memory.consolidate import TURN_MARKER_KEY
+    from allpath_trade.memory.consolidate import _turn_marker_key
 
     c, _memory, obs, convo, app_state = make(tmp_path, ScriptedLLM([LLMError("down")]))
     cid = convo.start()
@@ -292,7 +295,7 @@ def test_daily_consolidation_llm_failure_leaves_both_markers_unmoved(tmp_path):
 
     assert "failed" in out or "llm error" in out
     assert not any(r["source"] == "consolidator" for r in obs.recent())
-    assert app_state.get(TURN_MARKER_KEY) is None
+    assert app_state.get(_turn_marker_key("paper")) is None
 
     # same turn is re-offered on the next (successful) run
     c.llm = ScriptedLLM([LLMResponse(text="recovered")])
@@ -379,7 +382,7 @@ def test_daily_consolidation_marker_only_advances_past_turns_actually_sent(tmp_p
     # 3 turns, run once, and confirm the 3rd (dropped by the cap) still
     # shows up on the next run rather than being silently skipped.
     import allpath_trade.memory.consolidate as consolidate_module
-    from allpath_trade.memory.consolidate import TURN_MARKER_KEY
+    from allpath_trade.memory.consolidate import _turn_marker_key
 
     orig_cap = consolidate_module.TURN_LINES_CAP
     consolidate_module.TURN_LINES_CAP = 2
@@ -403,7 +406,7 @@ def test_daily_consolidation_marker_only_advances_past_turns_actually_sent(tmp_p
         assert out2 == "second batch"
         prompt2 = c.llm.seen[0][0]["content"]
         assert "newest turn" in prompt2  # picked up, not lost
-        assert app_state.get(TURN_MARKER_KEY) is not None
+        assert app_state.get(_turn_marker_key("paper")) is not None
     finally:
         consolidate_module.TURN_LINES_CAP = orig_cap
 
@@ -425,6 +428,44 @@ def test_consolidator_requires_app_state_when_conversations_given(tmp_path):
     except ValueError:
         raised = True
     assert raised
+
+
+# -- shadow-dual-active T4 review Minor 8: structural account-match guard --
+
+def test_consolidator_rejects_mismatched_observations_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn, account="shadow")
+    # Wrong account on purpose: paper's ObservationLog handed to a
+    # Consolidator that otherwise thinks it's shadow's.
+    obs = ObservationLog(conn, account="paper")
+    with pytest.raises(ValueError, match="observations is scoped to 'paper'"):
+        Consolidator(ScriptedLLM([]), memory, obs, TradeJournal(conn, account="shadow"),
+                     conn, account="shadow")
+
+
+def test_consolidator_rejects_mismatched_conversations_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn, account="shadow")
+    obs = ObservationLog(conn, account="shadow")
+    # Wrong account on purpose: paper's ConversationStore handed to a
+    # Consolidator that otherwise thinks it's shadow's.
+    convo = ConversationStore(conn, account="paper")
+    app_state = AppState(conn)
+    with pytest.raises(ValueError, match="conversations is scoped to 'paper'"):
+        Consolidator(ScriptedLLM([]), memory, obs, TradeJournal(conn, account="shadow"),
+                     conn, conversations=convo, app_state=app_state, account="shadow")
+
+
+def test_consolidator_accepts_matching_accounts_throughout(tmp_path):
+    # Sanity check the guard isn't over-strict: every store genuinely
+    # scoped to the same account must construct cleanly.
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn, account="shadow")
+    obs = ObservationLog(conn, account="shadow")
+    convo = ConversationStore(conn, account="shadow")
+    app_state = AppState(conn)
+    Consolidator(ScriptedLLM([]), memory, obs, TradeJournal(conn, account="shadow"),
+                 conn, conversations=convo, app_state=app_state, account="shadow")
 
 
 def test_system_note_echoes_are_excluded_from_turn_lines(tmp_path):
@@ -469,3 +510,82 @@ def test_run_daily_reports_truthfully_when_only_turn_marker_write_fails(tmp_path
     assert "consolidation failed" not in out
     # the observation marker (and thus the memory write) already landed
     assert any(r["source"] == "consolidator" for r in obs.recent())
+
+
+def test_turn_marker_seeds_paper_from_legacy_key_shadow_starts_at_zero(tmp_path):
+    # shadow-dual-active T4 CRITICAL carry: the pre-dual-active turn-id
+    # watermark lived under one global app_state key. Paper's new
+    # per-account key must fall back to that legacy value ONE TIME (until
+    # paper's own run_daily writes the new key); shadow has no legacy
+    # history and must start at 0 regardless of what the legacy key holds.
+    from allpath_trade.memory.consolidate import TURN_MARKER_KEY, _turn_marker_key
+
+    conn = connect(tmp_path / "db.sqlite")
+    app_state = AppState(conn)
+    app_state.set(TURN_MARKER_KEY, "42")  # pre-dual-active global watermark
+
+    paper = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="paper"),
+        ObservationLog(conn, account="paper"), TradeJournal(conn, account="paper"),
+        conn, conversations=ConversationStore(conn, account="paper"),
+        app_state=app_state, account="paper")
+    shadow = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="shadow"),
+        ObservationLog(conn, account="shadow"), TradeJournal(conn, account="shadow"),
+        conn, conversations=ConversationStore(conn, account="shadow"),
+        app_state=app_state, account="shadow")
+
+    assert paper._last_turn_marker() == 42  # seeded from the legacy key
+    assert shadow._last_turn_marker() == 0  # no legacy history for shadow
+
+    # Once paper's own per-account key is written, the legacy fallback is
+    # never consulted again even if the legacy key still holds a value.
+    app_state.set(_turn_marker_key("paper"), "100")
+    assert paper._last_turn_marker() == 100
+
+
+def test_turn_marker_legacy_key_is_migrated_then_deleted(tmp_path):
+    """Review Minor: the legacy seed must MIGRATE, not just read. Left in
+    place, the legacy row keeps shadowing the per-account key forever -- a
+    later reset of `consolidator_last_turn_id:paper` would silently
+    resurrect the stale global watermark and skip every turn below it."""
+    from allpath_trade.memory.consolidate import TURN_MARKER_KEY, _turn_marker_key
+
+    conn = connect(tmp_path / "db.sqlite")
+    app_state = AppState(conn)
+    app_state.set(TURN_MARKER_KEY, "42")
+
+    paper = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="paper"),
+        ObservationLog(conn, account="paper"), TradeJournal(conn, account="paper"),
+        conn, conversations=ConversationStore(conn, account="paper"),
+        app_state=app_state, account="paper")
+
+    assert paper._last_turn_marker() == 42
+    assert app_state.get(_turn_marker_key("paper")) == "42"   # carried over
+    assert app_state.get(TURN_MARKER_KEY) is None             # and cleaned up
+
+    # After a reset of the per-account key there is no legacy row left to
+    # resurrect: the account genuinely starts from 0.
+    app_state.delete(_turn_marker_key("paper"))
+    assert paper._last_turn_marker() == 0
+
+
+def test_turn_marker_migration_failure_still_returns_the_legacy_value(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    app_state = AppState(conn)
+    app_state.set("consolidator_last_turn_id", "7")
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("disk full")
+
+    app_state.set = boom
+    c = Consolidator(
+        ScriptedLLM([]), MemoryStore(tmp_path / "memory", conn, account="paper"),
+        ObservationLog(conn, account="paper"), TradeJournal(conn, account="paper"),
+        conn, conversations=ConversationStore(conn, account="paper"),
+        app_state=app_state, account="paper")
+
+    # A failed migration must degrade to "read the legacy value and carry
+    # on" -- never to re-consuming every turn from id 0.
+    assert c._last_turn_marker() == 7

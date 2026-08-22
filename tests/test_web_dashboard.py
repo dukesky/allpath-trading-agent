@@ -10,7 +10,11 @@ from fastapi.testclient import TestClient
 from allpath_trade.broker.base import Account, Position
 from allpath_trade.config import Settings
 from allpath_trade.data.base import Quote
-from allpath_trade.scheduler import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
+from allpath_trade.scheduler import (
+    SENTINEL_HEARTBEAT_KEY,
+    SENTINEL_LAST_OK_KEY,
+    SENTINEL_MARKET_OPEN_KEY,
+)
 from allpath_trade.strategy.model import (
     Authorization,
     PositionPlan,
@@ -465,7 +469,10 @@ def test_sentinel_heartbeat_status_never_ran_when_row_absent():
 
 def test_sentinel_heartbeat_status_shows_minutes_ago():
     raw = (_FROZEN_NOW - timedelta(minutes=12)).isoformat()
-    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    # I7: `last_ok_raw` -- the same tick's successful check, so the line
+    # keeps its plain "last check" copy (a lagging or missing last-ok is
+    # what changes it; see the I7 cases at the end of this section).
+    result = sentinel_heartbeat_status(raw, 60, last_ok_raw=raw, now=_FROZEN_NOW)
     assert result["text"] == "Sentinel: last check 12m ago · interval 60m"
     assert result["warn"] is False
 
@@ -478,7 +485,7 @@ def test_sentinel_heartbeat_status_warns_past_twice_the_interval():
 
 def test_sentinel_heartbeat_status_no_warn_at_exactly_twice_the_interval():
     raw = (_FROZEN_NOW - timedelta(minutes=120)).isoformat()  # exactly 2 * 60
-    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    result = sentinel_heartbeat_status(raw, 60, last_ok_raw=raw, now=_FROZEN_NOW)
     assert result["warn"] is False
 
 
@@ -488,7 +495,7 @@ def test_sentinel_heartbeat_status_tolerates_a_naive_timestamp():
     # dashboard -- treat it as UTC like every other timestamp in this
     # codebase (see fmt.ago).
     raw = (_FROZEN_NOW - timedelta(minutes=5)).replace(tzinfo=None).isoformat()
-    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    result = sentinel_heartbeat_status(raw, 60, last_ok_raw=raw, now=_FROZEN_NOW)
     assert result["text"] == "Sentinel: last check 5m ago · interval 60m"
 
 
@@ -498,7 +505,8 @@ def test_sentinel_heartbeat_status_tolerates_a_non_utc_offset():
     from zoneinfo import ZoneInfo
 
     et_time = _FROZEN_NOW.astimezone(ZoneInfo("America/New_York")) - timedelta(minutes=8)
-    result = sentinel_heartbeat_status(et_time.isoformat(), 60, now=_FROZEN_NOW)
+    result = sentinel_heartbeat_status(et_time.isoformat(), 60,
+                                       last_ok_raw=et_time.isoformat(), now=_FROZEN_NOW)
     assert result["text"] == "Sentinel: last check 8m ago · interval 60m"
 
 
@@ -519,7 +527,8 @@ def test_sentinel_heartbeat_status_market_closed_says_paused_not_checked():
 
 def test_sentinel_heartbeat_status_market_open_keeps_last_check_copy():
     raw = (_FROZEN_NOW - timedelta(minutes=5)).isoformat()
-    result = sentinel_heartbeat_status(raw, 60, market_open_raw="true", now=_FROZEN_NOW)
+    result = sentinel_heartbeat_status(raw, 60, market_open_raw="true",
+                                       last_ok_raw=raw, now=_FROZEN_NOW)
     assert result["text"] == "Sentinel: last check 5m ago · interval 60m"
 
 
@@ -528,7 +537,7 @@ def test_sentinel_heartbeat_status_missing_market_flag_keeps_last_check_copy():
     # caller that never set it) must not be misread as "market closed" --
     # default to today's copy rather than guessing.
     raw = (_FROZEN_NOW - timedelta(minutes=5)).isoformat()
-    result = sentinel_heartbeat_status(raw, 60, now=_FROZEN_NOW)
+    result = sentinel_heartbeat_status(raw, 60, last_ok_raw=raw, now=_FROZEN_NOW)
     assert result["text"] == "Sentinel: last check 5m ago · interval 60m"
 
 
@@ -538,6 +547,66 @@ def test_sentinel_heartbeat_status_staleness_warning_still_keys_off_tick_age_whe
     # daemon itself may have died) must still warn.
     raw = (_FROZEN_NOW - timedelta(minutes=200)).isoformat()
     result = sentinel_heartbeat_status(raw, 60, market_open_raw="false", now=_FROZEN_NOW)
+    assert result["warn"] is True
+
+
+# --- I7: sentinel_last_ok -- "the check ran", not just "the tick ran" ------
+
+def test_sentinel_heartbeat_status_warns_when_no_successful_check_recorded():
+    """I7: the heartbeat is written BEFORE run_once, so a sentinel raising
+    on every tick reads as a perfectly healthy "last check 0m ago". With no
+    successful pass on record the line must say so, and warn."""
+    raw = (_FROZEN_NOW - timedelta(minutes=1)).isoformat()
+    result = sentinel_heartbeat_status(raw, 15, last_ok_raw=None, now=_FROZEN_NOW)
+    assert result["warn"] is True
+    assert result["text"] == (
+        "Sentinel: last check 1m ago · no successful check recorded")
+
+
+def test_sentinel_heartbeat_status_warns_when_last_ok_lags_the_tick():
+    raw = (_FROZEN_NOW - timedelta(minutes=0)).isoformat()
+    last_ok = (_FROZEN_NOW - timedelta(minutes=47)).isoformat()
+    result = sentinel_heartbeat_status(raw, 15, last_ok_raw=last_ok, now=_FROZEN_NOW)
+    assert result["warn"] is True
+    assert result["text"] == "Sentinel: last check 0m ago · last successful 47m ago"
+
+
+def test_sentinel_heartbeat_status_tolerates_lag_within_one_interval():
+    # One interval of slack: a single failed pass between two ticks is
+    # normal transient noise (a flaky quote), not an alert.
+    raw = _FROZEN_NOW.isoformat()
+    last_ok = (_FROZEN_NOW - timedelta(minutes=15)).isoformat()
+    result = sentinel_heartbeat_status(raw, 15, last_ok_raw=last_ok, now=_FROZEN_NOW)
+    assert result["warn"] is False
+    assert result["text"] == "Sentinel: last check 0m ago · interval 15m"
+
+
+def test_sentinel_heartbeat_status_market_closed_ignores_a_lagging_last_ok():
+    # Outside market hours nothing is evaluated by design, so `last_ok`
+    # lagging is the expected state, not a fault -- warning every weekend
+    # would train the operator to ignore the warning that matters.
+    raw = (_FROZEN_NOW - timedelta(minutes=5)).isoformat()
+    last_ok = (_FROZEN_NOW - timedelta(hours=60)).isoformat()
+    result = sentinel_heartbeat_status(raw, 15, market_open_raw="false",
+                                       last_ok_raw=last_ok, now=_FROZEN_NOW)
+    assert result["warn"] is False
+    assert result["text"] == (
+        "Sentinel: monitoring paused (market closed) · last tick 5m ago")
+
+
+def test_sentinel_heartbeat_status_malformed_last_ok_reads_as_missing():
+    raw = _FROZEN_NOW.isoformat()
+    result = sentinel_heartbeat_status(raw, 15, last_ok_raw="not-a-timestamp",
+                                       now=_FROZEN_NOW)
+    assert result["warn"] is True
+    assert "no successful check recorded" in result["text"]
+
+
+def test_sentinel_heartbeat_status_stale_tick_still_warns_with_a_fresh_last_ok():
+    # The two warnings are independent: a dead daemon (stale tick) must
+    # warn even though its last recorded check succeeded.
+    raw = (_FROZEN_NOW - timedelta(minutes=200)).isoformat()
+    result = sentinel_heartbeat_status(raw, 60, last_ok_raw=raw, now=_FROZEN_NOW)
     assert result["warn"] is True
 
 
@@ -704,7 +773,11 @@ def test_dashboard_sentinel_heartbeat_shows_minutes_ago(client, monkeypatch):
     frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
+                    (frozen_now - timedelta(minutes=12)).isoformat())
+    # I7: that same tick's check succeeded, so the line keeps its plain
+    # "interval" copy rather than the last-successful warning.
+    c.app_state.set(f"{SENTINEL_LAST_OK_KEY}:paper",
                     (frozen_now - timedelta(minutes=12)).isoformat())
 
     body = client.get("/").text
@@ -719,7 +792,7 @@ def test_dashboard_sentinel_heartbeat_stale_carries_the_warn_class(client, monke
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
     # Default interval is 60min, so 2x is 120min -- 200min is well past it.
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
                     (frozen_now - timedelta(minutes=200)).isoformat())
 
     body = client.get("/").text
@@ -732,12 +805,34 @@ def test_dashboard_sentinel_heartbeat_recent_does_not_carry_the_warn_class(clien
     frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
+                    (frozen_now - timedelta(minutes=12)).isoformat())
+    c.app_state.set(f"{SENTINEL_LAST_OK_KEY}:paper",
                     (frozen_now - timedelta(minutes=12)).isoformat())
 
     body = client.get("/").text
 
     assert '<p class="muted">Sentinel: last check 12m ago' in body
+
+
+def test_dashboard_sentinel_heartbeat_warns_when_checks_keep_failing(
+        client, monkeypatch):
+    """I7, end to end: ticks are landing, but nothing has evaluated for
+    over two hours -- the page must say so instead of reporting a healthy
+    "last check 1m ago". (The app's default interval is 60m, so the
+    last-ok lag has to clear that one interval of slack.)"""
+    frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
+    c = client.app.state.holder.get()
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
+                    (frozen_now - timedelta(minutes=1)).isoformat())
+    c.app_state.set(f"{SENTINEL_LAST_OK_KEY}:paper",
+                    (frozen_now - timedelta(minutes=130)).isoformat())
+
+    body = client.get("/").text
+
+    assert '<p class="warn">Sentinel: last check 1m ago · last successful 130m ago' \
+        in body
 
 
 def test_dashboard_sentinel_heartbeat_shows_paused_copy_when_market_was_closed(
@@ -748,7 +843,7 @@ def test_dashboard_sentinel_heartbeat_shows_paused_copy_when_market_was_closed(
     frozen_now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)  # 2026-08-09 is a Sunday
     monkeypatch.setattr(dashboard_route, "_utcnow", lambda: frozen_now)
     c = client.app.state.holder.get()
-    c.app_state.set(SENTINEL_HEARTBEAT_KEY,
+    c.app_state.set(f"{SENTINEL_HEARTBEAT_KEY}:paper",
                     (frozen_now - timedelta(minutes=5)).isoformat())
     c.app_state.set(SENTINEL_MARKET_OPEN_KEY, "false")
 
@@ -933,16 +1028,60 @@ def test_equity_history_cache_retries_a_failure_well_before_the_success_ttl(
     monkeypatch.setattr(client.app.state.holder.get(), "broker", FailingEquityHistoryBroker())
     dashboard_route._equity_history_cache.clear()
     client.get("/")
-    ts, history = dashboard_route._equity_history_cache[dashboard_route._DEFAULT_RANGE]
+    cache_key = ("fake", dashboard_route._DEFAULT_RANGE)
+    ts, history = dashboard_route._equity_history_cache[cache_key]
     assert history == []
 
     # 31s back is past the 30s failure TTL but nowhere near the 5-minute
     # success TTL -- a genuine failure must not get to hide behind the long
     # TTL meant for a working chart.
-    dashboard_route._equity_history_cache[dashboard_route._DEFAULT_RANGE] = (ts - 31, history)
+    dashboard_route._equity_history_cache[cache_key] = (ts - 31, history)
     monkeypatch.setattr(client.app.state.holder.get(), "broker", EquityHistoryBroker())
     body = client.get("/").text
     assert "<polyline" in body
+
+
+# --- shadow-dual-active T4 review Important 4: keyed by (broker.name, range),
+# not range alone -- two brokers sharing one process (paper + shadow) must
+# never serve each other's cached equity curve. ------------------------------
+
+class _NamedEquityHistoryBroker(EquityHistoryBroker):
+    """Same canned history shape as EquityHistoryBroker, but with a
+    distinct `.name` and a distinct series -- so a cache-key collision
+    would be caught by the SERIES ending up wrong, not just by dict size."""
+
+    def __init__(self, name: str, offset: int) -> None:
+        super().__init__()
+        self.name = name
+        self._offset = offset
+
+    def get_equity_history(self, days):
+        base = datetime(2026, 8, 1, tzinfo=UTC)
+        return [(base + timedelta(days=i), Decimal(str(self._offset + i * 100)))
+                for i in range(5)]
+
+
+def test_equity_history_cache_keyed_by_broker_name_not_range_alone(client, monkeypatch):
+    dashboard_route._equity_history_cache.clear()
+    holder = client.app.state.holder
+
+    monkeypatch.setattr(holder.get(), "broker", _NamedEquityHistoryBroker("paper", 10000))
+    client.get("/")
+    monkeypatch.setattr(holder.get(), "broker", _NamedEquityHistoryBroker("shadow", 50000))
+    client.get("/")
+
+    assert len(dashboard_route._equity_history_cache) == 2
+    paper_key = ("paper", dashboard_route._DEFAULT_RANGE)
+    shadow_key = ("shadow", dashboard_route._DEFAULT_RANGE)
+    assert paper_key in dashboard_route._equity_history_cache
+    assert shadow_key in dashboard_route._equity_history_cache
+    _, paper_history = dashboard_route._equity_history_cache[paper_key]
+    _, shadow_history = dashboard_route._equity_history_cache[shadow_key]
+    # Distinct series prove shadow's render didn't reuse paper's cached
+    # entry (or vice versa) -- a same-key collision would leave one
+    # account's dashboard silently showing the other's equity curve.
+    assert paper_history[0][1] == Decimal(10000)
+    assert shadow_history[0][1] == Decimal(50000)
 
 
 # --- Minor 2: a one-point history hides the period-change headline ---------
@@ -1003,3 +1142,145 @@ def test_dashboard_range_query_param_name_is_unchanged(client, monkeypatch):
     dashboard_route._equity_history_cache.clear()
     body = client.get("/?range=1y").text
     assert '<a href="/?range=1y" class="tab-link on">Year</a>' in body
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T7: shadow empty-ledger guidance card and the
+# per-position "price as of" staleness column. Uses the real `client`
+# fixture (real build_components, so `accounts["shadow"]` is a real
+# ShadowLedger, same as test_web_settings.py's own shadow tests).
+# ---------------------------------------------------------------------------
+
+def test_dashboard_paper_never_shows_price_as_of_column(client):
+    # FakeBroker (the paper fixture's broker) always reports one AAPL
+    # position -- Alpaca's own live feed has no "last known, possibly
+    # stale" concept for this app to surface, so the column must not exist
+    # at all on paper's own dashboard render.
+    body = client.get("/").text
+    assert "Price as of" not in body
+
+
+def test_dashboard_shadow_empty_ledger_shows_guidance_card(client):
+    client.post("/account/switch", data={"account": "shadow"})
+
+    body = client.get("/").text
+
+    assert "Your shadow ledger has no positions yet." in body
+    assert "Import your positions" in body
+    assert 'href="/chat"' in body
+    assert 'href="/settings"' in body
+
+
+def test_dashboard_shadow_position_never_priced_shows_never_recorded(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    client.post("/account/switch", data={"account": "shadow"})
+
+    body = client.get("/").text
+
+    assert "Price as of" in body
+    assert "never recorded" in body
+
+
+def test_dashboard_shadow_position_stale_price_shows_price_as_of(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    stale_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+    with b.conn.transaction():
+        b.conn.execute("UPDATE shadow_positions SET last_price_ts = ? WHERE ticker = ?",
+                       (stale_ts, "AAPL"))
+    # A failing quote for this ticker so staleness isn't masked by a fresh
+    # live price -- FakeDataSource.fail below matches the "or quote failed"
+    # half of spec §⑧, independent of the stale timestamp itself.
+    client.app.state.holder.get().data.fail = True
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/").text
+
+    assert "Price as of" in body
+    assert "d ago" in body
+
+
+def test_dashboard_shadow_position_fresh_quote_and_recent_ts_shows_current(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    fresh_ts = datetime.now(UTC).isoformat()
+    with b.conn.transaction():
+        b.conn.execute("UPDATE shadow_positions SET last_price_ts = ? WHERE ticker = ?",
+                       (fresh_ts, "AAPL"))
+    # FakeDataSource (the client fixture's data source) succeeds by default.
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/").text
+
+    assert "Price as of" in body  # column exists on shadow...
+    assert "<td class=\"muted\">current</td>" in body  # ...but this row is fresh
+
+
+def test_dashboard_shadow_empty_ledger_guidance_card_is_english_only(client):
+    client.post("/account/switch", data={"account": "shadow"})
+    assert_english_only(client.get("/").text)
+
+
+def test_dashboard_shadow_stale_position_is_english_only(client):
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    client.post("/account/switch", data={"account": "shadow"})
+    assert_english_only(client.get("/").text)
+
+
+# ---------------------------------------------------------------------------
+# C3: the shadow dashboard's trades table is a ledger of orders the USER
+# placed (or still has to place) by hand -- nothing was ever submitted from
+# here, so neither the heading nor the timestamp column may say so.
+# ---------------------------------------------------------------------------
+
+def _record_shadow_trade(client):
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    journal = client.app.state.holder.get().accounts["shadow"].journal
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                         reason="dip buy")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                  notional=None, status=OrderStatus.FILLED, filled_qty=Decimal(1),
+                  filled_avg_price=Decimal("332.01"),
+                  submitted_at=datetime.now(UTC), filled_at=datetime.now(UTC))
+    journal.record(intent, RiskDecision(approved=True), order)
+
+
+def test_shadow_dashboard_trades_table_is_a_ledger_not_submissions(client):
+    _record_shadow_trade(client)
+    client.post("/account/switch", data={"account": "shadow"})
+
+    body = client.get("/").text
+
+    assert "Recent ledger entries" in body
+    assert "<th>Recorded</th>" in body
+    assert "Recent trades" not in body
+    assert "<th>Submitted</th>" not in body
+
+
+def test_paper_dashboard_trades_table_wording_is_unchanged(client):
+    from allpath_trade.broker.base import Order, OrderIntent, OrderSide, OrderStatus
+    from allpath_trade.risk.gate import RiskDecision
+
+    journal = client.app.state.holder.get().journal
+    intent = OrderIntent(ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                         reason="dip buy")
+    order = Order(id="o1", ticker="TSLA", side=OrderSide.BUY, qty=Decimal(1),
+                  notional=None, status=OrderStatus.FILLED, filled_qty=Decimal(1),
+                  filled_avg_price=Decimal("332.01"),
+                  submitted_at=datetime.now(UTC), filled_at=datetime.now(UTC))
+    journal.record(intent, RiskDecision(approved=True), order)
+
+    body = client.get("/").text
+
+    assert "Recent trades" in body
+    assert "<th>Submitted</th>" in body
+
+
+def test_shadow_dashboard_stays_english_only(client):
+    _record_shadow_trade(client)
+    client.post("/account/switch", data={"account": "shadow"})
+    assert_english_only(client.get("/").text)

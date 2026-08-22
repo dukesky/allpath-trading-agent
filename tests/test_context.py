@@ -130,3 +130,53 @@ def test_system_prompt_includes_memory_sections(tmp_path):
     assert "Prefers dividend stocks" in prompt
     assert "Earnings vol" in prompt          # AAPL is held + in strategy
     assert "unrelated ticker" not in prompt  # ZZZZ not relevant
+
+
+# -- shadow-dual-active T4 review Important 1: which account is this? ------
+
+def test_system_prompt_omits_account_section_when_not_given(tmp_path):
+    # No caller has been wired to a specific account bundle yet unless it
+    # opts in (chat/terminal are still Task 5's job) -- `account=None`
+    # (the default) must render nothing extra, not a broken/empty section.
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "ACCOUNT:" not in prompt
+
+
+def test_system_prompt_paper_account_section(tmp_path):
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None), account="paper")
+    assert "ACCOUNT: paper" in prompt
+    assert "Alpaca paper sandbox" in prompt
+    assert "actually executed (simulated)" in prompt
+    # Paper's wording must not carry shadow's "recorded, not executed"
+    # framing -- the two sections are mutually exclusive per prompt.
+    assert "LOCAL LEDGER" not in prompt
+
+
+def test_system_prompt_shadow_account_section(tmp_path):
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None), account="shadow")
+    assert "ACCOUNT: shadow" in prompt
+    assert "LOCAL LEDGER" in prompt
+    assert "user's real brokerage" in prompt
+    assert "RECORDED here" in prompt
+    assert "user executes them manually" in prompt
+    assert "place this order" in prompt
+    # Shadow's wording must not carry paper's "actually executed" framing.
+    assert "Alpaca paper sandbox" not in prompt

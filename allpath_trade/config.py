@@ -115,6 +115,19 @@ class Settings(BaseSettings):
     # unattended (no user to say "keep going" past LIMIT_NOTICE), so it gets
     # its own cap rather than sharing whatever a chat session happens to use.
     reflection_max_iters: int = Field(default=12, ge=1)
+    # I8: the reflection pass's WALL-CLOCK bound, the companion to the
+    # tool-call budget above. `reflection_max_iters` caps how many provider
+    # round-trips a pass may make, but says nothing about how long each one
+    # takes -- 12 iterations that each sit near `llm_timeout_seconds`, plus
+    # slow tool calls between them, is most of an hour for ONE account, and
+    # the nightly chain runs every account in sequence. Checked between
+    # iterations (reflect.py's `_DeadlineGuard`): once the budget is spent
+    # the pass stops researching and is forced straight into the same
+    # one-iteration wrap-up turn the iteration cap already triggers, so the
+    # day still gets a real report rather than a `failed` row. 0 disables
+    # the bound entirely (the pre-I8 behaviour). Not on the settings page,
+    # same .env-only policy as REFLECTION_MAX_ITERS above.
+    reflection_deadline_seconds: int = Field(default=1800, ge=0)
     # Gates the after-close reflection job the same way daily_consolidation
     # gates the consolidator -- not on the settings page yet, .env-only.
     daily_reflection: bool = True

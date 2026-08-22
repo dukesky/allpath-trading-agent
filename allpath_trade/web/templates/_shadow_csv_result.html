@@ -1,0 +1,35 @@
+{# htmx-swapped preview fragment for the shadow-ledger CSV import
+   (settings.html's #shadow-csv-result) -- queues nothing itself; `errors`
+   non-empty means nothing was queued and nothing will be until a clean file
+   is re-uploaded (spec: "解析+校验每一行,任何错误都不入队,列出行号"). #}
+{% if errors %}
+<div class="warn" style="margin-top:10px">
+  <p style="margin:0 0 6px"><strong>{{ errors | length }} error(s) — nothing was queued:</strong></p>
+  <ul style="margin:0 0 0 18px;padding:0">
+    {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% else %}
+<div style="margin-top:10px">
+  <p class="muted" style="font-size:13px">
+    Preview — {{ rows | length }} position(s){% if cash is not none %}, cash set to {{ cash | money }}{% endif %}.
+    Nothing is applied yet; queuing creates one proposal you still have to approve.
+  </p>
+  {% if rows %}
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Ticker</th><th>Qty</th><th>Avg cost</th></tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr><td>{{ r.ticker }}</td><td>{{ r.qty }}</td><td>{{ r.avg_cost | money }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  <form method="post" action="/settings/shadow/csv-confirm" style="margin-top:10px">
+    <input type="hidden" name="csv_text" value="{{ csv_text }}">
+    <button class="primary" type="submit">Queue import for approval</button>
+  </form>
+</div>
+{% endif %}

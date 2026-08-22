@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from allpath_trade.broker.base import Order, OrderIntent, OrderStatus
 from allpath_trade.risk.gate import RiskDecision
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 # Fill-honesty round (I2): how long a still-'submitted' row is presented as
 # "fill pending" before rendering degrades to "status unconfirmed" instead.
@@ -36,8 +37,16 @@ def is_recent_submission(ts: str, *, now: datetime | None = None,
 
 
 class TradeJournal:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, account: str = DEFAULT_ACCOUNT) -> None:
+        # shadow-dual-active T5 carry (from T1's review): external boundaries
+        # (the web account cookie, the Telegram /account command, the CLI
+        # --account flag) now pass non-literal account strings through to
+        # store constructors -- gate here so an invalid value can never
+        # silently open a third, unscoped partition of this table.
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self._conn = conn
+        self._account = account
 
     def record(self, intent: OrderIntent, decision: RiskDecision,
                order: Order | None, status_override: str | None = None) -> int:
@@ -46,11 +55,12 @@ class TradeJournal:
         else:
             status = order.status.value if (decision.approved and order) else "rejected"
         cur = self._conn.execute(
-            "INSERT INTO trades (ts, ticker, side, qty, notional, status, reason,"
-            " strategy_id, risk_reasons, broker_order_id, filled_qty, filled_avg_price,"
-            " filled_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO trades (account, ts, ticker, side, qty, notional, status,"
+            " reason, strategy_id, risk_reasons, broker_order_id, filled_qty,"
+            " filled_avg_price, filled_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
+                self._account,
                 datetime.now(UTC).isoformat(),
                 intent.ticker,
                 intent.side.value,
@@ -103,19 +113,21 @@ class TradeJournal:
         stale by the time the UPDATE executes."""
         with self._conn.transaction():
             current = self._conn.execute(
-                "SELECT status FROM trades WHERE id = ?", (trade_id,)).fetchone()
+                "SELECT status FROM trades WHERE id = ? AND account = ?",
+                (trade_id, self._account)).fetchone()
             if (current is not None and current["status"] == OrderStatus.FILLED.value
                     and order.status != OrderStatus.FILLED):
                 return
             self._conn.execute(
                 "UPDATE trades SET filled_qty = ?, filled_avg_price = ?, filled_at = ?,"
-                " status = ? WHERE id = ?",
+                " status = ? WHERE id = ? AND account = ?",
                 (
                     str(order.filled_qty),
                     str(order.filled_avg_price) if order.filled_avg_price is not None else None,
                     order.filled_at.isoformat() if order.filled_at is not None else None,
                     order.status.value,
                     trade_id,
+                    self._account,
                 ),
             )
 
@@ -123,15 +135,16 @@ class TradeJournal:
         now = now or datetime.now(UTC)
         day = now.date().isoformat()
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM trades WHERE ts LIKE ?"
+            "SELECT COUNT(*) AS n FROM trades WHERE ts LIKE ? AND account = ?"
             " AND status NOT IN ('rejected', 'error')",
-            (f"{day}%",),
+            (f"{day}%", self._account),
         ).fetchone()
         return int(row["n"])
 
     def recent(self, limit: int = 50) -> list[sqlite3.Row]:
         return list(self._conn.execute(
-            "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)))
+            "SELECT * FROM trades WHERE account = ? ORDER BY id DESC LIMIT ?",
+            (self._account, limit)))
 
     def unfilled_recent(self, limit: int = 20) -> list[sqlite3.Row]:
         """Rows still awaiting a terminal broker answer: broker_order_id
@@ -163,6 +176,7 @@ class TradeJournal:
         status too, instead of quietly falling out of the sweep the moment
         the first partial fill lands (I3)."""
         return list(self._conn.execute(
-            "SELECT * FROM trades WHERE status IN ('submitted', 'partially_filled')"
+            "SELECT * FROM trades WHERE account = ?"
+            " AND status IN ('submitted', 'partially_filled')"
             " AND broker_order_id IS NOT NULL ORDER BY id DESC LIMIT ?",
-            (limit,)))
+            (self._account, limit)))

@@ -5,12 +5,13 @@ from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel
 
-from allpath_trade.broker.base import Broker, OrderIntent, Position
+from allpath_trade.broker.base import Broker, Order, OrderIntent, Position
 from allpath_trade.data.base import DataSource
 from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, ReviewQueue
 from allpath_trade.strategy.actions import parse_action, to_order_intent
@@ -45,7 +46,22 @@ class Sentinel:
                  broker: Broker, executor: Executor, queue: ReviewQueue,
                  notifier: Notifier, review_agent=None, observations=None,
                  web_base_url: str = "", app_state: AppState | None = None,
-                 telegram_bot_token: str = "") -> None:
+                 telegram_bot_token: str = "", account: str = DEFAULT_ACCOUNT) -> None:
+        # shadow-dual-active T7: which account THIS Sentinel instance
+        # belongs to (app.py constructs one per account) -- threaded into
+        # every notify.events builder call below for the `[Paper]`/
+        # `[Shadow]` subject prefix and the shadow-specific order wording.
+        # Named distinctly from `run_once`'s local `account` (the broker's
+        # `Account` balance object, an unrelated pre-existing local) --
+        # `self.account` is always the plain account STRING.
+        self.account = account
+        # C3: the one word this module uses for "the executor accepted it".
+        # For shadow that executor is `ShadowExecutor` writing a ledger row
+        # (broker/shadow.py has no brokerage behind it), so "submitted" --
+        # which travels into the notification body, the `TriggerOutcome`
+        # detail, and through that the run report and CLI output -- would
+        # claim an order exists somewhere that it does not.
+        self._placed = "recorded" if account == "shadow" else "submitted"
         self.strategies = strategies
         self.data = data
         self.broker = broker
@@ -172,9 +188,10 @@ class Sentinel:
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                       disposition="error", detail=str(exc))
             if result.submitted:
-                self._notify_order(doc, ticker, intent.side.value, True, "submitted")
+                self._notify_order(doc, ticker, intent.side.value, True, self._placed,
+                                   order=result.order)
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                                      disposition="executed", detail="submitted")
+                                      disposition="executed", detail=self._placed)
             detail = "; ".join(result.decision.reasons)
             self._notify_order(doc, ticker, intent.side.value, False, detail)
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
@@ -238,11 +255,12 @@ class Sentinel:
                 detail = f"review already resolved elsewhere: {exc}"
                 self._notify_order(doc, ticker, intent.side.value, False, detail)
                 return TriggerOutcome(**base, disposition="error", detail=detail)
-            detail = ("agent-approved; submitted" if result.submitted else
+            detail = (f"agent-approved; {self._placed}" if result.submitted else
                       "agent-approved; risk gate rejected: "
                       + "; ".join(result.decision.reasons))
             disposition = "executed" if result.submitted else "rejected"
-            self._notify_order(doc, ticker, intent.side.value, result.submitted, detail)
+            self._notify_order(doc, ticker, intent.side.value, result.submitted, detail,
+                               order=result.order)
             return TriggerOutcome(**base, disposition=disposition, detail=detail)
 
         try:
@@ -261,14 +279,24 @@ class Sentinel:
     def _notify_rule(self, doc: StrategyDoc, rule_id: str, condition: str,
                      disposition: str) -> None:
         subject, body = events.rule_triggered(
-            strategy_id=doc.id, rule_id=rule_id, ticker=doc.position.ticker,
-            condition=condition, disposition=disposition)
+            account=self.account, strategy_id=doc.id, rule_id=rule_id,
+            ticker=doc.position.ticker, condition=condition, disposition=disposition)
         self._send(doc, subject, body)
 
     def _notify_order(self, doc: StrategyDoc, ticker: str, side: str, submitted: bool,
-                      detail: str) -> None:
+                      detail: str, *, order: Order | None = None) -> None:
+        # `order` (the executor's own `Order`, when there is one -- see the
+        # AUTO+HARD and agent-approved AUTO+SOFT call sites above) supplies
+        # `filled_qty`/`filled_avg_price` for the shadow "place this order
+        # in your brokerage now: BUY 4.5 TSLA @ ~$332.01" wording
+        # (events.order_result's own docstring) -- absent on every path
+        # that never reached the executor (an exception, a risk-gate
+        # rejection), which is fine: that shadow wording only fires when
+        # `submitted=True` anyway.
         subject, body = events.order_result(
-            ticker=ticker, side=side, submitted=submitted, detail=detail)
+            account=self.account, ticker=ticker, side=side, submitted=submitted,
+            detail=detail, filled_qty=order.filled_qty if order else None,
+            filled_avg_price=order.filled_avg_price if order else None)
         self._send(doc, subject, body)
         # "自动执行了也要通知我" -- the order_result receipt (auto-executed hard
         # rule, and every other order outcome that flows through this same
@@ -278,7 +306,8 @@ class Sentinel:
         # Telegram leg is never gated by that email-only preference) and of
         # `self.web_base_url` (no link involved here at all). One message.
         push_telegram_receipt(app_state=self.app_state,
-                              telegram_bot_token=self.telegram_bot_token, body=body)
+                              telegram_bot_token=self.telegram_bot_token, body=body,
+                              account=self.account)
 
     def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
                        recommendation: str, *, price: Decimal | None = None,
@@ -300,7 +329,7 @@ class Sentinel:
         # `getattr`-based degrade-to-no-link rationale.
         approve_url = events.approve_link(self.web_base_url, review_id)
         subject, body = events.review_queued(
-            review_id=review_id, ticker=ticker, action=action,
+            account=self.account, review_id=review_id, ticker=ticker, action=action,
             strategy_id=doc.id, recommendation=recommendation,
             trigger_price=trigger_price, est_shares=est_shares,
             approve_url=approve_url)
@@ -313,7 +342,8 @@ class Sentinel:
         notify_review_queued(
             queue=self.queue, notifier=self.notifier, app_state=self.app_state,
             telegram_bot_token=self.telegram_bot_token, review_id=review_id,
-            subject=subject, body=body, notify_email=doc.notify_email)
+            subject=subject, body=body, account=self.account,
+            notify_email=doc.notify_email)
 
     def _send(self, doc: StrategyDoc, subject: str, body: str) -> None:
         # notify_email is a notification preference, not a trading

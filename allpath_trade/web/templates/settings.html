@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Settings · AllPath Trade{% endblock %}
 {% block content %}
-<h1>Settings</h1>
+<h1>Settings {% include "_account_chip.html" %}</h1>
 {% if saved %}<p class="muted">Saved. New conversations use the updated configuration.</p>{% endif %}
+{% if notice %}<p class="flash-ok">{{ notice }}</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 {# A model select offers every catalog entry for the active provider, plus
@@ -308,6 +309,52 @@
   <div class="row" style="margin-top:12px">
     <form method="post" action="/settings/reset-token">
       <button class="danger" type="submit">Reset access token</button>
+    </form>
+  </div>
+</div>
+
+{# Shadow ledger (shadow-dual-active T6): lives on the Brokerage tab, but --
+   like Unpair Telegram / Reset access token above -- outside the settings
+   <form>. Two reasons here specifically: the CSV upload needs its own
+   multipart <form> (can't nest inside the outer urlencoded one), and every
+   action below (preview/import/reset) takes effect immediately via its own
+   POST rather than waiting on "Save settings" -- there is no draft state to
+   lose either way. #}
+<div data-panel="brokerage"{% if active_tab != 'brokerage' %} hidden{% endif %}>
+  <h2>Shadow ledger</h2>
+  <div class="card">
+    <p class="muted">Cash {{ shadow.cash | money }} · {{ shadow.position_count }} position{{ 's' if shadow.position_count != 1 else '' }}</p>
+    <p class="muted" style="font-size:13px">
+      Last audit: {{ shadow.last_audit_ts | ago if shadow.last_audit_ts else 'never' }}
+      {%- if shadow.oldest_price_ts %} · oldest price as of {{ shadow.oldest_price_ts | ago }}{% endif %}
+    </p>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Import from CSV</h3>
+    <p class="hint">Columns: <code>ticker,qty,avg_cost</code> (a header row is
+    optional). One optional <code>CASH,&lt;amount&gt;</code> row sets cash.
+    Every row is validated before anything is queued -- any error and
+    nothing is queued at all. Importing queues ONE proposal for your
+    approval on the Pending page; nothing is applied until then.</p>
+    <form hx-post="/settings/shadow/csv-preview" hx-target="#shadow-csv-result"
+          hx-swap="innerHTML" hx-encoding="multipart/form-data"
+          hx-disabled-elt="this" hx-indicator="#shadow-csv-indicator">
+      <input type="file" name="csv_file" accept=".csv,text/csv" required>
+      <div class="row" style="margin-top:10px">
+        <button type="submit">Preview</button>
+        <span id="shadow-csv-indicator" class="htmx-indicator hint">Parsing…</span>
+      </div>
+    </form>
+    <div id="shadow-csv-result"></div>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">Reset ledger</h3>
+    <p class="hint">Clears every position and sets cash to $0 -- queued for
+    your approval like any other ledger edit; nothing changes until you
+    approve it.</p>
+    <form method="post" action="/settings/shadow/reset"
+          onsubmit="return confirm('Reset the shadow ledger? This queues clearing every position and setting cash to $0 for your approval. Continue?')">
+      <button class="danger" type="submit">Reset ledger</button>
     </form>
   </div>
 </div>

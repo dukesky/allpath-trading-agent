@@ -3,20 +3,26 @@ from __future__ import annotations
 import concurrent.futures
 import re
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from allpath_trade.app import Components
 from allpath_trade.broker.base import Broker, Position
 from allpath_trade.data.base import DataSource, Quote
 from allpath_trade.scheduler import is_market_hours, today_et_date
-from allpath_trade.store.app_state import SENTINEL_HEARTBEAT_KEY, SENTINEL_MARKET_OPEN_KEY
+from allpath_trade.store.accounts import ACCOUNTS
+from allpath_trade.store.app_state import (
+    SENTINEL_HEARTBEAT_KEY,
+    SENTINEL_LAST_OK_KEY,
+    SENTINEL_MARKET_OPEN_KEY,
+)
 from allpath_trade.strategy.model import RuleState, RuleType, StrategyDoc
+from allpath_trade.web.account_ctx import bundle, bundle_for, current_account
 from allpath_trade.web.charts import equity_since_caption, equity_svg, signed_money, signed_pct
+from allpath_trade.web.deps import components
 from allpath_trade.web.templating import templates
 
 router = APIRouter()
@@ -46,8 +52,32 @@ _broker_pool = concurrent.futures.ThreadPoolExecutor(
 QUOTES_BUDGET_SECONDS = 10
 
 
-def nav_context(components: Components) -> dict:
-    return {"pending_count": len(components.queue.list())}
+def nav_context(request: Request) -> dict:
+    """Nav-chrome context shared by every page: the current account's own
+    pending count (drives the badge on the "Pending" nav link, as before
+    shadow-dual-active), PLUS the account switcher's own state.
+
+    Pending-badge decision (shadow-dual-active T5): the badge counts ONLY
+    the CURRENT account's pending reviews, not both accounts' combined --
+    switching accounts is cheap (one click) and the badge is meant to answer
+    "does the account I'm LOOKING AT need me", not "does anything anywhere
+    need me" (which would make the badge number disagree with what's
+    actually listed on the /reviews page the badge links to). The OTHER
+    account not being silently invisible is handled separately: the
+    switcher chip for the account you're NOT on gets a small dot
+    (`other_account_pending`) when IT has pending rows, so nothing is ever
+    truly hidden -- just not double-counted into one badge."""
+    c = components(request)
+    current = current_account(request)
+    pending_count = len(bundle_for(c, current).queue.list())
+    other = next(a for a in ACCOUNTS if a != current)
+    other_pending = bool(bundle_for(c, other).queue.list())
+    return {
+        "pending_count": pending_count,
+        "current_account": current,
+        "other_account": other,
+        "other_account_pending": other_pending,
+    }
 
 
 def _with_timeout(fn):
@@ -88,6 +118,59 @@ def _cached_quote(data: DataSource, ticker: str) -> Quote | None:
 cached_quote = _cached_quote
 
 
+def _last_trading_day_cutoff(now: datetime) -> datetime:
+    """The instant before which a shadow position's `last_price_ts`
+    (broker/shadow.py's `_valuation_price` docstring: "staleness surfaced
+    to the user via last_price_ts -- Task 7 renders it") counts as stale
+    for the dashboard's "price as of" column -- "1 trading day ago", with
+    the same weekday-only calendar `is_market_hours`/`_is_after_close`
+    already use (no holiday awareness -- see docs/TODO.md, same documented
+    limitation). Monday's cutoff reaches back to Friday (the previous
+    trading day), not Sunday, so a price set at Friday's close is still
+    "yesterday's trading day" Monday morning rather than flagged stale by a
+    plain 24h window."""
+    days_back = 3 if now.weekday() == 0 else 1  # Monday -> back to Friday
+    return now - timedelta(days=days_back)
+
+
+def _shadow_price_staleness(b, positions: list[Position], data: DataSource,
+                            now: datetime) -> dict[str, str | None]:
+    """`{ticker: last_price_ts}` for every shadow position whose displayed
+    valuation the dashboard should flag with a "price as of" note --
+    shadow-dual-active T7, spec §⑧: "行情失败:最后已知价 + 标注". Empty (no
+    flags at all) on the paper account -- Alpaca's own live feed has no
+    analogous "last known, possibly stale" concept for this app to surface.
+
+    A ticker is flagged when EITHER of spec §⑧'s two conditions holds:
+    `last_price_ts` is missing or older than one trading day
+    (`_last_trading_day_cutoff`), OR a fresh quote attempt for it fails
+    right now (`_cached_quote` -- the exact same cached lookup the
+    strategy cards already use, so this costs no extra network calls on a
+    warm cache). Reads `shadow_positions.last_price_ts` directly via raw
+    SQL (mirrors `web/routes/settings.py`'s own `_shadow_ledger_summary`)
+    because `Broker.get_positions()`'s `Position` model -- shared with
+    paper/Alpaca -- has no timestamp field to carry this shadow-only
+    concept through."""
+    if b.account != "shadow" or not positions:
+        return {}
+    rows = b.conn.execute("SELECT ticker, last_price_ts FROM shadow_positions")
+    ts_by_ticker = {row["ticker"]: row["last_price_ts"] for row in rows}
+    cutoff = _last_trading_day_cutoff(now)
+    stale: dict[str, str | None] = {}
+    for p in positions:
+        ts = ts_by_ticker.get(p.ticker)
+        quote_failed = _cached_quote(data, p.ticker) is None
+        ts_stale = ts is None
+        if not ts_stale:
+            parsed = datetime.fromisoformat(ts)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            ts_stale = parsed.astimezone(UTC) < cutoff
+        if quote_failed or ts_stale:
+            stale[p.ticker] = ts
+    return stale
+
+
 # Dashboard equity-chart range tabs. Values are the `?range=` query string;
 # `_RANGE_DAYS` maps each to the lookback window passed to
 # Broker.get_equity_history -- everything except "ytd" is a fixed count,
@@ -121,15 +204,26 @@ _EQUITY_HISTORY_CACHE_TTL_SECONDS = 300  # 5 min -- same reasoning as the quote 
 # the quote cache's equivalent failure, so a stale broker hiccup shouldn't
 # get to keep the chart blank nearly as long.
 _EQUITY_HISTORY_FAILURE_TTL_SECONDS = 30
-# Module-level, keyed by range -- same "survive across requests, not just
-# within one render" rationale as `_quote_cache` above. A single-process app
-# talks to one broker, so the range alone is a sufficient key.
-_equity_history_cache: dict[str, tuple[float, list]] = {}
+# Module-level, keyed by (broker.name, range) -- same "survive across
+# requests, not just within one render" rationale as `_quote_cache` above.
+#
+# shadow-dual-active T4 review (Important 4): this used to be keyed by
+# `range_key` ALONE on the assumption that "a single-process app talks to
+# one broker" -- that stopped being true the moment paper and shadow
+# started sharing this one process. Whichever account's dashboard render
+# happened to populate a given range's slot first would silently serve
+# ITS equity curve to the other account's page for the rest of the TTL
+# (a paper-curve-under-shadow-view leak, or vice versa) until the cache
+# happened to expire. `broker.name` ("alpaca" for paper, "shadow" for the
+# ledger) is a sufficient second key -- each account's own broker instance
+# never changes identity across requests within one process.
+_equity_history_cache: dict[tuple[str, str], tuple[float, list]] = {}
 
 
 def _cached_equity_history(broker: Broker, range_key: str, days: int) -> list:
     now = time.monotonic()
-    cached = _equity_history_cache.get(range_key)
+    cache_key = (broker.name, range_key)
+    cached = _equity_history_cache.get(cache_key)
     if cached is not None:
         cached_at, cached_history = cached
         # An empty cached result reads as "the last attempt failed (or a
@@ -144,7 +238,7 @@ def _cached_equity_history(broker: Broker, range_key: str, days: int) -> list:
         history = _with_timeout(lambda: broker.get_equity_history(days))
     except Exception:  # noqa: BLE001 — a history failure must render the placeholder, never an error page
         history = []
-    _equity_history_cache[range_key] = (now, history)
+    _equity_history_cache[cache_key] = (now, history)
     return history
 
 
@@ -334,6 +428,7 @@ def _parse_heartbeat_ts(raw: str) -> datetime:
 
 def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
                               market_open_raw: str | None = None,
+                              last_ok_raw: str | None = None,
                               now: datetime | None = None) -> dict:
     """Pure function -- takes already-read `app_state.get(...)` values, no
     I/O, so it's testable without a store (same shape as summarize_strategy
@@ -350,20 +445,52 @@ def sentinel_heartbeat_status(raw: str | None, interval_minutes: int, *,
     existed -- treated as open, i.e. today's copy, rather than guessing.
     The staleness warning still keys off tick age either way: the tick
     itself is real proof of life regardless of whether the market was open
-    when it landed."""
+    when it landed.
+
+    `last_ok_raw` is SENTINEL_LAST_OK_KEY's per-account value (I7), written
+    only after `sentinel.run_once()` actually returned. The heartbeat above
+    is written BEFORE the check runs -- deliberately, it is the "scheduler
+    is alive" signal -- which meant a sentinel raising on every single tick
+    (dead data source, expired broker credentials) still rendered a
+    perfectly reassuring "last check 0m ago" indefinitely. Two independent
+    warnings now: the tick itself going stale (a dead daemon), and the tick
+    running while the CHECK keeps failing. The second gets one interval of
+    slack, because a single failed pass between two ticks is ordinary
+    transient noise, and is suppressed entirely while the market is closed,
+    where a lagging last-ok is the expected state rather than a fault
+    (warning every weekend would just train the operator to ignore it).
+    Missing or unparseable `last_ok_raw` reads as "no successful check
+    recorded" and warns -- unlike `market_open_raw`, absence here is not
+    ambiguous: an account whose sentinel has ever completed a pass during
+    market hours has this key."""
     if raw is None:
         return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
     try:
         last = _parse_heartbeat_ts(raw)
     except (TypeError, ValueError):
         return {"text": "Sentinel: never ran (daemon not running?)", "warn": False}
-    elapsed = (now or _utcnow()) - last
+    now = now or _utcnow()
+    elapsed = now - last
     minutes = max(0, int(elapsed.total_seconds() // 60))
     warn = minutes > 2 * interval_minutes
     if market_open_raw == "false":
         text = f"Sentinel: monitoring paused (market closed) · last tick {minutes}m ago"
-    else:
-        text = f"Sentinel: last check {minutes}m ago · interval {interval_minutes}m"
+        return {"text": text, "warn": warn}
+
+    last_ok = None
+    if last_ok_raw is not None:
+        try:
+            last_ok = _parse_heartbeat_ts(last_ok_raw)
+        except (TypeError, ValueError):
+            last_ok = None
+    if last_ok is None:
+        return {"text": (f"Sentinel: last check {minutes}m ago"
+                        " · no successful check recorded"), "warn": True}
+    ok_minutes = max(0, int((now - last_ok).total_seconds() // 60))
+    if ok_minutes - minutes > interval_minutes:
+        return {"text": (f"Sentinel: last check {minutes}m ago"
+                        f" · last successful {ok_minutes}m ago"), "warn": True}
+    text = f"Sentinel: last check {minutes}m ago · interval {interval_minutes}m"
     return {"text": text, "warn": warn}
 
 
@@ -397,7 +524,13 @@ def dashboard(request: Request,
     # Renamed from the query param's own name (`range`) -- that shadows the
     # `range` builtin for the whole function body; `alias="range"` keeps the
     # `?range=` URL contract unchanged while the Python-side name doesn't.
-    c = request.app.state.holder.get()
+    c = components(request)
+    # shadow-dual-active T5: `b` is the CURRENT account's bundle (broker,
+    # strategies, queue, journal, sentinel heartbeat) -- for paper (the
+    # default, cookie-less view) this is `c` itself, so nothing about the
+    # pre-existing single-account dashboard changes. `c` stays in scope for
+    # genuinely shared reads: settings, app_state, the data source.
+    b = bundle(request)
 
     # Whitelist, not a 400 -- an unrecognized `?range=` (a stale bookmark, a
     # hand-edited URL) just falls back to the default tab rather than
@@ -409,9 +542,20 @@ def dashboard(request: Request,
     # loop below -- this line's entire purpose is answering "is my system
     # wedged?", so it must never wait behind up to 2 * BROKER_TIMEOUT_SECONDS
     # of broker calls plus the quote budget below to reach the page.
+    #
+    # shadow-dual-active T5: reads `sentinel_last_pass:{account}` -- the
+    # per-account heartbeat key scheduler.py's `_run_sentinel_pass` writes
+    # (T4) -- not the bare legacy key, so the dashboard's heartbeat line
+    # always reflects the account currently being viewed, not always
+    # paper's own pass regardless of which account is on screen.
     sentinel_status = sentinel_heartbeat_status(
-        c.app_state.get(SENTINEL_HEARTBEAT_KEY), c.settings.sentinel_interval_minutes,
-        market_open_raw=c.app_state.get(SENTINEL_MARKET_OPEN_KEY))
+        c.app_state.get(f"{SENTINEL_HEARTBEAT_KEY}:{b.account}"),
+        c.settings.sentinel_interval_minutes,
+        market_open_raw=c.app_state.get(SENTINEL_MARKET_OPEN_KEY),
+        # I7: the per-account SUCCESS heartbeat, read alongside the plain
+        # one -- the heartbeat proves the scheduler ticked, this proves the
+        # tick actually evaluated anything.
+        last_ok_raw=c.app_state.get(f"{SENTINEL_LAST_OK_KEY}:{b.account}"))
 
     # Same is_market_hours the scheduler/sentinel gate their pass on (see
     # allpath_trade/scheduler.py) -- reused rather than reimplemented so the
@@ -425,15 +569,15 @@ def dashboard(request: Request,
     positions: list = []
     broker_error = ""
     try:
-        account = _with_timeout(c.broker.get_account)
-        positions = _with_timeout(c.broker.get_positions)
+        account = _with_timeout(b.broker.get_account)
+        positions = _with_timeout(b.broker.get_positions)
     except concurrent.futures.TimeoutError:
         broker_error = f"Broker unavailable: timed out after {BROKER_TIMEOUT_SECONDS}s"
     except Exception as exc:  # noqa: BLE001 — a broker outage must not blank the page
         broker_error = f"Broker unavailable: {exc}"
 
     days = _range_days(range_key, _utcnow())
-    equity_history = _cached_equity_history(c.broker, range_key, days)
+    equity_history = _cached_equity_history(b.broker, range_key, days)
     equity_summary = equity_period_summary(
         equity_history, account.equity if account is not None else None)
     # None (not a plain bool) when there's no headline to show at all
@@ -446,10 +590,16 @@ def dashboard(request: Request,
     equity_up_for_chart = (None if equity_summary["change"] is None
                            else equity_summary["change"] >= 0)
 
+    # shadow-dual-active T7: `{}` on paper, always -- see
+    # `_shadow_price_staleness`'s own docstring for why only a shadow
+    # position's valuation carries this "last known, possibly stale" idea
+    # at all.
+    price_as_of = _shadow_price_staleness(b, positions, c.data, _utcnow())
+
     errors: list[str] = []
-    strategies = c.strategies.load_all(status=None, errors=errors)
+    strategies = b.strategies.load_all(status=None, errors=errors)
     positions_by_ticker = {p.ticker: p for p in positions}
-    pending_strategy_ids = {row["strategy_id"] for row in c.queue.list("pending")}
+    pending_strategy_ids = {row["strategy_id"] for row in b.queue.list("pending")}
     equity = account.equity if account is not None else None
 
     # One shared QUOTES_BUDGET_SECONDS deadline for the whole loop, not a
@@ -471,8 +621,9 @@ def dashboard(request: Request,
 
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
+        "price_as_of": price_as_of,
         "broker_error": broker_error, "strategy_cards": strategy_cards,
-        "strategy_errors": errors, "trades": c.journal.recent(limit=8),
+        "strategy_errors": errors, "trades": b.journal.recent(limit=8),
         "sentinel_status": sentinel_status, "market_open": market_open,
         "range": range_key, "range_labels": _RANGE_LABELS,
         "equity_svg_markup": equity_svg(equity_history, up=equity_up_for_chart),
@@ -483,4 +634,4 @@ def dashboard(request: Request,
         "equity_change_pct_str": (signed_pct(equity_summary["change_pct"])
                                   if equity_summary["change_pct"] is not None else None),
         "equity_up": bool(equity_summary["change"] is not None and equity_summary["change"] >= 0),
-        **nav_context(c)})
+        **nav_context(request)})

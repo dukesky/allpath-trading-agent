@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from allpath_trade.memory.guard import scan_entry
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 LAYER_BUDGETS: dict[str, int] = {
     "profile": 2000, "strategy": 2000, "stock": 3000, "lesson": 2000,
@@ -23,12 +24,21 @@ class MemoryStore:
     Every mutation is diff-logged to SQLite. The files are the user's to read
     and edit; the agent gets no other write path."""
 
-    def __init__(self, root: Path, conn: sqlite3.Connection) -> None:
+    def __init__(self, root: Path, conn: sqlite3.Connection,
+                account: str = DEFAULT_ACCOUNT) -> None:
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         self.root = root
         self._conn = conn
+        self.account = account
 
     def path_for(self, layer: str, key: str | None) -> Path:
         if layer == "profile":
+            # Shared across every account by design (shadow-dual-active
+            # spec §②) -- profile.md/user_profile.md lives at the memory
+            # root, never under an account subdirectory. A MemoryStore
+            # built for "shadow" reads/writes the exact same file as one
+            # built for "paper".
             return self.root / "user_profile.md"
         subdir = {"strategy": "strategies", "stock": "stocks",
                   "lesson": "lessons"}.get(layer)
@@ -38,7 +48,7 @@ class MemoryStore:
             raise MemoryStoreError(f"invalid memory key: {key!r}")
         if layer == "stock":
             key = key.upper()
-        return self.root / subdir / f"{key}.md"
+        return self.root / self.account / subdir / f"{key}.md"
 
     def read(self, layer: str, key: str | None = None) -> str:
         path = self.path_for(layer, key)
@@ -90,9 +100,10 @@ class MemoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(after)
         self._conn.execute(
-            "INSERT INTO memory_log (ts, layer, key, action, before, after)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (datetime.now(UTC).isoformat(), layer, key, action, before, after))
+            "INSERT INTO memory_log (account, ts, layer, key, action, before, after)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (self.account, datetime.now(UTC).isoformat(), layer, key, action,
+             before, after))
         self._conn.commit()
         rel = path.relative_to(self.root)
         return f"{action} ok: {rel}"
@@ -100,10 +111,20 @@ class MemoryStore:
     def recent_log(self, limit: int = 30) -> list[sqlite3.Row]:
         """The change-audit trail the web memory page renders. Kept behind
         this API like every other store the web layer reads from, rather
-        than a route querying `memory_log` with its own raw SQL."""
+        than a route querying `memory_log` with its own raw SQL.
+
+        Scoped to this store's account: the log rows carry the full `after`
+        text of a note, so an unscoped query hands one account's Changes
+        tab the other account's note bodies verbatim. Note the consequence
+        for the SHARED profile layer -- a profile edit made while viewing
+        shadow is logged under 'shadow' and so only shows up in shadow's
+        Changes tab, even though the file itself is shared. Scoping the
+        audit trail to who made the change is the conservative side of
+        that trade."""
         return list(self._conn.execute(
             "SELECT ts, layer, key, action, after FROM memory_log"
-            " ORDER BY id DESC LIMIT ?", (limit,)))
+            " WHERE account = ? ORDER BY id DESC LIMIT ?",
+            (self.account, limit)))
 
     def render_for_context(self, layer: str, key: str | None = None,
                            budget: int | None = None) -> str:

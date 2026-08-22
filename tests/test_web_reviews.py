@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from allpath_trade.agent.review import ReviewAnalysis
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.config import Settings
+from allpath_trade.store.reviews import ReviewError
 from allpath_trade.web.app import create_app
 from allpath_trade.web.routes import dashboard as dashboard_route
 from allpath_trade.web.routes.reviews import split_diff_rows
@@ -92,6 +93,42 @@ def test_approve_executes_through_the_queue(client):
     assert r.status_code in (200, 303)
     row = client.app.state.holder.get().queue.get(rid)
     assert row["status"] == "approved"
+
+
+def test_approve_of_a_shadow_row_resolves_from_a_paper_cookie(client):
+    # shadow-dual-active T5 (row-bound, CARRIED from T4's review): the
+    # browser is viewing paper (the default, cookie-less account) but the
+    # review id being POSTed to belongs to shadow -- the in-app approve
+    # route must resolve it through SHADOW's own queue, not paper's.
+    comp = client.app.state.holder.get()
+    shadow_queue = comp.accounts["shadow"].queue
+    rid = shadow_queue.add(
+        strategy_id="s1", rule_id="r1", ticker="AAPL", rule_type="soft",
+        condition="price < 100", action="sell all", snapshot={"price": "99"},
+        intent=OrderIntent(ticker="AAPL", side=OrderSide.SELL, qty="1", reason="r1"))
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert r.status_code in (200, 303)
+    assert shadow_queue.get(rid)["status"] == "approved"
+    # Paper's own queue never had this id at all.
+    with pytest.raises(ReviewError):
+        comp.queue.get(rid)
+
+
+def test_reject_of_a_shadow_row_resolves_from_a_paper_cookie(client):
+    comp = client.app.state.holder.get()
+    shadow_queue = comp.accounts["shadow"].queue
+    rid = shadow_queue.add(
+        strategy_id="s1", rule_id="r1", ticker="AAPL", rule_type="soft",
+        condition="price < 100", action="sell all", snapshot={"price": "99"},
+        intent=OrderIntent(ticker="AAPL", side=OrderSide.SELL, qty="1", reason="r1"))
+
+    client.post(f"/reviews/{rid}/reject", data={"note": "no thanks"})
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "rejected"
+    assert row["resolution_note"] == "no thanks"
 
 
 def test_reject_records_the_decision(client):
@@ -953,3 +990,262 @@ def test_split_diff_rows_two_empty_texts_still_say_no_changes():
     # empty table body under the column headers.
     rows = split_diff_rows("", "")
     assert rows == [{"kind": "none", "text": "No changes"}]
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: shadow_edit review cards + real end-to-end approval
+# against the shadow account's actual ShadowLedger (this `client` fixture's
+# accounts["shadow"] is wired through the real build_components, applier
+# included -- see app.py's `_build_account_components`).
+# ---------------------------------------------------------------------------
+
+def queue_shadow_edit(client, **over):
+    from allpath_trade.agent.shadow_tools import cash_snapshot
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = cash_snapshot(b.broker)
+    kwargs = {"op": "set_cash", "ticker": "", "action": "Set cash",
+              "args": {"amount": "777"}, "before": before,
+              "after": {"cash": "777"}}
+    kwargs.update(over)
+    return b.queue.add_shadow_edit(**kwargs), b
+
+
+def test_shadow_edit_card_renders_title_and_before_after(client):
+    rid, _b = queue_shadow_edit(client)
+    # The card only shows on the CURRENT account's view -- switch first.
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+    assert f"#{rid}" in body
+    assert "Set cash" in body
+    assert "777" in body
+
+
+def test_shadow_edit_card_is_english_only(client):
+    _rid, _b = queue_shadow_edit(client)
+    client.post("/account/switch", data={"account": "shadow"})
+    assert_english_only(client.get("/reviews").text)
+
+
+def test_approve_shadow_edit_applies_to_the_real_ledger(client):
+    rid, b = queue_shadow_edit(client)
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert r.status_code in (200, 303)
+    assert b.broker.get_account().cash == 777
+    row = b.queue.get(rid)
+    assert row["status"] == "approved"
+    assert "applied" in row["execution_result"]
+
+
+def test_reject_shadow_edit_leaves_ledger_untouched(client):
+    rid, b = queue_shadow_edit(client)
+    before_cash = b.broker.get_account().cash
+
+    client.post(f"/reviews/{rid}/reject", data={"note": "no"})
+
+    assert b.broker.get_account().cash == before_cash
+    assert b.queue.get(rid)["status"] == "rejected"
+
+
+def test_approve_shadow_edit_stale_before_state_stays_pending(client):
+    from decimal import Decimal
+
+    rid, b = queue_shadow_edit(
+        client, before={"cash": "999999"})  # never matched reality
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert r.status_code in (200, 303)
+    row = b.queue.get(rid)
+    assert row["status"] == "pending"
+    assert b.broker.get_account().cash != Decimal(777)
+
+
+def test_approve_stale_shadow_edit_message_says_ledger_change_not_revision(client):
+    # M3: apply_shadow_edit_factory raises the exact same
+    # RevisionValidationError strategy_revision's applier does -- the
+    # in-app approve route must not echo "Revision failed re-validation"
+    # for a row that never was a revision.
+    rid, _b = queue_shadow_edit(client, before={"cash": "999999"})
+
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=True)
+
+    assert "Ledger change failed re-validation" in r.text
+    assert "Revision failed re-validation" not in r.text
+
+
+def test_shadow_edit_card_does_not_duplicate_the_action_as_a_reason(client):
+    # M1: shadow_edit's own `action` ("Set cash") is already the card's
+    # headline (the <strong> block) -- the .review-reason echo further
+    # down used to repeat it a second time.
+    queue_shadow_edit(client, action="Set cash to 777")
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+    assert body.count("Set cash to 777") == 1
+
+
+def test_shadow_edit_card_does_not_show_a_from_chat_triggered_on_line(client):
+    # M1: "From chat — triggered on <code>set_cash</code>" duplicates the
+    # card's own "Shadow ledger edit from your chat." line while also
+    # confusingly echoing the raw op name as if it were a rule condition.
+    queue_shadow_edit(client)
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+    assert "triggered on" not in body
+    assert "Shadow ledger edit from your chat." in body
+
+
+def test_import_card_lists_the_tickers_being_set(client):
+    from allpath_trade.agent.shadow_tools import full_snapshot, preview_import
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = full_snapshot(b.broker)
+    rows = [{"ticker": "AAPL", "qty": "10", "avg_cost": "150"},
+            {"ticker": "MSFT", "qty": "5", "avg_cost": "300"}]
+    after = preview_import(before, rows, None)
+    b.queue.add_shadow_edit(
+        op="import", ticker="", action="Import 2 position(s) from CSV",
+        args={"rows": rows, "cash": None}, before=before, after=after)
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert "AAPL" in body and "MSFT" in body
+
+
+def test_import_card_lists_first_10_tickers_and_a_count_of_the_rest(client):
+    from allpath_trade.agent.shadow_tools import full_snapshot, preview_import
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    before = full_snapshot(b.broker)
+    rows = [{"ticker": f"T{i}", "qty": "1", "avg_cost": "1"} for i in range(12)]
+    after = preview_import(before, rows, None)
+    b.queue.add_shadow_edit(
+        op="import", ticker="", action="Import 12 position(s) from CSV",
+        args={"rows": rows, "cash": None}, before=before, after=after)
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert "and 2 more" in body
+
+
+def test_reset_card_does_not_list_tickers(client):
+    # M7 is scoped to import specifically -- reset unconditionally wipes
+    # everything, so a "tickers being set" list would be misleading (it
+    # doesn't "set" anything, it removes it all).
+    from decimal import Decimal
+
+    from allpath_trade.agent.shadow_tools import full_snapshot
+
+    b = client.app.state.holder.get().accounts["shadow"]
+    b.broker.set_position("AAPL", Decimal(10), Decimal(100))
+    before = full_snapshot(b.broker)
+    rid = b.queue.add_shadow_edit(
+        op="reset", ticker="", action="Reset ledger", args={},
+        before=before, after={"positions": {}, "cash": "0"})
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert f"#{rid}" in body
+    assert "Tickers" not in body
+
+
+# ---------------------------------------------------------------------------
+# C3: the chat receipt for an approved SHADOW order must not say "submitted"
+# -- the shadow executor only wrote a ledger row, and this line is what the
+# agent (and the user) reads back later as the record of what happened.
+# ---------------------------------------------------------------------------
+
+class _RecordingChat:
+    def __init__(self) -> None:
+        self.notes: list[str] = []
+
+    def note_resolution(self, text: str, source: str = "web") -> None:
+        self.notes.append(text)
+
+
+def _queue_chat_order(queue):
+    return queue.add(
+        strategy_id="", rule_id="", ticker="AAPL", rule_type="soft",
+        condition="chat", action="sell all", snapshot={"price": "99"},
+        intent=OrderIntent(ticker="AAPL", side=OrderSide.SELL, qty="1",
+                           reason="chat"),
+        source="chat")
+
+
+def _wire_chats(client):
+    chats = {"paper": _RecordingChat(), "shadow": _RecordingChat()}
+    client.app.state.chat_services = chats
+    return chats
+
+
+def _stub_executor(monkeypatch, bundle):
+    # A submitted-and-clean ExecutionResult, so the echo under test is the
+    # success line rather than a broker/quote failure -- and so the shadow
+    # case never reaches the real (network-backed) quote lookup its own
+    # ledger write would otherwise make.
+    from allpath_trade.execution import ExecutionResult
+    from allpath_trade.risk import RiskDecision
+    monkeypatch.setattr(
+        bundle.executor, "execute",
+        lambda intent: ExecutionResult(submitted=True, order=None,
+                                       decision=RiskDecision(approved=True)))
+
+
+def test_shadow_order_approval_echoes_recorded_not_submitted(client, monkeypatch):
+    comp = client.app.state.holder.get()
+    shadow = comp.accounts["shadow"]
+    _stub_executor(monkeypatch, shadow)
+    rid = _queue_chat_order(shadow.queue)
+    chats = _wire_chats(client)
+
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    expected = (f"You resolved #{rid}. Result: order recorded in your shadow "
+                f"ledger — place it in your brokerage now")
+    assert chats["shadow"].notes == [expected]
+    assert chats["paper"].notes == []
+
+
+def test_paper_order_approval_still_echoes_order_submitted(client, monkeypatch):
+    comp = client.app.state.holder.get()
+    _stub_executor(monkeypatch, comp)
+    rid = _queue_chat_order(comp.queue)
+    chats = _wire_chats(client)
+
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    assert chats["paper"].notes == [f"You resolved #{rid}. Result: order submitted"]
+
+
+def test_resolved_shadow_order_card_says_recorded_not_submitted(client, monkeypatch):
+    # C3: the resolved card is the durable record on the reviews page --
+    # "Order submitted" there outlives the one-off approval message and is
+    # the wording a user checking back a day later reads.
+    comp = client.app.state.holder.get()
+    shadow = comp.accounts["shadow"]
+    _stub_executor(monkeypatch, shadow)
+    rid = _queue_chat_order(shadow.queue)
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/reviews").text
+
+    assert "Order recorded (shadow)" in body
+    assert "Order submitted" not in body
+
+
+def test_resolved_paper_order_card_still_says_submitted(client, monkeypatch):
+    comp = client.app.state.holder.get()
+    _stub_executor(monkeypatch, comp)
+    rid = _queue_chat_order(comp.queue)
+    client.post(f"/reviews/{rid}/approve", follow_redirects=False)
+
+    body = client.get("/reviews").text
+
+    assert "Order submitted" in body
+    assert "Order recorded (shadow)" not in body

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
 from allpath_trade.llm.factory import LLMConfigError
+from allpath_trade.web.account_ctx import bundle, current_account
 from allpath_trade.web.chat_service import ChatService
 from allpath_trade.web.routes.dashboard import nav_context
 from allpath_trade.web.routes.reviews import revision_view
@@ -15,17 +16,20 @@ router = APIRouter()
 
 
 def _service(request: Request) -> ChatService:
-    # Built once at app startup (web/app.py's create_app) and shared with the
-    # Telegram poller (Task 3) -- no more lazy get-or-create here. A settings
-    # save invalidates the cached session in place (ChatService.invalidate())
-    # instead of swapping this out for a new instance.
-    return request.app.state.chat_service
+    # shadow-dual-active T5: routed to the CURRENT account's own ChatService
+    # (its own conversation history, memory context, queue) rather than
+    # always the single paper instance -- `app.state.chat_services` is built
+    # once at app startup (web/app.py's create_app) and shared with the
+    # Telegram poller. A settings save invalidates the cached session in
+    # place (ChatService.invalidate()) instead of swapping this out for a
+    # new instance.
+    return request.app.state.chat_services[current_account(request)]
 
 
 def _render(request: Request, template: str, *, include_activity: bool) -> HTMLResponse:
-    c = request.app.state.holder.get()
+    b = bundle(request)
     service = _service(request)
-    pending = {r["id"]: dict(r) for r in c.queue.list("pending")}
+    pending = {r["id"]: dict(r) for r in b.queue.list("pending")}
     # Important 1: a chat strategy_revision row is filtered into this loop
     # by `source == 'chat'` (see _chat_messages.html), not by `kind` -- it
     # is NOT safe to reuse for approval the way a chat order row is (no
@@ -63,7 +67,7 @@ def _render(request: Request, template: str, *, include_activity: bool) -> HTMLR
     return templates.TemplateResponse(request, template, {
         "page": "chat", "messages": messages,
         "activity": activity, "pending": pending, "llm_error": llm_error,
-        **nav_context(c)})
+        **nav_context(request)})
 
 
 @router.get("/chat", response_class=HTMLResponse)

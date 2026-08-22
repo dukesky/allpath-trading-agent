@@ -29,10 +29,39 @@ has already committed."""
 from __future__ import annotations
 
 from allpath_trade.notify.base import Notifier
+from allpath_trade.notify.events import _prefix
+from allpath_trade.store.accounts import ACCOUNTS
 from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
 from allpath_trade.store.reviews import ReviewError, ReviewQueue
 from allpath_trade.telegram import TelegramAPI
 from allpath_trade.web.markdown import to_telegram_html
+
+
+def _prefixed_for_telegram(account: str, body: str) -> str:
+    """shadow-dual-active T7 (spec §⑤: "Telegram 按钮消息同样前缀"): Telegram
+    never renders the email/ntfy `subject` at all -- `push_telegram_review_
+    queued`/`push_telegram_receipt` below only ever send `body` -- so the
+    account has to be visible IN the body for a Telegram-only reader to
+    know which account a push concerns, the same way telegram.py's own
+    `_handle_chat_text`/`_resolve_review_callback` already prefix every
+    message THEY construct directly with `[Paper]`/`[Shadow]`.
+
+    Reuses `events._prefix` (the exact same helper every subject prefix in
+    this codebase now comes from) rather than re-deriving the bracket/
+    capitalization shape here, and treats an ALREADY-PREFIXED body as
+    final: a body opening with ANY known account's prefix is returned
+    untouched, not just one opening with the prefix this call was about to
+    add. The narrower same-prefix-only guard this replaces turned a
+    `("shadow", "[Paper] ...")` call into `"[Shadow] [Paper] ..."` -- two
+    contradictory account labels on one message, with the wrong one
+    leading. Whoever labelled the body knew which account it concerned;
+    this function's `account` argument is the weaker guess of the two."""
+    prefix = _prefix(account)
+    if not prefix:
+        return body
+    if any(body.startswith(_prefix(known)) for known in ACCOUNTS):
+        return body
+    return prefix + body
 
 
 def _telegram_target(app_state: AppState | None,
@@ -50,7 +79,7 @@ def _telegram_target(app_state: AppState | None,
 
 def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | None,
                                 telegram_bot_token: str, review_id: int,
-                                body: str) -> None:
+                                body: str, account: str) -> None:
     """Push a queued-review summary to the paired Telegram chat with inline
     Approve/Reject buttons. `body` is the same kind-specific summary text
     `events.review_queued(...)` already built for the email leg -- rendered
@@ -86,13 +115,14 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
             {"text": "✅ Approve", "callback_data": f"rv:approve:{review_id}:{nonce}"},
             {"text": "❌ Reject", "callback_data": f"rv:reject:{review_id}:{nonce}"},
         ]]}
-        api.send_message(chat_id, to_telegram_html(body), reply_markup=keyboard)
+        api.send_message(chat_id, to_telegram_html(_prefixed_for_telegram(account, body)),
+                         reply_markup=keyboard)
     except Exception:  # noqa: BLE001, S110 — best-effort, never break the caller
         pass
 
 
 def push_telegram_receipt(*, app_state: AppState | None, telegram_bot_token: str,
-                          body: str) -> None:
+                          body: str, account: str) -> None:
     """Push a plain receipt (no buttons) to the paired Telegram chat --
     used for an order_result event so an auto-executed hard rule ("自动执行了
     也要通知我") reaches Telegram too, not just email/ntfy. Same best-effort
@@ -102,14 +132,14 @@ def push_telegram_receipt(*, app_state: AppState | None, telegram_bot_token: str
         if target is None:
             return
         api, chat_id = target
-        api.send_message(chat_id, to_telegram_html(body))
+        api.send_message(chat_id, to_telegram_html(_prefixed_for_telegram(account, body)))
     except Exception:  # noqa: BLE001, S110 — best-effort, never break the caller
         pass
 
 
 def notify_review_queued(*, queue: ReviewQueue, notifier: Notifier | None,
                          app_state: AppState | None, telegram_bot_token: str,
-                         review_id: int, subject: str, body: str,
+                         review_id: int, subject: str, body: str, account: str,
                          notify_email: bool = True) -> None:
     """Notify BOTH channels that a review is waiting for approval.
 
@@ -131,4 +161,4 @@ def notify_review_queued(*, queue: ReviewQueue, notifier: Notifier | None,
         notifier.send(subject, body)
     push_telegram_review_queued(queue=queue, app_state=app_state,
                                 telegram_bot_token=telegram_bot_token,
-                                review_id=review_id, body=body)
+                                review_id=review_id, body=body, account=account)

@@ -78,6 +78,37 @@ main a:not(.card):not(.tab-link):hover { text-decoration:underline; }
 .chip { background:var(--surface-2); color:var(--muted); border:1px solid var(--line);
   border-radius:999px; padding:2px 9px; font-size:12px; margin-left:5px; }
 .chip:first-child { margin-left:0; }
+
+/* shadow-dual-active T5: which account (paper/shadow) a page/row/message
+   concerns -- accent (the same blue every other "this is the normal,
+   active state" affordance in this app already uses) for paper, amber
+   (--warn, already reserved for "needs attention") for shadow, so the two
+   read as distinct at a glance everywhere they appear: the nav switcher
+   below, the per-page heading chip (_account_chip.html), and the
+   approve-link pages. */
+.chip-paper { border-color:var(--accent); color:var(--accent); }
+.chip-shadow { border-color:var(--warn); color:var(--warn-ink); }
+
+/* The global account switcher, nav-right (spec §⑥: "顶部全局切换器"). A
+   single <form> with two submit buttons sharing one name/differing
+   `value` -- the browser sends whichever button was clicked, no JS
+   needed. `.on` marks the CURRENT account (accent/amber fill, same
+   pairing as .chip-paper/.chip-shadow above); the un-selected button
+   stays plain so there's exactly one obviously "active" segment. `.dot`
+   flags the OTHER account has pending reviews of its own (nav_context's
+   other_account_pending) -- visible without switching, but never folded
+   into the current account's own Pending badge count (dashboard.py's
+   nav_context explains why). */
+.account-switcher { display:flex; margin-left:4px; border:1px solid var(--line);
+  border-radius:999px; overflow:hidden; }
+.account-switcher button { background:transparent; border:none; color:var(--muted);
+  font-size:12px; font-weight:700; letter-spacing:.02em; padding:5px 12px;
+  cursor:pointer; font-family:inherit; }
+.account-switcher button:hover { color:var(--text); }
+.account-switcher button.on.acct-paper { background:var(--accent-soft); color:var(--accent); }
+.account-switcher button.on.acct-shadow { background:var(--warn-soft); color:var(--warn-ink); }
+.account-switcher .dot { display:inline-block; width:6px; height:6px; border-radius:50%;
+  background:var(--warn); margin-left:5px; vertical-align:middle; }
 /* Market open/closed pill, next to the sentinel heartbeat line. The dot
    alone carries the open/closed color -- .up here is the one place a
    universally-read "live" indicator, not a P/L direction, borrows the

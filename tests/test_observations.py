@@ -47,3 +47,47 @@ def test_window_excludes_rows_outside_bounds(tmp_path):
     rows = log.window(since_iso="2999-01-01T00:00:00+00:00",
                       until_iso="2999-12-31T00:00:00+00:00")
     assert rows == []
+
+
+def test_recent_and_window_are_scoped_by_account(tmp_path):
+    # shadow-dual-active T4 CRITICAL carry (T1 review): a shadow observation
+    # must never surface through a paper-scoped ObservationLog's reads, or
+    # vice versa.
+    conn = connect(tmp_path / "db.sqlite")
+    paper = ObservationLog(conn, account="paper")
+    shadow = ObservationLog(conn, account="shadow")
+    paper.add("chat", "paper only note")
+    shadow.add("chat", "shadow only note")
+
+    paper_rows = paper.recent()
+    shadow_rows = shadow.recent()
+    assert [r["text"] for r in paper_rows] == ["paper only note"]
+    assert [r["text"] for r in shadow_rows] == ["shadow only note"]
+
+    paper_window = paper.window(since_iso="1900-01-01T00:00:00+00:00",
+                                until_iso="2999-01-01T00:00:00+00:00")
+    assert [r["text"] for r in paper_window] == ["paper only note"]
+
+
+def test_last_marker_ts_is_scoped_by_account(tmp_path):
+    # The consolidator's watermark read (memory/consolidate.py's
+    # `_last_marker_ts`) must find only this account's own "consolidator"
+    # marker row -- otherwise whichever account's consolidator ran most
+    # recently would silently advance the OTHER account's watermark.
+    conn = connect(tmp_path / "db.sqlite")
+    paper = ObservationLog(conn, account="paper")
+    shadow = ObservationLog(conn, account="shadow")
+    shadow.add("consolidator", "shadow consolidation run")
+
+    assert paper.last_marker_ts("consolidator") is None
+    assert shadow.last_marker_ts("consolidator") is not None
+
+
+def test_observation_log_rejects_invalid_account(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    try:
+        ObservationLog(conn, account="../../etc")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for an invalid account")

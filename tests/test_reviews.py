@@ -813,3 +813,329 @@ def test_review_handle_survives_deepcopy(queue):
     cloned = copy.deepcopy(rid)
     assert cloned == rid
     assert isinstance(cloned, ReviewHandle)
+
+
+# --- shadow-dual-active T1: account scoping ---------------------------------
+
+def test_two_account_interleave_isolated(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, StubExecutor())
+    shadow = ReviewQueue(conn, StubExecutor(), account="shadow")
+
+    prid = add(paper)
+    srid = add(shadow)
+
+    [prow] = paper.list()
+    assert prow["id"] == prid and prow["account"] == "paper"
+    [srow] = shadow.list()
+    assert srow["id"] == srid and srow["account"] == "shadow"
+
+    # Cross-account get() must read back as "not found", not the other
+    # account's row.
+    with pytest.raises(ReviewError):
+        paper.get(srid)
+    with pytest.raises(ReviewError):
+        shadow.get(prid)
+
+
+def test_approve_does_not_cross_accounts(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, StubExecutor())
+    shadow = ReviewQueue(conn, StubExecutor(), account="shadow")
+    srid = add(shadow)
+
+    # paper's instance must not be able to approve shadow's row via its id.
+    with pytest.raises(ReviewError):
+        paper.approve(srid)
+    assert shadow.get(srid)["status"] == "pending"
+
+    shadow.approve(srid)
+    assert shadow.get(srid)["status"] == "approved"
+
+
+def test_supersede_pending_chat_revision_scoped_to_account(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, None)
+    shadow = ReviewQueue(conn, None, account="shadow")
+
+    # Same strategy_id in both accounts (legitimate: Task 2 gives each
+    # account its own strategy directory, so ids can collide).
+    prid = paper.add_strategy_revision(strategy_id="s1", ticker="AAPL",
+                                       old_yaml="old", new_yaml="new-p",
+                                       diff="d", rationale="r", source="chat")
+    srid = shadow.add_strategy_revision(strategy_id="s1", ticker="AAPL",
+                                        old_yaml="old", new_yaml="new-s",
+                                        diff="d", rationale="r", source="chat")
+
+    # A second paper proposal for the same strategy_id must supersede only
+    # the paper row, never shadow's.
+    prid2 = paper.add_strategy_revision(strategy_id="s1", ticker="AAPL",
+                                        old_yaml="old", new_yaml="new-p2",
+                                        diff="d", rationale="r", source="chat")
+    superseded = paper.supersede_pending_chat_revision(
+        "s1", f"replaced by #{prid2}", exclude_id=prid2)
+    assert superseded == prid
+    assert paper.get(prid)["status"] == "superseded"
+    assert shadow.get(srid)["status"] == "pending"
+
+
+def test_legacy_pending_reviews_row_defaults_account_paper_after_migration(tmp_path):
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(str(path))
+    raw.execute(
+        "CREATE TABLE pending_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " ts TEXT NOT NULL, strategy_id TEXT NOT NULL, rule_id TEXT NOT NULL,"
+        " ticker TEXT NOT NULL, rule_type TEXT NOT NULL, condition TEXT NOT NULL,"
+        " action TEXT NOT NULL, snapshot TEXT NOT NULL, intent TEXT,"
+        " status TEXT NOT NULL DEFAULT 'pending', resolved_ts TEXT,"
+        " resolution_note TEXT, execution_result TEXT,"
+        " kind TEXT NOT NULL DEFAULT 'order')")
+    raw.execute(
+        "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker, rule_type,"
+        " condition, action, snapshot) VALUES ('t', 's1', 'r1', 'AAPL', 'soft',"
+        " 'c', 'a', '{}')")
+    raw.commit()
+    raw.close()
+
+    conn = connect(path)
+    row = conn.execute("SELECT account FROM pending_reviews").fetchone()
+    assert row["account"] == "paper"
+
+    paper = ReviewQueue(conn, None)
+    [prow] = paper.list(status=None)
+    assert prow["account"] == "paper"
+
+
+def test_constructor_rejects_invalid_account(tmp_path):
+    with pytest.raises(ValueError, match="invalid account"):
+        ReviewQueue(connect(tmp_path / "t.db"), None, account="evil")
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T5: ReviewQueue.locate -- the row-bound approval
+# primitive every web/TG/approve-link entry point uses to find which
+# account a review actually belongs to, regardless of the caller's own
+# `_account` or the current view/chat's selected account.
+# ---------------------------------------------------------------------------
+
+def test_locate_finds_a_row_regardless_of_which_instance_asks(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = ReviewQueue(conn, None)
+    shadow = ReviewQueue(conn, None, account="shadow")
+    shadow_id = shadow.add(strategy_id="s1", rule_id="r1", ticker="AAPL",
+                           rule_type="soft", condition="c", action="a",
+                           snapshot={}, intent=None)
+
+    # Asked via the PAPER instance -- locate is unscoped by self._account,
+    # unlike .get(), which would raise "not found" for a foreign-account id.
+    located = paper.locate(shadow_id)
+    assert located is not None
+    account, row = located
+    assert account == "shadow"
+    assert row["id"] == shadow_id
+    assert row["ticker"] == "AAPL"
+
+    # And the reverse: a paper row located via the shadow instance.
+    paper_id = paper.add(strategy_id="s2", rule_id="r2", ticker="TSLA",
+                         rule_type="soft", condition="c", action="a",
+                         snapshot={}, intent=None)
+    account2, row2 = shadow.locate(paper_id)
+    assert account2 == "paper"
+    assert row2["id"] == paper_id
+
+
+def test_locate_returns_none_for_a_missing_id(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    queue = ReviewQueue(conn, None)
+    assert queue.locate(999999) is None
+
+
+def test_locate_returns_none_for_a_row_with_a_corrupted_account_column(tmp_path):
+    # shadow-dual-active T5 review Minor: every caller of `locate`
+    # (web/account_ctx.bundle_for, telegram.py's own inline equivalent)
+    # feeds its `account` result straight into `c.accounts[account]` with
+    # no further validation -- so a row whose `account` column isn't one of
+    # the known accounts (hand-edited DB, a hypothetical future migration
+    # bug) used to reach that dict lookup and raise `KeyError`, a 500,
+    # instead of the same "not found" this id would get if it simply didn't
+    # exist. `locate` must filter such rows out itself, at the one shared
+    # unscoped lookup, rather than leaving every call site to guard against
+    # it independently.
+    conn = connect(tmp_path / "t.db")
+    queue = ReviewQueue(conn, None)
+    rid = queue.add(strategy_id="s1", rule_id="r1", ticker="AAPL",
+                    rule_type="soft", condition="c", action="a",
+                    snapshot={}, intent=None)
+    conn.execute("UPDATE pending_reviews SET account = ? WHERE id = ?",
+                ("not-a-real-account", rid))
+    conn.commit()
+
+    assert queue.locate(rid) is None
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T6: shadow_edit kind -- add_shadow_edit/
+# _approve_shadow_edit. `apply_shadow_edit_factory` (agent/shadow_tools.py)
+# has its own thorough test suite (tests/test_shadow_tools.py) for the
+# staleness/atomicity math; these tests exercise the store-layer contract
+# only -- claim discipline, rollback-to-pending, applier injection.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def shadow_queue(tmp_path):
+    return ReviewQueue(connect(tmp_path / "s.db"), None, account="shadow")
+
+
+def add_shadow_edit(queue, **over):
+    kwargs = {"op": "set_cash", "ticker": "", "action": "Set cash",
+              "args": {"amount": "500"}, "before": {"cash": "0"},
+              "after": {"cash": "500"}}
+    kwargs.update(over)
+    return queue.add_shadow_edit(**kwargs)
+
+
+def test_add_shadow_edit_row_shape(shadow_queue):
+    rid = add_shadow_edit(shadow_queue, action="Set cash")
+    row = shadow_queue.get(rid)
+    assert row["kind"] == "shadow_edit"
+    assert row["account"] == "shadow"
+    assert row["action"] == "Set cash"
+    assert row["strategy_id"] == ""
+    assert row["rule_id"] == "shadow_edit"
+    assert row["rule_type"] == "shadow_edit"
+    assert row["condition"] == "set_cash"
+    assert row["status"] == "pending"
+    assert row["source"] == "chat"
+    snapshot = json.loads(row["snapshot"])
+    assert snapshot == {"op": "set_cash", "args": {"amount": "500"},
+                        "before": {"cash": "0"}, "after": {"cash": "500"}}
+
+
+def test_add_shadow_edit_rejected_on_a_non_shadow_account(tmp_path):
+    paper_queue = ReviewQueue(connect(tmp_path / "t.db"), None)
+    with pytest.raises(ReviewError, match="shadow account"):
+        add_shadow_edit(paper_queue)
+
+
+def test_approve_shadow_edit_calls_applier_and_marks_applied(shadow_queue):
+    calls = []
+
+    def applier(op, args, before):
+        calls.append((op, args, before))
+
+    shadow_queue.set_shadow_edit_applier(applier)
+    rid = add_shadow_edit(shadow_queue)
+
+    result = shadow_queue.approve(rid)
+
+    assert result is None
+    assert calls == [("set_cash", {"amount": "500"}, {"cash": "0"})]
+    row = shadow_queue.get(rid)
+    assert row["status"] == "approved"
+    assert json.loads(row["execution_result"]) == {"applied": True}
+
+
+def test_approve_shadow_edit_without_applier_raises_and_leaves_pending(shadow_queue):
+    rid = add_shadow_edit(shadow_queue)
+    with pytest.raises(ReviewError):
+        shadow_queue.approve(rid)
+    assert shadow_queue.get(rid)["status"] == "pending"
+
+
+def test_approve_shadow_edit_validation_error_leaves_row_pending(shadow_queue):
+    def boom(op, args, before):
+        raise RevisionValidationError("ledger changed since this proposal")
+
+    shadow_queue.set_shadow_edit_applier(boom)
+    rid = add_shadow_edit(shadow_queue)
+
+    with pytest.raises(RevisionValidationError):
+        shadow_queue.approve(rid)
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "pending"
+    assert row["resolved_ts"] is None
+    # still rejectable
+    shadow_queue.reject(rid, note="stale")
+    assert shadow_queue.get(rid)["status"] == "rejected"
+
+
+def test_approve_shadow_edit_validation_error_restores_the_approve_token(shadow_queue):
+    """A staleness rollback means nothing was actually written to the
+    ledger -- this proposal is still exactly as approvable as it was before
+    `approve()` was called. The claim step nulls `approval_token_hash`/
+    `token_expires_ts` unconditionally, so the rollback branch must restore
+    them, or the row goes back to "pending" while its own approve-by-link
+    token is permanently dead -- silently breaking a not-yet-clicked email/
+    Telegram notification link even though nothing changed."""
+    def boom(op, args, before):
+        raise RevisionValidationError("ledger changed since this proposal")
+
+    shadow_queue.set_shadow_edit_applier(boom)
+    handle = add_shadow_edit(shadow_queue)
+    token = handle.token
+
+    with pytest.raises(RevisionValidationError):
+        shadow_queue.approve(handle)
+
+    row = shadow_queue.get(handle)
+    assert row["status"] == "pending"
+    assert row["approval_token_hash"] is not None
+    assert row["token_expires_ts"] is not None
+
+    # The ORIGINAL token minted at propose time still consumes.
+    consumed = shadow_queue.consume_token(handle, token)
+    assert consumed is not None
+    assert consumed["id"] == handle
+
+
+def test_approve_shadow_edit_runtime_error_recorded_and_reraised(shadow_queue):
+    def boom(op, args, before):
+        raise RuntimeError("disk full")
+
+    shadow_queue.set_shadow_edit_applier(boom)
+    rid = add_shadow_edit(shadow_queue)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        shadow_queue.approve(rid)
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "approved"
+    assert json.loads(row["execution_result"]) == {"error": "disk full"}
+
+
+def test_approve_shadow_edit_twice_raises(shadow_queue):
+    calls = []
+    shadow_queue.set_shadow_edit_applier(lambda op, args, before: calls.append(1))
+    rid = add_shadow_edit(shadow_queue)
+    shadow_queue.approve(rid)
+    with pytest.raises(ReviewError):
+        shadow_queue.approve(rid)
+    assert calls == [1]
+
+
+def test_approve_shadow_edit_with_corrupt_snapshot_raises_and_leaves_pending(shadow_queue):
+    shadow_queue.set_shadow_edit_applier(lambda op, args, before: None)
+    rid = add_shadow_edit(shadow_queue)
+    shadow_queue._conn.execute(
+        "UPDATE pending_reviews SET snapshot=? WHERE id=?", ("not json", rid))
+    shadow_queue._conn.commit()
+
+    with pytest.raises(ReviewError):
+        shadow_queue.approve(rid)
+
+    row = shadow_queue.get(rid)
+    assert row["status"] == "pending"
+    assert row["execution_result"] is None
+
+
+def test_reject_shadow_edit_never_calls_applier(shadow_queue):
+    calls = []
+    shadow_queue.set_shadow_edit_applier(lambda op, args, before: calls.append(1))
+    rid = add_shadow_edit(shadow_queue)
+
+    shadow_queue.reject(rid, note="no")
+
+    assert calls == []
+    row = shadow_queue.get(rid)
+    assert row["status"] == "rejected" and row["resolution_note"] == "no"

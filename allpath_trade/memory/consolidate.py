@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
@@ -9,6 +10,7 @@ from allpath_trade.agent.tools import ToolRegistry, fence_external
 from allpath_trade.llm.base import LLMClient
 from allpath_trade.memory.observations import ObservationLog
 from allpath_trade.memory.store import MemoryStore
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.journal import TradeJournal
@@ -52,7 +54,23 @@ MARKER = "consolidation run"
 # the established home for this kind of single-row process cursor (see
 # SENTINEL_HEARTBEAT_KEY); reusing it here keeps this a "read the KV table"
 # concern rather than a new schema addition.
+#
+# shadow-dual-active T4 CRITICAL carry (from T1's review): this was a single
+# GLOBAL app_state key -- under per-account nightly consolidation,
+# interleaved turn ids across both accounts' conversations mean whichever
+# account's run_daily happened to execute first would advance this one
+# shared marker past the OTHER account's still-unconsumed turns, silently
+# losing them forever (they're older than the marker, so the next run's
+# `turns_since` never re-offers them). `_turn_marker_key` below suffixes
+# this constant with the account, giving each account its own independent
+# cursor; this bare constant is kept only as the pre-dual-active LEGACY key
+# name, read as a one-time fallback by `_last_turn_marker` when paper's new
+# per-account key has never been written (see there).
 TURN_MARKER_KEY = "consolidator_last_turn_id"
+
+
+def _turn_marker_key(account: str) -> str:
+    return f"{TURN_MARKER_KEY}:{account}"
 
 # Conversation turns are chattier than trade/observation events and, unlike
 # the single-session POST_CHAT_PROMPT transcript, `run_daily` aggregates
@@ -97,7 +115,29 @@ class Consolidator:
                  observations: ObservationLog, journal: TradeJournal,
                  conn: sqlite3.Connection, max_updates: int = 20,
                  conversations: ConversationStore | None = None,
-                 app_state: AppState | None = None) -> None:
+                 app_state: AppState | None = None,
+                 account: str = DEFAULT_ACCOUNT) -> None:
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
+        # shadow-dual-active T4 review Minor 8: `_last_marker_ts` and
+        # `_last_turn_marker` (see their own docstrings just below) both
+        # rely, BY CONVENTION ONLY, on the caller having handed this
+        # Consolidator the SAME account's `observations`/`conversations`
+        # instances -- nothing previously enforced that. A future call
+        # site that mismatches them (e.g. shadow's Consolidator built with
+        # paper's ObservationLog by a copy-paste error in app.py) would
+        # silently consolidate the WRONG account's events into this
+        # account's memory, with no error anywhere to catch it. Structural
+        # checks here turn that into a loud construction-time failure
+        # instead of a quiet cross-account leak.
+        if observations.account != account:
+            raise ValueError(
+                f"Consolidator account mismatch: observations is scoped to"
+                f" {observations.account!r}, not {account!r}")
+        if conversations is not None and conversations.account != account:
+            raise ValueError(
+                f"Consolidator account mismatch: conversations is scoped to"
+                f" {conversations.account!r}, not {account!r}")
         if conversations is not None and app_state is None:
             # Not graceful degradation -- a slow corruption loop (Finding
             # 4). `_last_turn_marker` returns 0 forever without app_state,
@@ -118,6 +158,7 @@ class Consolidator:
         self.max_updates = max_updates
         self.conversations = conversations
         self.app_state = app_state
+        self.account = account
 
     def _registry(self) -> ToolRegistry:
         registry = ToolRegistry()
@@ -125,15 +166,52 @@ class Consolidator:
         return registry
 
     def _last_marker_ts(self) -> str | None:
-        row = self._conn.execute(
-            "SELECT ts FROM observations WHERE source='consolidator'"
-            " ORDER BY id DESC LIMIT 1").fetchone()
-        return row["ts"] if row else None
+        # shadow-dual-active T4 CRITICAL carry: delegates to
+        # ObservationLog.last_marker_ts, which scopes by `self.observations
+        # .account` -- this constructor's caller always hands this
+        # Consolidator the SAME account's ObservationLog instance (app.py's
+        # per-account bundle), so this naturally stays this account's own
+        # marker with no separate account plumbing needed here. A legacy
+        # pre-dual-active row (backfilled account='paper' by the T4 ALTER)
+        # is still found by paper's own instance -- no explicit seeding
+        # needed for this marker, unlike the turn-id watermark below.
+        return self.observations.last_marker_ts("consolidator")
 
     def _last_turn_marker(self) -> int:
         if self.app_state is None:
             return 0
-        value = self.app_state.get(TURN_MARKER_KEY)
+        value = self.app_state.get(_turn_marker_key(self.account))
+        if value is None and self.account == DEFAULT_ACCOUNT:
+            # shadow-dual-active T4 CRITICAL carry: seed paper's new
+            # per-account key from the pre-dual-active global key, ONE TIME.
+            # `shadow` has no legacy history to seed from, so it simply
+            # starts at 0, same as a brand-new account should.
+            #
+            # Review Minor: the seed MIGRATES -- it writes the per-account
+            # key and deletes the legacy row here, rather than waiting for
+            # `run_daily` to happen to write the new key on some later day
+            # with turns to consume. Two reasons. Until that write lands the
+            # fallback is live on every call, so the "ONE TIME" above was
+            # only true in the happy path; and leaving the legacy row in
+            # place forever means any later deletion of the per-account key
+            # (an operator resetting the watermark, a future account-reset)
+            # silently resurrects the stale global value and skips every
+            # turn below it. Migrating makes the legacy key genuinely
+            # consumed: read once, moved, gone.
+            #
+            # A failed migration write degrades to "return the legacy value
+            # anyway": re-consuming every turn from id 0 (an expensive
+            # memory-tier prompt over the entire history) would be a far
+            # worse response to a transient store error than simply trying
+            # the migration again on the next call.
+            value = self.app_state.get(TURN_MARKER_KEY)
+            if value is not None:
+                try:
+                    self.app_state.set(_turn_marker_key(self.account), value)
+                    self.app_state.delete(TURN_MARKER_KEY)
+                except Exception as exc:  # noqa: BLE001 — see comment above
+                    print(f"[consolidate] legacy turn-marker migration failed: "
+                          f"{exc}", file=sys.stderr)
         return int(value) if value else 0
 
     def _turn_lines(self) -> tuple[list[str], int | None]:
@@ -233,7 +311,7 @@ class Consolidator:
             self.observations.add("consolidator", f"{MARKER}: {summary[:200]}")
             if max_turn_id is not None and self.app_state is not None:
                 try:
-                    self.app_state.set(TURN_MARKER_KEY, str(max_turn_id))
+                    self.app_state.set(_turn_marker_key(self.account), str(max_turn_id))
                 except Exception as exc:  # noqa: BLE001
                     # Memory WAS written (memory_update tool calls already
                     # ran inside session.run_turn above) and the

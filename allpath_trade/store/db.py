@@ -8,6 +8,7 @@ from pathlib import Path
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1: which pipeline
     ts TEXT NOT NULL,                -- UTC ISO-8601
     ticker TEXT NOT NULL,
     side TEXT NOT NULL,
@@ -20,8 +21,14 @@ CREATE TABLE IF NOT EXISTS trades (
     broker_order_id TEXT
 );
 
+-- shadow-dual-active T2 (carried from T1 review): `account` is a plain
+-- column here, not part of a constraint SQLite can't ALTER in place (unlike
+-- `reports`'s UNIQUE or `rule_states`'s PRIMARY KEY) -- version numbers are
+-- never required to be unique across rows, so a legacy DB just gets the
+-- column ALTERed + backfilled 'paper' below, no table rebuild needed.
 CREATE TABLE IF NOT EXISTS strategy_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',
     strategy_id TEXT NOT NULL,
     version INTEGER NOT NULL,
     ts TEXT NOT NULL,
@@ -29,16 +36,24 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
     content TEXT NOT NULL
 );
 
+-- shadow-dual-active T1: PK includes `account` so the same (strategy_id,
+-- rule_id) can be independently armed/triggered per account -- paper and
+-- shadow strategy dirs can both define a strategy called e.g. "growth"
+-- (Task 2: strategies/{account}/) with rules that must not share state.
+-- Legacy on-disk DBs still have the old 2-column PK; `_rebuild_rule_states`
+-- below rebuilds them into this shape (SQLite can't ALTER a PRIMARY KEY).
 CREATE TABLE IF NOT EXISTS rule_states (
+    account TEXT NOT NULL DEFAULT 'paper',
     strategy_id TEXT NOT NULL,
     rule_id TEXT NOT NULL,
     state TEXT NOT NULL,
     updated_ts TEXT NOT NULL,
-    PRIMARY KEY (strategy_id, rule_id)
+    PRIMARY KEY (account, strategy_id, rule_id)
 );
 
 CREATE TABLE IF NOT EXISTS pending_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1
     ts TEXT NOT NULL,
     strategy_id TEXT NOT NULL,
     rule_id TEXT NOT NULL,
@@ -57,6 +72,7 @@ CREATE TABLE IF NOT EXISTS pending_reviews (
 
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1
     started_ts TEXT NOT NULL,
     title TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT 'chat'  -- 'chat' | 'reflection' (Phase 6)
@@ -69,8 +85,15 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     message TEXT NOT NULL
 );
 
+-- shadow-dual-active T6 review (C1): `account` scopes the memory change
+-- audit trail the same way it scopes `observations`. Without it the web
+-- Memory page's Changes tab (routes/memory.py -> MemoryStore.recent_log)
+-- rendered the OTHER account's `after` text -- the full note body -- to
+-- whichever account was being viewed. No constraint to rebuild here, so a
+-- plain ALTER in `_MIGRATIONS` backfills legacy rows 'paper'.
 CREATE TABLE IF NOT EXISTS memory_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',
     ts TEXT NOT NULL,
     layer TEXT NOT NULL,
     key TEXT,
@@ -79,16 +102,32 @@ CREATE TABLE IF NOT EXISTS memory_log (
     after TEXT
 );
 
+-- shadow-dual-active T4 CRITICAL carry (from T1's review): `account` scopes
+-- every read/write here (memory/observations.py's ObservationLog) so a
+-- shadow-account observation can never be picked up by paper's daily
+-- consolidation/reflection window queries, or vice versa. Was UNIQUE-free
+-- before, so a plain ALTER (see _MIGRATIONS) is enough -- no rebuild needed.
 CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',
     ts TEXT NOT NULL,
     source TEXT NOT NULL,
     subject TEXT,
     text TEXT NOT NULL
 );
 
+-- shadow-dual-active T4 CRITICAL carry (from T1's review): `account` (last
+-- column, UNINDEXED) scopes every row so a shadow chat turn or observation
+-- can never surface in paper's session_search results (memory/search.py)
+-- -- straight into the paper agent's context, the exact leak class T1's
+-- review flagged. Appended LAST (not inserted before subject/content) so
+-- SessionSearch.query's `snippet(search_index, 3, ...)` column-index call
+-- -- 0=kind, 1=ref_id, 2=subject, 3=content -- keeps pointing at `content`
+-- unchanged. FTS5 has no ALTER TABLE ADD COLUMN in the sqlite3 version this
+-- app targets, so an existing on-disk table needs the same rebuild
+-- treatment as `reports`/`rule_states` below -- see `_rebuild_search_index`.
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-    kind UNINDEXED, ref_id UNINDEXED, subject, content
+    kind UNINDEXED, ref_id UNINDEXED, subject, content, account UNINDEXED
 );
 
 -- Tiny key-value table for process-level facts that don't belong in any
@@ -101,19 +140,25 @@ CREATE TABLE IF NOT EXISTS app_state (
     value TEXT
 );
 
--- Daily reflection reports (Phase 6). One row per ET trading day; the
--- `date` UNIQUE constraint is also how the reflection scheduler stays
--- idempotent across process restarts -- see ReportStore.
+-- Daily reflection reports (Phase 6). One row per (account, ET trading day);
+-- the UNIQUE(account, date) constraint is also how the reflection scheduler
+-- stays idempotent across process restarts -- see ReportStore. Was
+-- UNIQUE(date) alone before shadow-dual-active T1 -- `_rebuild_reports`
+-- below migrates a legacy on-disk table into this shape (SQLite can't ALTER
+-- a UNIQUE constraint in place); a fresh install gets this shape directly
+-- via CREATE TABLE IF NOT EXISTS.
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL UNIQUE,
+    account TEXT NOT NULL DEFAULT 'paper',
+    date TEXT NOT NULL,
     body TEXT NOT NULL,
     summary TEXT NOT NULL,
     conversation_id INTEGER,
     model TEXT NOT NULL DEFAULT '',
     tokens_used INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'ok',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE (account, date)
 );
 
 -- LLM usage + cost-estimate panel (store/llm_usage.py). One row per
@@ -127,6 +172,62 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     purpose TEXT NOT NULL DEFAULT ''
+);
+
+-- shadow-dual-active T3: ShadowLedger's own tables (broker/shadow.py).
+-- Deliberately have NO `account` column, unlike every table above --
+-- these tables ARE the shadow account's ledger (there is one shadow
+-- account, so there is nothing to dimension by), not a shared table a
+-- second account's rows could leak into. New tables land straight in
+-- SCHEMA (not _MIGRATIONS) per the house convention: CREATE TABLE IF NOT
+-- EXISTS already covers both a fresh install and an existing on-disk DB
+-- that predates this table, with no ALTER step needed.
+CREATE TABLE IF NOT EXISTS shadow_positions (
+    ticker TEXT PRIMARY KEY,
+    qty TEXT NOT NULL,
+    avg_cost TEXT NOT NULL,
+    last_price TEXT,
+    last_price_ts TEXT,
+    updated_ts TEXT NOT NULL
+);
+
+-- Single-row table (CHECK id=1) holding shadow cash. INSERT ... ON
+-- CONFLICT(id) DO UPDATE is how ShadowLedger both creates and updates it,
+-- so there is no separate "initialize the ledger" step.
+CREATE TABLE IF NOT EXISTS shadow_cash (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    cash TEXT NOT NULL,
+    updated_ts TEXT NOT NULL
+);
+
+-- Every submit_order call appends a row here, filled or rejected alike
+-- (rejections carry their reason in `note`, no fill_price/filled_at) --
+-- this table is the shadow account's full audit trail. `side='adjust'`
+-- rows (written by ShadowLedger's ledger-mutation helpers: set_position,
+-- set_cash, remove_position, record_fill -- Task 6's applier, never
+-- reachable from the agent directly) are also appended here for the same
+-- audit-trail reason, but are excluded from get_order/get_orders (Broker
+-- interface methods, side IN ('buy','sell') only) since they aren't
+-- orders the user submitted through the trading flow.
+CREATE TABLE IF NOT EXISTS shadow_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty TEXT,
+    notional TEXT,
+    status TEXT NOT NULL,
+    fill_price TEXT,
+    filled_at TEXT,
+    note TEXT NOT NULL DEFAULT ''
+);
+
+-- One row per ET calendar day, upserted both by get_account (every read,
+-- best-effort) and (eventually) a nightly job -- see ShadowLedger.
+CREATE TABLE IF NOT EXISTS shadow_equity_daily (
+    date TEXT PRIMARY KEY,
+    equity TEXT NOT NULL,
+    cash TEXT NOT NULL
 );
 """
 
@@ -150,7 +251,60 @@ _MIGRATIONS = [
     # that must always fail closed in ReviewQueue._token_ok.
     "ALTER TABLE pending_reviews ADD COLUMN approval_token_hash TEXT",
     "ALTER TABLE pending_reviews ADD COLUMN token_expires_ts TEXT",
+    # shadow-dual-active T1: account dimension. Plain ALTER + DEFAULT is
+    # enough for these four -- legacy rows (all pre-dating the shadow
+    # account) backfill 'paper' for free via the column default, exactly
+    # like the `kind` backfills above. `reports` and `rule_states` ALSO
+    # need a constraint that SQLite can't ALTER in place (a UNIQUE key and
+    # a PRIMARY KEY respectively) -- those columns are added here too, but
+    # the constraint fix is a separate table-rebuild step; see
+    # `_rebuild_reports`/`_rebuild_rule_states` below.
+    "ALTER TABLE trades ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE pending_reviews ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE conversations ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE reports ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    "ALTER TABLE rule_states ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    # shadow-dual-active T2 (carried from T1 review): strategy_versions was
+    # keyed on strategy_id alone -- after the strategies/{account}/
+    # directory split (this task), a same-id strategy in each account would
+    # otherwise share one version history, the same leak class as the
+    # rule_states PK T1 fixed. No table rebuild needed here (see the SCHEMA
+    # comment above `strategy_versions`): plain ALTER + DEFAULT backfills
+    # every legacy row 'paper', exactly like the four T1 columns above.
+    "ALTER TABLE strategy_versions ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    # shadow-dual-active T4 CRITICAL carry: plain ALTER is enough for
+    # `observations` (no constraint to rebuild, see the SCHEMA comment
+    # above it) -- legacy rows backfill 'paper' via the column default,
+    # same pattern as the T1 four-column block above. `search_index`
+    # (FTS5) needs the rebuild treatment instead; see
+    # `_rebuild_search_index` below.
+    "ALTER TABLE observations ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    # shadow-dual-active T6 review (C1): same plain-ALTER treatment for
+    # `memory_log` -- see the SCHEMA comment above it. Every legacy row was
+    # written before the shadow account existed, so 'paper' is the correct
+    # backfill, and the Changes tab stops showing one account the other's
+    # note text.
+    "ALTER TABLE memory_log ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
 ]
+
+# LOUD REMINDER for whoever adds the next account-scoped (or any other)
+# column to `reports` or `rule_states`: both tables have been rebuilt at
+# least once already (`_rebuild_reports`/`_rebuild_rule_states` below)
+# because SQLite cannot ALTER a UNIQUE/PRIMARY KEY constraint in place. Each
+# rebuild function hand-writes its own full DDL (CREATE TABLE ..._v2 with
+# every column spelled out) and its own explicit column list for the
+# INSERT ... SELECT copy. Adding a column ONLY to `_MIGRATIONS` (the ALTER
+# list above) is not enough for these two tables on a fresh install that
+# still needs a rebuild for some OTHER, still-unmigrated reason -- and
+# adding a column only to SCHEMA's CREATE TABLE IF NOT EXISTS is not enough
+# for an existing on-disk DB that goes through the rebuild path. Any new
+# column on `reports` or `rule_states` must be added in ALL THREE places:
+# SCHEMA's CREATE TABLE, the matching `_rebuild_*` function's CREATE TABLE
+# ..._v2 + INSERT column list, AND (if it needs backfilling on a DB that
+# predates the rebuild too) a plain ALTER in `_MIGRATIONS` above, run before
+# the rebuild so the rebuild's SELECT can read it. Forgetting one of the
+# three is silent: the column will exist on SOME on-disk databases and not
+# others, depending on exactly which migration path a given install took.
 
 
 class LockedConnection:
@@ -288,12 +442,167 @@ class _Rows:
         return iter(self._rows)
 
 
+def _table_sql(conn: LockedConnection, table: str) -> str | None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table,)).fetchone()
+    return row["sql"] if row is not None else None
+
+
+def _table_has_column(conn: LockedConnection, table: str, column: str) -> bool:
+    """Exact column-name check via `PRAGMA table_info`, not a substring
+    search over the table's stored CREATE statement text. Used by
+    `_rebuild_search_index` below (shadow-dual-active T4 review, Minor 5):
+    a plain `"account" in sql` guard is one stray word away from a false
+    positive (e.g. a future column, index name, or even a comment
+    containing the literal substring "account" would short-circuit the
+    rebuild as already-done without actually adding the column). PRAGMA
+    table_info works on FTS5 virtual tables the same as ordinary ones --
+    they register their declared columns there too -- so this is a strict
+    improvement with no new caveats, verified against a populated legacy
+    `search_index` in tests/test_db_migrations.py. `table` is always one of
+    this module's own hardcoded constants, never external input, so an
+    f-string is safe here -- PRAGMA doesn't accept bound parameters for the
+    table name at all."""
+    return any(row["name"] == column
+              for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _rebuild_reports(conn: LockedConnection) -> None:
+    """Table-rebuild for `reports`: SQLite has no `ALTER TABLE ... ADD
+    CONSTRAINT`, so the old UNIQUE(date) key can't become UNIQUE(account,
+    date) in place. Guarded by inspecting the table's own stored CREATE
+    TABLE text (`sqlite_master.sql`) for the new constraint, rather than a
+    sentinel row or a PRAGMA count, because that text is unambiguous and
+    can't drift out of sync with what's actually enforced -- if it's
+    there, the rebuild already happened (or this is a fresh install, where
+    `CREATE TABLE IF NOT EXISTS` above created the new shape directly and
+    this is a genuine no-op). Idempotent across restarts: run once on a
+    legacy DB, forever a no-op after.
+
+    Must run AFTER the `account` column ALTER above (also idempotent) --
+    the copy step below reads that column, so on a legacy DB it needs to
+    already exist (backfilled 'paper' by the ALTER's DEFAULT)."""
+    sql = _table_sql(conn, "reports")
+    if sql is None or "UNIQUE (account, date)" in sql:
+        return
+    with conn.transaction():
+        conn.execute(
+            "CREATE TABLE reports_v2 ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " account TEXT NOT NULL DEFAULT 'paper',"
+            " date TEXT NOT NULL,"
+            " body TEXT NOT NULL,"
+            " summary TEXT NOT NULL,"
+            " conversation_id INTEGER,"
+            " model TEXT NOT NULL DEFAULT '',"
+            " tokens_used INTEGER NOT NULL DEFAULT 0,"
+            " status TEXT NOT NULL DEFAULT 'ok',"
+            " created_at TEXT NOT NULL,"
+            " UNIQUE (account, date))")
+        try:
+            conn.execute(
+                "INSERT INTO reports_v2 (id, account, date, body, summary,"
+                " conversation_id, model, tokens_used, status, created_at)"
+                " SELECT id, account, date, body, summary, conversation_id,"
+                " model, tokens_used, status, created_at FROM reports")
+        except sqlite3.IntegrityError as exc:
+            # A DB old enough to predate even the UNIQUE(date) constraint
+            # can hold two rows for one date, which the new UNIQUE(account,
+            # date) key rejects. Say WHICH dates rather than surfacing a
+            # bare "UNIQUE constraint failed" out of `connect()` -- the
+            # savepoint rollback leaves every original row intact, so the
+            # user can delete the duplicate they don't want and restart.
+            dupes = ", ".join(sorted(
+                row["date"] for row in conn.execute(
+                    "SELECT date FROM reports GROUP BY account, date"
+                    " HAVING COUNT(*) > 1")))
+            raise RuntimeError(
+                "cannot migrate `reports`: duplicate rows for"
+                f" {dupes or 'an unknown date'} — delete the extra report"
+                " row(s) for those dates and restart") from exc
+        conn.execute("DROP TABLE reports")
+        conn.execute("ALTER TABLE reports_v2 RENAME TO reports")
+
+
+def _rebuild_rule_states(conn: LockedConnection) -> None:
+    """Table-rebuild for `rule_states`: the PRIMARY KEY must become
+    (account, strategy_id, rule_id) so the same strategy/rule id armed in
+    both `paper` and `shadow` (Task 2: each account gets its own strategy
+    directory, so ids CAN collide) tracks independent state instead of one
+    account's ON CONFLICT upsert silently overwriting the other's row.
+    SQLite can't ALTER a PRIMARY KEY in place, hence the rebuild. Same
+    guard shape as `_rebuild_reports` -- inspect the stored CREATE TABLE
+    text, no-op if already the new shape (rebuilt already, or a fresh
+    install that got it directly from SCHEMA)."""
+    sql = _table_sql(conn, "rule_states")
+    if sql is None or "PRIMARY KEY (account, strategy_id, rule_id)" in sql:
+        return
+    with conn.transaction():
+        conn.execute(
+            "CREATE TABLE rule_states_v2 ("
+            " account TEXT NOT NULL DEFAULT 'paper',"
+            " strategy_id TEXT NOT NULL,"
+            " rule_id TEXT NOT NULL,"
+            " state TEXT NOT NULL,"
+            " updated_ts TEXT NOT NULL,"
+            " PRIMARY KEY (account, strategy_id, rule_id))")
+        conn.execute(
+            "INSERT INTO rule_states_v2 (account, strategy_id, rule_id,"
+            " state, updated_ts)"
+            " SELECT account, strategy_id, rule_id, state, updated_ts"
+            " FROM rule_states")
+        conn.execute("DROP TABLE rule_states")
+        conn.execute("ALTER TABLE rule_states_v2 RENAME TO rule_states")
+
+
+def _rebuild_search_index(conn: LockedConnection) -> None:
+    """Table-rebuild for `search_index` (FTS5): shadow-dual-active T4
+    CRITICAL carry-forward from T1's review. FTS5 tables can't gain a
+    column via `ALTER TABLE ... ADD COLUMN` the way `observations` just
+    did above, so this mirrors `_rebuild_reports`/`_rebuild_rule_states`'s
+    approach: create a new virtual table with the extra `account` column,
+    copy every existing row into it (backfilled 'paper' -- the only
+    account that could have pre-existing rows), drop the old table, rename
+    the new one into place. `account` lands as the LAST column so
+    `SessionSearch.query`'s `snippet(search_index, 3, ...)` column-index
+    call -- 0=kind, 1=ref_id, 2=subject, 3=content -- keeps pointing at
+    `content` unchanged; see the SCHEMA comment above the CREATE VIRTUAL
+    TABLE for the full rationale.
+
+    Guarded the same way as the other two rebuilds: inspect the table's
+    own stored CREATE TABLE text for the new column name (FTS5 virtual
+    tables register in `sqlite_master` as type='table', same as ordinary
+    tables), so a second call -- or a fresh install that already got the
+    new shape straight from SCHEMA -- is a strict no-op. Idempotent across
+    restarts and verified against a populated legacy index (see
+    tests/test_db_migrations.py)."""
+    sql = _table_sql(conn, "search_index")
+    if sql is None or _table_has_column(conn, "search_index", "account"):
+        return
+    with conn.transaction():
+        conn.execute(
+            "CREATE VIRTUAL TABLE search_index_v2 USING fts5("
+            "kind UNINDEXED, ref_id UNINDEXED, subject, content,"
+            " account UNINDEXED)")
+        conn.execute(
+            "INSERT INTO search_index_v2 (kind, ref_id, subject, content, account)"
+            " SELECT kind, ref_id, subject, content, 'paper' FROM search_index")
+        conn.execute("DROP TABLE search_index")
+        conn.execute("ALTER TABLE search_index_v2 RENAME TO search_index")
+
+
 def _migrate(conn: LockedConnection) -> None:
     for stmt in _MIGRATIONS:
         try:
             conn.execute(stmt)
         except sqlite3.OperationalError:
             pass  # column already exists
+    # Constraint rebuilds run after the plain ALTERs above so the `account`
+    # column they depend on is already backfilled on a legacy DB.
+    _rebuild_reports(conn)
+    _rebuild_rule_states(conn)
+    _rebuild_search_index(conn)
 
 
 def connect(path: Path | str) -> LockedConnection:

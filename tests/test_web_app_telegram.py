@@ -135,6 +135,20 @@ def test_token_registers_the_mirror_hook(tmp_path):
         assert app.state.chat_service._mirror is not None
 
 
+def test_token_registers_the_mirror_hook_on_every_account_chat_service(tmp_path):
+    # shadow-dual-active T5: a shadow web-chat turn must mirror into
+    # Telegram too (labelled [Shadow]) -- not just paper's, which is all
+    # the pre-T5 single-ChatService design ever wired up.
+    SpyPoller.instances = []
+    settings = _settings(tmp_path, telegram_bot_token="123:ABC")
+    app = create_app(settings, broker=FakeBroker(), telegram_poller_cls=SpyPoller)
+
+    with TestClient(app):
+        assert set(app.state.chat_services) == {"paper", "shadow"}
+        for service in app.state.chat_services.values():
+            assert service._mirror is not None
+
+
 def test_poller_shares_the_same_app_state_the_chat_service_uses(tmp_path):
     # Both must read/write the same pairing/offset rows -- a second AppState
     # object pointed at a different connection would silently split state.
@@ -201,12 +215,31 @@ def _paired_app_state(tmp_path, chat_id: str = "555") -> AppState:
 
 
 def test_web_source_with_a_reply_sends_two_messages(tmp_path):
+    # shadow-dual-active T5: every mirrored line now carries an account
+    # prefix -- `account` defaults to "paper" here (the caller passed
+    # none), matching `_start_telegram`'s partial-binding for the paper
+    # ChatService (see test_account_prefix_reflects_which_chat_service_
+    # mirrored below for the shadow case).
     api = FakeMirrorAPI()
     app_state = _paired_app_state(tmp_path)
 
     _mirror_to_telegram("web", "hello", "hi there", api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
-    assert api.sent == [("555", "You (web): hello"), ("555", "hi there")]
+    assert api.sent == [("555", "[Paper] You (web): hello"), ("555", "[Paper] hi there")]
+
+
+def test_account_prefix_reflects_which_chat_service_mirrored(tmp_path):
+    # The shadow-account ChatService's mirror partial is bound with
+    # account="shadow" (see _start_telegram) -- proven directly here against
+    # the same _mirror_to_telegram function, without needing a full app.
+    api = FakeMirrorAPI()
+    app_state = _paired_app_state(tmp_path)
+
+    _mirror_to_telegram("web", "buy some AAPL", "noted", api=api, app_state=app_state,
+                        mirror_queue=ImmediateExecutor(), account="shadow")
+
+    assert api.sent == [("555", "[Shadow] You (web): buy some AAPL"),
+                        ("555", "[Shadow] noted")]
 
 
 def test_web_source_with_an_empty_reply_sends_only_the_note_line(tmp_path):
@@ -219,7 +252,7 @@ def test_web_source_with_an_empty_reply_sends_only_the_note_line(tmp_path):
     _mirror_to_telegram("web", "You resolved #1. Result: order submitted", "",
                         api=api, app_state=app_state, mirror_queue=ImmediateExecutor())
 
-    assert api.sent == [("555", "You resolved #1. Result: order submitted")]
+    assert api.sent == [("555", "[Paper] You resolved #1. Result: order submitted")]
 
 
 def test_telegram_source_is_a_no_op(tmp_path):
@@ -332,7 +365,7 @@ def test_web_sourced_resolution_still_mirrors_to_telegram_unchanged(
         chat_service.note_resolution("You resolved #2. Result: rejected")  # default source="web"
 
         assert chat_service.messages()[-1]["display"] == "You resolved #2. Result: rejected"
-        assert fake_api.sent == [("555", "You resolved #2. Result: rejected")]
+        assert fake_api.sent == [("555", "[Paper] You resolved #2. Result: rejected")]
 
 
 # ---------------------------------------------------------------------------
@@ -402,3 +435,6 @@ def test_stop_telegram_shuts_down_the_mirror_queue_and_clears_the_hook(tmp_path)
     # Lifespan shutdown already ran by the time the `with` block exits.
     assert mirror_queue._stop.is_set()
     assert app.state.chat_service._mirror is None
+    # shadow-dual-active T5: shadow's mirror hook must be cleared too, not
+    # just paper's -- both were registered on startup.
+    assert app.state.chat_services["shadow"]._mirror is None

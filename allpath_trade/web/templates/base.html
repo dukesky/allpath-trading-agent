@@ -17,6 +17,15 @@
     <a href="/memory" class="{{ 'on' if page == 'memory' }}">Memory</a>
     <a href="/reports" class="{{ 'on' if page == 'reports' }}">Reports</a>
     <a href="/settings" class="{{ 'on' if page == 'settings' }}">Settings</a>
+    {# shadow-dual-active T5: the global account switcher (spec §⑥), on
+       every page -- posts back to the SAME page via `_safe_redirect_
+       target`'s Referer read (account_ctx.py). #}
+    <form method="post" action="/account/switch" class="account-switcher">
+      <button type="submit" name="account" value="paper"
+              class="acct-paper{{ ' on' if current_account == 'paper' }}">PAPER{% if other_account == 'paper' and other_account_pending %}<span class="dot"></span>{% endif %}</button>
+      <button type="submit" name="account" value="shadow"
+              class="acct-shadow{{ ' on' if current_account == 'shadow' }}">SHADOW{% if other_account == 'shadow' and other_account_pending %}<span class="dot"></span>{% endif %}</button>
+    </form>
   </nav>
   <main>{% block content %}{% endblock %}</main>
 </body>

@@ -52,11 +52,47 @@ def load_identity(path: Path = Path("IDENTITY.md")) -> str:
     return DEFAULT_IDENTITY
 
 
+# shadow-dual-active T4 review (Important 1): without this, a session's
+# system prompt carries no signal at all about which account it's running
+# against -- the shadow account's nightly reflection (a LOCAL LEDGER the
+# user fills by hand, no real order routing) would reason about it exactly
+# like paper's real simulated fills, right down to telling the user "the
+# order filled" for something nobody has executed anywhere yet. Keyed by
+# the same account strings `store/accounts.ACCOUNTS` defines; not imported
+# from there directly to avoid pulling a store-layer module into agent/
+# context.py for two literal strings this dict already pins.
+ACCOUNT_NOTES: dict[str, str] = {
+    "paper": (
+        "Alpaca paper sandbox; orders the sentinel submits are actually "
+        "executed (simulated)"),
+    "shadow": (
+        "a LOCAL LEDGER mirroring the user's real brokerage; orders are "
+        "RECORDED here, the user executes them manually at their broker; "
+        'advise accordingly (e.g. "place this order" not "the order filled")'),
+}
+
+
+def _account_section(account: str) -> str:
+    note = ACCOUNT_NOTES.get(account, "unrecognized account")
+    return f"\n## Account\nACCOUNT: {account} — {note}\n"
+
+
 def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
                         strategies: StrategyStore, queue: ReviewQueue,
-                        memory: MemoryStore | None = None) -> str:
-    """Frozen snapshot, assembled once per session (stable prompt prefix)."""
-    parts = [identity, MARKET_MECHANICS_NOTE, "\n## Current snapshot (as of session start)\n"]
+                        memory: MemoryStore | None = None,
+                        account: str | None = None) -> str:
+    """Frozen snapshot, assembled once per session (stable prompt prefix).
+
+    `account` is optional (None omits the section entirely) so every
+    existing caller that hasn't been wired to a specific account bundle yet
+    (web chat, terminal chat -- Task 5's job) keeps behaving exactly as
+    before; only callers that already know which account they're running
+    against (the Reflector, per shadow-dual-active T4) pass it.
+    """
+    parts = [identity, MARKET_MECHANICS_NOTE]
+    if account is not None:
+        parts.append(_account_section(account))
+    parts.append("\n## Current snapshot (as of session start)\n")
     try:
         acct = broker.get_account()
         parts.append(f"account: equity={acct.equity} cash={acct.cash} "

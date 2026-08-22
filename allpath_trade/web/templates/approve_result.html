@@ -9,6 +9,11 @@
 <body class="centered">
   <div class="card" style="max-width:420px">
     <h1>{{ 'Done' if ok else 'Not completed' }}</h1>
+    {% if account %}
+    <p class="row" style="margin:0 0 6px">
+      <span class="chip {{ 'chip-shadow' if account == 'shadow' else 'chip-paper' }}">{{ account | capitalize }}</span>
+    </p>
+    {% endif %}
     <p class="{{ 'flash-ok' if ok else 'error' }}">{{ message }}</p>
     {% if burned %}
     <p class="hint">This link has now been used and won't work again. Open the

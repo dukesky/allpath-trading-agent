@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from allpath_trade.broker.base import OrderIntent
 from allpath_trade.execution import ExecutionError, ExecutionResult, Executor
+from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 # Approve-by-link token lifetime (Part A): 24h from issue, per row.
 TOKEN_TTL_SECONDS = 24 * 3600
@@ -70,11 +71,19 @@ class ReviewQueue:
     """Service API for pending trigger reviews. The CLI today, the Web UI
     (Phase 5) and the agent (Phase 3) all operate this same interface."""
 
-    def __init__(self, conn: sqlite3.Connection, executor: Executor | None) -> None:
+    def __init__(self, conn: sqlite3.Connection, executor: Executor | None,
+                account: str = DEFAULT_ACCOUNT) -> None:
+        # shadow-dual-active T5 carry: see TradeJournal's identical gate --
+        # the web account cookie / Telegram /account command / CLI --account
+        # flag now pass non-literal account strings through to this
+        # constructor too.
+        if not is_valid_account(account):
+            raise ValueError(f"invalid account: {account!r}")
         # executor may be None for read-only usage (list/reject);
         # approve() requires one for order-kind rows.
         self._conn = conn
         self._executor = executor
+        self._account = account
         # Phase 6: injected the same way as `executor` -- construction-time
         # for the common case, but strategy-revision approval is wired up
         # by Task 3's reflection machinery after the queue already exists
@@ -82,6 +91,14 @@ class ReviewQueue:
         # setter is needed too. None until set: revision approvals fail
         # loudly (see `approve`) rather than silently no-op-ing.
         self._revision_applier: Callable[[str, str, str, str, bool], None] | None = None
+        # shadow-dual-active T6: same injection pattern as `_revision_applier`
+        # above, for `kind="shadow_edit"` rows -- wired once at startup (see
+        # app.py's `_build_account_components`, shadow bundle only) with
+        # `agent.shadow_tools.apply_shadow_edit_factory`'s built function.
+        # `None` until set: a shadow_edit approval fails loudly (see
+        # `_approve_shadow_edit`) rather than silently no-op-ing, same as an
+        # unwired revision applier.
+        self._shadow_edit_applier: Callable[[str, dict, object], None] | None = None
 
     def set_revision_applier(self, fn: Callable[[str, str, str, str, bool], None]) -> None:
         """Wire up the function that actually applies an approved strategy
@@ -103,6 +120,18 @@ class ReviewQueue:
         calls this once at startup with the real strategy-file writer."""
         self._revision_applier = fn
 
+    def set_shadow_edit_applier(self, fn: Callable[[str, dict, object], None]) -> None:
+        """Wire up the function that actually applies an approved shadow
+        ledger edit: `fn(op, args, before)` -- `op` is one of "set_position"/
+        "set_cash"/"remove_position"/"record_fill"/"import"/"reset", `args`
+        is the tool call's own arguments, and `before` is the row's own
+        recorded before-state snapshot (compared to the ledger's CURRENT
+        state at approval time to detect staleness -- see
+        `agent.shadow_tools.apply_shadow_edit_factory`, which builds the
+        real function this points to). Only ever meaningful for the shadow
+        account's own `ReviewQueue`; wired once at startup in app.py."""
+        self._shadow_edit_applier = fn
+
     def _issue_token(self) -> tuple[str, str, str]:
         """Mint a fresh single-use approval-link token for a row about to
         be inserted. Returns (plaintext, hash, expires_iso) -- the caller
@@ -120,11 +149,11 @@ class ReviewQueue:
             risk_preview: str | None = None) -> ReviewHandle:
         token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
-            "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
+            "INSERT INTO pending_reviews (account, ts, strategy_id, rule_id, ticker,"
             " rule_type, condition, action, snapshot, intent, source,"
             " conversation_id, risk_preview, approval_token_hash, token_expires_ts)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (datetime.now(UTC).isoformat(), strategy_id, rule_id, ticker,
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._account, datetime.now(UTC).isoformat(), strategy_id, rule_id, ticker,
              rule_type, condition, action,
              json.dumps(snapshot, default=_json_default),
              intent.model_dump_json() if intent else None, source,
@@ -169,16 +198,65 @@ class ReviewQueue:
         it back and thread it to the applier alongside `old_yaml` itself."""
         token, token_hash, expires = self._issue_token()
         cur = self._conn.execute(
-            "INSERT INTO pending_reviews (ts, strategy_id, rule_id, ticker,"
+            "INSERT INTO pending_reviews (account, ts, strategy_id, rule_id, ticker,"
             " rule_type, condition, action, snapshot, intent, source,"
             " conversation_id, kind, approval_token_hash, token_expires_ts)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (datetime.now(UTC).isoformat(), strategy_id, "reflection", ticker,
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._account, datetime.now(UTC).isoformat(), strategy_id, "reflection", ticker,
              "revision", rationale[:200], "revise strategy",
              json.dumps({"old_yaml": old_yaml, "new_yaml": new_yaml,
                         "diff": diff, "rationale": rationale, "is_new": is_new}),
              None, source, conversation_id, "strategy_revision",
              token_hash, expires))
+        self._conn.commit()
+        return ReviewHandle(cur.lastrowid, token)
+
+    def add_shadow_edit(self, *, op: str, ticker: str, action: str, args: dict,
+                        before: object, after: object,
+                        conversation_id: int | None = None,
+                        source: str = "chat") -> ReviewHandle:
+        """Queue a proposed shadow-ledger edit for human approval
+        (shadow-dual-active T6, spec §④). Shares `pending_reviews` with
+        order/strategy_revision rows -- same unified-inbox reasoning as
+        `add_strategy_revision` (see its own docstring) -- so it fills the
+        legacy order-shaped NOT NULL columns honestly rather than leaving
+        them blank: `strategy_id` is always `""` (a shadow edit has no
+        strategy), `rule_id`/`rule_type` are the fixed sentinel
+        `"shadow_edit"`, `condition` carries the op name, and `action` is
+        the human-readable title the caller (`agent/shadow_tools.py`)
+        already built for this op ("Set position AAPL", "Correct fill
+        #12", ...) -- rendered verbatim by `_review_card.html`, the same
+        way an order row's own free-text `action` already is.
+
+        `args`/`before`/`after` are the caller's own tool arguments and its
+        read-only before/after ledger snapshot -- persisted together on
+        `snapshot` so `_approve_shadow_edit` can re-read the CURRENT ledger
+        state at approval time and compare it to `before` (staleness --
+        same "校验不过则批准动作报错并保持 pending" contract as
+        `_approve_revision`'s `old_yaml` check). This store layer never
+        interprets any of the three: it has no idea what a ledger looks
+        like, on purpose -- that knowledge lives entirely in
+        `agent/shadow_tools.py`.
+
+        Only valid on the shadow account's own queue instance -- there is
+        no ledger on paper to edit at all -- so this raises `ReviewError`
+        if called on any other account's `ReviewQueue`, the same
+        fail-closed posture `approve()`'s kind allowlist takes for an
+        unrecognized `kind`."""
+        if self._account != "shadow":
+            raise ReviewError(
+                "shadow ledger edits are only valid on the shadow account")
+        token, token_hash, expires = self._issue_token()
+        cur = self._conn.execute(
+            "INSERT INTO pending_reviews (account, ts, strategy_id, rule_id, ticker,"
+            " rule_type, condition, action, snapshot, intent, source,"
+            " conversation_id, kind, approval_token_hash, token_expires_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._account, datetime.now(UTC).isoformat(), "", "shadow_edit",
+             ticker.strip().upper() if ticker else "", "shadow_edit", op, action,
+             json.dumps({"op": op, "args": args, "before": before, "after": after},
+                        default=_json_default),
+             None, source, conversation_id, "shadow_edit", token_hash, expires))
         self._conn.commit()
         return ReviewHandle(cur.lastrowid, token)
 
@@ -235,41 +313,99 @@ class ReviewQueue:
         alone. The whole thing runs under `transaction()` so nothing else
         sharing this connection can interleave between the UPDATE and the
         follow-up SELECT that recovers the max id it actually touched."""
+        # `strategy_id` is scoped per-account (Task 2: strategies/{account}/
+        # directories), so the same id can legitimately exist in both
+        # accounts -- the WHERE clauses below filter on `account` as well so
+        # a chat proposal in one account never supersedes a same-named
+        # strategy's pending proposal in the other.
         resolved_ts = datetime.now(UTC).isoformat()
         exclude_clause = " AND id != ?" if exclude_id is not None else ""
-        params = ((resolved_ts, note, strategy_id)
+        params = ((resolved_ts, note, self._account, strategy_id)
                  + ((exclude_id,) if exclude_id is not None else ()))
         with self._conn.transaction():
             cur = self._conn.execute(
                 "UPDATE pending_reviews SET status='superseded', resolved_ts=?,"
                 " resolution_note=?, approval_token_hash=NULL, token_expires_ts=NULL"
                 " WHERE kind='strategy_revision' AND source='chat'"
-                " AND strategy_id=? AND status='pending'" + exclude_clause,
+                " AND account=? AND strategy_id=? AND status='pending'" + exclude_clause,
                 params)
             if cur.rowcount == 0:
                 return None
             row = self._conn.execute(
                 "SELECT MAX(id) AS max_id FROM pending_reviews"
                 " WHERE kind='strategy_revision' AND source='chat'"
-                " AND strategy_id=? AND status='superseded'"
+                " AND account=? AND strategy_id=? AND status='superseded'"
                 " AND resolved_ts=? AND resolution_note=?",
-                (strategy_id, resolved_ts, note)).fetchone()
+                (self._account, strategy_id, resolved_ts, note)).fetchone()
         return row["max_id"]
 
     def list(self, status: str | None = "pending") -> list[sqlite3.Row]:
         if status is None:
             return list(self._conn.execute(
-                "SELECT * FROM pending_reviews ORDER BY id DESC"))
+                "SELECT * FROM pending_reviews WHERE account = ? ORDER BY id DESC",
+                (self._account,)))
         return list(self._conn.execute(
-            "SELECT * FROM pending_reviews WHERE status = ? ORDER BY id DESC",
-            (status,)))
+            "SELECT * FROM pending_reviews WHERE status = ? AND account = ?"
+            " ORDER BY id DESC",
+            (status, self._account)))
 
     def get(self, review_id: int) -> sqlite3.Row:
+        # Filtered by account: Task 1 keeps every store instance scoped to
+        # its own account, so a foreign-account id reads back as "not
+        # found" here -- same as it not existing at all. Row-bound approval
+        # across the CURRENT view (spec: "批准永远作用于该行的账户") is
+        # Task 5's job, via a lookup that isn't scoped to one instance.
         row = self._conn.execute(
-            "SELECT * FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+            "SELECT * FROM pending_reviews WHERE id = ? AND account = ?",
+            (review_id, self._account)).fetchone()
         if row is None:
             raise ReviewError(f"review {review_id} not found")
         return row
+
+    def locate(self, review_id: int) -> tuple[str, sqlite3.Row] | None:
+        """Find `review_id` regardless of which account it belongs to --
+        deliberately UNSCOPED by `self._account` (`pending_reviews` is one
+        shared table across both accounts, see `store/db.py`'s schema).
+
+        This is the row-bound approval primitive (shadow-dual-active T5,
+        spec: "批准永远作用于该行的账户,与当前界面选择无关"): every entry
+        point that resolves a review by id from OUTSIDE its own account's
+        context -- the web reviews page (any row could belong to either
+        account once resolved actions are shown together), an `/a/<id>`
+        approve-link click, a Telegram Approve/Reject button tap -- must
+        call this FIRST to discover which account the row actually belongs
+        to, then act through THAT account's own `ReviewQueue` instance (its
+        own `.get`/`.approve`/`.reject`, still scoped by `account` as a
+        second, belt-and-suspenders filter). Never act on a row through
+        `self` here: this instance's own `_account` is irrelevant to what
+        `locate` returns and must not be used to resolve it.
+
+        Callable on ANY `ReviewQueue` instance regardless of that
+        instance's own `account` -- the query below never references
+        `self._account`. Returns `(account, row)`, or `None` if no row
+        with this id exists at all -- including when the row's stored
+        `account` column isn't one of `is_valid_account`'s known accounts.
+
+        shadow-dual-active T5 review Minor: every caller of `locate` (the
+        web reviews page, the `/a/<id>` approve-link, the Telegram
+        Approve/Reject button) turns its `account` result straight into
+        `c.accounts[account]` (`web/account_ctx.bundle_for`, or
+        `telegram.py`'s own inline equivalent) with no further check --
+        neither of those does `is_valid_account`-style validation, because
+        every OTHER account string in the app already passed through a
+        cookie/form/app_state gate that guarantees it. A row whose
+        `account` column was hand-corrupted (or, in principle, written by a
+        future migration bug) would reach that unguarded dict lookup and
+        raise `KeyError`, a 500, instead of the uniform "not found" this id
+        would already get if it didn't exist at all. Filtering here, at the
+        one shared unscoped-lookup primitive, keeps every caller's existing
+        "row not found" handling as the answer for that case too, without
+        needing the same guard repeated at each call site."""
+        row = self._conn.execute(
+            "SELECT * FROM pending_reviews WHERE id = ?", (review_id,)).fetchone()
+        if row is None or not is_valid_account(row["account"]):
+            return None
+        return row["account"], row
 
     def _token_ok(self, row: sqlite3.Row, token: str) -> bool:
         """No-oracle check: every failure mode (missing row handled by the
@@ -329,8 +465,8 @@ class ReviewQueue:
             return None
         cur = self._conn.execute(
             "UPDATE pending_reviews SET approval_token_hash=NULL"
-            " WHERE id=? AND approval_token_hash=? AND status='pending'",
-            (review_id, row["approval_token_hash"]))
+            " WHERE id=? AND approval_token_hash=? AND status='pending' AND account=?",
+            (review_id, row["approval_token_hash"], self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             return None
@@ -348,6 +484,8 @@ class ReviewQueue:
             return self._approve_revision(review_id)
         if row["kind"] == "order":
             return self._approve_order(review_id)
+        if row["kind"] == "shadow_edit":
+            return self._approve_shadow_edit(review_id)
         raise ReviewError(f"unknown review kind: {row['kind']!r}")
 
     def _approve_order(self, review_id: int) -> ExecutionResult:
@@ -379,8 +517,8 @@ class ReviewQueue:
         cur = self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?,"
             " approval_token_hash=NULL, token_expires_ts=NULL "
-            "WHERE id=? AND status=?",
-            ("approved", resolved_ts, review_id, "pending"))
+            "WHERE id=? AND status=? AND account=?",
+            ("approved", resolved_ts, review_id, "pending", self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             # Someone else already claimed this review
@@ -392,13 +530,13 @@ class ReviewQueue:
             result = self._executor.execute(intent)
         except ExecutionError as exc:
             self._conn.execute(
-                "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-                (json.dumps({"error": str(exc)}), review_id))
+                "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+                (json.dumps({"error": str(exc)}), review_id, self._account))
             self._conn.commit()
             raise
         self._conn.execute(
-            "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-            (result.model_dump_json(), review_id))
+            "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+            (result.model_dump_json(), review_id, self._account))
         self._conn.commit()
         return result
 
@@ -443,8 +581,8 @@ class ReviewQueue:
         cur = self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?,"
             " approval_token_hash=NULL, token_expires_ts=NULL "
-            "WHERE id=? AND status=?",
-            ("approved", resolved_ts, review_id, "pending"))
+            "WHERE id=? AND status=? AND account=?",
+            ("approved", resolved_ts, review_id, "pending", self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             row = self.get(review_id)
@@ -466,8 +604,9 @@ class ReviewQueue:
             # undo. If the applier is ever changed to validate *after*
             # writing, this rollback becomes unsafe and must be revisited.
             self._conn.execute(
-                "UPDATE pending_reviews SET status=?, resolved_ts=? WHERE id=?",
-                ("pending", None, review_id))
+                "UPDATE pending_reviews SET status=?, resolved_ts=?"
+                " WHERE id=? AND account=?",
+                ("pending", None, review_id, self._account))
             self._conn.commit()
             raise
         except Exception as exc:
@@ -479,8 +618,8 @@ class ReviewQueue:
             # an auditable trail, mirroring the order path's
             # ExecutionError handling.
             self._conn.execute(
-                "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-                (json.dumps({"error": str(exc)}), review_id))
+                "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+                (json.dumps({"error": str(exc)}), review_id, self._account))
             self._conn.commit()
             raise
         # Success: a small non-null marker, not the order path's full
@@ -488,14 +627,98 @@ class ReviewQueue:
         # write) -- keeps `execution_result` a reliable "has this row been
         # acted on" signal rather than leaving it ambiguously NULL.
         self._conn.execute(
-            "UPDATE pending_reviews SET execution_result=? WHERE id=?",
-            (json.dumps({"applied": True}), review_id))
+            "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+            (json.dumps({"applied": True}), review_id, self._account))
+        self._conn.commit()
+
+    def _approve_shadow_edit(self, review_id: int) -> None:
+        # Mirrors `_approve_revision`'s shape exactly: reject up front if
+        # approval can't possibly succeed, fetch + status-check, parse the
+        # snapshot BEFORE claiming (a corrupt snapshot must leave the row
+        # pending, not stuck "approved" with nothing applied), atomically
+        # claim, then act and record the outcome on the claimed row.
+        if self._shadow_edit_applier is None:
+            raise ReviewError(
+                "approve requires a shadow edit applier (none configured)")
+        row = self.get(review_id)
+        if row["status"] != "pending":
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
+
+        try:
+            snapshot = json.loads(row["snapshot"])
+            op = snapshot["op"]
+            args = snapshot["args"]
+            before = snapshot["before"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ReviewError(
+                f"review {review_id} has corrupt snapshot: {exc}") from exc
+
+        # Captured BEFORE the claim below clears them -- a stale-ledger
+        # RevisionValidationError (unlike a corrupt-snapshot or "already
+        # resolved" failure above) means nothing was actually written, so
+        # this proposal is still exactly as approvable as it was a moment
+        # ago; the rollback branch below restores these so the same
+        # approve-by-link token still consumes on retry, instead of dying
+        # here and forcing a brand-new proposal for what may be a purely
+        # transient staleness race.
+        token_hash = row["approval_token_hash"]
+        token_expires = row["token_expires_ts"]
+
+        resolved_ts = datetime.now(UTC).isoformat()
+        cur = self._conn.execute(
+            "UPDATE pending_reviews SET status=?, resolved_ts=?,"
+            " approval_token_hash=NULL, token_expires_ts=NULL "
+            "WHERE id=? AND status=? AND account=?",
+            ("approved", resolved_ts, review_id, "pending", self._account))
+        self._conn.commit()
+        if cur.rowcount == 0:
+            row = self.get(review_id)
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
+
+        try:
+            self._shadow_edit_applier(op, args, before)
+        except RevisionValidationError:
+            # Same rollback-to-pending contract as `_approve_revision`'s own
+            # RevisionValidationError handling -- see the LOUD INVARIANT
+            # comment there. `apply_shadow_edit_factory` guarantees every
+            # staleness/bad-arg/ledger-ValueError check runs (and raises
+            # this, and only this) before its own `conn.transaction()`
+            # block ever opens, so there is nothing on the ledger to undo.
+            #
+            # Also restores the approval-link token captured above -- the
+            # claim UPDATE just cleared it, but nothing actually applied, so
+            # leaving it cleared would kill the approve link permanently
+            # while the message ("re-propose") reads like the row is still
+            # actionable. Restoring it means the SAME link still consumes on
+            # a retry (e.g. once the ledger settles back to what the
+            # proposal expected), rather than only a brand-new proposal
+            # working.
+            self._conn.execute(
+                "UPDATE pending_reviews SET status=?, resolved_ts=?,"
+                " approval_token_hash=?, token_expires_ts=?"
+                " WHERE id=? AND account=?",
+                ("pending", None, token_hash, token_expires, review_id, self._account))
+            self._conn.commit()
+            raise
+        except Exception as exc:
+            # Not safely retryable (a write may have partially landed even
+            # though the applier's own transaction is meant to prevent
+            # that) -- claim stays "approved" with the failure recorded,
+            # mirroring the order/revision paths' own handling.
+            self._conn.execute(
+                "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+                (json.dumps({"error": str(exc)}), review_id, self._account))
+            self._conn.commit()
+            raise
+        self._conn.execute(
+            "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+            (json.dumps({"applied": True}), review_id, self._account))
         self._conn.commit()
 
     def attach_analysis(self, review_id: int, analysis_json: str) -> None:
         self._conn.execute(
-            "UPDATE pending_reviews SET agent_analysis = ? WHERE id = ?",
-            (analysis_json, review_id))
+            "UPDATE pending_reviews SET agent_analysis = ? WHERE id = ? AND account = ?",
+            (analysis_json, review_id, self._account))
         self._conn.commit()
 
     def reject(self, review_id: int, note: str = "") -> None:
@@ -510,8 +733,8 @@ class ReviewQueue:
         cur = self._conn.execute(
             "UPDATE pending_reviews SET status=?, resolved_ts=?, resolution_note=?,"
             " approval_token_hash=NULL, token_expires_ts=NULL "
-            "WHERE id=? AND status=?",
-            ("rejected", resolved_ts, note, review_id, "pending"))
+            "WHERE id=? AND status=? AND account=?",
+            ("rejected", resolved_ts, note, review_id, "pending", self._account))
         self._conn.commit()
         if cur.rowcount == 0:
             # Someone else already claimed this review

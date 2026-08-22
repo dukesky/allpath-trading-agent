@@ -128,16 +128,19 @@ class FailingQueue:
 class FakeComponents:
     reports: ReportStore
     conn: object
+    conversations: ConversationStore
     journal: TradeJournal
     observations: ObservationLog
+    search: SessionSearch
     broker: Broker
     data: DataSource
     strategies: StrategyStore
     queue: ReviewQueue
     memory: MemoryStore
+    account: str = "paper"
 
 
-def make_components(tmp_path, broker=None, data=None):
+def make_components(tmp_path, broker=None, data=None, account="paper"):
     conn = connect(tmp_path / "db.sqlite")
     strategies_dir = tmp_path / "strategies"
     strategies_dir.mkdir()
@@ -145,13 +148,16 @@ def make_components(tmp_path, broker=None, data=None):
     return FakeComponents(
         reports=ReportStore(conn),
         conn=conn,
+        conversations=ConversationStore(conn),
         journal=TradeJournal(conn),
         observations=ObservationLog(conn),
+        search=SessionSearch(conn),
         broker=broker if broker is not None else FakeBroker(),
         data=data if data is not None else FakeData(),
         strategies=StrategyStore(strategies_dir, conn),
         queue=ReviewQueue(conn, executor=None),
-        memory=MemoryStore(tmp_path / "memory", conn))
+        memory=MemoryStore(tmp_path / "memory", conn),
+        account=account)
 
 
 def make_settings(**overrides):
@@ -323,6 +329,23 @@ def test_build_briefing_quote_failure_renders_n_a():
     assert "day_change=n/a" in briefing
 
 
+# -- shadow-dual-active T4 review Important 1: the briefing header states
+# which account it reflects on --------------------------------------------
+
+def test_build_briefing_defaults_to_paper_account_header():
+    briefing = build_briefing(
+        et_date=ET_DATE, trades=[], observations=[], positions=[], pending_counts={})
+    assert "Account: paper" in briefing
+
+
+def test_build_briefing_shadow_account_header():
+    briefing = build_briefing(
+        et_date=ET_DATE, trades=[], observations=[], positions=[], pending_counts={},
+        account="shadow")
+    assert "Account: shadow" in briefing
+    assert "Account: paper" not in briefing
+
+
 # ---------------------------------------------------------------------------
 # Reflector.run_daily -- happy path
 # ---------------------------------------------------------------------------
@@ -369,6 +392,44 @@ def test_run_daily_happy_path_stores_ok_report_and_conversation(tmp_path):
     assert kind_row["kind"] == "reflection"
 
 
+# -- shadow-dual-active T4 review Important 1: the Reflector wires its own
+# bundle's account into BOTH the system prompt and the seed briefing, so a
+# shadow reflection can never reason about the local ledger as if it were
+# paper's real simulated execution. -----------------------------------------
+
+def test_run_daily_paper_system_prompt_and_briefing_carry_the_paper_account(tmp_path):
+    components = make_components(tmp_path, account="paper")
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings())
+
+    reflector.run_daily(now=NOW)
+
+    system_prompt = llm.seen[0][0]["content"]
+    assert "ACCOUNT: paper" in system_prompt
+    assert "Alpaca paper sandbox" in system_prompt
+    assert "LOCAL LEDGER" not in system_prompt
+
+    briefing = llm.seen[0][1]["content"]
+    assert "Account: paper" in briefing
+
+
+def test_run_daily_shadow_system_prompt_and_briefing_carry_the_shadow_account(tmp_path):
+    components = make_components(tmp_path, account="shadow")
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings())
+
+    reflector.run_daily(now=NOW)
+
+    system_prompt = llm.seen[0][0]["content"]
+    assert "ACCOUNT: shadow" in system_prompt
+    assert "LOCAL LEDGER" in system_prompt
+    assert "user executes them manually" in system_prompt
+    assert "Alpaca paper sandbox" not in system_prompt
+
+    briefing = llm.seen[0][1]["content"]
+    assert "Account: shadow" in briefing
+
+
 # ---------------------------------------------------------------------------
 # notifier wiring (Task 5): send_report fires once on a successful ("ok")
 # report, never on a failed one, and a notifier=None Reflector never crashes.
@@ -406,7 +467,7 @@ def test_run_daily_success_sends_notification_via_send_report(tmp_path, monkeypa
     sent_notifier, subject, summary_body, full_body = calls[0]
     assert sent_notifier is notifier
     row = components.reports.get(ET_DATE)
-    assert subject == f"[AllPath] Daily reflection {ET_DATE}"
+    assert subject == f"[Paper] [AllPath] Daily reflection {ET_DATE}"
     assert summary_body == row["summary"]
     assert row["body"] in full_body
 
@@ -769,3 +830,140 @@ def test_reflection_registry_excludes_order_and_confirm_tools(tmp_path):
         "list_strategies", "read_strategy", "list_pending_reviews",
         "memory_update", "memory_read", "session_search",
         "propose_strategy_revision"}
+
+
+# ---------------------------------------------------------------------------
+# I9: a `failed` row must not block the day's retry
+# ---------------------------------------------------------------------------
+
+def test_run_daily_retries_after_a_failed_row_and_replaces_it(tmp_path):
+    """I9: the idempotency guard reads `exists_ok`, not `exists` -- a night
+    whose first attempt stored `status="failed"` (LLM down at 16:05) must
+    still be retried by the next tick, and the successful retry replaces
+    the failed row instead of dying on the (account, date) UNIQUE."""
+    components = make_components(tmp_path)
+    failing = ScriptedLLM([LLMError("provider down")])
+    Reflector(llm=failing, components=components, settings=make_settings()
+              ).run_daily(now=NOW)
+    assert components.reports.get(ET_DATE)["status"] == "failed"
+
+    retry = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    status = Reflector(llm=retry, components=components, settings=make_settings()
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(retry.seen) == 1          # the retry really did call the LLM
+    rows = components.reports.list()
+    assert len(rows) == 1                # still one row for the day
+    assert rows[0]["status"] == "ok"
+    assert "Day summary" in rows[0]["body"]
+
+
+def test_run_daily_still_skips_when_an_ok_row_exists(tmp_path):
+    """The other half of I9: `exists_ok` must not weaken the guard for the
+    case it was written for -- a stored SUCCESS still costs no LLM call."""
+    components = make_components(tmp_path)
+    llm = ScriptedLLM([LLMResponse(text=REPORT_TEXT)])
+    reflector = Reflector(llm=llm, components=components, settings=make_settings())
+    reflector.run_daily(now=NOW)
+    assert reflector.run_daily(now=NOW).startswith("already ran")
+    assert len(llm.seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# I8: per-account wall-clock deadline on the reflection pass
+# ---------------------------------------------------------------------------
+
+class FakeClock:
+    """A monotonic clock the test drives by hand -- no real sleeps, so the
+    deadline tests stay instant and deterministic."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class SlowLLM(ScriptedLLM):
+    """ScriptedLLM that burns `seconds_per_call` of fake wall clock on every
+    completion, standing in for a genuinely slow provider/tool round-trip."""
+
+    def __init__(self, clock, seconds_per_call, responses):
+        super().__init__(responses)
+        self.clock = clock
+        self.seconds_per_call = seconds_per_call
+
+    def complete(self, messages, tools=None):
+        self.clock.advance(self.seconds_per_call)
+        return super().complete(messages, tools=tools)
+
+
+def test_run_daily_deadline_forces_the_wrap_up_prompt(tmp_path, monkeypatch):
+    """I8: a slow reflection must be bounded by wall clock, not only by the
+    tool-call cap -- one hung account otherwise holds up the whole nightly
+    chain. Crossing the deadline ends the research turn exactly the way the
+    iteration cap does: unparseable text, then the one corrective wrap-up
+    turn -- which is deliberately NOT deadline-gated, so the day still gets
+    a real report instead of a `failed` row."""
+    components = make_components(tmp_path)
+    clock = FakeClock()
+    monkeypatch.setattr(reflect_module, "_monotonic", clock)
+    llm = SlowLLM(clock, 400, [
+        tool_response("get_portfolio", {}),   # t+400, still inside 600s
+        tool_response("get_portfolio", {}),   # t+800, deadline now blown
+        LLMResponse(text=REPORT_TEXT),        # the wrap-up turn's answer
+    ])
+    settings = make_settings(reflection_max_iters=12,
+                             reflection_deadline_seconds=600)
+
+    status = Reflector(llm=llm, components=components, settings=settings
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert components.reports.get(ET_DATE)["status"] == "ok"
+    # Exactly 3 provider calls: two research iterations, then the wrap-up.
+    # The deadline-expired third iteration never reached the provider --
+    # without the deadline the cap would have allowed 12.
+    assert len(llm.seen) == 3
+    assert any(m["role"] == "user" and "Reproduce it now" in m["content"]
+               for m in llm.seen[-1])
+
+
+def test_run_daily_deadline_not_reached_leaves_the_pass_alone(tmp_path, monkeypatch):
+    components = make_components(tmp_path)
+    clock = FakeClock()
+    monkeypatch.setattr(reflect_module, "_monotonic", clock)
+    llm = SlowLLM(clock, 10, [
+        tool_response("get_portfolio", {}),
+        LLMResponse(text=REPORT_TEXT),
+    ])
+    settings = make_settings(reflection_deadline_seconds=600)
+
+    status = Reflector(llm=llm, components=components, settings=settings
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(llm.seen) == 2            # no corrective turn was needed
+
+
+def test_run_daily_deadline_zero_disables_the_deadline(tmp_path, monkeypatch):
+    """A deadline of 0 means "no wall-clock bound" -- the tool-call cap is
+    then the only limit, exactly as it was before I8."""
+    components = make_components(tmp_path)
+    clock = FakeClock()
+    monkeypatch.setattr(reflect_module, "_monotonic", clock)
+    llm = SlowLLM(clock, 100_000, [
+        tool_response("get_portfolio", {}),
+        LLMResponse(text=REPORT_TEXT),
+    ])
+    settings = make_settings(reflection_deadline_seconds=0)
+
+    status = Reflector(llm=llm, components=components, settings=settings
+                       ).run_daily(now=NOW)
+
+    assert status.startswith("ok:")
+    assert len(llm.seen) == 2

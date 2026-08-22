@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Chat · AllPath Trade{% endblock %}
 {% block content %}
+{# Chat has no <h1> of its own -- this is its "next to the page heading"
+   equivalent (spec §⑥). #}
+<p class="row" style="margin:0 0 10px">{% include "_account_chip.html" %}</p>
 {% include "_chat_messages.html" %}
 {% if not llm_error %}
 <form id="chat-form" hx-post="/chat/send" hx-target="#messages" hx-swap="outerHTML"

@@ -67,6 +67,25 @@ def test_order_filled_at_defaults_to_none():
     assert order.filled_at is None
 
 
+def test_intent_rejects_magnitude_over_max():
+    """Infinity/NaN are already rejected by pydantic's finite_number check
+    (Decimal fields), but a huge-but-finite value like 1e400 sailed straight
+    through -- exactly as ledger-bricking downstream as the infinite case
+    once it hits equity/market_value arithmetic. Same cap shadow_tools'
+    _parse_money already enforces for the shadow ledger's own numeric
+    inputs."""
+    from allpath_trade.broker.base import _MAX_MAGNITUDE
+
+    with pytest.raises(ValidationError):
+        OrderIntent(ticker="AAPL", side=OrderSide.BUY, qty=Decimal("1e400"), reason="x")
+    with pytest.raises(ValidationError):
+        OrderIntent(ticker="AAPL", side=OrderSide.BUY,
+                    notional=_MAX_MAGNITUDE * 2, reason="x")
+    # Exactly at the cap is still fine -- only strictly over it is rejected.
+    ok = OrderIntent(ticker="AAPL", side=OrderSide.BUY, qty=_MAX_MAGNITUDE, reason="x")
+    assert ok.qty == _MAX_MAGNITUDE
+
+
 def test_order_filled_at_accepts_a_datetime():
     from datetime import UTC, datetime
 

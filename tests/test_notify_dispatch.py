@@ -72,7 +72,7 @@ def test_push_telegram_review_queued_sends_buttons_with_review_id_and_nonce(tmp_
 
     dispatch.push_telegram_review_queued(
         queue=queue, app_state=app_state, telegram_bot_token=TOKEN,
-        review_id=int(handle), body="Item waiting for approval")
+        review_id=int(handle), body="Item waiting for approval", account="paper")
 
     [api] = FakeTelegramAPI.instances
     assert len(api.sent) == 1
@@ -95,7 +95,7 @@ def test_push_telegram_review_queued_noop_when_no_token(tmp_path, monkeypatch):
 
     dispatch.push_telegram_review_queued(
         queue=queue, app_state=app_state, telegram_bot_token="",
-        review_id=int(handle), body="x")
+        review_id=int(handle), body="x", account="paper")
 
     assert FakeTelegramAPI.instances == []
 
@@ -108,7 +108,7 @@ def test_push_telegram_review_queued_noop_when_not_paired(tmp_path, monkeypatch)
 
     dispatch.push_telegram_review_queued(
         queue=queue, app_state=app_state, telegram_bot_token=TOKEN,
-        review_id=int(handle), body="x")
+        review_id=int(handle), body="x", account="paper")
 
     assert FakeTelegramAPI.instances == []
 
@@ -120,7 +120,7 @@ def test_push_telegram_review_queued_noop_on_missing_review(tmp_path, monkeypatc
 
     dispatch.push_telegram_review_queued(
         queue=queue, app_state=app_state, telegram_bot_token=TOKEN,
-        review_id=999, body="x")
+        review_id=999, body="x", account="paper")
 
     [api] = FakeTelegramAPI.instances
     assert api.sent == []
@@ -142,7 +142,7 @@ def test_push_telegram_review_queued_swallows_api_exception(tmp_path, monkeypatc
 
     dispatch.push_telegram_review_queued(  # must not raise
         queue=queue, app_state=app_state, telegram_bot_token=TOKEN,
-        review_id=int(handle), body="x")
+        review_id=int(handle), body="x", account="paper")
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +155,8 @@ def test_push_telegram_receipt_sends_plain_message_no_buttons(tmp_path, monkeypa
     pair(app_state)
 
     dispatch.push_telegram_receipt(
-        app_state=app_state, telegram_bot_token=TOKEN, body="order submitted")
+        app_state=app_state, telegram_bot_token=TOKEN, body="order submitted",
+        account="paper")
 
     [api] = FakeTelegramAPI.instances
     [(chat_id, html, markup)] = api.sent
@@ -168,7 +169,8 @@ def test_push_telegram_receipt_noop_when_unpaired(tmp_path, monkeypatch):
     setup_fake_api(monkeypatch)
     _queue, app_state = make_queue(tmp_path)
 
-    dispatch.push_telegram_receipt(app_state=app_state, telegram_bot_token=TOKEN, body="x")
+    dispatch.push_telegram_receipt(app_state=app_state, telegram_bot_token=TOKEN, body="x",
+                                   account="paper")
 
     assert FakeTelegramAPI.instances == []
 
@@ -188,7 +190,7 @@ def test_notify_review_queued_sends_both_email_and_telegram(tmp_path, monkeypatc
     dispatch.notify_review_queued(
         queue=queue, notifier=notifier, app_state=app_state,
         telegram_bot_token=TOKEN, review_id=int(handle),
-        subject="subj", body="body text")
+        subject="subj", body="body text", account="paper")
 
     assert notifier.sent == [("subj", "body text")]
     [api] = FakeTelegramAPI.instances
@@ -206,7 +208,7 @@ def test_notify_review_queued_notify_email_false_skips_email_not_telegram(tmp_pa
     dispatch.notify_review_queued(
         queue=queue, notifier=notifier, app_state=app_state,
         telegram_bot_token=TOKEN, review_id=int(handle),
-        subject="subj", body="body text", notify_email=False)
+        subject="subj", body="body text", account="paper", notify_email=False)
 
     assert notifier.sent == []
     [api] = FakeTelegramAPI.instances
@@ -221,6 +223,86 @@ def test_notify_review_queued_no_notifier_no_telegram_is_a_noop(tmp_path, monkey
 
     dispatch.notify_review_queued(  # must not raise
         queue=queue, notifier=None, app_state=app_state,
-        telegram_bot_token="", review_id=int(handle), subject="s", body="b")
+        telegram_bot_token="", review_id=int(handle), subject="s", body="b",
+        account="paper")
 
     assert FakeTelegramAPI.instances == []
+
+
+# ---------------------------------------------------------------------------
+# shadow-dual-active T7: Telegram never renders `subject` -- only `body` --
+# so the account has to be visible in the pushed body itself, same
+# `[Paper]`/`[Shadow]` shape as every other prefix in this codebase.
+# ---------------------------------------------------------------------------
+
+def test_push_telegram_receipt_prefixes_body_for_shadow(tmp_path, monkeypatch):
+    setup_fake_api(monkeypatch)
+    _queue, app_state = make_queue(tmp_path)
+    pair(app_state)
+
+    dispatch.push_telegram_receipt(
+        app_state=app_state, telegram_bot_token=TOKEN, body="order recorded",
+        account="shadow")
+
+    [api] = FakeTelegramAPI.instances
+    [(_chat_id, html, _markup)] = api.sent
+    assert html.startswith("[Shadow] ")
+
+
+def test_push_telegram_receipt_does_not_double_prefix_an_already_prefixed_body(
+        tmp_path, monkeypatch):
+    setup_fake_api(monkeypatch)
+    _queue, app_state = make_queue(tmp_path)
+    pair(app_state)
+
+    dispatch.push_telegram_receipt(
+        app_state=app_state, telegram_bot_token=TOKEN,
+        body="[Shadow] order recorded", account="shadow")
+
+    [api] = FakeTelegramAPI.instances
+    [(_chat_id, html, _markup)] = api.sent
+    assert html.count("[Shadow]") == 1
+
+
+def test_push_telegram_review_queued_prefixes_body_for_shadow(tmp_path, monkeypatch):
+    setup_fake_api(monkeypatch)
+    queue, app_state = make_queue(tmp_path)
+    pair(app_state)
+    handle = queue.add(strategy_id="s", rule_id="r", ticker="AAPL", rule_type="soft",
+                       condition="c", action="a", snapshot={}, intent=None)
+
+    dispatch.push_telegram_review_queued(
+        queue=queue, app_state=app_state, telegram_bot_token=TOKEN,
+        review_id=int(handle), body="waiting for approval", account="shadow")
+
+    [api] = FakeTelegramAPI.instances
+    _chat_id, html, _markup = api.sent[0]
+    assert html.startswith("[Shadow] ")
+
+
+# ---------------------------------------------------------------------------
+# `_prefixed_for_telegram`: an already-prefixed body is FINAL, whichever
+# account's prefix it carries.
+#
+# The old guard only recognized the prefix it was about to add, so a body
+# that already said "[Paper] ..." came back as "[Shadow] [Paper] ..." -- two
+# contradictory account labels on one message, with the WRONG one leading.
+# Any known-account prefix now means "the caller already labelled this",
+# and the body is returned untouched.
+# ---------------------------------------------------------------------------
+
+def test_body_already_prefixed_for_the_same_account_is_left_alone():
+    assert dispatch._prefixed_for_telegram("shadow", "[Shadow] x") == "[Shadow] x"
+
+
+def test_body_already_prefixed_for_another_account_is_not_double_prefixed():
+    assert dispatch._prefixed_for_telegram("shadow", "[Paper] x") == "[Paper] x"
+    assert dispatch._prefixed_for_telegram("paper", "[Shadow] x") == "[Shadow] x"
+
+
+def test_unprefixed_body_still_gets_this_accounts_prefix():
+    assert dispatch._prefixed_for_telegram("shadow", "x") == "[Shadow] x"
+
+
+def test_unknown_account_leaves_the_body_unprefixed():
+    assert dispatch._prefixed_for_telegram("bogus", "x") == "x"
