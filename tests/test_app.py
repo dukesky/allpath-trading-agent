@@ -141,6 +141,7 @@ def test_approving_a_paper_strategy_revision_never_touches_shadows_directory(tmp
     paper.queue.approve(int(handle))
 
     assert "version: 2" in (paper.strategies.directory / "growth.yaml").read_text()
+    assert not (shadow.strategies.directory / "growth.yaml").exists()
 
 
 def test_each_account_sentinel_gets_its_own_drawdown_breaker(tmp_path):
@@ -156,4 +157,3 @@ def test_each_account_sentinel_gets_its_own_drawdown_breaker(tmp_path):
     assert paper.sentinel.breaker is not shadow.sentinel.breaker
     assert paper.sentinel.breaker.account == "paper"
     assert shadow.sentinel.breaker.account == "shadow"
-    assert not (shadow.strategies.directory / "growth.yaml").exists()
