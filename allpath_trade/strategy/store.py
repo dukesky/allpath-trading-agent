@@ -7,8 +7,9 @@ from pathlib import Path
 import yaml
 
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
-from allpath_trade.strategy.loader import StrategyValidationError, load_strategy
-from allpath_trade.strategy.model import RuleState, StrategyDoc, StrategyStatus
+from allpath_trade.strategy.loader import (
+    StrategyValidationError, atomic_write_text, load_strategy, parse_strategy_text)
+from allpath_trade.strategy.model import Authorization, RuleState, StrategyDoc, StrategyStatus
 
 
 class StrategyStore:
@@ -91,6 +92,19 @@ class StrategyStore:
 
     def rearm(self, strategy_id: str, rule_id: str) -> None:
         self.set_rule_state(strategy_id, rule_id, RuleState.ARMED)
+
+    def set_authorization(self, strategy_id: str, authorization: Authorization,
+                          reason: str) -> None:
+        """Narrow system write path (drawdown breaker): flip `authorization`
+        and nothing else. Same raw-file re-parse as the web status route --
+        never serialize the DB-merged doc back into the YAML."""
+        path = self.directory / f"{strategy_id}.yaml"
+        current = parse_strategy_text(strategy_id, path.read_text())
+        updated = current.model_copy(update={"authorization": authorization})
+        new_text = yaml.safe_dump(updated.model_dump(mode="json"),
+                                  sort_keys=False, allow_unicode=True)
+        atomic_write_text(path, new_text)
+        self.snapshot_version(updated, reason)
 
     def snapshot_version(self, doc: StrategyDoc, reason: str) -> None:
         content = yaml.safe_dump(doc.model_dump(mode="json"), allow_unicode=True,

@@ -5,7 +5,7 @@ import pytest
 
 from allpath_trade.store.db import connect
 from allpath_trade.strategy.loader import StrategyValidationError
-from allpath_trade.strategy.model import RuleState
+from allpath_trade.strategy.model import Authorization, RuleState
 from allpath_trade.strategy.store import StrategyStore
 
 ACTIVE = """
@@ -226,3 +226,27 @@ def test_versions_scoped_to_account(tmp_path):
         "SELECT account, reason FROM strategy_versions ORDER BY id"))
     assert [(r["account"], r["reason"]) for r in rows] == [
         ("paper", "paper initial"), ("paper", "paper v2"), ("shadow", "shadow initial")]
+
+
+def test_set_authorization_rewrites_only_that_field(tmp_path):
+    # arrange: write a strategy YAML with authorization: auto, version 3
+    s1_yaml = """
+name: "S1"
+status: active
+version: 3
+authorization: auto
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+    (tmp_path / "s1.yaml").write_text(s1_yaml)
+    store = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+
+    store.set_authorization("s1", Authorization.CONFIRM, "drawdown breaker")
+    doc = store.load("s1")
+    assert doc.authorization == Authorization.CONFIRM
+    assert doc.version == 3            # untouched
+    assert doc.status.value == "active"  # untouched
+    versions = store.versions("s1")
+    assert versions[-1]["reason"] == "drawdown breaker"  # match the actual
+    # column name used by snapshot_version/versions in this file's tests
