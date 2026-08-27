@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 from allpath_trade.web.deps import ComponentHolder
 
@@ -25,6 +26,10 @@ class FakeSettings:
 class FakeComponents:
     settings: FakeSettings
     conn: FakeConn
+    # options-via-mcp T7: per-account bundles, empty by default so every
+    # pre-existing test's fake graph keeps looking like one with no options
+    # backend anywhere (rebuild's backend teardown iterates this).
+    accounts: dict = field(default_factory=dict)
 
 
 def _tracking_builder(calls: list):
@@ -71,6 +76,81 @@ def test_rebuild_closes_the_old_connection_when_db_path_changes(tmp_path):
     assert original_conn.closed is True
     # The builder was asked to open a fresh connection (no conn handed in).
     assert calls[-1]["conn"] is None
+
+
+class FakeOptionsBackend:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def _bundle_with_backend(backend) -> SimpleNamespace:
+    """Shaped like app.AccountComponents as far as rebuild's teardown reads
+    it: the backend hangs off `bundle.executor.options_backend` (the
+    Sentinel shares the same instance, so rebuild only reaches through the
+    executor)."""
+    return SimpleNamespace(executor=SimpleNamespace(options_backend=backend))
+
+
+def test_rebuild_stops_the_old_graphs_options_backend(tmp_path):
+    # options-via-mcp T7 review fix: every rebuild swaps in a brand-new
+    # Components graph whose paper bundle gets a FRESH McpOptionsBackend --
+    # the old graph's backend (possibly a live uvx subprocess + daemon
+    # thread) is referenced by nothing afterwards, and its atexit hook only
+    # fires at process exit, so rebuild itself must stop it or repeated
+    # settings saves leak a subprocess each during a long run.
+    backends: list[FakeOptionsBackend] = []
+
+    def builder(settings, broker, conn):
+        backend = FakeOptionsBackend()
+        backends.append(backend)
+        used_conn = conn if conn is not None else FakeConn(f"conn:{settings.db_path}")
+        return FakeComponents(
+            settings=settings, conn=used_conn,
+            accounts={"paper": _bundle_with_backend(backend),
+                      "shadow": _bundle_with_backend(None)})
+
+    initial = FakeSettings(db_path=tmp_path / "a.db")
+    holder = ComponentHolder(initial, builder=builder, env_file=tmp_path / ".env")
+
+    # Same db_path: the connection is reused, but the graph -- and its
+    # options backend -- is still replaced, so the old backend must stop.
+    holder.rebuild(FakeSettings(db_path=tmp_path / "a.db"))
+    assert backends[0].stopped is True
+    assert backends[1].stopped is False  # the live graph's backend keeps running
+
+    # Changed db_path: same teardown alongside the stale-conn close.
+    holder.rebuild(FakeSettings(db_path=tmp_path / "b.db"))
+    assert backends[1].stopped is True
+    assert backends[2].stopped is False
+
+
+def test_rebuild_tolerates_a_backend_whose_stop_raises(tmp_path):
+    # Mirrors the stale-conn close's best-effort spirit: one backend's
+    # failing stop() must neither propagate out of rebuild() nor leave the
+    # new graph uninstalled.
+    class ExplodingBackend:
+        def stop(self) -> None:
+            raise RuntimeError("boom")
+
+    graphs: list[FakeComponents] = []
+
+    def builder(settings, broker, conn):
+        used_conn = conn if conn is not None else FakeConn(f"conn:{settings.db_path}")
+        built = FakeComponents(
+            settings=settings, conn=used_conn,
+            accounts={"paper": _bundle_with_backend(ExplodingBackend())})
+        graphs.append(built)
+        return built
+
+    initial = FakeSettings(db_path=tmp_path / "a.db")
+    holder = ComponentHolder(initial, builder=builder, env_file=tmp_path / ".env")
+
+    holder.rebuild(FakeSettings(db_path=tmp_path / "a.db"))  # must not raise
+
+    assert holder.get() is graphs[-1]
 
 
 def test_overlapping_rebuilds_never_install_a_closed_connection(tmp_path):

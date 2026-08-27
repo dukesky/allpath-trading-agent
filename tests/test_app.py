@@ -208,6 +208,24 @@ def test_options_backend_is_none_everywhere_when_flag_off(tmp_path):
     assert shadow.sentinel.options_backend is None
 
 
+def test_options_backend_stop_is_registered_with_atexit(tmp_path, monkeypatch):
+    """Task 7: construction registers the backend's own `stop` with atexit
+    -- the one shutdown hook shared by every build_components caller (serve
+    under FastAPI's lifespan AND the direct one-shot CLI commands). Patched
+    so this test never touches the real atexit table."""
+    registered: list = []
+    monkeypatch.setattr("allpath_trade.app.atexit.register",
+                        lambda fn, *a, **kw: registered.append(fn) or fn)
+
+    settings = _settings_with_options(tmp_path, options_trading=True,
+                                      alpaca_api_key="test-key",
+                                      alpaca_secret_key="test-secret")
+    components = build_components(settings, broker=FakeBroker())
+    backend = components.accounts["paper"].executor.options_backend
+
+    assert backend.stop in registered
+
+
 def test_options_backend_is_none_when_flag_on_but_no_alpaca_keys(tmp_path):
     """Flag on but no Alpaca keys configured (setup-wizard T1 territory) --
     there is nothing to build an MCP session against, so no backend either."""

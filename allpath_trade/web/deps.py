@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -87,6 +88,29 @@ class ComponentHolder:
                 self._components = built
             if stale_conn is not None:
                 stale_conn.close()
+            # options-via-mcp T7 review fix: the swapped-out graph's paper
+            # bundle may hold a live `McpOptionsBackend` -- a `uvx
+            # alpaca-mcp-server` subprocess plus a daemon thread once any
+            # option call has happened -- and `build_components` always
+            # constructs a FRESH backend for the new graph, never reusing
+            # the old one. Its atexit hook only fires at process exit, so
+            # without this every settings-page save would leak another
+            # subprocess/thread for the life of the process. Same shape as
+            # the `stale_conn.close()` above: tear down what the new graph
+            # no longer references, after the swap has committed (in-flight
+            # work against the old graph may then fail, exactly like work
+            # against a closed stale connection). Reached via the executor
+            # (the Sentinel shares the same instance, so one `stop()`
+            # covers both) with getattr-tolerance because tests drive
+            # `rebuild()` with minimal fake Components; `stop()` is
+            # idempotent, and one backend's failure to stop must not skip
+            # the others or fail the rebuild itself.
+            for bundle in getattr(current, "accounts", {}).values():
+                backend = getattr(getattr(bundle, "executor", None),
+                                  "options_backend", None)
+                if backend is not None:
+                    with contextlib.suppress(Exception):
+                        backend.stop()
 
 
 def holder(request) -> ComponentHolder:  # request: FastAPI Request
