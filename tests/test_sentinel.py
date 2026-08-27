@@ -667,3 +667,129 @@ def test_run_once_on_an_unconfigured_broker_reports_one_error_and_checks_nothing
     assert report.outcomes == []
     assert ex.calls == [] and n.sent == []
     assert store.load("t").rules[0].state == RuleState.ARMED
+
+
+# ---------------------------------------------------------------------------
+# Task 7: the drawdown circuit breaker (risk/breaker.py) wired into
+# run_once -- tripped before any strategy is evaluated, so a demoted auto
+# strategy is evaluated as confirm on this same pass; optional (None by
+# default) so every Sentinel constructed without one keeps behaving exactly
+# as it did before this breaker existed.
+# ---------------------------------------------------------------------------
+
+class EquityBroker(FakeBroker):
+    """FakeBroker with a configurable equity, for breaker tests only --
+    FakeBroker itself stays a fixed 10000 (test_web_dashboard.py and others
+    depend on that exact value)."""
+
+    def __init__(self, equity, qty="10"):
+        super().__init__(qty)
+        self._equity = Decimal(equity)
+
+    def get_account(self):
+        return Account(equity=self._equity, cash=Decimal(5000),
+                       buying_power=self._equity)
+
+
+def _breaker_make(tmp_path, yaml_text, *, price="200", equity="80000",
+                  qty="10", halt_pct="0.15", peak="100000", account="paper"):
+    from allpath_trade.risk.breaker import DrawdownBreaker
+    from allpath_trade.store.app_state import AppState
+
+    (tmp_path / "t.yaml").write_text(yaml_text)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    executor = SpyExecutor()
+    queue = ReviewQueue(conn, executor, account=account)
+    notifier = SpyNotifier()
+    app_state = AppState(conn)
+    if peak is not None:
+        app_state.set(f"drawdown_peak:{account}", str(peak))
+    broker = EquityBroker(equity, qty=qty)
+    breaker = DrawdownBreaker(app_state, store, Decimal(halt_pct), account)
+    s = Sentinel(store, FakeData(price), broker, executor, queue, notifier,
+                account=account, app_state=app_state, breaker=breaker)
+    return s, store, executor, queue, notifier, breaker, app_state
+
+
+def test_breaker_trip_halts_notifies_and_records(tmp_path):
+    # Equity 80,000 against a pre-seeded peak of 100,000 is a 20% drawdown
+    # -- above the default 15% halt_pct -- so this pass trips. One auto/hard
+    # strategy whose rule fires at the fake price (200 < 250).
+    s, store, ex, q, n, _breaker, _app_state = _breaker_make(
+        tmp_path, strategy_yaml(auth="auto"))
+
+    report = s.run_once()
+
+    assert any("drawdown breaker" in e for e in report.errors)
+    assert n.sent
+    subject, _body = n.sent[0]
+    assert "TRADING HALTED" in subject
+    # The demotion (inside breaker.check) already landed before load_all
+    # ran, so the strategy is evaluated as confirm on this same pass: the
+    # triggering rule must land in the review queue, not execute.
+    assert ex.calls == []
+    assert len(q.list()) == 1
+    assert store.load("t").authorization.value == "confirm"
+
+
+def test_breaker_trip_sends_even_when_notify_email_is_off(tmp_path):
+    # The breaker alert is an account-level halt, not a per-strategy
+    # notification preference -- it must reach the operator even when
+    # every strategy on file has notify_email: false.
+    s, _store, _ex, _q, n, _breaker, _app_state = _breaker_make(
+        tmp_path, strategy_yaml(auth="auto", notify_email=False))
+
+    s.run_once()
+
+    assert n.sent
+    subject, _body = n.sent[0]
+    assert "TRADING HALTED" in subject
+
+
+def test_breaker_trip_uses_breaker_observation_source(tmp_path):
+    from allpath_trade.memory.observations import ObservationLog
+
+    s, _store, _ex, _q, _n, _breaker, app_state = _breaker_make(
+        tmp_path, strategy_yaml(auth="auto"))
+    observations = ObservationLog(app_state._conn, account="paper")
+    s.observations = observations
+
+    s.run_once()
+
+    sources = [row["source"] for row in observations.recent(limit=10)]
+    # "breaker", not "sentinel" -- so the daily digest, which counts
+    # "sentinel" rows as rule triggers, never miscounts a breaker trip as
+    # one (sentinel.py:122-129's own rationale for "sentinel_error").
+    assert "breaker" in sources
+
+
+def test_no_breaker_means_no_behavior_change(tmp_path):
+    # A Sentinel constructed without breaker= (every pre-existing call
+    # site) runs exactly as it did before this breaker existed.
+    s, store, ex, _q, n = make(tmp_path, strategy_yaml())
+    assert s.breaker is None
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "executed"
+    assert len(ex.calls) == 1
+    assert not any("drawdown breaker" in e for e in report.errors)
+    assert len(n.sent) == 1
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED
+
+
+def test_tripped_breaker_does_not_realert(tmp_path):
+    s, _store, _ex, _q, n, _breaker, _app_state = _breaker_make(
+        tmp_path, strategy_yaml(auth="auto"))
+
+    first = s.run_once()
+    assert any("drawdown breaker" in e for e in first.errors)
+    first_sent = len(n.sent)
+    assert first_sent >= 1
+
+    second = s.run_once()
+
+    assert not any("drawdown breaker" in e for e in second.errors)
+    assert not any("TRADING HALTED" in subject for subject, _body in n.sent[first_sent:])

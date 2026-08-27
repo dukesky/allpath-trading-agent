@@ -115,6 +115,27 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
     return subject, body
 
 
+def drawdown_halt(*, account: str, peak: Decimal, equity: Decimal,
+                  drawdown: Decimal, demoted: list[str]) -> tuple[str, str]:
+    """The drawdown circuit breaker's own alert (Task 7) -- always sent
+    through `self.notifier.send` directly plus `push_telegram_receipt`, NOT
+    the per-strategy `_send`/`notify_email` gate every other sentinel event
+    goes through: an account-level halt is not a per-strategy notification
+    preference, so it must reach the operator even when every strategy on
+    file happens to have `notify_email: false`."""
+    subject = (f"{_prefix(account)}[AllPath] TRADING HALTED: "
+               f"{drawdown:.1%} drawdown")
+    names = ", ".join(demoted) if demoted else "none were set to auto"
+    body = (f"Equity ${equity:,.2f} is {drawdown:.1%} below its peak "
+            f"${peak:,.2f}.\n"
+            f"The drawdown circuit breaker tripped. Auto strategies demoted "
+            f"to confirm: {names}.\n"
+            "No further orders will execute without your approval.\n"
+            "To resume: review the account, restore strategies to auto "
+            "deliberately, then run `allpath-trade breaker reset`." + FOOTER)
+    return subject, body
+
+
 def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   strategy_id: str, recommendation: str = "",
                   trigger_price: str = "", est_shares: str = "",

@@ -17,6 +17,7 @@ from allpath_trade.migrate_files import migrate_files
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.email import build_notifier
 from allpath_trade.reflect import Reflector
+from allpath_trade.risk.breaker import DrawdownBreaker
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 from allpath_trade.sentinel import Sentinel
 from allpath_trade.store.accounts import ACCOUNTS, DEFAULT_ACCOUNT
@@ -205,10 +206,18 @@ def _build_account_components(account: str, *, settings: Settings,
     # ObservationLog's and SessionSearch's own docstrings.
     observations = ObservationLog(conn, account=account)
     search = SessionSearch(conn, account=account)
+    # Task 7: the drawdown circuit breaker is per-account, like everything
+    # else built in this function -- `app_state is not None` mirrors every
+    # other app_state-gated feature in this module (e.g. Telegram push);
+    # in practice app_state is always built before this function runs, so
+    # this is a defensive `None`, not a real code path today.
+    breaker = (DrawdownBreaker(app_state, strategies,
+                               settings.drawdown_halt_pct, account)
+               if app_state is not None else None)
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
                        observations=observations, web_base_url=settings.web_base_url,
                        app_state=app_state, telegram_bot_token=settings.telegram_bot_token,
-                       account=account)
+                       account=account, breaker=breaker)
 
     bundle = AccountComponents(
         account=account, broker=broker, data=data, conn=conn, journal=journal,
