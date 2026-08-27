@@ -8,9 +8,9 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from allpath_trade.strategy.actions import ActionError, parse_action
+from allpath_trade.strategy.actions import ActionError, is_option_action, parse_action
 from allpath_trade.strategy.conditions import ConditionError, parse_condition
-from allpath_trade.strategy.model import StrategyDoc
+from allpath_trade.strategy.model import Authorization, RuleType, StrategyDoc
 
 _VALID_STRATEGY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -81,9 +81,17 @@ def parse_strategy_text(strategy_id: str, text: str) -> StrategyDoc:
         except ConditionError as exc:
             errors.append(f"rule {rule.id}: {exc}")
         try:
-            parse_action(rule.action)
+            action_spec = parse_action(rule.action)
         except ActionError as exc:
             errors.append(f"rule {rule.id}: {exc}")
+        else:
+            if is_option_action(action_spec) and not (
+                doc.authorization == Authorization.AUTO and rule.type == RuleType.HARD
+            ):
+                errors.append(
+                    f"rule {rule.id}: option actions require authorization: auto "
+                    "and rule type: hard (v1 limitation)"
+                )
     if errors:
         raise StrategyValidationError(strategy_id, errors)
     return doc

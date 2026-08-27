@@ -172,3 +172,59 @@ def test_invalid_bias_value_is_rejected():
     text = GOOD_YAML + "\nbias: sideways\n"
     with pytest.raises(StrategyValidationError):
         parse_strategy_text("aapl-long", text)
+
+
+# --- option actions: authorization: auto + rule type: hard only -----------
+
+OPTION_YAML_AUTO_HARD = """
+name: "AAPL calls"
+status: active
+version: 1
+authorization: auto
+position:
+  ticker: aapl
+  target_weight: 15%
+rules:
+  - id: buy-the-dip-call
+    type: hard
+    condition: "price < 185"
+    action: "buy_call $1000"
+review:
+  cadence: daily
+  invalidation: "thesis breaks"
+"""
+
+
+def test_option_action_on_auto_hard_rule_parses():
+    doc = parse_strategy_text("aapl-calls", OPTION_YAML_AUTO_HARD)
+    assert doc.rules[0].action == "buy_call $1000"
+
+
+def test_option_action_with_confirm_authorization_rejected():
+    bad = OPTION_YAML_AUTO_HARD.replace("authorization: auto", "authorization: confirm")
+    with pytest.raises(StrategyValidationError) as ei:
+        parse_strategy_text("aapl-calls", bad)
+    assert any("option actions require authorization: auto and rule type: hard" in e
+               for e in ei.value.errors)
+
+
+def test_option_action_on_soft_rule_rejected():
+    bad = OPTION_YAML_AUTO_HARD.replace("type: hard", "type: soft")
+    with pytest.raises(StrategyValidationError) as ei:
+        parse_strategy_text("aapl-calls", bad)
+    assert any("option actions require authorization: auto and rule type: hard" in e
+               for e in ei.value.errors)
+
+
+def test_option_action_close_options_on_auto_hard_parses():
+    text = OPTION_YAML_AUTO_HARD.replace('"buy_call $1000"', '"close_options"')
+    doc = parse_strategy_text("aapl-calls", text)
+    assert doc.rules[0].action == "close_options"
+
+
+def test_plain_stock_actions_unaffected_by_option_enforcement():
+    # authorization: confirm + soft rule with a plain stock action must still
+    # parse fine -- the auto+hard restriction only applies to option actions.
+    doc = parse_strategy_text("aapl-long", GOOD_YAML)
+    assert doc.authorization == Authorization.CONFIRM
+    assert doc.rules[1].type == RuleType.SOFT
