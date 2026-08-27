@@ -13,6 +13,18 @@ as long as the backend is up). Sync callers submit work onto that loop with
 `threading.Lock` serializes calls so two threads never drive the same
 `ClientSession` concurrently.
 
+Each spawn attempt (initial start, or a respawn after a transport failure)
+gets its own `_ServerHandle` -- its own thread, event loop, ready/shutdown
+events, and session slot. The background thread only ever writes to ITS
+`_ServerHandle`'s fields, never directly to `self.*`; `self._current` is
+assigned exactly once per successful attempt, by `_spawn_locked` itself
+(always under `self._lock`), only after that exact attempt's `ready` has
+fired. This is what keeps a slow or hung attempt (e.g. a startup timeout)
+from ever overwriting the handle a later, successful attempt publishes: an
+abandoned handle simply has nothing left pointing at it once
+`_spawn_locked` raises, so it can't corrupt `self._current` no matter how
+long it takes to actually unwind in the background.
+
 Probed facts this module hard-codes (see
 docs/superpowers/specs/2026-08-27-options-via-mcp-design.md, "Probed
 facts", verified live 2026-08-27 against the real server):
@@ -79,6 +91,25 @@ class OptionsBackend(Protocol):
     def stop(self) -> None: ...
 
 
+class _ServerHandle:
+    """State for exactly one spawn attempt of the MCP server subprocess:
+    its own thread, its own event loop, its own ready/shutdown events, its
+    own session slot. Nothing outside `McpOptionsBackend._run_loop` writes
+    to these fields, and `_run_loop` never touches `McpOptionsBackend.*`
+    directly -- only its own `_ServerHandle` -- so an attempt that never
+    gets published to `self._current` (e.g. because it timed out) cannot
+    corrupt whatever attempt becomes current next, no matter how long it
+    takes to actually unwind."""
+
+    def __init__(self) -> None:
+        self.ready = threading.Event()
+        self.errors: list[BaseException] = []
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.shutdown_event: asyncio.Event | None = None
+        self.session: ClientSession | None = None
+        self.thread: threading.Thread | None = None
+
+
 class McpOptionsBackend:
     """Lazy-starting `OptionsBackend` backed by `uvx alpaca-mcp-server`.
 
@@ -92,10 +123,7 @@ class McpOptionsBackend:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._lock = threading.Lock()
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
-        self._session: ClientSession | None = None
-        self._shutdown_event: asyncio.Event | None = None
+        self._current: _ServerHandle | None = None
 
     # -- subprocess / session lifecycle -----------------------------------
 
@@ -109,71 +137,92 @@ class McpOptionsBackend:
         }
         return StdioServerParameters(command="uvx", args=["alpaca-mcp-server"], env=env)
 
-    def _run_loop(self, ready: threading.Event, errors: list[BaseException]) -> None:
-        """Thread body: owns the event loop for the life of the backend.
+    def _run_loop(self, handle: _ServerHandle) -> None:
+        """Thread body: owns the event loop for the life of this attempt.
 
         Runs one long-lived coroutine that enters the stdio transport and
-        session contexts, publishes the session, signals readiness, then
-        blocks on the shutdown event -- so the contexts are entered and
-        exited on the same loop iteration as required by the MCP SDK.
+        session contexts, publishes the session onto `handle` (never onto
+        `self`), signals readiness, then blocks on the shutdown event --
+        so the contexts are entered and exited on the same loop iteration
+        as required by the MCP SDK.
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        self._loop = loop
+        handle.loop = loop
 
         async def main() -> None:
             shutdown_event = asyncio.Event()
-            self._shutdown_event = shutdown_event
+            handle.shutdown_event = shutdown_event
             try:
                 async with (
                     stdio_client(self._server_params()) as (read, write),
                     ClientSession(read, write) as session,
                 ):
                     await session.initialize()
-                    self._session = session
-                    ready.set()
+                    handle.session = session
+                    handle.ready.set()
                     await shutdown_event.wait()
             except BaseException as exc:  # noqa: BLE001 - surfaced to the caller thread
-                errors.append(exc)
-                ready.set()
+                handle.errors.append(exc)
+                handle.ready.set()
             finally:
-                self._session = None
+                handle.session = None
 
         try:
             loop.run_until_complete(main())
         finally:
             loop.close()
 
-    def _spawn_locked(self) -> None:
-        """Start the server thread. Caller must hold `self._lock`."""
-        ready = threading.Event()
-        errors: list[BaseException] = []
-        thread = threading.Thread(
-            target=self._run_loop, args=(ready, errors), daemon=True,
-        )
-        self._thread = thread
-        thread.start()
-        if not ready.wait(timeout=_STARTUP_TIMEOUT):
-            raise OptionsBackendError("options MCP server startup timed out")
-        if errors:
-            raise OptionsBackendError(f"options MCP server failed to start: {errors[0]}")
+    def _abandon(self, handle: _ServerHandle) -> None:
+        """Best-effort teardown of one `_ServerHandle`'s thread/subprocess.
 
-    def _teardown_locked(self) -> None:
-        """Best-effort shutdown of a possibly-broken session. Caller must
-        hold `self._lock`."""
-        loop = self._loop
-        shutdown_event = self._shutdown_event
-        if loop is not None and shutdown_event is not None:
+        Used both for normal teardown of the current handle and for a
+        handle that must never become current (startup timed out). Signals
+        that handle's own shutdown event via its own loop, then joins its
+        own thread -- this only ever touches `handle`'s fields, so it is
+        safe to call on an attempt that was never published to
+        `self._current`.
+        """
+        if handle.loop is not None and handle.shutdown_event is not None:
+            shutdown_event = handle.shutdown_event
             try:
-                loop.call_soon_threadsafe(shutdown_event.set)
+                handle.loop.call_soon_threadsafe(shutdown_event.set)
             except RuntimeError:
                 pass
-        if self._thread is not None:
-            self._thread.join(timeout=_CALL_TIMEOUT)
-        self._session = None
-        self._loop = None
-        self._shutdown_event = None
-        self._thread = None
+        if handle.thread is not None:
+            handle.thread.join(timeout=_CALL_TIMEOUT)
+
+    def _spawn_locked(self) -> None:
+        """Start one spawn attempt. Caller must hold `self._lock`.
+
+        `self._current` is assigned exactly once here, only after THIS
+        attempt's `ready` has fired successfully -- a timed-out or failed
+        attempt is torn down via `_abandon` and never published, so it can
+        never overwrite a handle a later attempt sets as current.
+        """
+        handle = _ServerHandle()
+        thread = threading.Thread(target=self._run_loop, args=(handle,), daemon=True)
+        handle.thread = thread
+        thread.start()
+
+        if not handle.ready.wait(timeout=_STARTUP_TIMEOUT):
+            self._abandon(handle)
+            raise OptionsBackendError("options MCP server startup timed out")
+        if handle.errors:
+            # main() already saw the failure and set `ready` itself, so
+            # its coroutine is already exiting -- just bound the join.
+            if handle.thread is not None:
+                handle.thread.join(timeout=_CALL_TIMEOUT)
+            raise OptionsBackendError(f"options MCP server failed to start: {handle.errors[0]}")
+
+        self._current = handle
+
+    def _teardown_locked(self) -> None:
+        """Best-effort shutdown of the current session, if any. Caller
+        must hold `self._lock`."""
+        handle, self._current = self._current, None
+        if handle is not None:
+            self._abandon(handle)
 
     def stop(self) -> None:
         """Idempotent shutdown: safe to call whether or not the backend
@@ -184,11 +233,12 @@ class McpOptionsBackend:
     # -- call plumbing ------------------------------------------------------
 
     def _invoke_locked(self, tool: str, args: dict[str, Any]) -> str:
-        """Run one `call_tool` on the session's loop. Caller must hold
-        `self._lock` and have a live `self._session`/`self._loop`."""
-        assert self._session is not None and self._loop is not None
+        """Run one `call_tool` on the current handle's loop. Caller must
+        hold `self._lock` and have a live `self._current`."""
+        handle = self._current
+        assert handle is not None and handle.session is not None and handle.loop is not None
         future = asyncio.run_coroutine_threadsafe(
-            self._session.call_tool(tool, args), self._loop,
+            handle.session.call_tool(tool, args), handle.loop,
         )
         result = future.result(timeout=_CALL_TIMEOUT)
         return result.content[0].text
@@ -201,7 +251,7 @@ class McpOptionsBackend:
         `OptionsBackendError`.
         """
         with self._lock:
-            if self._session is None:
+            if self._current is None:
                 self._spawn_locked()
             try:
                 text = self._invoke_locked(tool, args)

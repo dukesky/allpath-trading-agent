@@ -12,12 +12,16 @@ Run the integration test with:
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
+import allpath_trade.broker.options_mcp as options_mcp_module
 from allpath_trade.broker.options_mcp import (
     McpOptionsBackend,
     OptionPick,
@@ -297,6 +301,164 @@ class TestOptionPick:
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle: spawn timeout/cleanup and the one-respawn-then-error path in
+# `_call`. No real subprocess: `stdio_client`/`ClientSession` are
+# monkeypatched to fakes on the `options_mcp` module (the same names
+# `_run_loop` looks up), so the REAL threading/event-loop/lock machinery
+# in `McpOptionsBackend` runs, just against a fake transport.
+# ---------------------------------------------------------------------------
+
+class _FakeContent:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _FakeCallResult:
+    """Stands in for the `mcp` SDK's `CallToolResult`: `.content[0].text`
+    is the strict-JSON envelope `_parse_result` expects."""
+
+    def __init__(self, data: dict):
+        self.content = [_FakeContent(json.dumps({"_alpaca_mcp_security": {}, "data": data}))]
+
+
+class _ScriptedSession:
+    """Stand-in for `mcp.ClientSession`, used as `ClientSession(read,
+    write)` inside `_run_loop`. Calling the instance mimics the
+    constructor and always returns the SAME instance, so one scripted
+    list of `call_tool` outcomes survives across a respawn (which
+    constructs a fresh "session" by calling `ClientSession(...)` again on
+    a new thread/loop)."""
+
+    def __init__(self, outcomes: list):
+        self.outcomes = outcomes
+
+    def __call__(self, read, write):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def initialize(self):
+        return None
+
+    async def call_tool(self, name: str, args: dict):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+@contextlib.asynccontextmanager
+async def _fast_stdio_client(*args, **kwargs):
+    yield (None, None)
+
+
+def _slow_stdio_client(delay: float):
+    """A `stdio_client` fake whose `__aenter__` takes `delay` seconds --
+    used to force a spawn-timeout deterministically without ever touching
+    a real subprocess."""
+
+    @contextlib.asynccontextmanager
+    async def _cm(*args, **kwargs):
+        await asyncio.sleep(delay)
+        yield (None, None)
+
+    return _cm
+
+
+class TestLifecycle:
+    def test_spawn_timeout_abandons_and_joins_the_stuck_thread(self, monkeypatch):
+        created_handles: list = []
+
+        class _SpyHandle(options_mcp_module._ServerHandle):
+            def __init__(self):
+                super().__init__()
+                created_handles.append(self)
+
+        monkeypatch.setattr(options_mcp_module, "_ServerHandle", _SpyHandle)
+        monkeypatch.setattr(options_mcp_module, "_STARTUP_TIMEOUT", 0.02)
+        # The fake connect takes far longer than the timeout above, so
+        # `_spawn_locked` is guaranteed to time out while this attempt is
+        # still stuck inside `stdio_client(...).__aenter__()`.
+        monkeypatch.setattr(options_mcp_module, "stdio_client", _slow_stdio_client(0.2))
+        monkeypatch.setattr(options_mcp_module, "ClientSession", _ScriptedSession([]))
+
+        backend = McpOptionsBackend(Settings())
+        with pytest.raises(OptionsBackendError, match="startup timed out"):
+            backend._call("get_option_contracts", {})
+
+        # The timed-out attempt must never become `self._current` ...
+        assert backend._current is None
+        assert len(created_handles) == 1
+        # ... and `_abandon()` must have actually joined its thread before
+        # `_spawn_locked` raised, rather than leaving it dangling forever.
+        assert not created_handles[0].thread.is_alive()
+
+    def test_call_respawns_exactly_once_then_succeeds(self, monkeypatch):
+        outcomes = [
+            RuntimeError("transport dropped"),
+            _FakeCallResult({"option_contracts": []}),
+        ]
+        monkeypatch.setattr(options_mcp_module, "stdio_client", _fast_stdio_client)
+        monkeypatch.setattr(options_mcp_module, "ClientSession", _ScriptedSession(outcomes))
+
+        backend = McpOptionsBackend(Settings())
+        try:
+            data = backend._call("get_option_contracts", {})
+            assert data == {"option_contracts": []}
+            # Both scripted outcomes were consumed: the first call failed,
+            # exactly one respawn happened, and the retry succeeded.
+            assert outcomes == []
+        finally:
+            backend.stop()
+
+    def test_call_raises_options_backend_error_after_exactly_one_respawn(self, monkeypatch):
+        outcomes = [RuntimeError("boom 1"), RuntimeError("boom 2")]
+        monkeypatch.setattr(options_mcp_module, "stdio_client", _fast_stdio_client)
+        monkeypatch.setattr(options_mcp_module, "ClientSession", _ScriptedSession(outcomes))
+
+        backend = McpOptionsBackend(Settings())
+        try:
+            with pytest.raises(OptionsBackendError, match="failed after respawn") as exc_info:
+                backend._call("get_option_contracts", {})
+            assert "boom 2" in str(exc_info.value)
+            # Exactly 2 call_tool invocations happened (initial attempt +
+            # one respawn retry) -- not a third, i.e. not an infinite
+            # respawn loop.
+            assert outcomes == []
+        finally:
+            backend.stop()
+
+    def test_stop_tears_down_the_running_session(self, monkeypatch):
+        monkeypatch.setattr(options_mcp_module, "stdio_client", _fast_stdio_client)
+        monkeypatch.setattr(
+            options_mcp_module, "ClientSession",
+            _ScriptedSession([_FakeCallResult({"option_contracts": []})]),
+        )
+
+        backend = McpOptionsBackend(Settings())
+        backend._call("get_option_contracts", {})
+        handle = backend._current
+        assert handle is not None
+        assert handle.thread is not None
+        assert handle.thread.is_alive()
+
+        backend.stop()
+
+        assert backend._current is None
+        assert not handle.thread.is_alive()
+
+    def test_stop_is_idempotent_when_never_started(self):
+        backend = McpOptionsBackend(Settings())
+        backend.stop()
+        backend.stop()
+        assert backend._current is None
+
+
+# ---------------------------------------------------------------------------
 # Live integration test (deselected by default -- same mechanism as
 # tests/test_broker_alpaca_integration.py). Spawns the real
 # `uvx alpaca-mcp-server`, lists tools, and fetches one contract + one
@@ -359,15 +521,14 @@ def test_live_mcp_server_lists_place_option_order_tool():
     if settings is None:
         pytest.skip("no Alpaca keys available (repo-root .env missing or empty)")
 
-    import asyncio
-
     backend = McpOptionsBackend(settings)
     try:
         with backend._lock:
-            if backend._session is None:
+            if backend._current is None:
                 backend._spawn_locked()
+            handle = backend._current
             future = asyncio.run_coroutine_threadsafe(
-                backend._session.list_tools(), backend._loop,
+                handle.session.list_tools(), handle.loop,
             )
             tools = future.result(timeout=30)
         names = [t.name for t in tools.tools]
