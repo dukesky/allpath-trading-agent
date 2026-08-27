@@ -134,6 +134,18 @@ def test_parse_occ_symbol_rejects_invalid_occ():
     assert parse_occ_symbol("META260918X00600000") is None  # invalid right
 
 
+def test_parse_occ_symbol_rejects_calendar_invalid_dates():
+    """Test that shape-matching but calendar-invalid dates return None."""
+    # Month 99 is invalid
+    assert parse_occ_symbol("META269932C00600000") is None
+    # Day 32 is invalid (February)
+    assert parse_occ_symbol("META260232C00600000") is None
+    # Month 00 is invalid
+    assert parse_occ_symbol("META260032C00600000") is None
+    # Day 00 is invalid
+    assert parse_occ_symbol("META260900C00600000") is None
+
+
 def test_option_intent_valid():
     """Test creating a valid OptionIntent."""
     opt = OptionIntent(

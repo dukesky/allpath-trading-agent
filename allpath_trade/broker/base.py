@@ -63,7 +63,8 @@ def parse_occ_symbol(ticker: str) -> OccParts | None:
     """Parse an OCC option symbol into its components.
 
     OCC pattern: root (1-6 letters) + YYMMDD + C/P + strike (8 digits).
-    Returns None if the ticker does not match the OCC pattern.
+    Returns None if the ticker does not match the OCC pattern or has an
+    invalid date (e.g., month 99, day 32).
 
     Examples:
         parse_occ_symbol("META260918C00600000") ->
@@ -71,9 +72,10 @@ def parse_occ_symbol(ticker: str) -> OccParts | None:
         parse_occ_symbol("META260918P00123500") ->
             OccParts(root="META", expiry=date(2026,9,18), right="put", strike=Decimal("123.5"))
         parse_occ_symbol("META") -> None
+        parse_occ_symbol("META269932C00600000") -> None (invalid month 99)
     """
-    pattern = r'^(?P<root>[A-Z]{1,6})(?P<ymd>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$'
-    match = re.match(pattern, ticker)
+    pattern = r'(?P<root>[A-Z]{1,6})(?P<ymd>\d{6})(?P<cp>[CP])(?P<strike>\d{8})'
+    match = re.fullmatch(pattern, ticker)
     if not match:
         return None
 
@@ -86,7 +88,12 @@ def parse_occ_symbol(ticker: str) -> OccParts | None:
     year = 2000 + int(ymd[:2])
     month = int(ymd[2:4])
     day = int(ymd[4:6])
-    expiry = date(year, month, day)
+
+    # Try to construct the date; return None if invalid (e.g., month 99, day 32)
+    try:
+        expiry = date(year, month, day)
+    except ValueError:
+        return None
 
     # Convert right: C -> "call", P -> "put"
     right = "call" if cp == "C" else "put"
