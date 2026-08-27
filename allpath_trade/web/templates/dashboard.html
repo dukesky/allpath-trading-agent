@@ -4,6 +4,15 @@
 <h1>Dashboard {% include "_account_chip.html" %}</h1>
 <p class="{{ 'warn' if sentinel_status.warn else 'muted' }}">{{ sentinel_status.text }} <span class="chip market-pill {{ 'open' if market_open else 'closed' }}"><span class="dot">●</span> Market {{ 'open' if market_open else 'closed' }}</span></p>
 
+{% if breaker_tripped %}
+{# Task 8: reuses the setup-wizard banner's own strip layout (.setup-banner)
+   with the existing alert color (.error) rather than inventing a new class
+   -- the only other place this app renders a full-width strip. Shown only
+   for the account currently on screen (dashboard.py's `b.account`), never
+   the other account's own tripped state. #}
+<p class="setup-banner error">Trading halted — drawdown breaker tripped at {{ breaker_tripped }}. Auto strategies were demoted to confirm; run <code>allpath-trade breaker reset</code> after reviewing.</p>
+{% endif %}
+
 {% if broker_error %}
 <p class="error">{{ broker_error }}</p>
 {% if broker_unconfigured %}

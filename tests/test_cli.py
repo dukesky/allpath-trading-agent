@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import ClassVar
 
 from allpath_trade.broker.base import Account, Broker, Position
-from allpath_trade.cli import cmd_chat, main
+from allpath_trade.cli import cmd_breaker, cmd_chat, main
 from allpath_trade.config import Settings
 
 
@@ -786,6 +786,119 @@ def test_account_flag_scopes_rearm(tmp_path, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert code == 1
     assert "not found" in err
+
+
+# --- Task 8: breaker status/reset --------------------------------------
+
+def _breaker_for_cli_test(tmp_path, account: str = "paper"):
+    """Same shape as test_breaker.py's own `_breaker` helper -- a bare
+    DrawdownBreaker over a real (temp-file) AppState/StrategyStore, with no
+    broker/sentinel/CLI machinery involved. `cmd_breaker` never touches the
+    strategy store's files (only `app_state.get`/`.set`/`.delete` via the
+    breaker), so the directory doesn't need to exist."""
+    from allpath_trade.risk.breaker import DrawdownBreaker
+    from allpath_trade.store.app_state import AppState
+    from allpath_trade.store.db import connect
+    from allpath_trade.strategy.store import StrategyStore
+
+    conn = connect(tmp_path / "t.db")
+    app_state = AppState(conn)
+    store = StrategyStore(tmp_path / "strategies", conn, account=account)
+    breaker = DrawdownBreaker(app_state, store, Decimal("0.15"), account)
+    return breaker, app_state
+
+
+def test_cmd_breaker_status_and_reset(tmp_path, capsys):
+    breaker, app_state = _breaker_for_cli_test(tmp_path)
+    app_state.set("drawdown_peak:paper", "100000")
+    app_state.set("drawdown_tripped:paper", "2026-08-20T00:00:00+00:00")
+
+    assert cmd_breaker(breaker, "status") == 0
+    out = capsys.readouterr().out
+    assert "TRIPPED" in out
+    assert "100000" in out
+    assert breaker.tripped_at() is not None  # "status" never mutates state
+
+    assert cmd_breaker(breaker, "reset") == 0
+    out = capsys.readouterr().out
+    # Reset copy must make clear strategies STAY at confirm -- restoring
+    # auto is a deliberate, separate act via the agent, not implied here.
+    assert "confirm" in out.lower()
+    assert "auto" in out.lower()
+    assert breaker.tripped_at() is None
+    assert app_state.get("drawdown_peak:paper") is None
+
+
+def test_cmd_breaker_status_when_never_tripped(tmp_path, capsys):
+    breaker, _ = _breaker_for_cli_test(tmp_path)
+
+    assert cmd_breaker(breaker, "status") == 0
+    out = capsys.readouterr().out
+    assert "TRIPPED" not in out
+    assert "ok" in out
+
+
+def test_cmd_breaker_reset_when_not_tripped_is_a_noop(tmp_path):
+    breaker, _ = _breaker_for_cli_test(tmp_path)
+    assert breaker.tripped_at() is None
+
+    assert cmd_breaker(breaker, "reset") == 0
+    assert breaker.tripped_at() is None
+
+
+def test_breaker_command_via_main_reports_and_resets_tripped_state(
+        tmp_path, capsys, monkeypatch):
+    from allpath_trade.store.app_state import AppState
+    from allpath_trade.store.db import connect
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    # allpath-trade.db is Settings.db_path's own default -- the same file
+    # `main()` will open once it loads settings from this cwd (mirrors
+    # test_account_flag_scopes_reviews_list's own setup above).
+    conn = connect(tmp_path / "allpath-trade.db")
+    AppState(conn).set("drawdown_peak:paper", "100000")
+    AppState(conn).set("drawdown_tripped:paper", "2026-08-20T00:00:00+00:00")
+    conn.close()
+
+    code = main(["breaker", "status"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "TRIPPED" in out
+    assert "100000" in out
+
+    code = main(["breaker", "reset"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "confirm" in out.lower()
+
+    code = main(["breaker", "status"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "TRIPPED" not in out
+    assert "ok" in out
+
+
+def test_breaker_account_flag_scopes_to_the_right_account(tmp_path, capsys, monkeypatch):
+    from allpath_trade.store.app_state import AppState
+    from allpath_trade.store.db import connect
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "strategies" / "paper").mkdir(parents=True)
+    (tmp_path / "strategies" / "shadow").mkdir(parents=True)
+    conn = connect(tmp_path / "allpath-trade.db")
+    AppState(conn).set("drawdown_tripped:shadow", "2026-08-20T00:00:00+00:00")
+    conn.close()
+
+    code = main(["breaker", "status", "--account", "shadow"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "TRIPPED" in out
+
+    code = main(["breaker", "status", "--account", "paper"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "TRIPPED" not in out
 
 
 def test_chat_account_flag_scopes_conversations_search_and_system_prompt(

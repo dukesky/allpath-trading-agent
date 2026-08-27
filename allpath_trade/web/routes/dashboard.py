@@ -596,6 +596,16 @@ def dashboard(request: Request,
         # ticks that deliberately checked nothing.
         broker_unconfigured=broker_unconfigured)
 
+    # Task 8: the drawdown breaker's own tripped flag (risk/breaker.py sets
+    # `drawdown_tripped:{account}` the moment it demotes every auto
+    # strategy to confirm) -- read for the CURRENT account only (`b.account`,
+    # not the legacy paper-only `c`), so the banner tracks whichever
+    # account's dashboard is actually on screen, same as `sentinel_status`
+    # just above. `None` when the breaker has never tripped (or was already
+    # reset via `allpath-trade breaker reset`), which the template treats as
+    # "no banner" via a plain `{% if %}`.
+    breaker_tripped = c.app_state.get(f"drawdown_tripped:{b.account}")
+
     # Same is_market_hours the scheduler/sentinel gate their pass on (see
     # allpath_trade/scheduler.py) -- reused rather than reimplemented so the
     # pill can never disagree with what actually decided whether today's
@@ -665,6 +675,7 @@ def dashboard(request: Request,
         "strategy_cards": strategy_cards,
         "strategy_errors": errors, "trades": b.journal.recent(limit=8),
         "sentinel_status": sentinel_status, "market_open": market_open,
+        "breaker_tripped": breaker_tripped,
         "range": range_key, "range_labels": _RANGE_LABELS,
         "equity_svg_markup": equity_svg(equity_history, up=equity_up_for_chart),
         "equity_since": equity_since_caption(equity_history),
