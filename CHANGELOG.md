@@ -6,9 +6,15 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
 
 - **Single-leg options, gated off by default**: `OPTIONS_TRADING` (`.env`
   only, default `false`) turns on buy-to-open call/put and sell-to-close
-  option orders. Off is byte-identical to today — no new subprocess, no new
-  strategy YAML accepted. Paper account only; shadow gets no options (spec
-  decision, tracked as a known limitation in `docs/TODO.md`).
+  option orders. Off means no MCP subprocess is ever spawned, and any
+  option rule that does fire reports an "options trading disabled" error
+  disposition instead of trading — the flag only gates backend
+  construction in `app.py`. The strategy loader's auto+hard validation for
+  option-action YAML runs unconditionally either way, so a strategy file
+  using `buy_call`/`buy_put`/`close_options` on an `authorization: auto` +
+  `type: hard` rule still parses and loads with the flag off; it just can't
+  trade until the flag is on. Paper account only; shadow gets no options
+  (spec decision, tracked as a known limitation in `docs/TODO.md`).
 - **New action grammar**: strategy rules can now write `buy_call $<budget>
   [dte>=<days>] [otm=<pct>%]`, `buy_put ...` (same params), and
   `close_options`. Omitted `dte`/`otm` default to `dte>=7 otm=2%`. Because
