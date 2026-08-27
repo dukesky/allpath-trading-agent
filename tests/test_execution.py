@@ -687,6 +687,42 @@ def test_option_unknown_payload_status_defaults_to_submitted(tmp_path):
     assert row["status"] == "submitted"
 
 
+def test_option_malformed_payload_field_journals_error_and_raises(tmp_path):
+    # Reviewer-flagged Critical (task-5 fix round): the broker call already
+    # succeeded here -- a real order was placed -- before a present-but-
+    # unparseable numeric field (filled_qty="N/A") blows up Decimal(). That
+    # must not escape as a raw, unjournaled exception: the trade WAS placed
+    # and needs to be counted (daily cap, exposure) even though we can't
+    # read its fill details.
+    backend = FakeOptionsBackend(
+        payload={"id": "opt4", "status": "filled", "filled_qty": "N/A"})
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    with pytest.raises(ExecutionError, match="unparseable"):
+        ex.execute_option(opt_buy(premium="500"))
+    [row] = journal.recent()
+    assert row["status"] == "error"
+    assert "order placed but response unparseable" in row["risk_reasons"]
+    # The order was genuinely submitted to the broker -- confirm the fake
+    # actually received the call, distinguishing this from a rejection.
+    assert backend.calls == [(CALL_OCC, "buy", 1, "buy_to_open")]
+
+
+def test_option_filled_status_without_filled_qty_degrades_to_submitted(tmp_path):
+    # Reviewer-flagged Important (task-5 fix round): status="filled" with no
+    # usable filled_qty (missing or under a field name we don't read) would
+    # otherwise journal a self-contradictory filled/0 row. Degrading to
+    # SUBMITTED keeps the row honest -- fill-refresh reconciliation can
+    # still correct it later once real fill data is available.
+    backend = FakeOptionsBackend(payload={"id": "opt5", "status": "filled"})
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    res = ex.execute_option(opt_buy(premium="500"))
+    assert res.submitted
+    assert res.order.status == OrderStatus.SUBMITTED
+    assert res.order.filled_qty == Decimal(0)
+    [row] = journal.recent()
+    assert row["status"] == "submitted"
+
+
 def test_option_trades_today_shares_cap_with_stock_trades(tmp_path):
     backend = FakeOptionsBackend()
     ex, _broker, journal = make_option_executor(

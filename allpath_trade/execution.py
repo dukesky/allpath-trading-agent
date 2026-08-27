@@ -81,11 +81,25 @@ def _order_from_payload(payload: dict, intent: OptionIntent) -> Order:
     qty = Decimal(str(qty_raw)) if qty_raw not in (None, "") else Decimal(intent.qty)
 
     filled_qty_raw = payload.get("filled_qty")
-    filled_qty = Decimal(str(filled_qty_raw)) if filled_qty_raw not in (None, "") else Decimal(0)
+    filled_qty_present = filled_qty_raw not in (None, "")
+    filled_qty = Decimal(str(filled_qty_raw)) if filled_qty_present else Decimal(0)
 
     filled_avg_price_raw = payload.get("filled_avg_price")
     filled_avg_price = (Decimal(str(filled_avg_price_raw))
                         if filled_avg_price_raw not in (None, "") else None)
+
+    # I2 (reviewer, task-5 fix round): a payload reporting status "filled"
+    # but with no usable filled_qty (missing/differently-named field) would
+    # otherwise journal a self-contradictory row -- filled_qty=0 alongside
+    # status=filled. Degrade to SUBMITTED instead of fabricating a filled
+    # row: this is the same honest-uncertainty stance TradeJournal.refresh_
+    # fill and the ongoing refresh_pending_fills sweep already take for a
+    # not-yet-confirmed fill (NULL fill columns, status=submitted) -- a
+    # later sweep or manual reconciliation can still correct it once the
+    # real fill data is available, whereas a fabricated FILLED/0 row would
+    # just sit there wrong.
+    if status == OrderStatus.FILLED and not filled_qty_present:
+        status = OrderStatus.SUBMITTED
 
     submitted_at = _parse_payload_datetime(payload.get("submitted_at")) or datetime.now(UTC)
     filled_at = _parse_payload_datetime(payload.get("filled_at"))
@@ -309,6 +323,22 @@ class Executor:
             self.journal.record(order_intent, failed, None, status_override="error")
             raise ExecutionError(str(exc)) from exc
 
-        order = _order_from_payload(payload, intent)
+        try:
+            order = _order_from_payload(payload, intent)
+        except Exception as exc:
+            # The broker call above already succeeded -- a real order was
+            # placed -- so a parse failure here (e.g. a present-but-
+            # malformed numeric field like filled_qty="N/A") must not leave
+            # that trade with zero journal record: it would silently
+            # undercount trades_today and options exposure on every check
+            # after this one. Journal what we know (the order WAS placed,
+            # we just can't read the response) and raise, exactly like the
+            # broker-error path above.
+            failed = RiskDecision(
+                approved=False,
+                reasons=[f"order placed but response unparseable: {exc}"])
+            self.journal.record(order_intent, failed, None, status_override="error")
+            raise ExecutionError(f"order placed but response unparseable: {exc}") from exc
+
         self.journal.record(order_intent, decision, order)
         return ExecutionResult(submitted=True, order=order, decision=decision)
