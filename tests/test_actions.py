@@ -6,6 +6,7 @@ from allpath_trade.broker.base import OrderSide, Position
 from allpath_trade.strategy.actions import (
     ActionError,
     ActionKind,
+    is_option_action,
     parse_action,
     to_order_intent,
 )
@@ -87,3 +88,69 @@ def test_buy_to_target_with_value_mode():
     intent = to_order_intent(parse_action("buy to target_weight"),
                              **kw(strategy=strat))
     assert intent.notional == Decimal("3000.00")  # 5000 - 10*200
+
+
+# --- option action grammar -------------------------------------------------
+
+@pytest.mark.parametrize("text,kind", [
+    ("buy_call $1500", ActionKind.BUY_CALL),
+    ("BUY_CALL $1500", ActionKind.BUY_CALL),
+    ("buy_put $1500", ActionKind.BUY_PUT),
+    ("Buy_Put $1500", ActionKind.BUY_PUT),
+])
+def test_parse_option_buy_bare(text, kind):
+    spec = parse_action(text)
+    assert spec.kind == kind
+    assert spec.amount == Decimal(1500)
+    assert spec.min_dte is None
+    assert spec.otm_pct is None
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("buy_call $1500 dte>=10 otm=3%", ActionKind.BUY_CALL),
+    ("buy_put $1500 dte>=10 otm=3%", ActionKind.BUY_PUT),
+])
+def test_parse_option_buy_with_params(text, kind):
+    spec = parse_action(text)
+    assert spec.kind == kind
+    assert spec.amount == Decimal(1500)
+    assert spec.min_dte == 10
+    assert spec.otm_pct == Decimal("0.03")
+
+
+def test_parse_close_options():
+    spec = parse_action("close_options")
+    assert spec.kind == ActionKind.CLOSE_OPTIONS
+    assert spec.amount is None
+
+
+def test_parse_close_options_case_insensitive():
+    spec = parse_action("Close_Options")
+    assert spec.kind == ActionKind.CLOSE_OPTIONS
+
+
+@pytest.mark.parametrize("bad", [
+    "buy_call",              # missing $ amount
+    "buy_call $0",           # non-positive amount
+    "buy_call $1500 otm=0%",  # otm out of bounds (must be > 0)
+    "buy_call $1500 otm=51%",  # otm out of bounds (must be <= 50)
+    "buy_call $1500 dte>=-1",  # negative dte not a valid grammar token
+    "buy_call $1500 otm=3",   # missing % sign
+    "close_options now",      # close_options takes no params
+])
+def test_parse_option_actions_rejects(bad):
+    with pytest.raises(ActionError):
+        parse_action(bad)
+
+
+def test_is_option_action():
+    assert is_option_action(parse_action("buy_call $1500")) is True
+    assert is_option_action(parse_action("buy_put $1500")) is True
+    assert is_option_action(parse_action("close_options")) is True
+    assert is_option_action(parse_action("sell all")) is False
+    assert is_option_action(parse_action("buy $3000")) is False
+
+
+def test_to_order_intent_rejects_option_spec():
+    with pytest.raises(ActionError):
+        to_order_intent(parse_action("buy_call $1500"), **kw())

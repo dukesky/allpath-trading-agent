@@ -3,14 +3,119 @@ from __future__ import annotations
 import concurrent.futures
 import sys
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
 
-from allpath_trade.broker.base import Broker, Order, OrderIntent, OrderStatus
+from allpath_trade.broker.base import (
+    Broker,
+    OptionIntent,
+    Order,
+    OrderIntent,
+    OrderSide,
+    OrderStatus,
+)
+from allpath_trade.broker.options_mcp import OptionsBackend
 from allpath_trade.data.base import DataSource
 from allpath_trade.risk.gate import RiskDecision, RiskGate
 from allpath_trade.store.journal import TradeJournal
+
+# Option-order statuses collapsed onto our coarse OrderStatus, mirroring
+# broker/alpaca.py's _STATUS_MAP -- the MCP server's place_option_order
+# payload carries the same Alpaca order-status vocabulary (see
+# broker/options_mcp.py's module docstring). Kept as its own local copy
+# rather than importing alpaca.py's map: that map is a private module
+# constant of a different broker implementation, and duplicating six
+# string literals here is cheaper than reaching across broker modules for
+# it.
+_OPTION_STATUS_MAP = {
+    "filled": OrderStatus.FILLED,
+    "partially_filled": OrderStatus.PARTIALLY_FILLED,
+    "canceled": OrderStatus.CANCELED,
+    "expired": OrderStatus.CANCELED,
+    "rejected": OrderStatus.REJECTED,
+}
+
+
+def _parse_payload_datetime(value: object) -> datetime | None:
+    """Best-effort parse of a datetime the MCP payload may or may not carry
+    in a usable form. Anything not a parseable ISO string (missing, wrong
+    type, malformed) yields None rather than raising -- the caller falls
+    back to `datetime.now(UTC)` for `submitted_at`, or leaves `filled_at`
+    unset."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _synthetic_order_intent(intent: OptionIntent) -> OrderIntent:
+    """The journal (and the digest/reflection pipelines built on it) only
+    know how to read `OrderIntent` rows -- this projects an `OptionIntent`
+    onto that shape with zero schema change, per spec §5. `notional` is
+    deliberately left None: the gate's own decision reasons already carry
+    the premium figure, and `notional` on a real OrderIntent means "spend
+    this many dollars of stock", which contracts are not."""
+    return OrderIntent(
+        ticker=intent.occ_symbol,
+        side=intent.side,
+        qty=Decimal(intent.qty),
+        notional=None,
+        reason=intent.reason,
+        strategy_id=intent.strategy_id,
+    )
+
+
+def _order_from_payload(payload: dict, intent: OptionIntent) -> Order:
+    """Build an `Order` defensively from the MCP server's raw `data`
+    envelope for `place_option_order`. Only `id` and `status` are
+    documented as always present (see options_mcp.py's module docstring);
+    everything else falls back to a safe default rather than raising on a
+    field the server happens to omit."""
+    status = _OPTION_STATUS_MAP.get(str(payload.get("status", "")).lower(), OrderStatus.SUBMITTED)
+
+    qty_raw = payload.get("qty")
+    qty = Decimal(str(qty_raw)) if qty_raw not in (None, "") else Decimal(intent.qty)
+
+    filled_qty_raw = payload.get("filled_qty")
+    filled_qty_present = filled_qty_raw not in (None, "")
+    filled_qty = Decimal(str(filled_qty_raw)) if filled_qty_present else Decimal(0)
+
+    filled_avg_price_raw = payload.get("filled_avg_price")
+    filled_avg_price = (Decimal(str(filled_avg_price_raw))
+                        if filled_avg_price_raw not in (None, "") else None)
+
+    # I2 (reviewer, task-5 fix round): a payload reporting status "filled"
+    # but with no usable filled_qty (missing/differently-named field) would
+    # otherwise journal a self-contradictory row -- filled_qty=0 alongside
+    # status=filled. Degrade to SUBMITTED instead of fabricating a filled
+    # row: this is the same honest-uncertainty stance TradeJournal.refresh_
+    # fill and the ongoing refresh_pending_fills sweep already take for a
+    # not-yet-confirmed fill (NULL fill columns, status=submitted) -- a
+    # later sweep or manual reconciliation can still correct it once the
+    # real fill data is available, whereas a fabricated FILLED/0 row would
+    # just sit there wrong.
+    if status == OrderStatus.FILLED and not filled_qty_present:
+        status = OrderStatus.SUBMITTED
+
+    submitted_at = _parse_payload_datetime(payload.get("submitted_at")) or datetime.now(UTC)
+    filled_at = _parse_payload_datetime(payload.get("filled_at"))
+
+    return Order(
+        id=str(payload.get("id", "")),
+        ticker=intent.occ_symbol,
+        side=intent.side,
+        qty=qty,
+        notional=None,
+        status=status,
+        filled_qty=filled_qty,
+        filled_avg_price=filled_avg_price,
+        submitted_at=submitted_at,
+        filled_at=filled_at,
+    )
 
 
 class ExecutionError(Exception):
@@ -112,11 +217,13 @@ class Executor:
     agent tools) creates OrderIntents and calls execute()."""
 
     def __init__(self, broker: Broker, gate: RiskGate,
-                 journal: TradeJournal, data: DataSource) -> None:
+                 journal: TradeJournal, data: DataSource,
+                 options_backend: OptionsBackend | None = None) -> None:
         self.broker = broker
         self.gate = gate
         self.journal = journal
         self.data = data
+        self.options_backend = options_backend
 
     def execute(self, intent: OrderIntent) -> ExecutionResult:
         # Notional intents don't need a price for the gate's checks (order_value
@@ -170,4 +277,68 @@ class Executor:
                     self.journal.refresh_fill(trade_id, refreshed)
             except Exception:  # noqa: BLE001, S110 — poll + write degrade together
                 pass
+        return ExecutionResult(submitted=True, order=order, decision=decision)
+
+    def execute_option(self, intent: OptionIntent) -> ExecutionResult:
+        """Option-order counterpart to `execute`. `est_premium` is already a
+        total-dollar figure, so unlike `execute` there is no quote to fetch
+        here at all -- an OCC symbol like "META260918C00600000" would break
+        `self.data`'s stock-quote lookup (yfinance) anyway."""
+        order_intent = _synthetic_order_intent(intent)
+
+        try:
+            account = self.broker.get_account()
+            positions = self.broker.get_positions()
+            trades_today = self.journal.trades_today()
+        except Exception as exc:
+            failed = RiskDecision(approved=False,
+                                  reasons=[f"data error: {exc}"])
+            self.journal.record(order_intent, failed, None, status_override="error")
+            raise ExecutionError(str(exc)) from exc
+
+        decision = self.gate.check_option(
+            intent,
+            account=account,
+            positions=positions,
+            trades_today=trades_today,
+            is_paper=self.broker.is_paper,
+        )
+        if not decision.approved:
+            self.journal.record(order_intent, decision, None)
+            return ExecutionResult(submitted=False, order=None, decision=decision)
+
+        if self.options_backend is None:
+            failed = RiskDecision(approved=False, reasons=["options trading disabled"])
+            self.journal.record(order_intent, failed, None, status_override="error")
+            raise ExecutionError("options trading disabled")
+
+        position_intent = "buy_to_open" if intent.side == OrderSide.BUY else "sell_to_close"
+        side = "buy" if intent.side == OrderSide.BUY else "sell"
+        try:
+            payload = self.options_backend.place_option_order(
+                intent.occ_symbol, side, intent.qty, position_intent)
+        except Exception as exc:
+            failed = RiskDecision(approved=False,
+                                  reasons=[f"broker error: {exc}"])
+            self.journal.record(order_intent, failed, None, status_override="error")
+            raise ExecutionError(str(exc)) from exc
+
+        try:
+            order = _order_from_payload(payload, intent)
+        except Exception as exc:
+            # The broker call above already succeeded -- a real order was
+            # placed -- so a parse failure here (e.g. a present-but-
+            # malformed numeric field like filled_qty="N/A") must not leave
+            # that trade with zero journal record: it would silently
+            # undercount trades_today and options exposure on every check
+            # after this one. Journal what we know (the order WAS placed,
+            # we just can't read the response) and raise, exactly like the
+            # broker-error path above.
+            failed = RiskDecision(
+                approved=False,
+                reasons=[f"order placed but response unparseable: {exc}"])
+            self.journal.record(order_intent, failed, None, status_override="error")
+            raise ExecutionError(f"order placed but response unparseable: {exc}") from exc
+
+        self.journal.record(order_intent, decision, order)
         return ExecutionResult(submitted=True, order=order, decision=decision)

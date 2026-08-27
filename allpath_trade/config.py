@@ -169,6 +169,10 @@ class Settings(BaseSettings):
     # on. .env-only by design -- flipping it is an experiment decision, not
     # a settings-page toggle a user should reach for casually.
     experiment_auto_apply_revisions: bool = False
+    # Options trading gate: enable options trading when set. .env-only by
+    # design -- options trading is an opt-in feature requiring deliberate
+    # configuration, not a settings-page toggle.
+    options_trading: bool = False
     # Drawdown circuit breaker: halt auto trading when equity falls this
     # fraction below its recorded peak. 0 disables the breaker entirely.
     drawdown_halt_pct: Decimal = Field(default=Decimal("0.15"), ge=0, lt=1)

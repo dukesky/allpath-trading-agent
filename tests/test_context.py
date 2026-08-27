@@ -204,3 +204,30 @@ def test_system_prompt_includes_screenshot_import_guidance(tmp_path):
     assert "only visible to you on your FIRST reply of this turn" in prompt
     # Not baked into the user-editable IDENTITY.md fallback.
     assert "Screenshots of positions" not in DEFAULT_IDENTITY
+
+
+def test_system_prompt_includes_options_actions_guidance(tmp_path):
+    # Task 7 (options-via-mcp): the system prompt is the one place every
+    # chat/reflection session sees the option-only rule grammar, its
+    # defaults, the authorization: auto + type: hard restriction, and the
+    # position-sizing/paired-exit discipline -- static text, present whether
+    # or not OPTIONS_TRADING happens to be on for this run (the note says so
+    # itself rather than being conditionally assembled).
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "## Option actions" in prompt
+    assert "OPTIONS_TRADING" in prompt
+    assert "buy_call $<budget>" in prompt
+    assert "buy_put $<budget>" in prompt
+    assert "close_options" in prompt
+    assert "dte>=7 otm=2%" in prompt
+    assert "authorization: auto" in prompt and "type: hard" in prompt
+    assert "2% of account equity" in prompt
+    assert "close_options` exit" in prompt
+    # Not baked into the user-editable IDENTITY.md fallback.
+    assert "Option actions" not in DEFAULT_IDENTITY

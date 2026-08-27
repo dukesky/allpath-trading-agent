@@ -172,3 +172,146 @@ def test_invalid_bias_value_is_rejected():
     text = GOOD_YAML + "\nbias: sideways\n"
     with pytest.raises(StrategyValidationError):
         parse_strategy_text("aapl-long", text)
+
+
+# --- option actions: authorization: auto + rule type: hard only -----------
+
+OPTION_YAML_AUTO_HARD = """
+name: "AAPL calls"
+status: active
+version: 1
+authorization: auto
+position:
+  ticker: aapl
+  target_weight: 15%
+rules:
+  - id: buy-the-dip-call
+    type: hard
+    condition: "price < 185"
+    action: "buy_call $1000"
+review:
+  cadence: daily
+  invalidation: "thesis breaks"
+"""
+
+
+def test_option_action_on_auto_hard_rule_parses():
+    doc = parse_strategy_text("aapl-calls", OPTION_YAML_AUTO_HARD)
+    assert doc.rules[0].action == "buy_call $1000"
+
+
+def test_option_action_with_confirm_authorization_rejected():
+    # Finding 1a: this enforcement is authoring-time only now -- see the
+    # `authoring=False by default` tests below for the load-time behavior
+    # this same YAML must have instead (must NOT raise).
+    bad = OPTION_YAML_AUTO_HARD.replace("authorization: auto", "authorization: confirm")
+    with pytest.raises(StrategyValidationError) as ei:
+        parse_strategy_text("aapl-calls", bad, authoring=True)
+    assert any("option actions require authorization: auto and rule type: hard" in e
+               for e in ei.value.errors)
+
+
+def test_option_action_on_soft_rule_rejected():
+    bad = OPTION_YAML_AUTO_HARD.replace("type: hard", "type: soft")
+    with pytest.raises(StrategyValidationError) as ei:
+        parse_strategy_text("aapl-calls", bad, authoring=True)
+    assert any("option actions require authorization: auto and rule type: hard" in e
+               for e in ei.value.errors)
+
+
+def test_option_action_close_options_on_auto_hard_parses():
+    text = OPTION_YAML_AUTO_HARD.replace('"buy_call $1000"', '"close_options"')
+    doc = parse_strategy_text("aapl-calls", text)
+    assert doc.rules[0].action == "close_options"
+
+
+def test_plain_stock_actions_unaffected_by_option_enforcement():
+    # authorization: confirm + soft rule with a plain stock action must still
+    # parse fine -- the auto+hard restriction only applies to option actions.
+    doc = parse_strategy_text("aapl-long", GOOD_YAML)
+    assert doc.authorization == Authorization.CONFIRM
+    assert doc.rules[1].type == RuleType.SOFT
+
+
+# --- Finding 1a: `authoring` param gates the auto+hard check ---------------
+# (load-only callers must succeed even against a strategy that would fail
+# authoring-time validation today -- e.g. one the drawdown breaker demoted
+# from auto to confirm after it was originally authored valid).
+
+def test_authoring_false_by_default_option_action_on_confirm_still_loads():
+    # The default (authoring=False, what `load_strategy`/`StrategyStore.
+    # load`/`load_all` use) must NOT enforce the auto+hard restriction --
+    # this is the load path a demoted strategy's file goes through on every
+    # subsequent sentinel pass (Finding 1's regression).
+    bad = OPTION_YAML_AUTO_HARD.replace("authorization: auto", "authorization: confirm")
+    doc = parse_strategy_text("aapl-calls", bad)
+    assert doc.authorization == Authorization.CONFIRM
+    assert doc.rules[0].action == "buy_call $1000"
+
+
+def test_authoring_false_by_default_option_action_on_soft_rule_still_loads():
+    bad = OPTION_YAML_AUTO_HARD.replace("type: hard", "type: soft")
+    doc = parse_strategy_text("aapl-calls", bad)
+    assert doc.rules[0].type == RuleType.SOFT
+
+
+def test_authoring_true_rejects_option_action_with_confirm_authorization():
+    bad = OPTION_YAML_AUTO_HARD.replace("authorization: auto", "authorization: confirm")
+    with pytest.raises(StrategyValidationError) as ei:
+        parse_strategy_text("aapl-calls", bad, authoring=True)
+    assert any("option actions require authorization: auto and rule type: hard" in e
+               for e in ei.value.errors)
+
+
+def test_authoring_true_rejects_option_action_on_soft_rule():
+    bad = OPTION_YAML_AUTO_HARD.replace("type: hard", "type: soft")
+    with pytest.raises(StrategyValidationError) as ei:
+        parse_strategy_text("aapl-calls", bad, authoring=True)
+    assert any("option actions require authorization: auto and rule type: hard" in e
+               for e in ei.value.errors)
+
+
+def test_authoring_true_accepts_valid_auto_hard_option_action():
+    # OPTION_YAML_AUTO_HARD has no close_options rule -- add one so this
+    # doesn't also trip Finding 4's entry-without-exit check below.
+    text = OPTION_YAML_AUTO_HARD.replace(
+        "review:", "  - {id: exit, type: hard, condition: \"price > 999\", "
+                    "action: \"close_options\"}\nreview:")
+    doc = parse_strategy_text("aapl-calls", text, authoring=True)
+    assert doc.rules[0].action == "buy_call $1000"
+    assert doc.rules[1].action == "close_options"
+
+
+# --- Finding 4: authoring requires a close_options exit for every entry ---
+
+def test_authoring_true_rejects_buy_call_with_no_close_options_rule():
+    # OPTION_YAML_AUTO_HARD has a lone buy_call rule and no close_options
+    # anywhere -- must be rejected at authoring time.
+    with pytest.raises(StrategyValidationError) as ei:
+        parse_strategy_text("aapl-calls", OPTION_YAML_AUTO_HARD, authoring=True)
+    assert any("close_options" in e for e in ei.value.errors)
+
+
+def test_authoring_true_accepts_buy_put_with_a_close_options_rule():
+    text = OPTION_YAML_AUTO_HARD.replace('"buy_call $1000"', '"buy_put $1000"').replace(
+        "review:", "  - {id: exit, type: hard, condition: \"price > 999\", "
+                    "action: \"close_options\"}\nreview:")
+    doc = parse_strategy_text("aapl-calls", text, authoring=True)
+    assert doc.rules[0].action == "buy_put $1000"
+    assert doc.rules[1].action == "close_options"
+
+
+def test_authoring_false_loads_an_existing_entry_only_file_without_error():
+    # A file already on disk with an entry but no exit (e.g. authored
+    # before Finding 4 existed) must keep LOADING -- this check is
+    # authoring-time only, exactly like Finding 1a's auto+hard check.
+    doc = parse_strategy_text("aapl-calls", OPTION_YAML_AUTO_HARD)
+    assert doc.rules[0].action == "buy_call $1000"
+
+
+def test_authoring_true_close_options_alone_is_fine_no_entry_required():
+    # The exit-requires-entry direction isn't a rule -- a strategy that only
+    # ever closes (no buy_call/buy_put anywhere) has nothing to pair.
+    text = OPTION_YAML_AUTO_HARD.replace('"buy_call $1000"', '"close_options"')
+    doc = parse_strategy_text("aapl-calls", text, authoring=True)
+    assert doc.rules[0].action == "close_options"

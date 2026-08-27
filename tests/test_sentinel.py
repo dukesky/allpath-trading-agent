@@ -1,12 +1,16 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 from allpath_trade.broker.base import (
     Account,
     Broker,
+    Order,
+    OrderSide,
+    OrderStatus,
     Position,
 )
+from allpath_trade.broker.options_mcp import OptionPick, OptionsBackendError
 from allpath_trade.data.base import DataSource, Quote
 from allpath_trade.execution import ExecutionError
 from allpath_trade.risk.gate import RiskDecision
@@ -48,26 +52,41 @@ class FakeBroker(Broker):
     name = "fake"
     is_paper = True
 
-    def __init__(self, qty="10"):
+    def __init__(self, qty="10", extra_positions=None, open_orders=None):
         self.qty = Decimal(qty)
+        # Task 6: OCC-symbol option positions a test wants held alongside
+        # (or instead of) the AAPL stock position above -- used by
+        # close_options and expiry-sweep tests. Empty by default, so every
+        # pre-existing call site (none of which passes this) is unaffected.
+        self.extra_positions = list(extra_positions or [])
+        # Finding 2b: open orders `get_orders(open_only=True)` returns --
+        # used by the expiry sweep's already-selling dedup. Empty by
+        # default (matches the prior hardcoded `return []`), so every
+        # pre-existing call site is unaffected.
+        self.open_orders = list(open_orders or [])
+        self.get_orders_raises = False
 
     def get_account(self):
         return Account(equity=Decimal(10000), cash=Decimal(5000),
                        buying_power=Decimal(10000))
 
     def get_positions(self):
-        if self.qty <= 0:
-            return []
-        return [Position(ticker="AAPL", qty=self.qty,
-                         avg_entry_price=Decimal(180),
-                         market_value=self.qty * Decimal(200),
-                         unrealized_pl=Decimal(0))]
+        positions = []
+        if self.qty > 0:
+            positions.append(Position(ticker="AAPL", qty=self.qty,
+                             avg_entry_price=Decimal(180),
+                             market_value=self.qty * Decimal(200),
+                             unrealized_pl=Decimal(0)))
+        positions.extend(self.extra_positions)
+        return positions
 
     def get_order(self, order_id):
         raise NotImplementedError
 
     def get_orders(self, open_only=True):
-        return []
+        if self.get_orders_raises:
+            raise RuntimeError("broker unavailable")
+        return self.open_orders
 
     def submit_order(self, intent):
         raise NotImplementedError
@@ -82,6 +101,11 @@ class SpyExecutor:
         self.raise_exc = raise_exc
         self.reject_reasons = reject_reasons
         self.calls = []
+        # Task 6: option calls are recorded separately from `calls` --
+        # `OptionIntent` and `OrderIntent` are different shapes, and every
+        # pre-existing test asserting on `calls` must keep seeing exactly
+        # the stock-path intents it always did.
+        self.option_calls = []
 
     def execute(self, intent):
         if self.fail:
@@ -89,6 +113,20 @@ class SpyExecutor:
         if self.raise_exc is not None:
             raise self.raise_exc
         self.calls.append(intent)
+        from allpath_trade.execution import ExecutionResult
+        if self.reject_reasons is not None:
+            return ExecutionResult(
+                submitted=False, order=None,
+                decision=RiskDecision(approved=False, reasons=self.reject_reasons))
+        return ExecutionResult(submitted=True, order=None,
+                               decision=RiskDecision(approved=True))
+
+    def execute_option(self, intent):
+        if self.fail:
+            raise ExecutionError("boom")
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        self.option_calls.append(intent)
         from allpath_trade.execution import ExecutionResult
         if self.reject_reasons is not None:
             return ExecutionResult(
@@ -106,6 +144,42 @@ class SpyNotifier:
         self.sent.append((subject, body))
 
 
+class FakeOptionsBackend:
+    """Minimal `OptionsBackend` fake for sentinel tests -- unlike
+    tests/test_execution.py's fake of the same name, sentinel tests always
+    route order placement through `SpyExecutor.execute_option` (never the
+    real `Executor`), so this fake only needs `pick_contract` to actually
+    do anything; `place_option_order` is never called from these tests and
+    stays a stub."""
+
+    def __init__(self, pick=None, pick_fail=False):
+        self.pick = pick
+        self.pick_fail = pick_fail
+        self.pick_calls = []
+
+    def pick_contract(self, underlying, right, min_dte, otm_pct, budget, spot):
+        self.pick_calls.append((underlying, right, min_dte, otm_pct, budget, spot))
+        if self.pick_fail:
+            raise OptionsBackendError("mcp down")
+        return self.pick
+
+    def place_option_order(self, occ_symbol, side, qty, position_intent):
+        raise NotImplementedError
+
+    def stop(self):
+        pass
+
+
+def _occ_symbol(root: str, expiry: date, right: str = "C", strike=200) -> str:
+    return f"{root}{expiry.strftime('%y%m%d')}{right}{int(strike * 1000):08d}"
+
+
+def _occ_position(occ_symbol: str, qty: str = "1") -> Position:
+    q = Decimal(qty)
+    return Position(ticker=occ_symbol, qty=q, avg_entry_price=Decimal(5),
+                    market_value=q * Decimal(500), unrealized_pl=Decimal(0))
+
+
 def make(tmp_path: Path, yaml_text: str, *, price="200", qty="10", fail=False,
          account="paper"):
     (tmp_path / "t.yaml").write_text(yaml_text)
@@ -116,6 +190,29 @@ def make(tmp_path: Path, yaml_text: str, *, price="200", qty="10", fail=False,
     notifier = SpyNotifier()
     s = Sentinel(store, FakeData(price), FakeBroker(qty), executor, queue, notifier,
                  account=account)
+    return s, store, executor, queue, notifier
+
+
+def make_option(tmp_path: Path, yaml_text: str, *, backend, price="200", qty="10",
+                account="paper", extra_positions=None, broker=None):
+    """Like `make`, but wires an `options_backend` (a `FakeOptionsBackend`,
+    or None to test the disabled path) and lets the caller seed OCC-symbol
+    positions alongside the usual AAPL stock position.
+
+    `broker` lets a Finding-2b test pass a pre-built `FakeBroker` (e.g. one
+    seeded with `open_orders=` or `get_orders_raises=True`) instead of the
+    plain one this helper would otherwise construct from `qty`/
+    `extra_positions`."""
+    (tmp_path / "t.yaml").write_text(yaml_text)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    executor = SpyExecutor()
+    queue = ReviewQueue(conn, executor, account=account)
+    notifier = SpyNotifier()
+    if broker is None:
+        broker = FakeBroker(qty, extra_positions=extra_positions)
+    s = Sentinel(store, FakeData(price), broker, executor, queue, notifier,
+                account=account, options_backend=backend)
     return s, store, executor, queue, notifier
 
 
@@ -682,8 +779,8 @@ class EquityBroker(FakeBroker):
     FakeBroker itself stays a fixed 10000 (test_web_dashboard.py and others
     depend on that exact value)."""
 
-    def __init__(self, equity, qty="10"):
-        super().__init__(qty)
+    def __init__(self, equity, qty="10", extra_positions=None):
+        super().__init__(qty, extra_positions=extra_positions)
         self._equity = Decimal(equity)
 
     def get_account(self):
@@ -793,3 +890,479 @@ def test_tripped_breaker_does_not_realert(tmp_path):
 
     assert not any("drawdown breaker" in e for e in second.errors)
     assert not any("TRADING HALTED" in subject for subject, _body in n.sent[first_sent:])
+
+
+def _breaker_make_option(tmp_path, yaml_text, *, backend, price="200", equity="80000",
+                         qty="10", halt_pct="0.15", peak="100000", account="paper",
+                         extra_positions=None):
+    """Like `_breaker_make`, but wires an `options_backend` and lets the
+    caller seed OCC-symbol positions -- used by Finding 1's regression
+    test below."""
+    from allpath_trade.risk.breaker import DrawdownBreaker
+    from allpath_trade.store.app_state import AppState
+
+    (tmp_path / "t.yaml").write_text(yaml_text)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(tmp_path, conn)
+    executor = SpyExecutor()
+    queue = ReviewQueue(conn, executor, account=account)
+    notifier = SpyNotifier()
+    app_state = AppState(conn)
+    if peak is not None:
+        app_state.set(f"drawdown_peak:{account}", str(peak))
+    broker = EquityBroker(equity, qty=qty, extra_positions=extra_positions)
+    breaker = DrawdownBreaker(app_state, store, Decimal(halt_pct), account)
+    s = Sentinel(store, FakeData(price), broker, executor, queue, notifier,
+                account=account, app_state=app_state, breaker=breaker,
+                options_backend=backend)
+    return s, store, executor, queue, notifier, breaker, app_state
+
+
+def test_breaker_demoted_auto_option_strategy_still_loads_buy_skipped_close_executes(tmp_path):
+    # Finding 1 regression. Before the fix: DrawdownBreaker.check demotes
+    # every `auto` strategy to `confirm` via StrategyStore.set_authorization
+    # (risk/breaker.py), which does NOT re-validate the strategy. The very
+    # next line in run_once, `self.strategies.load_all(...)`, used to
+    # re-enforce "option actions require authorization: auto + type: hard"
+    # on every load (strategy/loader.py) -- so the now-demoted file would
+    # raise StrategyValidationError forever after, and load_all treats a
+    # bad file as "skip it entirely", silently dropping EVERY rule in it,
+    # including a close_options stop-loss, precisely during the drawdown
+    # the breaker exists to protect against.
+    #
+    # After the fix: loading no longer enforces that check (only authoring
+    # does -- see loader.py's `authoring` param), so the strategy keeps
+    # loading; sentinel.py's `_dispatch_option` is the new runtime last
+    # line of defense that keeps its buy_call rule from firing anyway
+    # (skipped, not executed), while its close_options rule -- risk-
+    # reducing, and exempt from the authorization gate by design -- still
+    # executes.
+    future_expiry = date.today() + timedelta(days=90)
+    aapl_call = _occ_symbol("AAPL", future_expiry)
+    yaml_text = """
+name: "T"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: entry, type: hard, condition: "price < 250", action: "buy_call $500"}
+  - {id: exit, type: hard, condition: "price < 250", action: "close_options"}
+"""
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, store, ex, _q, _n, _breaker, _app_state = _breaker_make_option(
+        tmp_path, yaml_text, backend=backend, extra_positions=[_occ_position(aapl_call)])
+
+    report = s.run_once()
+
+    # The breaker tripped and demoted this strategy on this same pass.
+    assert any("drawdown breaker" in e for e in report.errors)
+    assert store.load("t").authorization.value == "confirm"
+
+    # The strategy still loaded and BOTH its rules were evaluated -- the
+    # bug this regresses against would have made `load_all` skip this file
+    # entirely, leaving `report.outcomes` empty.
+    outcomes = {o.rule_id: o for o in report.outcomes}
+    assert set(outcomes) == {"entry", "exit"}
+    assert outcomes["entry"].disposition == "skipped"
+    assert "authorization: auto" in outcomes["entry"].detail
+    assert outcomes["exit"].disposition == "executed"
+    assert aapl_call in outcomes["exit"].detail
+
+    # The buy never reached the executor; the close did.
+    assert len(ex.option_calls) == 1
+    assert ex.option_calls[0].side.value == "sell"
+    assert ex.option_calls[0].occ_symbol == aapl_call
+
+
+# ---------------------------------------------------------------------------
+# Task 6: option dispatch (buy_call/buy_put/close_options) and the DTE<=1
+# expiry safety sweep. `SpyExecutor.execute_option` records intents the same
+# way `.execute` already does for stock intents -- these tests exercise
+# `_dispatch_option`/`_dispatch_close_options`/`_run_expiry_sweep`, not the
+# real `Executor` (that's tests/test_execution.py's job).
+# ---------------------------------------------------------------------------
+
+_PICK = OptionPick(
+    occ_symbol="AAPL260101C00204000", expiry=date(2026, 1, 1),
+    strike=Decimal("204"), ask=Decimal("2.50"), qty=2, est_premium=Decimal("500"))
+
+
+def test_buy_call_executes_with_defaults_applied_when_action_omits_them(tmp_path):
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="buy_call $500"), backend=backend)
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "executed"
+    # Defaults (dte 7, otm 2%) are applied by the sentinel, not the parser --
+    # spec.min_dte/otm_pct are None on the parsed action here.
+    assert backend.pick_calls == [
+        ("AAPL", "call", 7, Decimal("0.02"), Decimal("500"), Decimal("200"))]
+    [intent] = ex.option_calls
+    assert intent.underlying == "AAPL"
+    assert intent.right == "call"
+    assert intent.occ_symbol == "AAPL260101C00204000"
+    assert intent.side.value == "buy"
+    assert intent.qty == 2
+    assert intent.est_premium == Decimal("500")
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED
+    assert len(n.sent) == 1
+
+
+def test_buy_put_explicit_dte_and_otm_are_passed_through_not_defaulted(tmp_path):
+    put_pick = OptionPick(occ_symbol="AAPL260101P00196000", expiry=date(2026, 1, 1),
+                          strike=Decimal("196"), ask=Decimal("2.10"), qty=1,
+                          est_premium=Decimal("210"))
+    backend = FakeOptionsBackend(pick=put_pick)
+    s, *_ = make_option(
+        tmp_path, strategy_yaml(action="buy_put $500 dte>=10 otm=3%"), backend=backend)
+
+    s.run_once()
+
+    assert backend.pick_calls == [
+        ("AAPL", "put", 10, Decimal("0.03"), Decimal("500"), Decimal("200"))]
+
+
+def test_buy_call_no_affordable_contract_is_skipped(tmp_path):
+    backend = FakeOptionsBackend(pick=None)
+    s, store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="buy_call $500"), backend=backend)
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "skipped"
+    assert "no affordable option contract" in o.detail
+    assert ex.option_calls == []
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED
+    assert len(n.sent) == 1
+
+
+def test_buy_call_backend_error_reported_as_error_not_raised(tmp_path):
+    backend = FakeOptionsBackend(pick_fail=True)
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="buy_call $500"), backend=backend)
+
+    report = s.run_once()  # must not raise
+
+    [o] = report.outcomes
+    assert o.disposition == "error"
+    assert "mcp down" in o.detail
+    assert ex.option_calls == []
+    assert len(n.sent) == 1
+
+
+def test_buy_call_without_options_backend_is_error_not_crash(tmp_path):
+    s, _store, ex, _q, n = make(tmp_path, strategy_yaml(action="buy_call $500"))
+
+    report = s.run_once()  # must not raise
+
+    [o] = report.outcomes
+    assert o.disposition == "error"
+    assert o.detail == "options trading disabled"
+    assert ex.calls == [] and ex.option_calls == []
+    assert len(n.sent) == 1
+
+
+def test_buy_call_rejected_by_executor_is_rejected_not_executed(tmp_path):
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="buy_call $500"), backend=backend)
+    ex.reject_reasons = ["exceeds max_options_weight"]
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "rejected"
+    assert "exceeds max_options_weight" in o.detail
+    assert len(n.sent) == 1
+
+
+def test_close_options_closes_only_matching_underlying_positions(tmp_path):
+    # Far-future expiry -- must stay outside the DTE<=1 expiry sweep's
+    # window (also active in this test, since it also needs an
+    # options_backend), so this test isolates close_options's own filtering.
+    future_expiry = date.today() + timedelta(days=90)
+    aapl_call = _occ_symbol("AAPL", future_expiry)
+    other_call = _occ_symbol("MSFT", future_expiry)
+    backend = FakeOptionsBackend()
+    s, store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="close_options"), backend=backend,
+        extra_positions=[_occ_position(aapl_call), _occ_position(other_call)])
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "executed"
+    assert aapl_call in o.detail
+    [intent] = ex.option_calls
+    assert intent.occ_symbol == aapl_call
+    assert intent.underlying == "AAPL"
+    assert intent.side.value == "sell"
+    assert intent.qty == 1
+    assert intent.est_premium == Decimal(0)
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED
+    assert len(n.sent) == 1  # one order_result receipt for the one close
+
+
+def test_close_options_one_bad_qty_position_does_not_abort_the_batch(tmp_path):
+    # Finding 5: `OptionIntent.qty` requires >= 1 -- a position whose qty
+    # truncates to 0 via `int(p.qty)` (e.g. a stray 0.5-contract position
+    # from a bad broker payload, which should never happen but must be
+    # handled defensively) used to raise a `ValidationError` OUTSIDE the
+    # per-position try/except, abandoning every remaining position in this
+    # strategy's close_options batch. The fix moves construction inside the
+    # try -- the bad position is recorded as an issue, and the good
+    # position right after it still gets closed.
+    future_expiry = date.today() + timedelta(days=90)
+    bad_call = _occ_symbol("AAPL", future_expiry, strike=190)
+    good_call = _occ_symbol("AAPL", future_expiry, strike=210)
+    backend = FakeOptionsBackend()
+    s, store, ex, _q, _n = make_option(
+        tmp_path, strategy_yaml(action="close_options"), backend=backend,
+        extra_positions=[_occ_position(bad_call, qty="0.5"),
+                         _occ_position(good_call, qty="1")])
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "executed"  # at least one position closed
+    assert bad_call in o.detail
+    assert good_call in o.detail
+    [intent] = ex.option_calls
+    assert intent.occ_symbol == good_call
+    assert intent.side.value == "sell"
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED
+
+
+def test_close_options_with_no_matching_positions_is_skipped(tmp_path):
+    backend = FakeOptionsBackend()
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="close_options"), backend=backend)
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "skipped"
+    assert "no option positions to close" in o.detail
+    assert ex.option_calls == []
+    assert len(n.sent) == 1
+
+
+def test_close_options_without_options_backend_is_error_not_crash(tmp_path):
+    s, _store, ex, _q, n = make(tmp_path, strategy_yaml(action="close_options"))
+
+    report = s.run_once()  # must not raise
+
+    [o] = report.outcomes
+    assert o.disposition == "error"
+    assert o.detail == "options trading disabled"
+    assert ex.calls == [] and ex.option_calls == []
+    assert len(n.sent) == 1
+
+
+def test_close_options_on_soft_rule_is_skipped_not_executed(tmp_path):
+    # Finding 1b defense in depth: the loader's authoring-time validation
+    # normally guarantees every option action sits on a `type: hard` rule,
+    # but a strategy YAML written directly to disk (bypassing draft_strategy/
+    # propose_strategy_revision) can still reach the sentinel with a soft
+    # rule. `_dispatch_option`'s close_options branch must independently
+    # refuse to execute in that case rather than trusting the loader's
+    # guarantee alone -- closes ignore `authorization` by design, but never
+    # `type`.
+    future_expiry = date.today() + timedelta(days=90)
+    aapl_call = _occ_symbol("AAPL", future_expiry)
+    yaml_text = """
+name: "T"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: r1, type: soft, condition: "price < 250", action: "close_options"}
+"""
+    backend = FakeOptionsBackend()
+    s, _store, ex, _q, n = make_option(
+        tmp_path, yaml_text, backend=backend, extra_positions=[_occ_position(aapl_call)])
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "skipped"
+    assert "type: hard" in o.detail
+    assert ex.option_calls == []
+    assert len(n.sent) == 1
+
+
+def test_expiry_sweep_closes_dte_le_1_and_leaves_dte_gt_1(tmp_path):
+    today = date.today()
+    expiring = _occ_symbol("AAPL", today + timedelta(days=1))  # DTE == 1
+    safe = _occ_symbol("AAPL", today + timedelta(days=5))       # DTE == 5
+    backend = FakeOptionsBackend()
+    # No rule fires (condition never true) -- isolates the sweep from the
+    # strategy loop entirely.
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend,
+        extra_positions=[_occ_position(expiring), _occ_position(safe)])
+
+    report = s.run_once()
+
+    assert report.outcomes == []  # no rule triggered
+    [intent] = ex.option_calls
+    assert intent.occ_symbol == expiring
+    assert intent.side.value == "sell"
+    assert intent.reason == "expiry safety sweep (DTE<=1)"
+    assert len(n.sent) == 1  # one receipt for the one closed position
+
+
+def test_expiry_sweep_closes_a_position_expiring_today(tmp_path):
+    today_expiry = _occ_symbol("AAPL", date.today())  # DTE == 0
+    backend = FakeOptionsBackend()
+    s, _store, ex, _q, _n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend,
+        extra_positions=[_occ_position(today_expiry)])
+
+    s.run_once()
+
+    assert [i.occ_symbol for i in ex.option_calls] == [today_expiry]
+
+
+def test_expiry_sweep_absent_when_options_backend_is_none(tmp_path):
+    today = date.today()
+    expiring = _occ_symbol("AAPL", today)
+    # `make_option` with backend=None: an OCC position at DTE 0 is present,
+    # but `run_once` must never call `_run_expiry_sweep` at all when
+    # `options_backend` is None (not just no-op inside it).
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=None,
+        extra_positions=[_occ_position(expiring)])
+
+    report = s.run_once()
+
+    assert ex.option_calls == []
+    assert n.sent == []
+    assert report.outcomes == []
+
+
+def test_expiry_sweep_uses_options_sweep_observation_source(tmp_path):
+    from allpath_trade.memory.observations import ObservationLog
+
+    today = date.today()
+    expiring = _occ_symbol("AAPL", today)
+    backend = FakeOptionsBackend()
+    s, _store, _ex, q, _n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend,
+        extra_positions=[_occ_position(expiring)])
+    s.observations = ObservationLog(q._conn)
+
+    s.run_once()
+
+    rows = s.observations.recent()
+    assert rows and rows[0]["source"] == "options_sweep"
+    assert all(r["source"] != "sentinel" for r in rows)
+
+
+def test_expiry_sweep_rejected_close_is_recorded_in_report_errors(tmp_path):
+    expiring = _occ_symbol("AAPL", date.today())
+    backend = FakeOptionsBackend()
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend,
+        extra_positions=[_occ_position(expiring)])
+    ex.reject_reasons = ["daily trade limit reached"]
+
+    report = s.run_once()
+
+    assert any("expiry sweep" in e and expiring in e for e in report.errors)
+    assert len(n.sent) == 1
+
+
+def test_expiry_sweep_exception_isolated_into_report_errors(tmp_path):
+    expiring = _occ_symbol("AAPL", date.today())
+    backend = FakeOptionsBackend()
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend,
+        extra_positions=[_occ_position(expiring)])
+    ex.raise_exc = ExecutionError("mcp down")
+
+    report = s.run_once()  # must not raise
+
+    assert any("expiry sweep" in e and "mcp down" in e for e in report.errors)
+    assert n.sent == []
+
+
+# ---------------------------------------------------------------------------
+# Finding 2b: the expiry sweep must not submit a second sell-to-close on a
+# position that already has an open sell order (e.g. from a close_options
+# rule that fired earlier in this same pass, or an unresolved order left
+# over from a prior pass).
+# ---------------------------------------------------------------------------
+
+def _open_sell_order(occ_symbol: str) -> Order:
+    return Order(id="o1", ticker=occ_symbol, side=OrderSide.SELL, qty=Decimal(1),
+                notional=None, status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                filled_avg_price=None, submitted_at=datetime.now(UTC))
+
+
+def test_expiry_sweep_skips_position_with_open_sell_order(tmp_path):
+    expiring = _occ_symbol("AAPL", date.today())
+    backend = FakeOptionsBackend()
+    broker = FakeBroker(extra_positions=[_occ_position(expiring)],
+                        open_orders=[_open_sell_order(expiring)])
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend, broker=broker)
+
+    report = s.run_once()
+
+    assert ex.option_calls == []
+    assert n.sent == []
+    assert report.outcomes == []
+    assert report.errors == []
+
+
+def test_expiry_sweep_still_closes_positions_without_an_open_sell_order(tmp_path):
+    # An open order on a DIFFERENT symbol must not suppress the sweep for
+    # the one that actually needs closing.
+    expiring = _occ_symbol("AAPL", date.today())
+    other = _occ_symbol("MSFT", date.today())
+    backend = FakeOptionsBackend()
+    broker = FakeBroker(extra_positions=[_occ_position(expiring)],
+                        open_orders=[_open_sell_order(other)])
+    s, _store, ex, _q, _n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend, broker=broker)
+
+    s.run_once()
+
+    assert [i.occ_symbol for i in ex.option_calls] == [expiring]
+
+
+def test_expiry_sweep_ignores_open_buy_orders_for_the_same_symbol(tmp_path):
+    # Only an open SELL order suppresses the sweep -- a (nonsensical in
+    # practice, but defensive) open BUY on the same OCC symbol must not.
+    expiring = _occ_symbol("AAPL", date.today())
+    open_buy = Order(id="o2", ticker=expiring, side=OrderSide.BUY, qty=Decimal(1),
+                     notional=None, status=OrderStatus.SUBMITTED, filled_qty=Decimal(0),
+                     filled_avg_price=None, submitted_at=datetime.now(UTC))
+    backend = FakeOptionsBackend()
+    broker = FakeBroker(extra_positions=[_occ_position(expiring)], open_orders=[open_buy])
+    s, _store, ex, _q, _n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend, broker=broker)
+
+    s.run_once()
+
+    assert [i.occ_symbol for i in ex.option_calls] == [expiring]
+
+
+def test_expiry_sweep_get_orders_failure_falls_back_to_sweeping_everything(tmp_path):
+    # Best-effort filter: a broker failure fetching open orders must not
+    # skip the sweep itself -- proceed as if nothing has an open sell.
+    expiring = _occ_symbol("AAPL", date.today())
+    backend = FakeOptionsBackend()
+    broker = FakeBroker(extra_positions=[_occ_position(expiring)])
+    broker.get_orders_raises = True
+    s, _store, ex, _q, _n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend, broker=broker)
+
+    s.run_once()  # must not raise
+
+    assert [i.occ_symbol for i in ex.option_calls] == [expiring]

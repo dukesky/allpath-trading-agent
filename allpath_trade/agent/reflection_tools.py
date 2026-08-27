@@ -75,7 +75,7 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
                     f"cannot change strategy id (proposed id {raw['id']!r})")
 
         try:
-            doc = parse_strategy_text(strategy_id, new_yaml)
+            doc = parse_strategy_text(strategy_id, new_yaml, authoring=True)
         except StrategyValidationError as exc:
             return f"error: invalid strategy revision for '{strategy_id}': {exc}"
 

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from allpath_trade.broker.base import Account, OrderIntent, OrderSide, Position
+from allpath_trade.broker.base import Account, OptionIntent, OrderIntent, OrderSide, Position
 from allpath_trade.risk.gate import RiskGate, RiskLimits
 
 ACCT = Account(equity=Decimal(10000), cash=Decimal(5000), buying_power=Decimal(10000))
@@ -134,3 +134,148 @@ def test_approves_sell_notional_within_position_value():
     intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal(1500), reason="t")
     d = check(intent)
     assert d.approved and d.reasons == []
+
+
+def test_max_options_weight_defaults_to_10_percent():
+    limits = RiskLimits()
+    assert limits.max_options_weight == Decimal("0.10")
+
+
+# -- check_option ------------------------------------------------------------
+
+CALL_OCC = "META260918C00600000"
+EXISTING_CALL_OCC = "META260918C00500000"
+
+
+def opt_buy(occ=CALL_OCC, underlying="META", premium="500", qty=1):
+    return OptionIntent(underlying=underlying, right="call", occ_symbol=occ,
+                        side=OrderSide.BUY, qty=qty, est_premium=Decimal(premium), reason="t")
+
+
+def opt_sell(occ=CALL_OCC, underlying="META", premium="0", qty=1):
+    return OptionIntent(underlying=underlying, right="call", occ_symbol=occ,
+                        side=OrderSide.SELL, qty=qty, est_premium=Decimal(premium), reason="t")
+
+
+def check_option(intent, limits=None, positions=None, trades_today=0, is_paper=True,
+                 account=ACCT):
+    gate = RiskGate(limits or RiskLimits())
+    return gate.check_option(intent, account=account,
+                             positions=positions if positions is not None else [],
+                             trades_today=trades_today, is_paper=is_paper)
+
+
+def test_check_option_approves_reasonable_buy():
+    d = check_option(opt_buy(premium="500"), positions=[])
+    assert d.approved and d.reasons == []
+
+
+def test_check_option_rejects_live_when_not_allowed():
+    d = check_option(opt_buy(), is_paper=False)
+    assert not d.approved
+    assert any("live" in r.lower() for r in d.reasons)
+
+
+def test_check_option_allows_live_when_enabled():
+    d = check_option(opt_buy(premium="500"), limits=RiskLimits(allow_live=True),
+                     is_paper=False, positions=[])
+    assert d.approved
+
+
+def test_check_option_rejects_premium_above_order_value_cap():
+    d = check_option(opt_buy(premium="6000"), positions=[])
+    assert not d.approved
+    assert any("order value" in r.lower() for r in d.reasons)
+
+
+def test_check_option_rejects_exposure_cap():
+    # equity 10000, max_options_weight 0.10 -> cap 1000; existing 900 + new 200 = 1100 > cap
+    positions = [Position(ticker=EXISTING_CALL_OCC, qty=Decimal(1), avg_entry_price=Decimal(9),
+                          market_value=Decimal(900), unrealized_pl=Decimal(0))]
+    d = check_option(opt_buy(premium="200"), positions=positions)
+    assert not d.approved
+    assert any("options exposure" in r.lower() for r in d.reasons)
+
+
+def test_check_option_exposure_ignores_stock_positions():
+    # A large stock position must not count toward the options exposure cap.
+    positions = [Position(ticker="AAPL", qty=Decimal(10), avg_entry_price=Decimal(190),
+                          market_value=Decimal(9000), unrealized_pl=Decimal(100))]
+    d = check_option(opt_buy(premium="200"), positions=positions)
+    assert d.approved and d.reasons == []
+
+
+def test_check_option_approves_exposure_exactly_at_cap():
+    positions = [Position(ticker=EXISTING_CALL_OCC, qty=Decimal(1), avg_entry_price=Decimal(8),
+                          market_value=Decimal(800), unrealized_pl=Decimal(0))]
+    d = check_option(opt_buy(premium="200"), positions=positions)  # 800 + 200 == 1000 cap
+    assert d.approved and d.reasons == []
+
+
+def test_check_option_sell_close_exempt_from_value_caps():
+    d = check_option(opt_sell(premium="99999"), positions=[])
+    assert d.approved and d.reasons == []
+
+
+def test_check_option_rejects_daily_trade_limit_on_buy():
+    d = check_option(opt_buy(premium="100"), positions=[], trades_today=10)
+    assert not d.approved
+    assert any("daily trade" in r.lower() for r in d.reasons)
+
+
+def test_check_option_sell_exempt_from_daily_trade_limit():
+    # Finding 2: a safety sweep/stop-loss close must never be blocked by the
+    # shared daily-trade cap -- sells are fully cap-exempt now, not just
+    # exempt from the value/exposure caps.
+    d = check_option(opt_sell(premium="0"), positions=[], trades_today=10)
+    assert d.approved and d.reasons == []
+
+
+def test_check_option_exposure_skipped_when_equity_non_positive():
+    # cash=1000 (not 0) isolates the exposure-cap-skip behavior under test
+    # from Finding 3's new cash-reserve check (min_cash_reserve defaults to
+    # 0, so any positive cash clears it) -- equity<=0 is what's exercised
+    # here, not cash.
+    zero_equity_acct = Account(equity=Decimal(0), cash=Decimal(1000), buying_power=Decimal(0))
+    positions = [Position(ticker=EXISTING_CALL_OCC, qty=Decimal(1), avg_entry_price=Decimal(9999),
+                          market_value=Decimal(999999), unrealized_pl=Decimal(0))]
+    d = check_option(opt_buy(premium="100"), positions=positions, account=zero_equity_acct)
+    assert d.approved and d.reasons == []
+
+
+def test_check_option_collects_multiple_reasons():
+    d = check_option(opt_buy(premium="6000"), positions=[], trades_today=99)
+    assert len(d.reasons) >= 2
+
+
+# -- Finding 3: min_cash_reserve for option buys -----------------------------
+
+def test_check_option_rejects_buy_breaking_cash_reserve():
+    limits = RiskLimits(min_cash_reserve=Decimal(4500))
+    acct = Account(equity=Decimal(10000), cash=Decimal(5000), buying_power=Decimal(10000))
+    d = check_option(opt_buy(premium="1000"), limits=limits, positions=[], account=acct)
+    assert not d.approved
+    assert any("cash reserve" in r.lower() for r in d.reasons)
+
+
+def test_check_option_approves_buy_leaving_exact_cash_reserve():
+    limits = RiskLimits(min_cash_reserve=Decimal(4000))
+    acct = Account(equity=Decimal(10000), cash=Decimal(5000), buying_power=Decimal(10000))
+    d = check_option(opt_buy(premium="1000"), limits=limits, positions=[], account=acct)
+    assert d.approved and d.reasons == []
+
+
+def test_check_option_sell_exempt_from_cash_reserve():
+    limits = RiskLimits(min_cash_reserve=Decimal(9999999))
+    d = check_option(opt_sell(premium="0"), limits=limits, positions=[])
+    assert d.approved and d.reasons == []
+
+
+# -- Finding 2: daily-trade cap exemption for sells (positive control) ------
+
+def test_check_option_buy_still_rejects_daily_trade_limit():
+    # Sanity check the buy side still respects the cap -- only sells are
+    # exempt now.
+    d = check_option(opt_buy(premium="100"), positions=[], trades_today=10)
+    assert not d.approved
+    assert any("daily trade" in r.lower() for r in d.reasons)

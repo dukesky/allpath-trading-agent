@@ -258,6 +258,69 @@ def test_invalid_yaml_rejected_for_both_sources(tmp_path, source):
     assert (tmp_path / "strategies" / "s1.yaml").read_text() == CURRENT
 
 
+# --- Finding 1a/4: the applier is itself an authoring surface (defense in
+# depth -- it must not trust that the propose-time tool already enforced
+# these). Exercised via source="chat" (whose authorization/status freeze is
+# skipped entirely, see the section above) so CURRENT's default
+# authorization: confirm -> auto is allowed through to reach the
+# option-authoring checks under test here. -------------------------------
+
+OPTION_NO_EXIT = """\
+name: "S1"
+status: active
+version: 2
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: entry, type: hard, condition: "price < 100", action: "buy_call $500"}
+"""
+
+OPTION_SOFT_RULE = """\
+name: "S1"
+status: active
+version: 2
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: entry, type: soft, condition: "price < 100", action: "buy_call $500"}
+  - {id: exit, type: hard, condition: "price > 999", action: "close_options"}
+"""
+
+OPTION_VALID = """\
+name: "S1"
+status: active
+version: 2
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: entry, type: hard, condition: "price < 100", action: "buy_call $500"}
+  - {id: exit, type: hard, condition: "price > 999", action: "close_options"}
+"""
+
+
+def test_applier_rejects_option_action_on_soft_rule(tmp_path):
+    store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    with pytest.raises(RevisionValidationError, match="type: hard"):
+        apply_fn("s1", OPTION_SOFT_RULE, CURRENT, "chat")
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == CURRENT
+
+
+def test_applier_rejects_option_entry_with_no_exit_rule(tmp_path):
+    store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    with pytest.raises(RevisionValidationError, match="close_options"):
+        apply_fn("s1", OPTION_NO_EXIT, CURRENT, "chat")
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == CURRENT
+
+
+def test_applier_accepts_a_valid_option_revision(tmp_path):
+    store, _ = make(tmp_path)
+    apply_fn = apply_revision_factory(store)
+    apply_fn("s1", OPTION_VALID, CURRENT, "chat")
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == OPTION_VALID
+
+
 # --- snapshot reason names the source -------------------------------------
 
 def test_reflection_snapshot_reason(tmp_path):

@@ -182,3 +182,14 @@ def test_drawdown_halt_pct_range(monkeypatch):
         Settings()
     monkeypatch.setenv("DRAWDOWN_HALT_PCT", "0")
     assert Settings().drawdown_halt_pct == Decimal("0")
+
+
+def test_options_trading_defaults_to_false():
+    s = Settings(_env_file=None)
+    assert s.options_trading is False
+
+
+def test_options_trading_loads_from_env(tmp_path: Path):
+    store = SettingsStore(tmp_path / ".env")
+    store.set("OPTIONS_TRADING", "true")
+    assert store.load().options_trading is True

@@ -69,6 +69,36 @@ discussed.
 """
 
 
+# Task 7 (options-via-mcp): assembled-prompt content, not IDENTITY.md, for
+# the same reason MARKET_MECHANICS_NOTE/SCREENSHOT_NOTE are -- this
+# describes a product feature (the option-only rule actions) the user isn't
+# expected to have to re-document after replacing IDENTITY.md. Static and
+# unconditional (always in the prompt, every session) rather than gated on
+# `Settings.options_trading` here: the flag lives on `Settings`, which
+# `build_system_prompt` is never handed, and the text itself says up front
+# it only applies when the setting is on -- see `loader.py`'s
+# `is_option_action(...)` gate for the authorization/type enforcement this
+# describes, and `strategy/actions.py`'s `_PATTERNS` for the exact grammar.
+OPTIONS_ACTIONS_NOTE = """\
+
+## Option actions (only when OPTIONS_TRADING is enabled in Settings)
+Three rule actions place/close single-leg option positions instead of
+equity: `buy_call $<budget> [dte>=<days>] [otm=<pct>%]`,
+`buy_put $<budget> [dte>=<days>] [otm=<pct>%]`, and `close_options` (closes
+every open option position on the strategy's ticker, sell-to-close). `dte`
+and `otm` are optional; when omitted they default to `dte>=7 otm=2%`.
+`$<budget>` is the total premium to spend — the sentinel picks the nearest
+qualifying contract and sizes contracts to fit under it.
+Every rule using one of these three actions must sit on a strategy with
+`authorization: auto` and have `type: hard` — `draft_strategy` and
+`propose_strategy_revision` reject an option action anywhere else (v1
+limitation). Discipline: keep `$<budget>` to roughly 2% of account equity or
+less per position, and never draft an option entry rule without a paired
+`close_options` exit — one hard rule for a profit target and one hard rule
+for a stop, at minimum. No multi-leg orders, no selling to open.
+"""
+
+
 def load_identity(path: Path = Path("IDENTITY.md")) -> str:
     if path.exists():
         return path.read_text()
@@ -112,7 +142,7 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
     before; only callers that already know which account they're running
     against (the Reflector, per shadow-dual-active T4) pass it.
     """
-    parts = [identity, MARKET_MECHANICS_NOTE, SCREENSHOT_NOTE]
+    parts = [identity, MARKET_MECHANICS_NOTE, SCREENSHOT_NOTE, OPTIONS_ACTIONS_NOTE]
     if account is not None:
         parts.append(_account_section(account))
     parts.append("\n## Current snapshot (as of session start)\n")

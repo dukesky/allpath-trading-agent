@@ -250,3 +250,34 @@ rules:
     versions = store.versions("s1")
     assert versions[-1]["reason"] == "drawdown breaker"  # match the actual
     # column name used by snapshot_version/versions in this file's tests
+
+
+def test_set_authorization_on_option_strategy_and_subsequent_load_both_succeed(tmp_path):
+    # Finding 1 (loader.py's `authoring` param) at the store level -- the
+    # most direct regression test for the actual bug: `set_authorization`'s
+    # own internal re-parse of the file, and the `store.load` call right
+    # after (standing in for the next sentinel pass's `load_all`), must
+    # both succeed on an option strategy even though this file (entry-only,
+    # no close_options rule) would fail Finding 4's authoring-time check --
+    # and even after this call demotes it off authorization: auto, which
+    # would fail Finding 1a's authoring-time check too. Neither check may
+    # ever run on this load-only path; if either did, `store.load` below
+    # would raise `StrategyValidationError` and this drawdown-breaker call
+    # site would leave the strategy permanently unloadable.
+    s1_yaml = """
+name: "S1"
+status: active
+version: 1
+authorization: auto
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "buy_call $500"}
+"""
+    (tmp_path / "s1.yaml").write_text(s1_yaml)
+    store = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+
+    store.set_authorization("s1", Authorization.CONFIRM, "drawdown breaker")
+
+    doc = store.load("s1")
+    assert doc.authorization == Authorization.CONFIRM
+    assert doc.rules[0].action == "buy_call $500"

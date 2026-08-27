@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel
@@ -8,10 +9,14 @@ from pydantic import BaseModel
 from allpath_trade.broker.base import (
     Broker,
     BrokerNotConfigured,
+    OptionIntent,
     Order,
     OrderIntent,
+    OrderSide,
     Position,
+    parse_occ_symbol,
 )
+from allpath_trade.broker.options_mcp import OptionsBackend, OptionsBackendError
 from allpath_trade.data.base import DataSource
 from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
@@ -21,7 +26,13 @@ from allpath_trade.risk.breaker import DrawdownBreaker
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, ReviewQueue
-from allpath_trade.strategy.actions import parse_action, to_order_intent
+from allpath_trade.strategy.actions import (
+    ActionKind,
+    ActionSpec,
+    is_option_action,
+    parse_action,
+    to_order_intent,
+)
 from allpath_trade.strategy.conditions import evaluate_condition
 from allpath_trade.strategy.model import (
     Authorization,
@@ -54,7 +65,8 @@ class Sentinel:
                  notifier: Notifier, review_agent=None, observations=None,
                  web_base_url: str = "", app_state: AppState | None = None,
                  telegram_bot_token: str = "", account: str = DEFAULT_ACCOUNT,
-                 breaker: DrawdownBreaker | None = None) -> None:
+                 breaker: DrawdownBreaker | None = None,
+                 options_backend: OptionsBackend | None = None) -> None:
         # shadow-dual-active T7: which account THIS Sentinel instance
         # belongs to (app.py constructs one per account) -- threaded into
         # every notify.events builder call below for the `[Paper]`/
@@ -96,6 +108,17 @@ class Sentinel:
         # it did before this breaker existed. app.py builds one per
         # account whenever app_state is available.
         self.breaker = breaker
+        # Task 6: the options MCP backend -- optional (None by default), so
+        # every Sentinel constructed without it (every pre-existing call
+        # site, and any account with options_trading off) behaves exactly
+        # as it did before options existed: option ActionKinds can only
+        # reach `_dispatch_option` because the strategy loader already
+        # refuses to load a strategy containing one unless
+        # authorization=auto and the rule is hard (strategy/loader.py), but
+        # `_dispatch_option` itself is still defensive against `None` here
+        # (the operator can turn the flag off with strategies still on
+        # disk) rather than trusting that invariant alone.
+        self.options_backend = options_backend
 
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
@@ -146,6 +169,18 @@ class Sentinel:
                     f"drawdown breaker tripped ({trip.drawdown:.1%}); "
                     "auto strategies demoted to confirm")
 
+        # Task 6: expiry safety sweep -- account-level, not tied to any one
+        # strategy's rules, so it runs here rather than inside
+        # `_check_strategy`. Only when options are actually enabled for
+        # this account (mirrors every other `options_backend is None`
+        # no-op guard in this module). Any option position within one
+        # calendar day of expiry is closed unconditionally: v1 never
+        # exercises a position (spec §"Out of scope"), so an option left
+        # open through expiry would simply expire worthless/be auto-
+        # exercised by the OCC with nobody watching.
+        if self.options_backend is not None:
+            self._run_expiry_sweep(positions, report)
+
         # A single invalid strategy YAML must not stop monitoring for every
         # other strategy — collect its error and keep going.
         docs = self.strategies.load_all(errors=report.errors)
@@ -166,6 +201,70 @@ class Sentinel:
                     self.observations.add("sentinel_error", f"{doc.id}: {exc}")
         return report
 
+    def _run_expiry_sweep(self, positions: dict[str, Position],
+                          report: SentinelReport) -> None:
+        today = datetime.now(UTC).date()
+        # Finding 2b: a position already carrying an open sell order (e.g.
+        # a close_options rule for the same strategy fired earlier in this
+        # same sentinel pass, or a prior sweep's sell-to-close is still
+        # unfilled/unresolved from a previous pass) must not get a second
+        # sell-to-close piled on top of it. Queried once per sweep, not per
+        # position -- one `get_orders` round trip either way. Best-effort:
+        # a broker failure here must not skip the sweep itself (the whole
+        # point of this sweep is that it's the last line of defense against
+        # an expiring position), just its dedup -- proceed as if nothing
+        # has an open sell.
+        try:
+            open_sell_symbols = {
+                o.ticker for o in self.broker.get_orders(open_only=True)
+                if o.side == OrderSide.SELL
+            }
+        except Exception:  # noqa: BLE001 — best-effort filter, see above
+            open_sell_symbols = set()
+        for p in positions.values():
+            parts = parse_occ_symbol(p.ticker)
+            if parts is None or (parts.expiry - today).days > 1:
+                continue
+            if p.ticker in open_sell_symbols:
+                continue
+            try:
+                intent = OptionIntent(
+                    underlying=parts.root, right=parts.right, occ_symbol=p.ticker,
+                    side=OrderSide.SELL, qty=int(p.qty), est_premium=Decimal(0),
+                    reason="expiry safety sweep (DTE<=1)")
+                result = self.executor.execute_option(intent)
+            except Exception as exc:  # noqa: BLE001 — one bad position must not
+                # stop the sweep for the rest of the positions, nor crash the pass.
+                report.errors.append(f"expiry sweep {p.ticker}: {exc}")
+                continue
+            detail = self._placed if result.submitted else "; ".join(result.decision.reasons)
+            # No `StrategyDoc` exists for this account-level sweep, so unlike
+            # `_notify_order` this send is never gated by a per-strategy
+            # `notify_email` -- built directly here, mirroring the breaker
+            # block's own ungated `events.*` + `notifier.send` +
+            # `push_telegram_receipt` pattern just above.
+            subject, body = events.order_result(
+                account=self.account, ticker=p.ticker, side="sell",
+                submitted=result.submitted, detail=detail,
+                filled_qty=result.order.filled_qty if result.order else None,
+                filled_avg_price=result.order.filled_avg_price if result.order else None)
+            if self.notifier is not None:
+                self.notifier.send(subject, body)
+            push_telegram_receipt(
+                app_state=self.app_state, telegram_bot_token=self.telegram_bot_token,
+                body=body, account=self.account)
+            if self.observations is not None:
+                # Distinct source ("options_sweep", not "sentinel") for the
+                # same digest-count reason as "breaker" above -- an expiry
+                # close is not a rule trigger.
+                self.observations.add(
+                    "options_sweep",
+                    f"expiry sweep closed {p.ticker}: "
+                    f"{'executed' if result.submitted else 'rejected'} {detail}".strip(),
+                    subject=parts.root)
+            if not result.submitted:
+                report.errors.append(f"expiry sweep {p.ticker}: rejected: {detail}")
+
     def _check_strategy(self, doc: StrategyDoc, equity: Decimal,
                         positions: dict[str, Position],
                         report: SentinelReport) -> None:
@@ -183,7 +282,7 @@ class Sentinel:
             self.strategies.set_rule_state(doc.id, rule.id, RuleState.TRIGGERED)
             outcome = self._dispatch(doc, rule.id, rule.type, rule.condition,
                                      rule.action, quote.price, position, equity,
-                                     ctx)
+                                     ctx, positions)
             report.outcomes.append(outcome)
             if self.observations is not None:
                 self.observations.add(
@@ -210,9 +309,22 @@ class Sentinel:
     def _dispatch(self, doc: StrategyDoc, rule_id: str, rule_type: RuleType,
                   condition: str, action: str, price: Decimal,
                   position: Position | None, equity: Decimal,
-                  ctx: dict[str, Decimal]) -> TriggerOutcome:
+                  ctx: dict[str, Decimal],
+                  positions: dict[str, Position]) -> TriggerOutcome:
         reason = f"strategy {doc.id} rule {rule_id}: {condition} -> {action}"
-        intent = to_order_intent(parse_action(action), strategy=doc,
+        spec = parse_action(action)
+        if is_option_action(spec):
+            # Option ActionKinds must never reach `to_order_intent` below --
+            # it raises on them by design (strategy/actions.py). The loader
+            # (strategy/loader.py) already refuses to load a strategy with
+            # an option action unless authorization=auto and the rule is
+            # hard, so there is no confirm/notify/soft branching to do here
+            # the way the stock path below still has to -- straight to
+            # execution, defensively guarded against `options_backend`
+            # being off inside `_dispatch_option` itself.
+            return self._dispatch_option(doc, rule_id, condition, rule_type, spec, price,
+                                         positions, reason)
+        intent = to_order_intent(spec, strategy=doc,
                                  rule_id=rule_id, price=price,
                                  position=position, equity=equity, reason=reason)
         snapshot = {k: str(v) for k, v in ctx.items()}
@@ -260,6 +372,164 @@ class Sentinel:
                                   disposition="queued")
         return self._agent_review(rid, doc, rule_id, rule_type, condition,
                                   action, intent, price=price)
+
+    def _dispatch_option(self, doc: StrategyDoc, rule_id: str, condition: str,
+                         rule_type: RuleType, spec: ActionSpec, price: Decimal,
+                         positions: dict[str, Position],
+                         reason: str) -> TriggerOutcome:
+        if self.options_backend is None:
+            # Defensive: the loader guarantees every option action lives on
+            # an auto+hard rule, but it cannot guarantee the operator left
+            # options_trading on -- turning it off must degrade this one
+            # rule to a reported error, never crash the whole sentinel pass.
+            self._notify_rule(doc, rule_id, condition, "error")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="error",
+                                  detail="options trading disabled")
+        if spec.kind == ActionKind.CLOSE_OPTIONS:
+            # Finding 1b, close half: still gated on rule_type == HARD (the
+            # loader's authoring-time validation already guarantees this
+            # for every option action -- this is defense in depth, not
+            # reliance on that guarantee alone). Deliberately NOT gated on
+            # doc.authorization == AUTO, unlike the buy path below: a close
+            # can only shrink existing option exposure, never grow it, and
+            # the v1 pending-review queue has no support for holding an
+            # OptionIntent for confirm/notify authorization to resolve
+            # later. If a demoted (authorization: confirm) strategy's
+            # close_options rule stopped firing here, a drawdown-breaker
+            # demotion would silently disable the very stop-loss exit it
+            # exists to protect -- exactly Finding 1's failure mode, just
+            # from the opposite direction.
+            if rule_type != RuleType.HARD:
+                self._notify_rule(doc, rule_id, condition, "skipped")
+                return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                      disposition="skipped",
+                                      detail="close_options requires rule type: hard")
+            return self._dispatch_close_options(doc, rule_id, condition, positions, reason)
+        # BUY_CALL / BUY_PUT.
+        # Finding 1b, buy half -- runtime last line of defense: the
+        # loader's authoring-time validation normally guarantees
+        # authorization: auto + type: hard for every option action, but a
+        # strategy that WAS valid at authoring time can be demoted later
+        # (DrawdownBreaker flips authorization: auto -> confirm without
+        # re-validating, and loading was deliberately changed to no longer
+        # enforce this check -- see strategy/loader.py's `authoring` param
+        # docstring -- precisely so a demoted strategy keeps LOADING).
+        # Without this check, a demoted strategy's buy_call/buy_put rule
+        # would still fire and place a brand-new autonomous option order
+        # with nobody having confirmed it -- exactly what
+        # authorization: confirm exists to prevent, and exactly the wrong
+        # direction to fail during a drawdown halt.
+        if not (doc.authorization == Authorization.AUTO and rule_type == RuleType.HARD):
+            self._notify_rule(doc, rule_id, condition, "skipped")
+            return TriggerOutcome(
+                strategy_id=doc.id, rule_id=rule_id, disposition="skipped",
+                detail="option buys require authorization: auto -- strategy "
+                       "demoted or misconfigured")
+        return self._dispatch_option_buy(doc, rule_id, condition, spec, price, reason)
+
+    def _dispatch_option_buy(self, doc: StrategyDoc, rule_id: str, condition: str,
+                             spec: ActionSpec, price: Decimal,
+                             reason: str) -> TriggerOutcome:
+        right = "call" if spec.kind == ActionKind.BUY_CALL else "put"
+        # Defaults (dte 7, otm 2%) are applied HERE, not by the parser --
+        # strategy/actions.py's ActionSpec deliberately leaves them None
+        # when the rule text omits them (see its own docstring).
+        min_dte = spec.min_dte if spec.min_dte is not None else 7
+        otm_pct = spec.otm_pct if spec.otm_pct is not None else Decimal("0.02")
+        underlying = doc.position.ticker
+
+        try:
+            pick = self.options_backend.pick_contract(
+                underlying, right, min_dte, otm_pct, spec.amount, price)
+        except OptionsBackendError as exc:
+            self._notify_rule(doc, rule_id, condition, "error")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="error", detail=str(exc))
+        if pick is None:
+            # Not an error -- pick_contract's own contract (broker/
+            # options_mcp.py) returns None rather than raising when no
+            # affordable/tradable contract exists.
+            self._notify_rule(doc, rule_id, condition, "skipped")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="skipped",
+                                  detail="no affordable option contract")
+
+        intent = OptionIntent(underlying=underlying, right=right,
+                              occ_symbol=pick.occ_symbol, side=OrderSide.BUY,
+                              qty=pick.qty, est_premium=pick.est_premium,
+                              reason=reason, strategy_id=doc.id)
+        try:
+            result = self.executor.execute_option(intent)
+        except Exception as exc:  # noqa: BLE001 — mirror the stock AUTO+HARD
+            # branch above: any executor failure must be reported and
+            # notified, never crash the sentinel pass.
+            self._notify_order(doc, pick.occ_symbol, "buy", False, str(exc))
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="error", detail=str(exc))
+        if result.submitted:
+            self._notify_order(doc, pick.occ_symbol, "buy", True, self._placed,
+                               order=result.order)
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="executed", detail=self._placed)
+        detail = "; ".join(result.decision.reasons)
+        self._notify_order(doc, pick.occ_symbol, "buy", False, detail)
+        return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                              disposition="rejected", detail=detail)
+
+    def _dispatch_close_options(self, doc: StrategyDoc, rule_id: str, condition: str,
+                                positions: dict[str, Position],
+                                reason: str) -> TriggerOutcome:
+        underlying = doc.position.ticker
+        to_close = [p for p in positions.values()
+                   if (parts := parse_occ_symbol(p.ticker)) is not None
+                   and parts.root == underlying]
+        if not to_close:
+            self._notify_rule(doc, rule_id, condition, "skipped")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="skipped",
+                                  detail="no option positions to close")
+
+        closed: list[str] = []
+        issues: list[str] = []
+        for p in to_close:
+            # Finding 5: intent construction moved INSIDE the try (matching
+            # `_run_expiry_sweep`'s own pattern) -- `OptionIntent`'s
+            # `qty >= 1` validator can raise `ValidationError` for a
+            # position whose fractional qty truncates to 0 via `int(p.qty)`
+            # (e.g. 0.5 contracts, which should never happen but a bad
+            # broker payload could produce). With construction OUTSIDE the
+            # try, that raised straight out of this loop and abandoned
+            # every remaining position in `to_close` -- one bad position
+            # aborted the whole close_options batch. Inside the try, that
+            # position is recorded as an issue and the loop continues.
+            try:
+                parts = parse_occ_symbol(p.ticker)
+                intent = OptionIntent(underlying=underlying, right=parts.right,
+                                      occ_symbol=p.ticker, side=OrderSide.SELL,
+                                      qty=int(p.qty), est_premium=Decimal(0),
+                                      reason=reason, strategy_id=doc.id)
+                result = self.executor.execute_option(intent)
+            except Exception as exc:  # noqa: BLE001 — one bad close must not
+                # abort the rest of this strategy's option positions.
+                issues.append(f"{p.ticker}: {exc}")
+                self._notify_order(doc, p.ticker, "sell", False, str(exc))
+                continue
+            if result.submitted:
+                closed.append(p.ticker)
+                self._notify_order(doc, p.ticker, "sell", True, self._placed,
+                                   order=result.order)
+            else:
+                reasons = "; ".join(result.decision.reasons)
+                issues.append(f"{p.ticker}: {reasons}")
+                self._notify_order(doc, p.ticker, "sell", False, reasons)
+
+        detail = f"closed: {', '.join(closed)}" if closed else ""
+        if issues:
+            detail = (detail + "; " if detail else "") + f"errors: {'; '.join(issues)}"
+        disposition = "error" if issues and not closed else "executed"
+        return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                              disposition=disposition, detail=detail)
 
     def _agent_review(self, rid: int, doc: StrategyDoc, rule_id: str,
                       rule_type: RuleType, condition: str, action: str,
