@@ -157,3 +157,64 @@ def test_each_account_sentinel_gets_its_own_drawdown_breaker(tmp_path):
     assert paper.sentinel.breaker is not shadow.sentinel.breaker
     assert paper.sentinel.breaker.account == "paper"
     assert shadow.sentinel.breaker.account == "shadow"
+
+
+def _settings_with_options(tmp_path, *, options_trading: bool,
+                           alpaca_api_key: str = "", alpaca_secret_key: str = "") -> Settings:
+    return Settings(_env_file=None, db_path=tmp_path / "t.db",
+                    strategies_dir=tmp_path / "strategies",
+                    memory_dir=tmp_path / "memory",
+                    options_trading=options_trading,
+                    alpaca_api_key=alpaca_api_key,
+                    alpaca_secret_key=alpaca_secret_key)
+
+
+def test_paper_executor_and_sentinel_share_one_options_backend_when_enabled(tmp_path):
+    """Task 7: flag on + Alpaca keys present -- exactly one McpOptionsBackend
+    is built for the paper account and handed to BOTH its Executor and its
+    Sentinel (not two separate instances that would race two independent MCP
+    sessions), while shadow -- never a real brokerage -- always gets None.
+    Construction only, never a real call: McpOptionsBackend is lazy (see its
+    own class docstring), so this asserts identity/type without spawning
+    `uvx`."""
+    from allpath_trade.broker.options_mcp import McpOptionsBackend
+
+    settings = _settings_with_options(tmp_path, options_trading=True,
+                                      alpaca_api_key="test-key",
+                                      alpaca_secret_key="test-secret")
+    components = build_components(settings, broker=FakeBroker())
+    paper = components.accounts["paper"]
+    shadow = components.accounts["shadow"]
+
+    assert isinstance(paper.executor.options_backend, McpOptionsBackend)
+    assert paper.executor.options_backend is paper.sentinel.options_backend
+    assert shadow.executor.options_backend is None
+    assert shadow.sentinel.options_backend is None
+
+
+def test_options_backend_is_none_everywhere_when_flag_off(tmp_path):
+    """Flag off (the default) -- construction is byte-identical to before
+    this task: no McpOptionsBackend anywhere, for either account."""
+    settings = _settings_with_options(tmp_path, options_trading=False,
+                                      alpaca_api_key="test-key",
+                                      alpaca_secret_key="test-secret")
+    components = build_components(settings, broker=FakeBroker())
+    paper = components.accounts["paper"]
+    shadow = components.accounts["shadow"]
+
+    assert paper.executor.options_backend is None
+    assert paper.sentinel.options_backend is None
+    assert shadow.executor.options_backend is None
+    assert shadow.sentinel.options_backend is None
+
+
+def test_options_backend_is_none_when_flag_on_but_no_alpaca_keys(tmp_path):
+    """Flag on but no Alpaca keys configured (setup-wizard T1 territory) --
+    there is nothing to build an MCP session against, so no backend either."""
+    settings = _settings_with_options(tmp_path, options_trading=True,
+                                      alpaca_api_key="", alpaca_secret_key="")
+    components = build_components(settings, broker=FakeBroker())
+    paper = components.accounts["paper"]
+
+    assert paper.executor.options_backend is None
+    assert paper.sentinel.options_backend is None

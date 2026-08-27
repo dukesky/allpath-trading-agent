@@ -218,7 +218,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         "`bias` (bullish/bearish/neutral) drive the strategies page's "
         "at-a-glance chips -- include them when the thesis makes the time "
         "horizon and market direction clear, but leave them out rather "
-        "than guessing when it doesn't.",
+        "than guessing when it doesn't. Rules may use the option actions "
+        "(buy_call/buy_put/close_options) only when options trading is "
+        "enabled -- see the system prompt's Option actions section for the "
+        "grammar, defaults, and the authorization: auto + type: hard "
+        "restriction.",
         {"type": "object", "properties": {
             "strategy_id": {"type": t}, "yaml_text": {"type": t},
             "reason": {"type": t}},

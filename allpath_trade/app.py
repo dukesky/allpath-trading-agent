@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import sqlite3
 from dataclasses import dataclass
 
 from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
+from allpath_trade.broker.options_mcp import McpOptionsBackend
 from allpath_trade.config import Settings
 from allpath_trade.data.base import DataSource
 from allpath_trade.data.yf import YFinanceSource
@@ -171,7 +173,35 @@ def _build_account_components(account: str, *, settings: Settings,
     broker = _build_broker(account, settings, conn, data, broker_override)
     journal = TradeJournal(conn, account=account)
     gate = RiskGate(RiskLimits())
-    executor = Executor(broker, gate, journal, data)
+    # Task 7: options trading is paper-only (spec §7) -- shadow's ledger
+    # never touches a real brokerage, so it always gets `options_backend=
+    # None` (the parameter's own default; nothing to pass for shadow). One
+    # `McpOptionsBackend` is built here per process, shared by this
+    # account's `Executor` AND `Sentinel` below, so both dispatch through
+    # the exact same daemon thread/subprocess rather than racing two
+    # independent MCP sessions. Gated on both the feature flag and Alpaca
+    # keys being present -- with the flag off, or no keys configured yet
+    # (setup-wizard T1), construction here is byte-identical to before this
+    # task: `options_backend` stays None and nothing below changes.
+    options_backend: McpOptionsBackend | None = None
+    if account == DEFAULT_ACCOUNT and settings.options_trading and settings.alpaca_api_key:
+        options_backend = McpOptionsBackend(settings)
+        # `McpOptionsBackend` is lazy -- this spawns nothing yet -- but once
+        # a real pick/order call starts the `uvx alpaca-mcp-server`
+        # subprocess and its daemon thread, something has to stop them on
+        # the way out or the subprocess can outlive this process. There is
+        # no single clean shutdown hook that covers every caller of
+        # `build_components`: `cli.py serve` runs it under FastAPI's
+        # lifespan (see web/app.py), but every other CLI command (run-once,
+        # sentinel-once, digest, ...) calls `build_components` directly and
+        # exits with no lifespan at all. `atexit` is the one hook common to
+        # all of them. `stop()` is idempotent and a no-op when the backend
+        # was never started, so registering it here is safe even though
+        # `ComponentHolder.rebuild()` (web settings page) can call this
+        # function again later and register a second, independent backend's
+        # `stop` alongside this one.
+        atexit.register(options_backend.stop)
+    executor = Executor(broker, gate, journal, data, options_backend=options_backend)
     queue = ReviewQueue(conn, executor, account=account)
     # shadow-dual-active T4: use the classmethod so account validation gates
     # the directory resolution (StrategyStore.for_account's own docstring:
@@ -217,7 +247,7 @@ def _build_account_components(account: str, *, settings: Settings,
     sentinel = Sentinel(strategies, data, broker, executor, queue, notifier,
                        observations=observations, web_base_url=settings.web_base_url,
                        app_state=app_state, telegram_bot_token=settings.telegram_bot_token,
-                       account=account, breaker=breaker)
+                       account=account, breaker=breaker, options_backend=options_backend)
 
     bundle = AccountComponents(
         account=account, broker=broker, data=data, conn=conn, journal=journal,
