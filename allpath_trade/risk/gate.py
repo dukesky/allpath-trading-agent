@@ -10,6 +10,7 @@ from allpath_trade.broker.base import Account, OrderIntent, OrderSide, Position
 class RiskLimits(BaseModel):
     max_order_value: Decimal = Decimal(5000)
     max_position_weight: Decimal = Decimal("0.25")  # fraction of equity
+    max_options_weight: Decimal = Decimal("0.10")  # total option exposure vs equity
     max_daily_trades: int = 10
     min_cash_reserve: Decimal = Decimal(0)
     allow_live: bool = False

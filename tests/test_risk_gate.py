@@ -134,3 +134,8 @@ def test_approves_sell_notional_within_position_value():
     intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL, notional=Decimal(1500), reason="t")
     d = check(intent)
     assert d.approved and d.reasons == []
+
+
+def test_max_options_weight_defaults_to_10_percent():
+    limits = RiskLimits()
+    assert limits.max_options_weight == Decimal("0.10")
