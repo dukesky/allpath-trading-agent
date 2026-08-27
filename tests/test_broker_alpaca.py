@@ -1,3 +1,4 @@
+import functools
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -213,3 +214,21 @@ def test_get_equity_history_raises_on_mismatched_lengths():
 
     with pytest.raises(ValueError):
         broker.get_equity_history(days=30)
+
+
+# --- Task 2: HTTP timeout ---------------------------------------------------
+
+
+def test_own_trading_client_session_gets_default_timeout():
+    b = AlpacaBroker("key", "secret", paper=True, http_timeout_seconds=7)
+    req = b._client._session.request
+    assert isinstance(req, functools.partial)
+    assert req.keywords == {"timeout": 7.0}
+
+
+def test_injected_client_session_is_left_untouched():
+    session = SimpleNamespace(request=lambda *a, **k: None)
+    original = session.request
+    fake = SimpleNamespace(_session=session)
+    AlpacaBroker("k", "s", client=fake)
+    assert fake._session.request is original

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -36,9 +37,22 @@ class AlpacaBroker(Broker):
     name = "alpaca"
 
     def __init__(self, api_key: str, secret_key: str, paper: bool = True,
-                 client: object | None = None) -> None:
+                 client: object | None = None,
+                 http_timeout_seconds: float = 30.0) -> None:
         self.is_paper = paper
         self._client = client or TradingClient(api_key, secret_key, paper=paper)
+        if client is None:
+            # alpaca-py's RESTClient never passes timeout= to its requests
+            # session, so a hung TCP connection blocks forever -- and the
+            # sentinel/dashboard threads behind it (docs/TODO.md). Binding a
+            # default here fixes every call site at once; an injected test
+            # client keeps whatever behavior it came with. getattr-guarded
+            # so a future alpaca-py that renames _session degrades to the
+            # old (no-timeout) behavior instead of crashing at startup.
+            session = getattr(self._client, "_session", None)
+            if session is not None:
+                session.request = functools.partial(
+                    session.request, timeout=float(http_timeout_seconds))
 
     def get_account(self) -> Account:
         a = self._client.get_account()

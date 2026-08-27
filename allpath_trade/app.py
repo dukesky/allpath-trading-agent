@@ -150,7 +150,8 @@ def _build_broker(account: str, settings: Settings, conn: sqlite3.Connection,
         from allpath_trade.broker.alpaca import AlpacaBroker
 
         return AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
-                            paper=settings.alpaca_paper)
+                            paper=settings.alpaca_paper,
+                            http_timeout_seconds=settings.broker_http_timeout_seconds)
     # shadow-dual-active T4: the shadow account is never Alpaca and never
     # takes `broker_override` (that parameter exists only for paper's own
     # tests/CLI injection, see build_components) -- it always gets its own
