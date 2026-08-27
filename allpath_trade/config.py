@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -163,6 +164,18 @@ class Settings(BaseSettings):
     # REFLECTION_MAX_ITERS. Floor of 10s guards against a value so low every
     # call would time out immediately.
     llm_timeout_seconds: int = Field(default=180, ge=10)
+    # Two-week-autonomous-run experiment (spec 2026-08-26): reflection's own
+    # revision proposals auto-apply through the normal applier when this is
+    # on. .env-only by design -- flipping it is an experiment decision, not
+    # a settings-page toggle a user should reach for casually.
+    experiment_auto_apply_revisions: bool = False
+    # Drawdown circuit breaker: halt auto trading when equity falls this
+    # fraction below its recorded peak. 0 disables the breaker entirely.
+    drawdown_halt_pct: Decimal = Field(default=Decimal("0.15"), ge=0, lt=1)
+    # Alpaca's TradingClient issues requests with NO socket timeout (see
+    # docs/TODO.md's _broker_pool note) -- one hung call stalls a sentinel
+    # tick silently. yfinance already defaults to 30s internally.
+    broker_http_timeout_seconds: int = Field(default=30, ge=5)
     # Telegram chat channel (Task 1 of the Telegram plan): the bot token from
     # BotFather (@BotFather -> /newbot). Empty (the default) means the
     # channel is off -- no poller starts, no pairing is possible.

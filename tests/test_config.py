@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -166,3 +167,18 @@ def test_set_preserves_values_with_spaces_hashes_and_equals(tmp_path: Path):
     reloaded = SettingsStore(tmp_path / ".env")
     assert reloaded.get("SMTP_FROM") == "AllPath Trade <bot@example.com>"
     assert reloaded.get("WEB_TOKEN") == "abc#def=ghi jkl"
+
+
+def test_experiment_and_breaker_settings_defaults():
+    s = Settings(_env_file=None)
+    assert s.experiment_auto_apply_revisions is False
+    assert s.drawdown_halt_pct == Decimal("0.15")
+    assert s.broker_http_timeout_seconds == 30
+
+
+def test_drawdown_halt_pct_range(monkeypatch):
+    monkeypatch.setenv("DRAWDOWN_HALT_PCT", "1.5")
+    with pytest.raises(ValidationError):
+        Settings()
+    monkeypatch.setenv("DRAWDOWN_HALT_PCT", "0")
+    assert Settings().drawdown_halt_pct == Decimal("0")
