@@ -9,12 +9,14 @@ from allpath_trade import execution as execution_module
 from allpath_trade.broker.base import (
     Account,
     Broker,
+    OptionIntent,
     Order,
     OrderIntent,
     OrderSide,
     OrderStatus,
     Position,
 )
+from allpath_trade.broker.options_mcp import OptionsBackendError
 from allpath_trade.data.base import DataSource, Quote
 from allpath_trade.execution import ExecutionError, Executor, refresh_pending_fills
 from allpath_trade.risk.gate import RiskDecision, RiskGate, RiskLimits
@@ -103,10 +105,52 @@ class FakeBroker(Broker):
         pass
 
 
+class FailingAccountBroker(FakeBroker):
+    """get_account raises -- used to exercise execute_option's data-fetch
+    failure path (mirrors FailingData for the stock path, but the option
+    path never touches DataSource at all)."""
+
+    def get_account(self):
+        raise RuntimeError("broker down")
+
+
+class FakeOptionsBackend:
+    """Minimal `OptionsBackend` fake for the executor tests. `pick_contract`
+    is unused by execute_option and deliberately left unimplemented."""
+
+    def __init__(self, fail=False, payload=None):
+        self.fail = fail
+        self.payload = payload if payload is not None else {
+            "id": "opt1", "status": "filled", "qty": "1",
+            "filled_qty": "1", "filled_avg_price": "5.25",
+        }
+        self.calls = []
+
+    def pick_contract(self, underlying, right, min_dte, otm_pct, budget, spot):
+        raise NotImplementedError
+
+    def place_option_order(self, occ_symbol, side, qty, position_intent):
+        self.calls.append((occ_symbol, side, qty, position_intent))
+        if self.fail:
+            raise OptionsBackendError("mcp down")
+        return self.payload
+
+    def stop(self):
+        pass
+
+
 def make_executor(tmp_path, fail=False, limits=None):
     journal = TradeJournal(connect(tmp_path / "t.db"))
     broker = FakeBroker(fail=fail)
     ex = Executor(broker, RiskGate(limits or RiskLimits()), journal, FakeData())
+    return ex, broker, journal
+
+
+def make_option_executor(tmp_path, options_backend=None, limits=None, broker=None):
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    broker = broker if broker is not None else FakeBroker()
+    ex = Executor(broker, RiskGate(limits or RiskLimits()), journal, FakeData(),
+                 options_backend=options_backend)
     return ex, broker, journal
 
 
@@ -118,6 +162,19 @@ def buy(notional="500"):
 def buy_qty(qty="1"):
     return OrderIntent(ticker="AAPL", side=OrderSide.BUY,
                        qty=Decimal(qty), reason="t")
+
+
+CALL_OCC = "META260918C00600000"
+
+
+def opt_buy(occ=CALL_OCC, premium="500", qty=1):
+    return OptionIntent(underlying="META", right="call", occ_symbol=occ,
+                        side=OrderSide.BUY, qty=qty, est_premium=Decimal(premium), reason="t")
+
+
+def opt_sell(occ=CALL_OCC, premium="0", qty=1):
+    return OptionIntent(underlying="META", right="call", occ_symbol=occ,
+                        side=OrderSide.SELL, qty=qty, est_premium=Decimal(premium), reason="t")
 
 
 def test_approved_intent_is_submitted_and_journaled(tmp_path):
@@ -509,4 +566,137 @@ def test_trades_today_from_journal_feeds_daily_cap(tmp_path):
     res = ex.execute(buy())
     assert not res.submitted
     assert broker.submitted == []
+    assert any("daily trade limit" in r for r in res.decision.reasons)
+
+
+# -- execute_option -----------------------------------------------------------
+
+def test_approved_option_buy_is_submitted_and_journaled(tmp_path):
+    backend = FakeOptionsBackend()
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    res = ex.execute_option(opt_buy(premium="500"))
+    assert res.submitted
+    assert res.order.id == "opt1"
+    assert backend.calls == [(CALL_OCC, "buy", 1, "buy_to_open")]
+    [row] = journal.recent()
+    assert row["status"] == "filled"
+    assert row["ticker"] == CALL_OCC
+    assert row["side"] == "buy"
+    assert row["qty"] == "1"
+    assert row["notional"] is None
+
+
+def test_approved_option_sell_uses_sell_to_close(tmp_path):
+    backend = FakeOptionsBackend()
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    res = ex.execute_option(opt_sell(premium="0"))
+    assert res.submitted
+    assert backend.calls == [(CALL_OCC, "sell", 1, "sell_to_close")]
+    [row] = journal.recent()
+    assert row["side"] == "sell"
+
+
+def test_option_gate_rejection_never_reaches_backend(tmp_path):
+    backend = FakeOptionsBackend()
+    ex, _broker, journal = make_option_executor(
+        tmp_path, options_backend=backend, limits=RiskLimits(max_order_value=Decimal(100)))
+    res = ex.execute_option(opt_buy(premium="500"))  # exceeds max_order_value
+    assert not res.submitted and res.order is None
+    assert backend.calls == []
+    [row] = journal.recent()
+    assert row["status"] == "rejected"
+
+
+def test_option_sell_close_bypasses_value_caps_but_gate_still_runs(tmp_path):
+    # A close is exempt from the premium/exposure caps but still goes
+    # through the gate (and, e.g., the daily-trade cap still applies).
+    backend = FakeOptionsBackend()
+    ex, _broker, journal = make_option_executor(
+        tmp_path, options_backend=backend, limits=RiskLimits(max_order_value=Decimal(1)))
+    res = ex.execute_option(opt_sell(premium="99999"))
+    assert res.submitted
+    [row] = journal.recent()
+    assert row["status"] == "filled"
+
+
+def test_option_disabled_backend_raises(tmp_path):
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=None)
+    with pytest.raises(ExecutionError):
+        ex.execute_option(opt_buy(premium="500"))
+    [row] = journal.recent()
+    assert row["status"] == "error"
+    assert "options trading disabled" in row["risk_reasons"]
+
+
+def test_option_backend_error_is_journaled_and_raised(tmp_path):
+    backend = FakeOptionsBackend(fail=True)
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    with pytest.raises(ExecutionError):
+        ex.execute_option(opt_buy(premium="500"))
+    [row] = journal.recent()
+    assert row["status"] == "error"
+    assert "mcp down" in row["risk_reasons"]
+
+
+def test_option_data_failure_is_journaled_and_raised(tmp_path):
+    backend = FakeOptionsBackend()
+    ex, _broker, journal = make_option_executor(
+        tmp_path, options_backend=backend, broker=FailingAccountBroker())
+    with pytest.raises(ExecutionError):
+        ex.execute_option(opt_buy(premium="500"))
+    [row] = journal.recent()
+    assert row["status"] == "error"
+    assert "data error" in row["risk_reasons"]
+    assert backend.calls == []
+
+
+def test_option_execute_never_fetches_a_stock_quote(tmp_path):
+    # An OCC symbol like "META260918C00600000" would break a stock-quote
+    # lookup (yfinance) -- execute_option must never call self.data at all.
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    broker = FakeBroker()
+    backend = FakeOptionsBackend()
+    ex = Executor(broker, RiskGate(RiskLimits()), journal, FailingData(),
+                 options_backend=backend)
+    res = ex.execute_option(opt_buy(premium="500"))
+    assert res.submitted  # would have raised if get_quote were called
+
+
+def test_option_order_built_defensively_from_minimal_payload(tmp_path):
+    backend = FakeOptionsBackend(payload={"id": "opt2", "status": "submitted"})
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    before = datetime.now(UTC)
+    res = ex.execute_option(opt_buy(qty=3, premium="500"))
+    assert res.submitted
+    assert res.order.status == OrderStatus.SUBMITTED
+    assert res.order.qty == Decimal(3)  # falls back to intent.qty
+    assert res.order.filled_qty == Decimal(0)
+    assert res.order.filled_avg_price is None
+    assert res.order.submitted_at >= before  # falls back to now() since payload has none
+    [row] = journal.recent()
+    assert row["status"] == "submitted"
+    assert row["filled_qty"] is None or row["filled_qty"] == "0"
+
+
+def test_option_unknown_payload_status_defaults_to_submitted(tmp_path):
+    backend = FakeOptionsBackend(payload={"id": "opt3", "status": "new"})
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    res = ex.execute_option(opt_buy(premium="500"))
+    assert res.order.status == OrderStatus.SUBMITTED
+    [row] = journal.recent()
+    assert row["status"] == "submitted"
+
+
+def test_option_trades_today_shares_cap_with_stock_trades(tmp_path):
+    backend = FakeOptionsBackend()
+    ex, _broker, journal = make_option_executor(
+        tmp_path, options_backend=backend, limits=RiskLimits(max_daily_trades=1))
+    filled = Order(id="o0", ticker="AAPL", side=OrderSide.BUY, qty=None,
+                   notional=Decimal(500), status=OrderStatus.FILLED,
+                   filled_qty=Decimal("2.5"), filled_avg_price=Decimal(200),
+                   submitted_at=datetime.now(UTC))
+    journal.record(buy(), RiskDecision(approved=True), filled)
+    res = ex.execute_option(opt_buy(premium="100"))
+    assert not res.submitted
+    assert backend.calls == []
     assert any("daily trade limit" in r for r in res.decision.reasons)
