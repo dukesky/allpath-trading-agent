@@ -84,10 +84,15 @@ class RiskGate:
         already a total-dollar figure (ask*100*qty), so unlike `check` there
         is no separate `price` param to convert qty into dollars.
 
-        SELL (close) intents are exempt from the premium cap and the
-        exposure cap: closing a risk-reducing position must never be
-        blocked by value caps (spec §4). Both sides still respect the
-        shared daily-trade cap."""
+        SELL (close) intents are exempt from every cap below -- the premium
+        cap, the exposure cap, the cash-reserve check, and (Finding 2) the
+        daily-trade cap too: a close can only shrink existing option
+        exposure, never grow risk, and both the DTE<=1 expiry safety sweep
+        and a close_options stop-loss rule execute through this exact SELL
+        path. A safety sweep or stop-loss exit must never be blocked by a
+        cap shared with every BUY (stock or option) that already ran
+        earlier in the day -- that would starve the one thing meant to run
+        no matter what."""
         reasons: list[str] = []
         lim = self.limits
 
@@ -112,8 +117,18 @@ class RiskGate:
                         f"options exposure {exposure} exceeds max_options_weight "
                         f"{lim.max_options_weight:.0%} of equity ({max_allowed})")
 
-        if trades_today >= lim.max_daily_trades:
-            reasons.append(
-                f"daily trade limit reached ({trades_today}/{lim.max_daily_trades})")
+            # Finding 3: mirrors `check`'s own cash-reserve floor for stock
+            # buys -- an option buy spends real cash (the premium) just like
+            # a stock buy does, and had no equivalent check at all before
+            # this, letting a premium blow straight through min_cash_reserve.
+            if account.cash - intent.est_premium < lim.min_cash_reserve:
+                reasons.append(
+                    f"buy would violate cash reserve minimum {lim.min_cash_reserve}")
+
+            # Finding 2: daily-trade cap applies to BUYS only -- see the
+            # docstring above for why SELL (close) is fully exempt.
+            if trades_today >= lim.max_daily_trades:
+                reasons.append(
+                    f"daily trade limit reached ({trades_today}/{lim.max_daily_trades})")
 
         return RiskDecision(approved=not reasons, reasons=reasons)

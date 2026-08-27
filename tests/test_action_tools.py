@@ -406,6 +406,83 @@ def test_draft_strategy_web_mode_notify_failure_does_not_fail_the_tool(tmp_path)
     assert len(queue.list("pending")) == 1
 
 
+# --- Finding 1a/4: draft_strategy is an authoring surface -- it must reject
+# an option action anywhere but an auto+hard rule, and reject a buy_call/
+# buy_put with no paired close_options exit rule. ---------------------------
+
+OPTION_NO_EXIT = """\
+name: "AAPL calls"
+status: draft
+version: 1
+authorization: auto
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: entry, type: hard, condition: "price < 100", action: "buy_call $500"}
+"""
+
+OPTION_WITH_EXIT = OPTION_NO_EXIT + (
+    '  - {id: exit, type: hard, condition: "price > 999", action: "close_options"}\n')
+
+OPTION_WRONG_AUTH = OPTION_WITH_EXIT.replace("authorization: auto", "authorization: confirm")
+OPTION_WRONG_TYPE = OPTION_WITH_EXIT.replace(
+    '{id: entry, type: hard,', '{id: entry, type: soft,')
+
+
+def test_draft_strategy_rejects_option_entry_with_no_exit_rule(tmp_path):
+    reg, store, _, prompts = make(tmp_path, answers=[True])
+    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_NO_EXIT,
+              reason="x")
+    assert out.startswith("error:") and "close_options" in out
+    assert prompts == []
+    assert store.versions("calls") == []
+
+
+def test_draft_strategy_accepts_option_entry_with_matching_exit_rule(tmp_path):
+    reg, store, _, prompts = make(tmp_path, answers=[True])
+    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_WITH_EXIT,
+              reason="x")
+    assert "saved calls v1" in out
+    assert (tmp_path / "strategies" / "calls.yaml").exists()
+    assert prompts != []
+
+
+def test_draft_strategy_rejects_option_action_with_confirm_authorization(tmp_path):
+    reg, store, _, prompts = make(tmp_path, answers=[True])
+    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_WRONG_AUTH,
+              reason="x")
+    assert out.startswith("error:") and "authorization: auto" in out
+    assert prompts == []
+    assert store.versions("calls") == []
+
+
+def test_draft_strategy_rejects_option_action_on_soft_rule(tmp_path):
+    reg, store, _, prompts = make(tmp_path, answers=[True])
+    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_WRONG_TYPE,
+              reason="x")
+    assert out.startswith("error:") and "type: hard" in out
+    assert prompts == []
+    assert store.versions("calls") == []
+
+
+def test_draft_strategy_revision_against_an_existing_entry_only_file_still_reads(tmp_path):
+    # Finding 1a: the re-parse of the CURRENT file (to decide whether to
+    # bump the drafted version) must not enforce authoring-time checks --
+    # an existing entry-only option file (e.g. one written before Finding 4
+    # existed, or by drawdown-breaker demotion in Finding 1's case) must
+    # still be readable here so the version-bump logic works, even though
+    # re-submitting it fresh would now be rejected.
+    (tmp_path / "strategies").mkdir(exist_ok=True)
+    (tmp_path / "strategies" / "calls.yaml").write_text(
+        OPTION_NO_EXIT.replace("version: 1", "version: 5"))
+    reg, store, _, prompts = make(tmp_path, answers=[True])
+    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_WITH_EXIT,
+              reason="add exit")
+    # The drafted version (1) is below the current file's (5), so
+    # draft_strategy silently bumps it to 6 -- proving it successfully read
+    # (and didn't choke on) the existing entry-only file.
+    assert "saved calls v6" in out
+
+
 def test_order_sink_takes_precedence_over_confirm(tmp_path):
     calls: list = []
 

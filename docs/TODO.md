@@ -349,3 +349,47 @@
       本来就是本地记账、不接真实券商 API，期权的合约/报价/成交都要靠
       Alpaca MCP 服务器，两者暂不兼容；后续若要支持，需要单独设计 shadow
       侧的期权模拟记账方式。
+- [ ] **agent 快照看不到期权开关的实际状态**：`agent/context.py` 的
+      `OPTIONS_ACTIONS_NOTE` 是静态、无条件拼进系统提示词的一段文本（该
+      模块自己的注释解释了原因：`build_system_prompt` 拿不到
+      `Settings`），只在文字里写"only when OPTIONS_TRADING is enabled in
+      Settings"；`build_system_prompt` 组装的"Current snapshot"部分（账户
+      余额、持仓、策略列表及其规则状态、近期成交、待审核数）里，没有任何
+      一项告诉 agent 当前这个账户的 `options_trading` 到底是开是关。agent
+      只能凭这段静态文字自行判断，猜错时可能在期权关闭的账户上仍建议
+      `buy_call`/`buy_put`——`strategy/loader.py`/`draft_strategy` 不会让
+      这类策略真的落地（会被拒），不是安全问题，但会给用户一个走不通的
+      建议，体验上不完整。
+- [ ] **`_parse_result` 可能让原始 `JSONDecodeError`/`KeyError` 漏过
+      `OptionsBackendError` 的捕获**：`broker/options_mcp.py` 的
+      `McpOptionsBackend._call` 只在 `_invoke_locked` 那一步的
+      try/except 里做了"传输失败重连一次"处理；`return
+      self._parse_result(text)` 这一行本身在 `with self._lock` 块内、但不
+      在任何 try 保护之下——如果 MCP 服务器返回的文本不是预期的
+      `{"_alpaca_mcp_security": {...}, "data": {...}}` 严格 JSON（比如被
+      截断、格式变了），`_parse_result` 里 `json.loads`/`["data"]` 抛出的
+      `JSONDecodeError`/`KeyError` 会原样往上冒，而不是包装成
+      `OptionsBackendError`。`sentinel.py` 里专门 `except
+      OptionsBackendError` 的分支接不住它，会被 `_check_strategy`/
+      `run_once` 外层更宽的 `except Exception` 兜住——不会崩溃整个哨兵
+      轮次，但这一条规则的记录方式会落到 per-strategy 的 `sentinel_error`
+      而不是正常 outcome 列表里的 "error" disposition，跟其他期权错误路径
+      不完全一致。
+- [ ] **`place_option_order` 返回体缺 `id` 字段时，这笔成交会被永远重新
+      拉取**：`execution.py` 的 `_order_from_payload` 对
+      `payload.get("id", "")` 做了兜底，缺字段时 `Order.id`（进而
+      journal 里的 `broker_order_id`）就是空字符串。`TradeJournal.
+      unfilled_recent` 之后每一轮哨兵都会把这一行当"未确认成交"重新纳入
+      `refresh_pending_fills`，后者拿这个空字符串去调
+      `broker.get_order("")`，会一直失败、一直拿不到终态——这一行会长期
+      占着 `unfilled_recent` 的 20 条配额，直到人工介入清理，不会自愈。
+- [ ] **到期清仓扫描和同一轮 `close_options` 规则命中共用同一份持仓
+      快照**：`run_once` 里 `_run_expiry_sweep` 和策略规则循环用的是同
+      一个 `positions` 字典（这一轮 `broker.get_positions()` 的结果）。
+      如果某个 DTE<=1 的期权仓位既被扫描器判定要平仓、又恰好被同一策略
+      的 `close_options` 规则命中，两边会各发一笔卖出平仓单——第二笔大
+      概率会被 broker 判 qty 不足或直接拒单，无害地失败，但
+      `report.errors`/通知里会多出一条看似"失败"的记录，容易让人误以为
+      出了问题。这一版加的 open-orders 过滤（`get_orders(open_only=True)`
+      去重）只覆盖"扫描器 vs 已经挂在 broker 上的旧单"，覆盖不到"扫描器
+      vs 同一轮里刚提交、还没来得及反映到订单状态查询里"的这个短窗口。

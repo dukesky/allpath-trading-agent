@@ -123,8 +123,16 @@ def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str
                 f"cannot change strategy id (proposed id {raw['id']!r})")
 
         # 4. Full YAML/strategy validation -- same for both sources.
+        # authoring=True: this is the actual persisted write (the applier
+        # is "the ONLY place that ever writes a strategy YAML file", per
+        # this module's own docstring), so it is itself an authoring
+        # surface and must re-enforce the option-action authorization/exit-
+        # rule checks (Findings 1a/4) as defense in depth -- it must not
+        # trust that the proposer (draft_strategy / propose_strategy_revision)
+        # already ran them, since this applier is independently reachable
+        # (tests, and in principle a future proposer).
         try:
-            doc = parse_strategy_text(strategy_id, new_yaml)
+            doc = parse_strategy_text(strategy_id, new_yaml, authoring=True)
         except StrategyValidationError as exc:
             raise RevisionValidationError(str(exc)) from exc
 

@@ -608,8 +608,9 @@ def test_option_gate_rejection_never_reaches_backend(tmp_path):
 
 
 def test_option_sell_close_bypasses_value_caps_but_gate_still_runs(tmp_path):
-    # A close is exempt from the premium/exposure caps but still goes
-    # through the gate (and, e.g., the daily-trade cap still applies).
+    # A close is exempt from every cap check (premium, exposure, cash
+    # reserve, and — Finding 2 — the daily-trade cap too) but still goes
+    # through the gate for the live-trading-disabled check.
     backend = FakeOptionsBackend()
     ex, _broker, journal = make_option_executor(
         tmp_path, options_backend=backend, limits=RiskLimits(max_order_value=Decimal(1)))

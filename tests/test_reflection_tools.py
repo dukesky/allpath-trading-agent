@@ -496,3 +496,61 @@ def test_on_proposed_not_called_on_a_rejected_proposal(tmp_path):
 
     # Assert: callback should not have been called
     assert seen == []
+
+
+# --- Finding 1a/4: propose_strategy_revision is an authoring surface too ---
+# (authorization stays `auto` across CURRENT -> PROPOSED in every case below
+# so these never trip the unrelated "cannot change authorization" guard --
+# each proposal isolates the option-authoring check under test.)
+
+CURRENT_OPTION_AUTO = """\
+name: "S1"
+status: active
+version: 1
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: entry, type: hard, condition: "price < 100", action: "buy_call $500"}
+  - {id: exit, type: hard, condition: "price > 999", action: "close_options"}
+"""
+
+
+def make_option(tmp_path):
+    strategies_dir = tmp_path / "strategies"
+    strategies_dir.mkdir()
+    (strategies_dir / "s1.yaml").write_text(CURRENT_OPTION_AUTO)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(strategies_dir, conn)
+    queue = ReviewQueue(conn, executor=None)
+    reg = ToolRegistry()
+    register_reflection_tools(reg, strategies=store, queue=queue)
+    return reg, store, queue
+
+
+def test_propose_strategy_revision_rejects_removing_the_only_exit_rule(tmp_path):
+    reg, _store, queue = make_option(tmp_path)
+    proposed = CURRENT_OPTION_AUTO.replace(
+        '  - {id: exit, type: hard, condition: "price > 999", action: "close_options"}\n',
+        "").replace("version: 1", "version: 2")
+    out = call(reg, strategy_id="s1", new_yaml=proposed, rationale="drop exit by mistake")
+    assert out.startswith("error:") and "close_options" in out
+    assert queue.list() == []
+
+
+def test_propose_strategy_revision_rejects_option_action_on_soft_rule(tmp_path):
+    reg, _store, queue = make_option(tmp_path)
+    proposed = CURRENT_OPTION_AUTO.replace(
+        "{id: entry, type: hard,", "{id: entry, type: soft,").replace(
+        "version: 1", "version: 2")
+    out = call(reg, strategy_id="s1", new_yaml=proposed, rationale="loosen entry")
+    assert out.startswith("error:") and "type: hard" in out
+    assert queue.list() == []
+
+
+def test_propose_strategy_revision_accepts_a_valid_option_revision(tmp_path):
+    reg, _store, queue = make_option(tmp_path)
+    proposed = CURRENT_OPTION_AUTO.replace(
+        '"buy_call $500"', '"buy_call $600"').replace("version: 1", "version: 2")
+    out = call(reg, strategy_id="s1", new_yaml=proposed, rationale="raise budget")
+    assert not out.startswith("error:")
+    assert len(queue.list()) == 1

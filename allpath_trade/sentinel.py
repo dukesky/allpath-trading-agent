@@ -204,9 +204,28 @@ class Sentinel:
     def _run_expiry_sweep(self, positions: dict[str, Position],
                           report: SentinelReport) -> None:
         today = datetime.now(UTC).date()
+        # Finding 2b: a position already carrying an open sell order (e.g.
+        # a close_options rule for the same strategy fired earlier in this
+        # same sentinel pass, or a prior sweep's sell-to-close is still
+        # unfilled/unresolved from a previous pass) must not get a second
+        # sell-to-close piled on top of it. Queried once per sweep, not per
+        # position -- one `get_orders` round trip either way. Best-effort:
+        # a broker failure here must not skip the sweep itself (the whole
+        # point of this sweep is that it's the last line of defense against
+        # an expiring position), just its dedup -- proceed as if nothing
+        # has an open sell.
+        try:
+            open_sell_symbols = {
+                o.ticker for o in self.broker.get_orders(open_only=True)
+                if o.side == OrderSide.SELL
+            }
+        except Exception:  # noqa: BLE001 — best-effort filter, see above
+            open_sell_symbols = set()
         for p in positions.values():
             parts = parse_occ_symbol(p.ticker)
             if parts is None or (parts.expiry - today).days > 1:
+                continue
+            if p.ticker in open_sell_symbols:
                 continue
             try:
                 intent = OptionIntent(
@@ -303,7 +322,7 @@ class Sentinel:
             # the way the stock path below still has to -- straight to
             # execution, defensively guarded against `options_backend`
             # being off inside `_dispatch_option` itself.
-            return self._dispatch_option(doc, rule_id, condition, spec, price,
+            return self._dispatch_option(doc, rule_id, condition, rule_type, spec, price,
                                          positions, reason)
         intent = to_order_intent(spec, strategy=doc,
                                  rule_id=rule_id, price=price,
@@ -355,7 +374,7 @@ class Sentinel:
                                   action, intent, price=price)
 
     def _dispatch_option(self, doc: StrategyDoc, rule_id: str, condition: str,
-                         spec: ActionSpec, price: Decimal,
+                         rule_type: RuleType, spec: ActionSpec, price: Decimal,
                          positions: dict[str, Position],
                          reason: str) -> TriggerOutcome:
         if self.options_backend is None:
@@ -368,7 +387,45 @@ class Sentinel:
                                   disposition="error",
                                   detail="options trading disabled")
         if spec.kind == ActionKind.CLOSE_OPTIONS:
+            # Finding 1b, close half: still gated on rule_type == HARD (the
+            # loader's authoring-time validation already guarantees this
+            # for every option action -- this is defense in depth, not
+            # reliance on that guarantee alone). Deliberately NOT gated on
+            # doc.authorization == AUTO, unlike the buy path below: a close
+            # can only shrink existing option exposure, never grow it, and
+            # the v1 pending-review queue has no support for holding an
+            # OptionIntent for confirm/notify authorization to resolve
+            # later. If a demoted (authorization: confirm) strategy's
+            # close_options rule stopped firing here, a drawdown-breaker
+            # demotion would silently disable the very stop-loss exit it
+            # exists to protect -- exactly Finding 1's failure mode, just
+            # from the opposite direction.
+            if rule_type != RuleType.HARD:
+                self._notify_rule(doc, rule_id, condition, "skipped")
+                return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                      disposition="skipped",
+                                      detail="close_options requires rule type: hard")
             return self._dispatch_close_options(doc, rule_id, condition, positions, reason)
+        # BUY_CALL / BUY_PUT.
+        # Finding 1b, buy half -- runtime last line of defense: the
+        # loader's authoring-time validation normally guarantees
+        # authorization: auto + type: hard for every option action, but a
+        # strategy that WAS valid at authoring time can be demoted later
+        # (DrawdownBreaker flips authorization: auto -> confirm without
+        # re-validating, and loading was deliberately changed to no longer
+        # enforce this check -- see strategy/loader.py's `authoring` param
+        # docstring -- precisely so a demoted strategy keeps LOADING).
+        # Without this check, a demoted strategy's buy_call/buy_put rule
+        # would still fire and place a brand-new autonomous option order
+        # with nobody having confirmed it -- exactly what
+        # authorization: confirm exists to prevent, and exactly the wrong
+        # direction to fail during a drawdown halt.
+        if not (doc.authorization == Authorization.AUTO and rule_type == RuleType.HARD):
+            self._notify_rule(doc, rule_id, condition, "skipped")
+            return TriggerOutcome(
+                strategy_id=doc.id, rule_id=rule_id, disposition="skipped",
+                detail="option buys require authorization: auto -- strategy "
+                       "demoted or misconfigured")
         return self._dispatch_option_buy(doc, rule_id, condition, spec, price, reason)
 
     def _dispatch_option_buy(self, doc: StrategyDoc, rule_id: str, condition: str,
@@ -436,12 +493,22 @@ class Sentinel:
         closed: list[str] = []
         issues: list[str] = []
         for p in to_close:
-            parts = parse_occ_symbol(p.ticker)
-            intent = OptionIntent(underlying=underlying, right=parts.right,
-                                  occ_symbol=p.ticker, side=OrderSide.SELL,
-                                  qty=int(p.qty), est_premium=Decimal(0),
-                                  reason=reason, strategy_id=doc.id)
+            # Finding 5: intent construction moved INSIDE the try (matching
+            # `_run_expiry_sweep`'s own pattern) -- `OptionIntent`'s
+            # `qty >= 1` validator can raise `ValidationError` for a
+            # position whose fractional qty truncates to 0 via `int(p.qty)`
+            # (e.g. 0.5 contracts, which should never happen but a bad
+            # broker payload could produce). With construction OUTSIDE the
+            # try, that raised straight out of this loop and abandoned
+            # every remaining position in `to_close` -- one bad position
+            # aborted the whole close_options batch. Inside the try, that
+            # position is recorded as an issue and the loop continues.
             try:
+                parts = parse_occ_symbol(p.ticker)
+                intent = OptionIntent(underlying=underlying, right=parts.right,
+                                      occ_symbol=p.ticker, side=OrderSide.SELL,
+                                      qty=int(p.qty), est_premium=Decimal(0),
+                                      reason=reason, strategy_id=doc.id)
                 result = self.executor.execute_option(intent)
             except Exception as exc:  # noqa: BLE001 — one bad close must not
                 # abort the rest of this strategy's option positions.

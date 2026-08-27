@@ -89,7 +89,7 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         if not is_valid_strategy_id(strategy_id):
             return f"error: invalid strategy id {strategy_id!r}"
         try:
-            doc = parse_strategy_text(strategy_id, yaml_text)
+            doc = parse_strategy_text(strategy_id, yaml_text, authoring=True)
         except StrategyValidationError as exc:
             return f"error: {'; '.join(exc.errors)}"
         path = strategies.directory / f"{strategy_id}.yaml"
