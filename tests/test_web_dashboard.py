@@ -854,6 +854,45 @@ def test_dashboard_sentinel_heartbeat_shows_paused_copy_when_market_was_closed(
     assert "Sentinel: last check" not in body
 
 
+# --- Task 8: drawdown breaker halt banner -----------------------------------
+
+def test_dashboard_shows_halt_banner_when_tripped(client):
+    c = client.app.state.holder.get()
+    c.app_state.set("drawdown_tripped:paper", "2026-08-20T00:00:00+00:00")
+
+    page = client.get("/").text
+
+    assert "trading halted" in page.lower()
+    assert "2026-08-20T00:00:00+00:00" in page
+    assert "allpath-trade breaker reset" in page
+
+
+def test_dashboard_no_banner_by_default(client):
+    assert "trading halted" not in client.get("/").text.lower()
+
+
+def test_dashboard_halt_banner_is_english_only(client):
+    c = client.app.state.holder.get()
+    c.app_state.set("drawdown_tripped:paper", "2026-08-20T00:00:00+00:00")
+
+    assert_english_only(client.get("/").text)
+
+
+def test_dashboard_halt_banner_shows_only_for_the_active_account(client):
+    # shadow-dual-active: `drawdown_tripped:{account}` is per-account state
+    # (risk/breaker.py) -- paper's dashboard must never show a banner for a
+    # trip that only happened on shadow's own breaker, and vice versa.
+    c = client.app.state.holder.get()
+    c.app_state.set("drawdown_tripped:shadow", "2026-08-20T00:00:00+00:00")
+
+    body = client.get("/").text  # paper, the default view
+    assert "trading halted" not in body.lower()
+
+    client.post("/account/switch", data={"account": "shadow"})
+    body = client.get("/").text
+    assert "trading halted" in body.lower()
+
+
 # --- Finding 1 (final review, phase5.5-ui-polish): heartbeat hoisted above
 # the strategy/quote loop, and one shared budget bounds total quote time ----
 

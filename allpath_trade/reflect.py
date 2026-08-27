@@ -19,6 +19,7 @@ from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
 from allpath_trade.scheduler import ET, ts_to_et_date
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
@@ -465,7 +466,18 @@ class Reflector:
         # first call the model makes to it burns an iteration on
         # "error: unknown tool" out of the 12-call session budget.
         register_memory_tools(registry, memory=c.memory, search=c.search)
-        register_reflection_tools(registry, strategies=c.strategies, queue=c.queue)
+        # Experiment mode (spec 2026-08-26, Settings.experiment_auto_apply_
+        # revisions): collect the plain-int review ids THIS run's own
+        # session proposes, so the success path below can auto-approve
+        # exactly those rows -- never a stale row queued by an earlier run
+        # or by a chat proposal. `on_proposed` stays None (the default) when
+        # the flag is off, so a non-experiment run allocates nothing extra
+        # and behaves exactly as before this change.
+        proposed_rids: list[int] = []
+        auto_apply = self.settings.experiment_auto_apply_revisions
+        register_reflection_tools(
+            registry, strategies=c.strategies, queue=c.queue,
+            on_proposed=proposed_rids.append if auto_apply else None)
 
         identity = load_identity()
         base_prompt = build_system_prompt(
@@ -546,6 +558,13 @@ class Reflector:
             # llm/base.py) -- recording 0 rather than fabricating a number.
             # TODO(Task 7): wire real usage once a client surfaces it.
             tokens_used=0, status="ok")
+        # Experiment mode: only on the success path, and only AFTER the
+        # report row is durably stored above -- a `_fail` run returns before
+        # reaching this line, so it never auto-applies anything, and a crash
+        # between the report write and this call just leaves the row
+        # pending for a human, same as today.
+        if auto_apply and proposed_rids:
+            self._auto_apply_revisions(proposed_rids)
         if self.notifier is not None:
             # Only a stored "ok" report notifies -- a "failed" one (LLM
             # down, or unparseable output twice, see _fail) does NOT push:
@@ -571,6 +590,37 @@ class Reflector:
             conversation_id=conversation_id, model=getattr(self.llm, "model", ""),
             tokens_used=0, status="failed")
         return reason
+
+    def _auto_apply_revisions(self, rids: list[int]) -> None:
+        """Experiment mode (spec 2026-08-26): approve the revision rows THIS
+        run just queued, through the exact applier chain a human approval
+        uses -- every guard (freeze, byte-exact base, version monotonicity)
+        still decides. A guard rejection leaves the row pending, same as
+        today, and the paper trail lands in observations either way."""
+        c = self.components
+        for rid in rids:
+            try:
+                row = dict(c.queue.get(rid))
+            except ReviewError:
+                continue  # superseded/vanished between propose and now
+            if row["status"] != "pending" or row["kind"] != "strategy_revision":
+                continue
+            strategy_id = row["strategy_id"]
+            try:
+                c.queue.approve(rid)
+            except (RevisionValidationError, ReviewError) as exc:
+                c.observations.add(
+                    "reflection_auto_apply",
+                    f"revision #{rid} for {strategy_id} NOT auto-applied "
+                    f"({exc}); left pending for human review",
+                    subject=row["ticker"])
+                continue
+            warning = c.strategies.rearm_warning(strategy_id)
+            c.observations.add(
+                "reflection_auto_apply",
+                f"revision #{rid} for {strategy_id} auto-applied "
+                f"(experiment mode).{warning}",
+                subject=row["ticker"])
 
     def _build_briefing(self, et_date: str) -> str:
         return build_briefing(

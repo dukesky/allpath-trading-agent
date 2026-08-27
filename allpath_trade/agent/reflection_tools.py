@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import difflib
+from collections.abc import Callable
+from typing import Optional
 
 import yaml
 
@@ -28,7 +30,8 @@ _MAX_RATIONALE_CHARS = 2000
 
 
 def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategyStore,
-                              queue: ReviewQueue) -> None:
+                              queue: ReviewQueue,
+                              on_proposed: Optional[Callable[[int], None]] = None) -> None:
     """Registers the one tool a reflection session gets for changing a
     strategy: `propose_strategy_revision`. There is deliberately no
     apply/confirm tool here -- every revision goes through the same human
@@ -164,6 +167,8 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
             strategy_id=strategy_id, ticker=doc.position.ticker,
             old_yaml=old_yaml, new_yaml=new_yaml, diff=diff, rationale=rationale,
             is_new=False)
+        if on_proposed is not None:
+            on_proposed(int(rid))
         return (f"Revision queued for user approval (#{rid}). It will not "
                 "take effect unless approved.")
 

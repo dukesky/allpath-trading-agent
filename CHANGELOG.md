@@ -2,6 +2,35 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Two-week autonomous run prep — 2026-08-26
+
+- **Experiment auto-apply for reflection revisions**: `EXPERIMENT_AUTO_APPLY_REVISIONS`
+  (`.env` only, default `false`) lets nightly reflection's own
+  `strategy_revision` proposals approve themselves through the exact same
+  guarded applier a human approval uses — byte-exact base-YAML staleness
+  check, strict version increase, and the existing freeze (a revision can
+  touch `thesis`/`rules` only, never `authorization` or `status`) all still
+  apply unchanged. A row that fails any check stays `pending` instead of
+  applying, same as today. Scoped to `source="reflection"` rows for the
+  account being reflected; chat-sourced strategy drafts and order proposals
+  are unaffected and still require human approval regardless of this flag.
+- **Drawdown circuit breaker**: a new permanent (not experiment-only)
+  per-account kill-switch. `DRAWDOWN_HALT_PCT` (default `0.15`, `0`
+  disables) tracks each account's equity peak in `app_state`; once equity
+  falls more than that fraction below the peak, the breaker trips **once** —
+  every `auto` strategy on that account is demoted to `confirm` and a
+  high-priority alert goes out on every configured channel (email/ntfy/
+  Telegram). Recovery is manual: `allpath-trade breaker status` reports the
+  current peak/tripped state, `allpath-trade breaker reset` clears that
+  bookkeeping so the breaker can arm again — it deliberately does not
+  restore any strategy to `auto`, since that decision needs a human to have
+  actually reviewed the account. The dashboard also shows a banner while a
+  tripped account's breaker hasn't been reset.
+- **Broker HTTP timeout**: `BROKER_HTTP_TIMEOUT_SECONDS` (default `30`) adds
+  a socket-level timeout to the Alpaca client, so a hung broker call now
+  fails and surfaces as a per-strategy sentinel error instead of stalling a
+  sentinel tick (and the dashboard's broker thread pool) indefinitely.
+
 ## Setup wizard + image import — 2026-08-22
 
 - **`serve` starts without Alpaca keys**: a fresh install no longer

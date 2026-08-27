@@ -72,7 +72,14 @@
 - [x] 独立守护进程 `allpath-trade run` 不发送每日摘要邮件——**ops-hardening round 已落地**，
       详见下面 Phase 6 遗留区块里同一条目的落地说明（两条重复记录了同一个问题，一并解决）
 - [ ] 通知正文里插值的文本（规则 condition、执行 detail、agent 的 recommendation）未做 URL 清理——其中若混入裸链接，邮件客户端可能自动转成可点击链接，与"通知不含链接"的设计承诺相悖
-- [ ] 一个永久挂起的 broker 会耗尽 `_broker_pool`（`dashboard.py` 的 4-worker 专用线程池）——耗尽之后仪表盘会一直显示"unavailable"，即使 broker 后来恢复也不会自愈，直到进程重启；且因为 `ThreadPoolExecutor` 的 worker 是非 daemon 线程，一次挂起的调用还会拖慢 `serve` 的干净关闭。根治办法是给 broker 的 HTTP 客户端加 socket 级别的超时，而不是只在应用层 `.result(timeout=...)`
+- [x] 一个永久挂起的 broker 会耗尽 `_broker_pool`（`dashboard.py` 的 4-worker 专用线程池）——耗尽之后仪表盘会一直显示"unavailable"，即使 broker 后来恢复也不会自愈，直到进程重启；且因为 `ThreadPoolExecutor` 的 worker 是非 daemon 线程，一次挂起的调用还会拖慢 `serve` 的干净关闭。根治办法是给 broker 的 HTTP 客户端加 socket 级别的超时，而不是只在应用层 `.result(timeout=...)`——
+      **two-week-autonomous-run 分支已落地**：新增 `Settings.broker_http_timeout_seconds`
+      （默认 30 秒，`.env` only，同 `llm_timeout_seconds` 的策略），传给 Alpaca
+      `TradingClient` 构造，加的是 socket 级别的超时，不是应用层 `.result(timeout=...)`
+      那种事后等待。一次挂起的请求现在会在超时后抛出异常，走 sentinel 已有的
+      per-strategy 隔离路径（`report.errors` + `sentinel_error` observation），
+      降级为一次记录在案的跳过 tick，而不是无限挂起、耗尽 `_broker_pool`。
+      yfinance 超时（同一类问题的另一处实例，见下面 Phase 6 遗留区块）仍待后续处理。
 - [ ] compaction 的 flush 钩子（`on_before_compact` 绑定到 `Consolidator.run_post_chat`）是在触发它的那个回合的 turn lock 内、同步跑一次记忆层 LLM 调用——长对话里某一回合会出现明显的延迟尖峰，理想情况应该异步/后台执行，不阻塞当前回合的响应
 
 ## Phase 5.5 遗留

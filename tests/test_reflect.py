@@ -9,7 +9,10 @@ from allpath_trade import reflect as reflect_module
 from allpath_trade.agent.action_tools import register_action_tools
 from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
-from allpath_trade.agent.reflection_tools import register_reflection_tools
+from allpath_trade.agent.reflection_tools import (
+    apply_revision_factory,
+    register_reflection_tools,
+)
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.broker.base import Account, Broker, Position
 from allpath_trade.config import Settings
@@ -967,3 +970,107 @@ def test_run_daily_deadline_zero_disables_the_deadline(tmp_path, monkeypatch):
 
     assert status.startswith("ok:")
     assert len(llm.seen) == 2
+
+
+# ---------------------------------------------------------------------------
+# Experiment mode (spec 2026-08-26): Settings.experiment_auto_apply_revisions
+# auto-approves a strategy_revision row THIS run's own session just queued,
+# through the exact ReviewQueue.approve applier chain a human approval uses.
+# ---------------------------------------------------------------------------
+
+STRAT_V2 = STRAT.replace("version: 1", "version: 2").replace("price < 100",
+                                                             "price < 95")
+
+
+def _scripted_propose_then_report(strategy_id="t"):
+    return ScriptedLLM([
+        tool_response("propose_strategy_revision", {
+            "strategy_id": strategy_id, "new_yaml": STRAT_V2,
+            "rationale": "tighten the stop"}),
+        LLMResponse(text=REPORT_TEXT),
+    ])
+
+
+def _revision_rows(components):
+    return [dict(x) for x in components.queue.list(status=None)
+            if x["kind"] == "strategy_revision"]
+
+
+def test_auto_apply_applies_this_runs_revision(tmp_path):
+    components = make_components(tmp_path)
+    # Same wiring app.py does unconditionally at startup (Task 4 context:
+    # queue.approve on a strategy_revision row raises ReviewError with no
+    # applier configured -- make_components itself deliberately leaves this
+    # unwired since most tests in this file never approve a revision).
+    components.queue.set_revision_applier(apply_revision_factory(components.strategies))
+    settings = make_settings(experiment_auto_apply_revisions=True)
+    r = Reflector(llm=_scripted_propose_then_report(), components=components,
+                  settings=settings, notifier=None)
+
+    out = r.run_daily(NOW)
+
+    assert out.startswith("ok:")
+    path = components.strategies.directory / "t.yaml"
+    assert "version: 2" in path.read_text()
+    (row,) = _revision_rows(components)
+    assert row["status"] == "approved"
+    texts = [o["text"] for o in components.observations.recent()]
+    assert any("auto-applied" in t for t in texts)
+
+
+def test_auto_apply_off_leaves_row_pending(tmp_path):
+    components = make_components(tmp_path)
+    settings = make_settings(experiment_auto_apply_revisions=False)
+    r = Reflector(llm=_scripted_propose_then_report(), components=components,
+                  settings=settings, notifier=None)
+
+    out = r.run_daily(NOW)
+
+    assert out.startswith("ok:")
+    path = components.strategies.directory / "t.yaml"
+    assert "version: 1" in path.read_text()
+    (row,) = _revision_rows(components)
+    assert row["status"] == "pending"
+
+
+def test_auto_apply_skipped_when_run_fails(tmp_path):
+    components = make_components(tmp_path)
+    components.queue.set_revision_applier(apply_revision_factory(components.strategies))
+    settings = make_settings(experiment_auto_apply_revisions=True)
+    llm = ScriptedLLM([
+        tool_response("propose_strategy_revision", {
+            "strategy_id": "t", "new_yaml": STRAT_V2,
+            "rationale": "tighten the stop"}),
+        LLMResponse(text="no structure here"),
+        LLMResponse(text="still no structure"),
+    ])
+    r = Reflector(llm=llm, components=components, settings=settings, notifier=None)
+
+    status = r.run_daily(NOW)
+
+    assert "failed" in status
+    (row,) = _revision_rows(components)
+    assert row["status"] == "pending"
+    path = components.strategies.directory / "t.yaml"
+    assert "version: 1" in path.read_text()
+
+
+def test_auto_apply_guard_rejection_leaves_pending_and_observes(tmp_path):
+    components = make_components(tmp_path)
+    components.queue.set_revision_applier(apply_revision_factory(components.strategies))
+    rid = components.queue.add_strategy_revision(
+        strategy_id="t", ticker="AAPL", old_yaml=STRAT, new_yaml=STRAT_V2,
+        diff="", rationale="tighten the stop", is_new=False)
+    # The file changes underneath the queued proposal -- the applier's
+    # byte-exact base check (strategy/apply.py gate 2) must now reject it.
+    (components.strategies.directory / "t.yaml").write_text(STRAT_V2)
+
+    r = Reflector(llm=ScriptedLLM([]), components=components,
+                  settings=make_settings(experiment_auto_apply_revisions=True),
+                  notifier=None)
+    r._auto_apply_revisions([int(rid)])
+
+    row = dict(components.queue.get(rid))
+    assert row["status"] == "pending"
+    texts = [o["text"] for o in components.observations.recent()]
+    assert any("NOT auto-applied" in t for t in texts)

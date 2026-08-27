@@ -17,6 +17,7 @@ from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
+from allpath_trade.risk.breaker import DrawdownBreaker
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, ReviewQueue
@@ -52,7 +53,8 @@ class Sentinel:
                  broker: Broker, executor: Executor, queue: ReviewQueue,
                  notifier: Notifier, review_agent=None, observations=None,
                  web_base_url: str = "", app_state: AppState | None = None,
-                 telegram_bot_token: str = "", account: str = DEFAULT_ACCOUNT) -> None:
+                 telegram_bot_token: str = "", account: str = DEFAULT_ACCOUNT,
+                 breaker: DrawdownBreaker | None = None) -> None:
         # shadow-dual-active T7: which account THIS Sentinel instance
         # belongs to (app.py constructs one per account) -- threaded into
         # every notify.events builder call below for the `[Paper]`/
@@ -89,6 +91,11 @@ class Sentinel:
         # `notify.dispatch`'s push functions already no-op on.
         self.app_state = app_state
         self.telegram_bot_token = telegram_bot_token
+        # Task 7: the drawdown circuit breaker (risk/breaker.py) is
+        # optional -- None (the default) means run_once behaves exactly as
+        # it did before this breaker existed. app.py builds one per
+        # account whenever app_state is available.
+        self.breaker = breaker
 
     def run_once(self) -> SentinelReport:
         report = SentinelReport()
@@ -108,6 +115,36 @@ class Sentinel:
         except Exception as exc:  # noqa: BLE001 — a broken env must surface, not crash
             report.errors.append(f"setup failed: {exc}")
             return report
+
+        if self.breaker is not None:
+            trip = self.breaker.check(account.equity)
+            if trip is not None:
+                subject, body = events.drawdown_halt(
+                    account=self.account, peak=trip.peak, equity=trip.equity,
+                    drawdown=trip.drawdown, demoted=trip.demoted)
+                # Account-level halt, not a per-strategy notification
+                # preference -- send directly rather than through `_send`,
+                # so it reaches the operator even when every strategy on
+                # file has `notify_email: false`.
+                if self.notifier is not None:
+                    self.notifier.send(subject, body)
+                push_telegram_receipt(
+                    app_state=self.app_state,
+                    telegram_bot_token=self.telegram_bot_token, body=body,
+                    account=self.account)
+                if self.observations is not None:
+                    # Distinct source ("breaker", not "sentinel") for the
+                    # same digest-count reason as `sentinel_error` above --
+                    # the daily digest counts "sentinel" rows as rule
+                    # triggers, and a breaker trip is not one.
+                    self.observations.add(
+                        "breaker",
+                        f"drawdown breaker tripped: {trip.drawdown:.1%} below "
+                        f"peak {trip.peak}; demoted: "
+                        f"{', '.join(trip.demoted) or 'none'}")
+                report.errors.append(
+                    f"drawdown breaker tripped ({trip.drawdown:.1%}); "
+                    "auto strategies demoted to confirm")
 
         # A single invalid strategy YAML must not stop monitoring for every
         # other strategy — collect its error and keep going.

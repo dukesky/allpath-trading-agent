@@ -82,8 +82,9 @@ def test_build_broker_returns_alpaca_when_both_keys_are_present(tmp_path, monkey
     built = {}
 
     class FakeAlpacaBroker:
-        def __init__(self, api_key, secret_key, paper=True):
-            built.update(api_key=api_key, secret_key=secret_key, paper=paper)
+        def __init__(self, api_key, secret_key, paper=True, http_timeout_seconds=30.0):
+            built.update(api_key=api_key, secret_key=secret_key, paper=paper,
+                         http_timeout_seconds=http_timeout_seconds)
 
     monkeypatch.setattr(alpaca_mod, "AlpacaBroker", FakeAlpacaBroker)
     settings = _settings(tmp_path, alpaca_api_key="k", alpaca_secret_key="s")
@@ -92,7 +93,7 @@ def test_build_broker_returns_alpaca_when_both_keys_are_present(tmp_path, monkey
                            broker_override=None)
 
     assert isinstance(broker, FakeAlpacaBroker)
-    assert built == {"api_key": "k", "secret_key": "s", "paper": True}
+    assert built == {"api_key": "k", "secret_key": "s", "paper": True, "http_timeout_seconds": 30.0}
 
 
 def test_build_broker_override_still_wins_over_the_unconfigured_fallback(tmp_path):

@@ -144,6 +144,32 @@ def cmd_rearm(store, strategy_id: str, rule_id: str) -> int:
     return 0
 
 
+def cmd_breaker(breaker, action: str) -> int:
+    """Task 8: `allpath-trade breaker status|reset`. Reads/clears the exact
+    same app_state keys DrawdownBreaker itself owns (`drawdown_peak:
+    {account}` / `drawdown_tripped:{account}`, see risk/breaker.py's
+    docstring), so this can never drift from what the breaker actually
+    recorded.
+
+    'reset' only clears the peak/tripped state (DrawdownBreaker.reset()) --
+    it does NOT re-arm any strategy back to auto. A strategy the breaker
+    demoted stays at 'confirm' until a human deliberately restores it via
+    the agent (or hand-edits the YAML); the reset copy says so explicitly
+    so this command is never mistaken for an all-clear."""
+    tripped = breaker.tripped_at()
+    peak = breaker.app_state.get(breaker._peak_key)
+    if action == "status":
+        if tripped:
+            print(f"TRIPPED at {tripped} (peak {peak})")
+        else:
+            print(f"ok (peak {peak or 'not yet recorded'})")
+        return 0
+    breaker.reset()
+    print("breaker reset: peak and tripped state cleared. Strategies stay "
+          "at confirm -- restore auto deliberately via the agent.")
+    return 0
+
+
 def _approve_needs_broker(settings: Settings, review_id: int, account: str) -> bool:
     """`reviews approve` on a strategy_revision row is pure file I/O -- no
     broker/executor is ever touched (see ReviewQueue._approve_revision:
@@ -495,12 +521,14 @@ CLI_EPILOG = """\
 examples:
   allpath-trade chat --new                       start a fresh conversation
   allpath-trade rearm aapl-long stop-loss        re-arm a triggered rule
+  allpath-trade breaker status                   check the drawdown breaker
+  allpath-trade breaker reset                    clear a tripped breaker
   allpath-trade reviews approve 3                execute pending review #3
   allpath-trade memory show --layer stock --key AAPL
                                              read the agent's AAPL dossier
 
 keys live in .env (see .env.example). Read-only commands (strategies, rearm,
-reviews list/reject, memory show) work without any keys.
+reviews list/reject, memory show, breaker) work without any keys.
 """
 
 
@@ -556,6 +584,20 @@ def main(argv: list[str] | None = None,
     p_rearm.add_argument("strategy_id", help="strategy file name without .yaml")
     p_rearm.add_argument("rule_id", help="rule id inside the strategy")
     _add_account_arg(p_rearm)
+    p_breaker = sub.add_parser(
+        "breaker", help="drawdown circuit breaker status/reset",
+        description="Show or reset the drawdown circuit breaker: a safety "
+                    "net that demotes every auto strategy to confirm once "
+                    "equity falls more than DRAWDOWN_HALT_PCT below its "
+                    "recorded peak. 'reset' clears the tripped/peak state "
+                    "so the next check starts fresh -- it does NOT restore "
+                    "any strategy to auto; that stays a deliberate, "
+                    "separate step you take via the agent after reviewing.")
+    p_breaker.add_argument(
+        "action", choices=["status", "reset"],
+        help="status: show tripped/peak state. reset: clear tripped/peak "
+             "state (strategies stay at confirm).")
+    _add_account_arg(p_breaker)
     p_reviews = sub.add_parser(
         "reviews", help="approve/reject triggers awaiting review",
         description="Soft-rule triggers (and everything on confirm-level "
@@ -769,6 +811,20 @@ def main(argv: list[str] | None = None,
         return cmd_strategies(settings, store)
     if args.command == "rearm":
         return cmd_rearm(store, args.strategy_id, args.rule_id)
+    if args.command == "breaker":
+        # Task 8: never in `needs_broker` above (like "strategies"/"rearm",
+        # this is read/reset of app_state + the strategy store, no broker
+        # involved) -- `broker is not None` only when a broker_factory was
+        # injected (tests) or another flag on this same invocation happened
+        # to need one; either way `components`/`conn` below is whichever one
+        # actually got built a few lines up.
+        from allpath_trade.risk.breaker import DrawdownBreaker
+        from allpath_trade.store.app_state import AppState
+
+        app_state = components.app_state if broker is not None else AppState(conn)
+        breaker = DrawdownBreaker(app_state, store, settings.drawdown_halt_pct,
+                                  account)
+        return cmd_breaker(breaker, args.action)
     if args.command == "reviews":
         return cmd_reviews(queue, args, store)
     if args.command == "chat":

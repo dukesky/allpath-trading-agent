@@ -146,6 +146,33 @@ def test_daily_digest_paper_names_account():
 
 
 # ---------------------------------------------------------------------------
+# Task 7: the drawdown circuit breaker's own alert -- names the damage
+# (how far below peak) and the recovery path (a deliberate manual reset).
+# ---------------------------------------------------------------------------
+
+def test_drawdown_halt_names_the_damage_and_the_recovery():
+    from decimal import Decimal
+
+    subject, body = events.drawdown_halt(
+        account="paper", peak=Decimal("100000"), equity=Decimal("82000"),
+        drawdown=Decimal("0.18"), demoted=["tsla-dip", "nvda-core"])
+    assert "TRADING HALTED" in subject
+    assert "[Paper]" in subject
+    assert "18.0%" in body
+    assert "tsla-dip, nvda-core" in body
+    assert "breaker reset" in body
+
+
+def test_drawdown_halt_with_no_demoted_strategies_says_so():
+    from decimal import Decimal
+
+    _subject, body = events.drawdown_halt(
+        account="shadow", peak=Decimal("100000"), equity=Decimal("82000"),
+        drawdown=Decimal("0.18"), demoted=[])
+    assert "none were set to auto" in body
+
+
+# ---------------------------------------------------------------------------
 # shadow-dual-active T7: `[Paper]`/`[Shadow]` subject prefixes on every
 # builder, shadow order/queued-review wording, and a missing/invalid
 # account degrading to no prefix rather than crashing.
@@ -275,11 +302,16 @@ def test_every_builder_is_english_only_for_both_accounts():
     # yourself", the ledger digest line) go through the same sweep every
     # paper variant already did, so a future edit can't slip CJK into a
     # shadow-only branch that nothing checks.
+    from decimal import Decimal
+
     for account in ("paper", "shadow"):
         for subject, body in [
             events.rule_triggered(account=account, strategy_id="s", rule_id="r",
                                   ticker="AAPL", condition="price < 100",
                                   disposition="queued"),
+            events.drawdown_halt(account=account, peak=Decimal("100000"),
+                                 equity=Decimal("82000"), drawdown=Decimal("0.18"),
+                                 demoted=["tsla-dip"]),
             events.order_result(account=account, ticker="AAPL", side="buy",
                                 submitted=True, detail="filled 3 @ 220.15"),
             events.order_result(account=account, ticker="AAPL", side="buy",

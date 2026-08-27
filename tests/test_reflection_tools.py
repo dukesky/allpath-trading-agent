@@ -449,3 +449,50 @@ def test_rearm_warning_names_the_triggered_rule_and_never_re_arms_it(tmp_path):
     # The warning is purely informational -- it must never itself flip the
     # rule back to armed.
     assert store.load("s1").rules[0].state == RuleState.TRIGGERED
+
+
+# --- on_proposed callback hook -----------------------------------------------
+
+def test_on_proposed_receives_the_new_review_id(tmp_path):
+    # Arrange: same as test_valid_proposal_queues_and_returns_pending_text
+    strategies_dir = tmp_path / "strategies"
+    strategies_dir.mkdir()
+    (strategies_dir / "s1.yaml").write_text(CURRENT)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(strategies_dir, conn)
+    queue = ReviewQueue(conn, executor=None)
+
+    # Set up registry with on_proposed callback
+    seen: list[int] = []
+    reg = ToolRegistry()
+    register_reflection_tools(reg, strategies=store, queue=queue, on_proposed=seen.append)
+
+    # Act
+    result = call(reg, strategy_id="s1", new_yaml=PROPOSED, rationale="stop was too loose")
+
+    # Assert
+    assert not result.startswith("error:")
+    assert len(seen) == 1
+    row = queue.get(seen[0])
+    assert row["kind"] == "strategy_revision"
+
+
+def test_on_proposed_not_called_on_a_rejected_proposal(tmp_path):
+    # Arrange: same as test_missing_strategy_returns_error_string
+    strategies_dir = tmp_path / "strategies"
+    strategies_dir.mkdir()
+    (strategies_dir / "s1.yaml").write_text(CURRENT)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(strategies_dir, conn)
+    queue = ReviewQueue(conn, executor=None)
+
+    # Set up registry with on_proposed callback
+    seen: list[int] = []
+    reg = ToolRegistry()
+    register_reflection_tools(reg, strategies=store, queue=queue, on_proposed=seen.append)
+
+    # Act: call with a missing strategy
+    call(reg, strategy_id="missing", new_yaml="x", rationale="r")
+
+    # Assert: callback should not have been called
+    assert seen == []
