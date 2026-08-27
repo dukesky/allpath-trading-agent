@@ -321,3 +321,31 @@
       /ASGI 服务器自身的限制（如 Nginx 的 `client_max_body_size`），应用代码
       里没有再加一层。对自托管、单用户场景影响有限，记录在此供后续如果要上
       公网反向代理时评估是否需要在应用层再加一道总量上限。
+
+## options-via-MCP（Task 8）已知限制
+
+- [ ] **只支持单腿期权**：目前只有买入开仓（call/put）与卖出平仓
+      （`buy_call`/`buy_put`/`close_options`），没有多腿组合单（如价差、
+      跨式）。spec 里就是这样定的范围（同日截止的黑客松交付），多腿是
+      明确的后续项，不是遗漏。
+- [ ] **期权 intent 没有走 pending-review 队列**：期权的自动交易能力完全
+      来自 sentinel 规则动作（`buy_call`/`buy_put`/`close_options`），而
+      不是 agent 的下单提案（`propose_order`）——因为提案需要人工审批，
+      会打断零干预运行。`strategy/loader.py` 强制期权动作只能出现在
+      `authorization: auto` 且 `type: hard` 的规则上，这是 v1 的既定限制，
+      文档已写进系统提示词（`OPTIONS_ACTIONS_NOTE`）。之后若要支持
+      `confirm`/`notify` 授权级别或 chat 发起的期权提案，需要给
+      `pending_reviews` 表和批准流水线加一条期权 intent 的分支——目前完全
+      没有。
+- [ ] **合约筛选不看 Greeks**：`McpOptionsBackend.pick_contract`（`broker/
+      options_mcp.py`）只按到期日下限（最近一个满足 `dte` 的到期日）和
+      行权价距离 spot 的 `otm` 百分比选合约，不查询、也不比较 delta/
+      theta/vega 等希腊字母。对希望按 delta 目标选合约（如"选 delta 约
+      0.3 的 call"）的策略，目前唯一的口径就是 otm 百分比这个粗略代理。
+- [ ] **shadow 账户不支持期权**：`_build_account_components`（`app.py`）
+      只在 `account == "paper"` 时才会构建 `McpOptionsBackend`，shadow 的
+      `options_backend` 恒为 `None`——这是 spec 明确写的范围（"Paper
+      account only; shadow account gets no options"），不是遗漏。shadow
+      本来就是本地记账、不接真实券商 API，期权的合约/报价/成交都要靠
+      Alpaca MCP 服务器，两者暂不兼容；后续若要支持，需要单独设计 shadow
+      侧的期权模拟记账方式。

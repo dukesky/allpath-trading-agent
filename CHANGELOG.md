@@ -2,6 +2,59 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Options trading via Alpaca MCP server — 2026-08-27
+
+- **Single-leg options, gated off by default**: `OPTIONS_TRADING` (`.env`
+  only, default `false`) turns on buy-to-open call/put and sell-to-close
+  option orders. Off is byte-identical to today — no new subprocess, no new
+  strategy YAML accepted. Paper account only; shadow gets no options (spec
+  decision, tracked as a known limitation in `docs/TODO.md`).
+- **New action grammar**: strategy rules can now write `buy_call $<budget>
+  [dte>=<days>] [otm=<pct>%]`, `buy_put ...` (same params), and
+  `close_options`. Omitted `dte`/`otm` default to `dte>=7 otm=2%`. Because
+  options are only autonomous through sentinel rule actions (not agent order
+  proposals, which would stall a zero-intervention run), the strategy loader
+  now rejects any option action on a rule that isn't `type: hard` on a
+  strategy that isn't `authorization: auto` — the v1 limitation is spelled
+  out in the validation error itself, and in a new `OPTIONS_ACTIONS_NOTE`
+  block injected into every system prompt (chat and reflection) alongside
+  the existing market-mechanics guidance, including the discipline line
+  that option budget per position should stay near 2% of equity and every
+  entry rule should pair with a `close_options` exit on both a target and a
+  stop.
+- **Alpaca's official MCP server as the options data/order path**:
+  `McpOptionsBackend` (`broker/options_mcp.py`) lazily spawns `uvx
+  alpaca-mcp-server` over stdio as a managed subprocess, with its own
+  session serialized onto a dedicated daemon thread and a 30s per-call
+  timeout; a transport failure tears the process down and respawns once
+  before surfacing the error, and the backend is stopped (subprocess
+  killed) both via `atexit` and whenever the web settings page rebuilds
+  components, so repeated settings saves can no longer leak a subprocess.
+  `pick_contract` picks the nearest tradable expiry on/after the `dte`
+  floor, then the strike closest to the `otm` target, sized to the rule's
+  dollar budget; `place_option_order` routes buys as `buy_to_open` and
+  closes as `sell_to_close`.
+- **Risk gate additions**: a new `RiskGate.check_option` enforces premium
+  `<= max_order_value` and total option exposure (existing option
+  positions' market value plus the new premium) `<= max_options_weight`
+  (10% of equity, new `RiskLimits` field) on buys only — closing a
+  position is never blocked by either value cap, only by the shared daily
+  trade-count limit, since a close reduces risk rather than adding it.
+- **Executor + sentinel wiring**: `Executor.execute_option` runs option
+  intents through the same gate → broker → journal → notification chain as
+  stock orders (journaled as a synthetic order keyed on the OCC symbol, so
+  the digest/reflection pipelines need no schema change). The sentinel
+  dispatches `buy_call`/`buy_put` through contract selection and
+  `close_options` by closing every position under the strategy's
+  underlying, plus a new expiry safety sweep that runs every tick and
+  sell-to-closes any option position within one calendar day of expiry
+  regardless of strategy, isolating one bad position's error from the rest
+  of the sweep and the sentinel pass.
+- **New dependency**: `mcp` (the official Python MCP SDK).
+- See `docs/superpowers/specs/2026-08-27-options-via-mcp-design.md` and
+  `docs/superpowers/plans/2026-08-27-options-via-mcp.md` for the full design
+  and task-by-task implementation record.
+
 ## Two-week autonomous run prep — 2026-08-26
 
 - **Experiment auto-apply for reflection revisions**: `EXPERIMENT_AUTO_APPLY_REVISIONS`

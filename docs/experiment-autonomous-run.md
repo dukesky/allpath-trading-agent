@@ -21,6 +21,14 @@ cp -r strategies strategies.experiment-start-backup
 Then, in the Alpaca dashboard, reset the paper account's cash balance to
 $100,000 so the run starts from a clean baseline.
 
+**lablab.ai Alpaca hackathon note**: if this run is for the Alpaca AI
+Trading Agents Hackathon, use a **brand-new, dedicated paper account**
+created specifically for the submission — a reused or reset existing
+account is ineligible for judging. On that new account, check the Alpaca
+dashboard and confirm its **Options Trading Level is ≥ 2** before starting
+the run if you plan to enable `OPTIONS_TRADING` (see below); a level-0/1
+account will reject option orders outright.
+
 ## 2. `.env` for the run
 
 Set these three for the duration of the experiment:
@@ -30,6 +38,17 @@ EXPERIMENT_AUTO_APPLY_REVISIONS=true
 SENTINEL_INTERVAL_MINUTES=30
 DRAWDOWN_HALT_PCT=0.15
 ```
+
+For the hackathon run, also add:
+
+```bash
+OPTIONS_TRADING=true
+```
+
+This turns on single-leg options (`buy_call`/`buy_put`/`close_options`
+rule actions, routed through Alpaca's MCP server) — required since the
+hackathon expects options in every strategy. Default is `false`; omit the
+line entirely for a non-hackathon run that shouldn't trade options.
 
 `EXPERIMENT_AUTO_APPLY_REVISIONS` lets nightly reflection's own
 strategy-revision proposals auto-apply through the normal guarded applier
