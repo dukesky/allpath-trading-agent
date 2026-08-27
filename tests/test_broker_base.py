@@ -1,9 +1,12 @@
+from datetime import date
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
-from allpath_trade.broker.base import Broker, OrderIntent, OrderSide
+from allpath_trade.broker.base import (
+    Broker, OrderIntent, OrderSide, OptionIntent, OccParts, parse_occ_symbol
+)
 
 
 def test_intent_requires_exactly_one_of_qty_or_notional():
@@ -98,3 +101,195 @@ def test_order_filled_at_accepts_a_datetime():
                   submitted_at=datetime(2026, 8, 9, 20, 27, tzinfo=UTC),
                   filled_at=filled_at)
     assert order.filled_at == filled_at
+
+
+def test_parse_occ_symbol_call():
+    """Test parsing a call option symbol."""
+    result = parse_occ_symbol("META260918C00600000")
+    assert result == OccParts(root="META", expiry=date(2026, 9, 18),
+                              right="call", strike=Decimal("600"))
+
+
+def test_parse_occ_symbol_put_with_fractional_strike():
+    """Test parsing a put option symbol with fractional strike."""
+    result = parse_occ_symbol("META260918P00123500")
+    assert result == OccParts(root="META", expiry=date(2026, 9, 18),
+                              right="put", strike=Decimal("123.5"))
+    # Verify Decimal equality works as expected
+    assert result.strike == Decimal("123.500")
+
+
+def test_parse_occ_symbol_rejects_plain_stock_ticker():
+    """Test that plain stock tickers return None."""
+    assert parse_occ_symbol("META") is None
+    assert parse_occ_symbol("BRKB") is None
+    assert parse_occ_symbol("AAPL") is None
+
+
+def test_parse_occ_symbol_rejects_invalid_occ():
+    """Test that invalid OCC symbols return None."""
+    assert parse_occ_symbol("META260918") is None  # missing right and strike
+    assert parse_occ_symbol("META260918C006") is None  # strike too short
+    assert parse_occ_symbol("meta260918C00600000") is None  # lowercase root
+    assert parse_occ_symbol("META260918X00600000") is None  # invalid right
+
+
+def test_option_intent_valid():
+    """Test creating a valid OptionIntent."""
+    opt = OptionIntent(
+        underlying="META",
+        right="call",
+        occ_symbol="META260918C00600000",
+        side=OrderSide.BUY,
+        qty=2,
+        est_premium=Decimal("1000"),
+        reason="test"
+    )
+    assert opt.underlying == "META"
+    assert opt.right == "call"
+    assert opt.qty == 2
+    assert opt.est_premium == Decimal("1000")
+
+
+def test_option_intent_underlying_uppercases_and_validates():
+    """Test that underlying is uppercased and non-empty is validated."""
+    opt = OptionIntent(
+        underlying="meta",
+        right="put",
+        occ_symbol="META260918P00123500",
+        side=OrderSide.SELL,
+        qty=1,
+        est_premium=Decimal("500"),
+        reason="test"
+    )
+    assert opt.underlying == "META"
+
+    with pytest.raises(ValidationError):
+        OptionIntent(
+            underlying="",
+            right="call",
+            occ_symbol="META260918C00600000",
+            side=OrderSide.BUY,
+            qty=1,
+            est_premium=Decimal("1000"),
+            reason="test"
+        )
+
+    with pytest.raises(ValidationError):
+        OptionIntent(
+            underlying="   ",
+            right="call",
+            occ_symbol="META260918C00600000",
+            side=OrderSide.BUY,
+            qty=1,
+            est_premium=Decimal("1000"),
+            reason="test"
+        )
+
+
+def test_option_intent_right_validates():
+    """Test that right must be 'call' or 'put'."""
+    opt_call = OptionIntent(
+        underlying="META",
+        right="call",
+        occ_symbol="META260918C00600000",
+        side=OrderSide.BUY,
+        qty=1,
+        est_premium=Decimal("1000"),
+        reason="test"
+    )
+    assert opt_call.right == "call"
+
+    opt_put = OptionIntent(
+        underlying="META",
+        right="Put",
+        occ_symbol="META260918P00123500",
+        side=OrderSide.SELL,
+        qty=1,
+        est_premium=Decimal("500"),
+        reason="test"
+    )
+    assert opt_put.right == "put"
+
+    with pytest.raises(ValidationError):
+        OptionIntent(
+            underlying="META",
+            right="invalid",
+            occ_symbol="META260918C00600000",
+            side=OrderSide.BUY,
+            qty=1,
+            est_premium=Decimal("1000"),
+            reason="test"
+        )
+
+
+def test_option_intent_qty_validates():
+    """Test that qty must be >= 1."""
+    with pytest.raises(ValidationError):
+        OptionIntent(
+            underlying="META",
+            right="call",
+            occ_symbol="META260918C00600000",
+            side=OrderSide.BUY,
+            qty=0,
+            est_premium=Decimal("1000"),
+            reason="test"
+        )
+
+    with pytest.raises(ValidationError):
+        OptionIntent(
+            underlying="META",
+            right="call",
+            occ_symbol="META260918C00600000",
+            side=OrderSide.BUY,
+            qty=-1,
+            est_premium=Decimal("1000"),
+            reason="test"
+        )
+
+    ok = OptionIntent(
+        underlying="META",
+        right="call",
+        occ_symbol="META260918C00600000",
+        side=OrderSide.BUY,
+        qty=1,
+        est_premium=Decimal("1000"),
+        reason="test"
+    )
+    assert ok.qty == 1
+
+
+def test_option_intent_est_premium_validates():
+    """Test that est_premium must be >= 0."""
+    with pytest.raises(ValidationError):
+        OptionIntent(
+            underlying="META",
+            right="call",
+            occ_symbol="META260918C00600000",
+            side=OrderSide.BUY,
+            qty=1,
+            est_premium=Decimal("-1"),
+            reason="test"
+        )
+
+    ok_zero = OptionIntent(
+        underlying="META",
+        right="put",
+        occ_symbol="META260918P00123500",
+        side=OrderSide.SELL,
+        qty=1,
+        est_premium=Decimal("0"),
+        reason="test close"
+    )
+    assert ok_zero.est_premium == Decimal("0")
+
+    ok_positive = OptionIntent(
+        underlying="META",
+        right="call",
+        occ_symbol="META260918C00600000",
+        side=OrderSide.BUY,
+        qty=1,
+        est_premium=Decimal("1000.50"),
+        reason="test"
+    )
+    assert ok_positive.est_premium == Decimal("1000.50")

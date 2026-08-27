@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from typing import NamedTuple
 
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -47,6 +49,53 @@ class BrokerNotConfigured(BrokerError):
 class OrderSide(str, Enum):
     BUY = "buy"
     SELL = "sell"
+
+
+class OccParts(NamedTuple):
+    """Parsed components of an OCC option symbol."""
+    root: str
+    expiry: date
+    right: str
+    strike: Decimal
+
+
+def parse_occ_symbol(ticker: str) -> OccParts | None:
+    """Parse an OCC option symbol into its components.
+
+    OCC pattern: root (1-6 letters) + YYMMDD + C/P + strike (8 digits).
+    Returns None if the ticker does not match the OCC pattern.
+
+    Examples:
+        parse_occ_symbol("META260918C00600000") ->
+            OccParts(root="META", expiry=date(2026,9,18), right="call", strike=Decimal("600"))
+        parse_occ_symbol("META260918P00123500") ->
+            OccParts(root="META", expiry=date(2026,9,18), right="put", strike=Decimal("123.5"))
+        parse_occ_symbol("META") -> None
+    """
+    pattern = r'^(?P<root>[A-Z]{1,6})(?P<ymd>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$'
+    match = re.match(pattern, ticker)
+    if not match:
+        return None
+
+    root = match.group("root")
+    ymd = match.group("ymd")
+    cp = match.group("cp")
+    strike_str = match.group("strike")
+
+    # Parse YYmmdd into date (YY is 20YY)
+    year = 2000 + int(ymd[:2])
+    month = int(ymd[2:4])
+    day = int(ymd[4:6])
+    expiry = date(year, month, day)
+
+    # Convert right: C -> "call", P -> "put"
+    right = "call" if cp == "C" else "put"
+
+    # Convert strike: 8 digits divided by 1000 to Decimal
+    strike_int = int(strike_str)
+    strike = Decimal(strike_int) / Decimal(1000)
+
+    return OccParts(root=root, expiry=expiry, right=right, strike=strike)
 
 
 class OrderStatus(str, Enum):
@@ -100,6 +149,51 @@ class OrderIntent(BaseModel):
             if val is not None and val.copy_abs() > _MAX_MAGNITUDE:
                 raise ValueError(f"order size {val} exceeds max magnitude {_MAX_MAGNITUDE}")
         return self
+
+
+class OptionIntent(BaseModel):
+    """A request to trade an option contract. Like OrderIntent, this is the
+    ONLY thing upper layers (LLM included) may produce; execution always
+    goes through the risk gate."""
+
+    underlying: str            # e.g. "META" (upper, validated non-empty)
+    right: str                 # "call" | "put"
+    occ_symbol: str            # e.g. "META260918C00600000"
+    side: OrderSide            # BUY (open) or SELL (close)
+    qty: int                   # contracts, >= 1
+    est_premium: Decimal       # total dollars (ask*100*qty); 0 for closes
+    reason: str
+    strategy_id: str | None = None
+
+    @field_validator("underlying")
+    @classmethod
+    def _upper(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v:
+            raise ValueError("underlying must be non-empty")
+        return v
+
+    @field_validator("right")
+    @classmethod
+    def _validate_right(cls, v: str) -> str:
+        v_lower = v.lower()
+        if v_lower not in ("call", "put"):
+            raise ValueError("right must be 'call' or 'put'")
+        return v_lower
+
+    @field_validator("qty")
+    @classmethod
+    def _validate_qty(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("qty must be >= 1")
+        return v
+
+    @field_validator("est_premium")
+    @classmethod
+    def _validate_premium(cls, v: Decimal) -> Decimal:
+        if v < 0:
+            raise ValueError("est_premium must be >= 0")
+        return v
 
 
 class Order(BaseModel):
