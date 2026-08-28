@@ -2,21 +2,22 @@
 
 # All Path Trading Agent
 
-**A self-hosted, LLM-powered trading agent framework for mid/long-term investing**
+**A self-hosted, LLM-powered autonomous trading agent framework**
 
-*It learns your goals, co-creates strategies with you, monitors the market, executes through your own brokerage account — and grows alongside you.*
+*It learns your goals, co-creates strategies with you, monitors the market, trades stocks and options through your own brokerage account — and grows alongside you.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#roadmap)
+[![Tests](https://img.shields.io/badge/tests-2368%20passing-brightgreen.svg)](#development)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
 [Getting Started](#getting-started) ·
 [Architecture](#architecture) ·
-[Safety Model](#safety-model) ·
-[Roadmap](#roadmap) ·
-[Contributing](#contributing) ·
+[Options via MCP](#options-trading-via-alpacas-mcp-server) ·
+[Autonomy](#the-autonomy-ladder) ·
+[Memory](#the-memory-system) ·
+[Safety](#safety-model) ·
 [中文文档](README.zh-CN.md) ·
 [**Website →**](https://trading.all-path.com)
 
@@ -25,34 +26,35 @@
 ---
 
 <p align="center">
-  <img src="docs/images/dashboard-demo.png" alt="AllPath Trading Agent dashboard — equity curve, positions, strategy cards (demo data)" width="900">
+  <img src="docs/images/hackathon/dashboard.png" alt="AllPath dashboard — live competition account: equity curve, positions across stocks and options, sentinel heartbeat" width="900">
 </p>
 
-<p align="center"><b>A trading agent that proposes. You approve.</b><br>
-Write strategies in plain YAML, let a sentinel watch them every hour, chat with an agent that remembers how you think (web or Telegram) — and keep a human approval gate in front of every single order. Paper trading by default; the agent has no tool that places an order or writes a strategy file.</p>
+<p align="center"><b>An agent that reasons like an analyst and executes like a machine.</b><br>
+Strategies are human-readable YAML documents — a prose thesis plus deterministic rules. A sentinel evaluates them on a schedule at zero LLM cost; an agent researches, drafts, reflects nightly, and revises its own strategies; a deterministic risk gate that no model can bypass sits in front of every order. You choose the autonomy level per strategy: notify-only, confirm-first, or fully autonomous.</p>
 
 <p align="center">
-  <code>rule fires → agent researches → proposal queued → <b>you approve</b> → risk gate → paper order</code>
+  <code>rule fires → contract selected via Alpaca MCP → risk gate → order → journal → notification → nightly reflection</code>
 </p>
 
-<p align="center"><sub>Screenshots use fictional demo data — not a real account.</sub></p>
-
----
-
-> **Project status:** Phases 1-6 are complete — broker connectivity, market data, risk management, and trade journaling are operational against Alpaca paper accounts; the strategy engine + sentinel loop (YAML strategies, rule evaluation, versioning, scheduled monitoring, hard-rule auto-execution) is running; the LLM agent core (multi-provider chat client, tool-calling loop, `allpath-trade chat` REPL, and a ReviewAgent that researches queued soft-rule triggers) is in place; the memory system (four curated markdown layers + consolidation + session search) enables the agent to learn and recall durable patterns across sessions; and the web interface (`allpath-trade serve`, token-gated, LAN-reachable) puts the dashboard, chat, and confirmation queue on your phone. Phase 5.5 rounded out that web interface — a visible sentinel heartbeat, push notifications via ntfy alongside email, per-strategy notification control, and daily memory consolidation now reads the day's web chat, not just terminal sessions. Phase 6 closed the third loop: an after-close **reflection** pass that re-checks each strategy against the day's trades and prices, writes durable lessons to memory, and proposes strategy revisions for your approval — see [Reflection](#reflection). The agent is now also reachable from Telegram — same conversation and memory as the web chat, mirrored both ways — see [Telegram Chat](#telegram-chat); and drafting or revising a strategy from either chat surface now queues a Pending approval instead of requiring a terminal. Phase 7 added a second, always-on account — **Shadow**, a local ledger that mirrors your real brokerage and records rather than routes orders — running in parallel with Paper; see [Two Accounts](#two-accounts). **Paper trading (and shadow recording — never a real order) only by default.**
+> **🏆 Currently competing in the [Alpaca AI Trading Agents Hackathon](https://lablab.ai/ai-hackathons/alpaca-ai-trading-agents-hackathon) (Aug 28 – Sep 4, 2026).** The screenshots in this README are the *live competition account*: a fresh $100k paper account run with **zero human intervention** — the agent picked the tickers, drafted the strategies (stock + options legs with paired exits), executes autonomously, and revises itself every night. Options data and order routing go through **Alpaca's official MCP server**. See [The Live Autonomous Run](#the-live-autonomous-run).
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Key Features](#key-features)
+- [Why AllPath](#why-allpath)
+- [System at a Glance](#system-at-a-glance)
 - [Architecture](#architecture)
-- [How It Works](#how-it-works)
-- [Reflection](#reflection)
+- [The Strategy System](#the-strategy-system)
+- [The Trading Loop](#the-trading-loop)
+- [Options Trading via Alpaca's MCP Server](#options-trading-via-alpacas-mcp-server)
+- [The Autonomy Ladder](#the-autonomy-ladder)
+- [Nightly Reflection & Self-Revision](#nightly-reflection--self-revision)
+- [The Memory System](#the-memory-system)
 - [Safety Model](#safety-model)
+- [Notifications](#notifications)
+- [Surfaces: Web, Telegram, CLI](#surfaces-web-telegram-cli)
+- [Two Accounts: Paper & Shadow](#two-accounts-paper--shadow)
+- [The Live Autonomous Run](#the-live-autonomous-run)
 - [Getting Started](#getting-started)
-- [Web Interface](#web-interface)
-- [Telegram Chat](#telegram-chat)
-- [Two Accounts](#two-accounts)
 - [Project Structure](#project-structure)
 - [Roadmap](#roadmap)
 - [Development](#development)
@@ -61,147 +63,324 @@ Write strategies in plain YAML, let a sentinel watch them every hour, chat with 
 - [Disclaimer](#disclaimer)
 - [License](#license)
 
-## Overview
+## Why AllPath
 
-Most LLM trading projects stop at *"here's my analysis."* Most algorithmic trading frameworks execute code but cannot reason. **All Path Trading Agent** bridges the two for **mid/long-term investing** (holding periods of weeks to months, not high-frequency trading):
+Most LLM trading projects stop at *"here's my analysis."* Most algorithmic frameworks execute code but cannot reason, remember, or explain themselves. **AllPath** closes the loop:
 
 | Capability | Description |
 |---|---|
-| **Conversational onboarding** | The agent interviews you to understand risk tolerance, capital, goals, and preferences |
-| **Strategy co-creation** | Each strategy is a human-readable document: an investment thesis (prose) plus deterministic entry / take-profit / stop-loss rules (machine-checkable) |
-| **Autonomous monitoring** | Scheduled market checks; on triggers the agent researches current news and prices itself before acting |
-| **Tiered execution** | Trades through *your own* brokerage account, at the authorization level you choose: notify-only → confirm-first → auto-execute within limits |
-| **Continuous learning** | Post-trade retrospectives, per-stock dossiers that compound over time, and distilled lessons that inform future decisions |
+| **Conversational strategy co-creation** | The agent interviews you, researches live prices and news, and drafts strategies as readable YAML — thesis in prose, entry/exit rules as deterministic expressions |
+| **Autonomous monitoring & execution** | A scheduled sentinel evaluates every rule with plain code (no LLM cost); triggers execute through a risk gate, queue for approval, or just notify — per-strategy, your choice |
+| **Options, natively** | Strategies can buy calls/puts and close option positions; contract selection and order routing go through Alpaca's official MCP server |
+| **Self-evolution** | A nightly reflection session reviews the day against every thesis, writes lessons to memory, re-arms spent triggers, and proposes (or, in experiment mode, applies) strategy revisions |
+| **Layered memory** | User profile, strategy history, per-stock dossiers, distilled lessons — curated markdown a human can read and audit, consolidated nightly |
+| **Defense in depth** | Deterministic risk gate, account-level drawdown circuit breaker, option expiry sweep, market-hours guards, byte-exact revision staleness checks — none of it bypassable by the model |
+| **Fully self-hosted** | Your keys, your data, your machine. SQLite + markdown on disk; no external services beyond your LLM provider and your brokerage |
 
-The framework is distributed as the Python package **`allpath-trade`** and is designed to run entirely on your own machine: your keys, your data, your decisions.
+It runs as the Python package **`allpath-trade`**: one process hosts the web UI, the scheduler, the Telegram bridge, and the agent.
 
-## Key Features
+## System at a Glance
 
-- **Three operating loops**
-  1. **Conversation loop** — on demand: discuss stocks, create or revise strategies. Changes always follow *agent drafts → you approve → takes effect*.
-  2. **Sentinel loop** — hourly during market hours (configurable interval): deterministic code evaluates prices against strategy rules at zero LLM cost. On a trigger, *hard rules* (e.g. stop-loss) execute immediately with no LLM in the path; *soft rules* (e.g. buy-the-dip) wake the agent to research conditions first.
-  3. **Reflection loop** — daily after close and after every trade: the agent re-validates each strategy's thesis against fresh information, reviews portfolio risk, and reports to you.
-
-- **Four-layer memory**
-
-  | Layer | Contents |
-  |---|---|
-  | User profile | Risk tolerance, goals, decision habits (slowly evolving) |
-  | Strategy memory | Full version history of every strategy, with revision rationale |
-  | Stock dossiers | Per-ticker knowledge that compounds: behavior patterns, trade history, ticker-specific lessons |
-  | Lessons | Distilled retrospective insights, retrieved by relevance for new decisions |
-
-- **Bring your own LLM** — Anthropic Claude, OpenAI, or OpenRouter (one key, many models); strong models for strategy work, cheaper models for routine checks, and no LLM at all for rule evaluation.
-
-- **Bring your own brokerage** — a thin, auditable adapter layer (a few hundred lines over the official `alpaca-py` SDK) that can be reviewed in one sitting. Additional brokers integrate through the `Broker` interface.
+<table>
+<tr>
+<td width="50%"><img src="docs/images/hackathon/strategies.png" alt="Strategies page — lifecycle badges, authorization tiers, rules at a glance"></td>
+<td width="50%"><img src="docs/images/hackathon/chat.png" alt="Chat — the agent researches live data and drafts strategies with inline proposal cards"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Strategies</b> — YAML documents with lifecycle badges, authorization tiers, armed/triggered rule states, and full version history</sub></td>
+<td align="center"><sub><b>Chat</b> — the same agent on web and Telegram; drafts and orders become approval cards, never direct writes</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/images/hackathon/reports.png" alt="Reports — nightly reflection with full transcript replay"></td>
+<td width="50%"><img src="docs/images/hackathon/memory.png" alt="Memory — four curated layers with change history"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Reports</b> — every nightly reflection: day summary, per-strategy check, lessons, revision proposals, and a replay of every tool call</sub></td>
+<td align="center"><sub><b>Memory</b> — profile / strategies / stock dossiers / lessons, tabbed, with an audited change log</sub></td>
+</tr>
+</table>
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph Surfaces
+        WEB["Web UI<br/>(FastAPI + htmx)"]
+        TG["Telegram bot"]
+        CLI["CLI / REPL"]
+    end
+
+    subgraph Agent["Agent core (LLM)"]
+        CHAT["Chat agent<br/>research · draft_strategy · propose_order"]
+        REVIEW["ReviewAgent<br/>analyzes soft-rule triggers"]
+        REFLECT["Nightly Reflection<br/>lessons · re-arm · revisions"]
+    end
+
+    subgraph Engine["Deterministic engine (no LLM)"]
+        SENTINEL["Sentinel<br/>evaluates YAML rules every 30 min"]
+        BREAKER["Drawdown circuit breaker<br/>15% from peak → halt"]
+        GATE["Risk gate<br/>caps · exposure · cash reserve"]
+        EXEC["Executor<br/>the ONLY path to a broker"]
+    end
+
+    subgraph Brokers["Market access"]
+        ALPACA["alpaca-py<br/>stocks"]
+        MCP["Alpaca MCP server<br/>option chains + option orders"]
+        YF["yfinance quotes"]
+    end
+
+    subgraph State["Local state"]
+        YAML["Strategy YAML + versions"]
+        MEM["Memory (markdown ×4 layers)"]
+        DB["SQLite: journal · queue ·<br/>conversations · observations"]
+    end
+
+    WEB --> CHAT
+    TG --> CHAT
+    CLI --> CHAT
+    CHAT -- "proposals (approval-gated)" --> DB
+    SENTINEL --> BREAKER
+    SENTINEL -- "hard rules" --> GATE
+    SENTINEL -- "soft rules" --> REVIEW --> GATE
+    GATE --> EXEC
+    EXEC --> ALPACA
+    EXEC -- "options" --> MCP
+    SENTINEL --> YF
+    SENTINEL --> YAML
+    REFLECT --> MEM
+    REFLECT -- "revisions" --> YAML
+    EXEC --> DB
 ```
-┌─────────────────────────────────────────────────────┐
-│                 Web UI (chat + dashboard)            │   ✅ Phase 5
-└──────────────────────────┬──────────────────────────┘
-                           │ HTTP / WebSocket
-┌──────────────────────────▼──────────────────────────┐
-│                  FastAPI application                 │
-│  ┌────────────┐  ┌──────────────┐  ┌─────────────┐  │
-│  │ Agent core │  │ Strategy     │  │ Scheduler   │  │   Phases 2–4
-│  │ (LLM, tools│  │ engine (rule │  │ (sentinel / │  │
-│  │  memory)   │  │  evaluator)  │  │  reflection)│  │
-│  └──────┬─────┘  └──────┬───────┘  └──────┬──────┘  │
-│  ┌──────▼───────────────▼────────────────▼───────┐  │
-│  │   Risk gate — deterministic, cannot be bypassed│  │   ✅ Phase 1
-│  └──────┬─────────────────────────────────────────┘ │
-│  ┌──────▼──────┐  ┌────────────┐  ┌──────────────┐  │
-│  │ Broker layer│  │ Data layer │  │ Notifications│  │   ✅ Phase 1
-│  │ (Alpaca)    │  │ (yfinance) │  │ (email, ntfy)│  │
-│  └─────────────┘  └────────────┘  └──────────────┘  │
-│        SQLite (strategies · memory · trade journal)  │
-└─────────────────────────────────────────────────────┘
+
+Three loops share one process:
+
+1. **Conversation loop** (on demand) — you talk; the agent researches with live tools; anything touching money or strategy files becomes an approval-queue proposal.
+2. **Sentinel loop** (every 30 minutes during market hours, configurable) — deterministic rule evaluation at zero LLM cost. Hard rules execute with no model in the path; soft rules wake a cheap ReviewAgent to research before deciding.
+3. **Reflection loop** (nightly, after close) — a bounded agent session reviews the day, updates memory, re-arms burned triggers, and proposes strategy revisions.
+
+Design documents live in [`docs/superpowers/specs/`](docs/superpowers/specs/), implementation plans in [`docs/superpowers/plans/`](docs/superpowers/plans/) — the project is built spec-first and the whole paper trail is in the repo.
+
+## The Strategy System
+
+A strategy is one YAML file: a **thesis** (prose — why this position exists) plus **rules** (machine-checkable expressions). This is the live NVDA strategy from the competition account, drafted entirely by the agent:
+
+```yaml
+name: NVDA short-term momentum swing (post-earnings breakout)
+status: active
+authorization: auto          # notify | confirm | auto
+thesis: >
+  Post-earnings momentum: Q2 EPS $2.22 beat, data-center +117% YoY,
+  guidance above street. Long leg of a semis-vs-software pair against
+  a CRM put hedge. Holding period 1-5 days.
+position: {ticker: NVDA, target_weight: 6%}
+rules:
+  - {id: entry-momentum, type: hard,
+     condition: "position_weight == 0 and price < 232",
+     action: "buy $3000"}
+  - {id: entry-call, type: hard,
+     condition: "position_weight > 0 and position_weight < 0.06 and price < 232",
+     action: "buy_call $1500 dte>=5 otm=3%"}
+  - {id: take-profit, type: hard, condition: "price > 246", action: "sell all"}
+  - {id: take-profit-options, type: hard, condition: "price > 246", action: "close_options"}
+  - {id: stop-loss, type: hard, condition: "price < 217", action: "sell all"}
+  - {id: stop-loss-options, type: hard, condition: "price < 217", action: "close_options"}
 ```
 
-Design documents are maintained in [`docs/superpowers/specs/`](docs/superpowers/specs/) and implementation plans in [`docs/superpowers/plans/`](docs/superpowers/plans/).
+**Rule conditions** are evaluated by a whitelist-AST expression evaluator (no `eval`) over a small context: `price`, `position_qty`, `position_weight`, `avg_entry_price`, `pnl_pct`, `target_weight`.
 
-## How It Works
+**Actions** are a closed grammar:
 
-**Conversation loop** — you talk, the agent researches with live tools, and anything that touches money or your strategy files stops for an explicit confirmation. On exit it distills what it learned into curated memory, which seeds the next session (dashed line).
-
-![Conversation loop](docs/images/conversation-loop.svg)
-
-**Sentinel loop** — runs on its own while you're away. Deterministic rule checks cost nothing; hard rules (stop-losses) execute without any LLM in the path, soft rules wake the agent to research before queuing for your approval. Every outcome is journaled, and after the close it's distilled into the same memory that makes the next review sharper.
-
-![Sentinel loop](docs/images/sentinel-loop.svg)
-
-## Reflection
-
-Once a trading day closes, a scheduled job runs a bounded agent session
-(up to `REFLECTION_MAX_ITERS` tool calls, default 12) that reviews the day
-against every active strategy's stated thesis and rules. It runs after the
-daily email digest and before nightly memory consolidation, so any
-conclusions it reaches are available to that same night's consolidation
-pass. Toggle it with `DAILY_REFLECTION` in `.env` (on by default).
-
-What it produces, every day it runs:
-
-- **A written report** — day summary, per-strategy check, lessons, and any
-  proposals — plus a short plain-language summary sized for a phone push
-  notification.
-- **Durable memory updates**, when the agent reaches a real conclusion (a
-  confirmed pattern, a broken assumption) — the same curated memory the
-  conversation and sentinel loops read from.
-- **Strategy revision proposals**, when a strategy's real-world behavior
-  measurably diverges from what it assumes — a full diff against the
-  current file plus the agent's rationale.
-
-Where to see it:
-
-| Surface | What's there |
+| Action | Meaning |
 |---|---|
-| **Reports page** (web UI) | One row per day, a summary teaser, and a detail view with the full report and a replay of the session's tool calls |
-| **Push / email** | ntfy gets the short summary as a phone banner; email gets the full report body |
-| **Pending page** | Any proposed strategy revision waits here, diffed against the current file, until you approve or reject it |
+| `buy $3000` / `buy to target_weight` | Notional stock buy |
+| `sell all` / `sell 50%` / `sell $2000` | Stock exit |
+| `buy_call $1500 dte>=10 otm=3%` | Buy call options: budget, min days-to-expiry, percent out-of-the-money (defaults `dte>=7`, `otm=2%`) |
+| `buy_put $1500 dte>=5 otm=3%` | Buy puts — directional or as a hedge leg |
+| `close_options` | Sell-to-close every option position on this underlying |
 
-Reflection **never applies anything on its own.** It has no order tool and
-no way to write a strategy file directly — every conclusion it acts on goes
-through `memory_update` (curated memory, not the money path) or
-`propose_strategy_revision` (queued on Pending, gated by the same
-byte-exact staleness check as every other approval). If the file changes
-underneath a pending proposal before you approve it, approval is refused
-and the diff is regenerated for review rather than silently applied against
-a moving target.
+**Rule types**: `hard` rules execute deterministically (stop-losses cannot fail because a model or API is down); `soft` rules wake the ReviewAgent to research current conditions first. **One-shot semantics**: a fired rule burns to `triggered` and never silently re-arms — re-arming is an explicit act (yours, or the nightly reflection's).
+
+Every change to a strategy file is versioned with its rationale. Strategy-parse validation enforces safety invariants at authoring time — e.g. option actions require `authorization: auto` + hard rules, and any strategy with option entries must carry `close_options` exit rules.
+
+<p align="center">
+  <img src="docs/images/hackathon/strategy-detail.png" alt="Strategy detail — rules with armed/triggered state, version history with rationale" width="860">
+</p>
+
+## The Trading Loop
+
+What happens when a rule fires, end to end:
+
+1. **Sentinel** (deterministic, scheduled) fetches quotes for each active strategy's underlying, builds the evaluation context, and checks every armed rule. Option rules are skipped—left armed—outside US market hours, so a trigger can never burn into a venue rejection overnight.
+2. **Dispatch by (rule type × authorization)**:
+   - `auto` + hard → execute now.
+   - `auto` + soft → the **ReviewAgent** (a cheap model with read-only research tools) analyzes the trigger and approves or skips it, with its reasoning attached.
+   - `confirm` → queued to **Pending** with the ReviewAgent's analysis attached; you approve on web/Telegram (inline buttons) or via a tokenized approve-by-link from the push notification.
+   - `notify` → you get a notification; nothing else happens.
+3. **Option actions** resolve a concrete contract at trigger time through the MCP server (see below); stock actions become notional orders.
+4. **Risk gate** — deterministic checks no model can bypass: per-order value cap, resulting position weight cap, total options exposure cap, cash reserve, daily trade cap. Sells and closes are never blocked by value caps — reducing risk is always allowed.
+5. **Executor** submits through the broker layer, polls the fill, and journals everything — order, decision, reasons, fill price, timestamps — into SQLite.
+6. **Notification receipt** goes to every configured channel, including for autonomous executions ("it traded without me" is exactly when you want to hear about it).
+
+<p align="center">
+  <img src="docs/images/hackathon/pending.png" alt="Pending queue — approval cards with risk pre-checks and agent analysis" width="860">
+</p>
+
+## Options Trading via Alpaca's MCP Server
+
+Options support is built on **[Alpaca's official MCP server](https://github.com/alpacahq/alpaca-mcp-server)** — the agent's option-chain queries and option orders speak MCP, while stock routing stays on `alpaca-py`:
+
+```
+sentinel rule "buy_call $1500 dte>=10 otm=3%" fires
+   │
+   ├─ McpOptionsBackend (persistent `uvx alpaca-mcp-server` subprocess, stdio)
+   │     get_option_contracts  → expirations ≥ today+dte, calls only
+   │     nearest expiry, strike closest to spot × 1.03
+   │     get_option_latest_quote → ask price
+   │     qty = floor($1500 / (ask × 100))
+   │
+   ├─ RiskGate.check_option    → premium ≤ per-order cap,
+   │                             total option exposure ≤ 10% of equity,
+   │                             cash reserve, shared daily trade cap
+   │
+   └─ place_option_order (MCP) → buy_to_open, market, day
+         → journal, fill poll, notification receipt
+```
+
+Engineering details that matter for reliability:
+
+- The MCP server runs as a **managed subprocess** — lazily spawned, watchdogged with a per-spawn ownership handle, one automatic respawn on transport failure, 30-second call timeouts, and clean teardown on exit and on settings-driven rebuilds. A hung MCP call cannot wedge the sentinel.
+- **Deterministic contract selection** — the LLM never picks strikes freehand; it writes intent parameters (budget, DTE floor, OTM percent) and plain code resolves the contract.
+- **Expiry safety sweep** — any held option with ≤ 1 day to expiry is closed automatically during market hours; positions never ride into exercise/assignment.
+- **Honest failure** — a broker response that carries no order id is journaled as an *error* and notified, never mistaken for a fill. (This guard exists because we hit exactly that failure live — a pre-market submission — on competition day one, and the system now refuses to be silently wrong.)
+- Scope is deliberately conservative in v1: **single-leg long options only** (buy calls/puts, sell-to-close). No naked writing, no multi-leg spreads. Hedging is expressed as buying puts on the opposite leg.
+
+## The Autonomy Ladder
+
+Autonomy in AllPath is **per-strategy, explicit, and graduated** — not a global switch:
+
+| Tier | Trigger behavior | Who decides |
+|---|---|---|
+| `notify` | You get a push; nothing executes | You, out of band |
+| `confirm` *(default)* | Queued to Pending with agent analysis attached | You, one tap |
+| `auto` + soft rule | ReviewAgent researches, then approves or skips | A cheap LLM, journaled |
+| `auto` + hard rule | Executes immediately through the risk gate | Plain code |
+
+Promoting a strategy to `auto` is guarded everywhere: proposal cards warn loudly, the nightly reflection is *frozen out* of changing authorization at all, and the UI confirms before activating. For fully unattended operation, two more layers back it up:
+
+- **Drawdown circuit breaker** — account equity is peak-tracked every sentinel pass; a configurable drawdown from peak (default **15%**) trips once: every `auto` strategy is demoted to `confirm`, a high-priority alert goes to every channel, and a dashboard banner stays up until you review and run `allpath-trade breaker reset`. Demotion is asymmetric by design: **option exits still execute** after a trip — the breaker stops new risk, never risk reduction.
+- **Experiment flag for self-revision** (`EXPERIMENT_AUTO_APPLY_REVISIONS`, default off) — lets the nightly reflection's own strategy revisions apply without human approval, turning the system into a genuinely self-evolving agent for bounded validation runs like the current competition week. Every safety check still applies (see [Safety Model](#safety-model)).
+
+## Nightly Reflection & Self-Revision
+
+After each trading day closes, a bounded agent session (12 tool calls, wall-clock deadline) receives a fenced briefing — the day's trades with fills, observations, current positions with price changes, every active strategy's thesis and rule states — and produces:
+
+- **A written report** with a push-sized summary — one row per day on the Reports page, with a full transcript replay of every tool call the session made.
+- **Durable memory updates** — confirmed patterns and broken assumptions written to the same curated memory every other loop reads.
+- **Trigger re-arms and strategy revisions** — when a one-shot rule burned that day, reflection decides whether to re-arm it at a re-justified level or rewrite it; when reality diverges from a thesis, it proposes a revision as a full diff with rationale.
+
+Revisions flow through a single hardened applier — the only code path that writes a strategy file:
+
+- **Byte-exact staleness check**: the file's current content must match what the proposal was diffed against, or approval is refused.
+- **Version monotonicity** and id immutability.
+- **The reflection freeze**: reflection revisions may touch thesis and rules only — never `authorization` (no self-promotion to `auto`), never `status`.
+- In experiment mode the same checks run — auto-apply is auto-*approval*, not a bypass. A failed check leaves the proposal pending for human eyes.
+
+## The Memory System
+
+Memory is **curated markdown, not embeddings** — small enough to read, audited on every write:
+
+| Layer | Contents | Cadence |
+|---|---|---|
+| `user_profile.md` | Risk tolerance, goals, decision habits | Slowly evolving; shared across accounts |
+| `strategies/` | Per-strategy working notes and revision rationale | Per revision |
+| `stocks/` | Per-ticker dossiers: behavior patterns, trade history, ticker-specific lessons | Compounds over time |
+| `lessons.md` | Distilled cross-cutting insights from retrospectives | Nightly |
+
+Around the layers:
+
+- **Observations journal** — every sentinel trigger, execution, skip, breaker event, and reflection outcome is an append-only observation row; it's the raw feed reflection and consolidation read.
+- **Nightly consolidation** — a dedicated pass (run on the strongest model tier, because a bad call here pollutes every later conversation) reads the day's conversations across web, Telegram, and terminal plus the observations journal, and decides what deserves to enter long-term memory. Per-layer size budgets force prioritization; every change lands in an audited `memory_log` diff.
+- **Injection defense** — external content (search results, fetched pages) is fenced before it reaches memory-writing paths, and `MemoryStore.apply` guards against instruction smuggling inside memory updates.
+- **Full-text session search** (SQLite FTS5) — the agent can search every past conversation and observation, per account.
+- **Three model tiers** — `CHAT_MODEL` for conversation and drafting, `REVIEW_MODEL` (cheap) for the hourly sentinel analysis, `MEMORY_MODEL` (strong) for consolidation and reflection. Bring your own provider: Anthropic, OpenAI, or OpenRouter.
 
 ## Safety Model
 
-The framework is built on one invariant: **the LLM can never bypass your limits.**
+One invariant everything else hangs off: **the LLM can never bypass your limits.**
 
 ```
-LLM / strategy rules  →  OrderIntent  →  RiskGate (deterministic)  →  Broker (official SDK)
-                                              │
-                                        Trade journal (SQLite audit trail)
+LLM / YAML rules → OrderIntent / OptionIntent → RiskGate (plain code) → Broker SDK / MCP
+                                                     │
+                                               SQLite journal (full audit trail)
 ```
 
 | Guarantee | Mechanism |
 |---|---|
-| Single path to the broker | `Executor.execute()` is the only code path that can submit an order; the LLM can only produce an `OrderIntent` |
-| Deterministic pre-trade checks | Order value cap, position weight cap, daily trade cap, and cash reserve are enforced by plain code — no model in the loop |
-| Paper-first | Live trading is disabled unless explicitly enabled (`allow_live`), and remains constrained by the risk gate |
-| Fail-safe stop-losses | Hard rules execute without the LLM — they cannot fail due to model or API outages |
-| Full auditability | Every trade, rejection, and error is journaled locally with its complete reasoning |
-| Local credentials | LLM and brokerage keys live in a local `.env` (gitignored); nothing is transmitted anywhere else |
+| Single path to any broker | `Executor.execute()` / `execute_option()` are the only submitting code paths; the LLM can only produce intents |
+| Deterministic pre-trade checks | Order value cap, position weight cap, options exposure cap (10% of equity), cash reserve, daily trade cap — plain code, no model in the loop |
+| Account-level kill switch | Drawdown circuit breaker: 15% from peak → all `auto` strategies demoted, alert on every channel, manual reset required |
+| Risk reduction always allowed | Sells and option closes are exempt from value caps and (for closes) the daily cap — a stop-loss or safety sweep can never be blocked by a limit |
+| Options never ride to expiry | DTE ≤ 1 sweep closes remaining option positions during market hours |
+| Market-hours discipline | Option rules are skipped (left armed) while the venue is closed; a closed-market submission can't silently burn a one-shot trigger |
+| Honest failure | A broker response without an order id journals an **error** and notifies — never a phantom "submitted" |
+| No self-promotion | Reflection revisions are frozen out of `authorization`/`status`; only a human promotes a strategy to `auto` |
+| Stale writes refused | Byte-exact base check on every revision approval; version numbers strictly increase |
+| Fail-safe stop-losses | Hard rules execute without the LLM — immune to model/API outages |
+| Paper-first | Live trading requires an explicit `allow_live` opt-in and still passes the same gate |
+| Local credentials | All keys live in a local gitignored `.env`; the web session cookie is `HttpOnly`/`SameSite=Strict`; state-changing routes are same-origin checked |
+
+## Notifications
+
+Every event reaches you on the channels you configure — with per-channel save-and-test so "configured" means *verified*:
+
+| Channel | What it carries |
+|---|---|
+| **Email (SMTP)** | Full-body notifications: rule triggers, order receipts with fills, daily digest, complete nightly reflection report |
+| **ntfy push** | Phone-banner-sized summaries of the same events — including a tokenized **approve-by-link** for pending confirmations |
+| **Telegram** | Everything mirrored into your paired chat, with **inline Approve/Reject buttons** (row-bound, single-use nonce) on pending items and receipts for every execution |
+
+Notification honesty is a design rule: autonomous executions send receipts too; shadow-account messages say "recorded — place it yourself" rather than pretending an order exists; every subject is prefixed `[Paper]` / `[Shadow]`; and a strategy-level `notify_email` toggle quiets a noisy strategy without ever silently changing what executes.
+
+## Surfaces: Web, Telegram, CLI
+
+**Web UI** (`allpath-trade serve`, FastAPI + htmx, no npm) — seven token-gated pages: Dashboard (equity curve, positions, strategy cards, sentinel heartbeat, breaker banner), Chat (with image attachments — paste a brokerage screenshot and the agent reads the table back), Pending, Strategies (+ per-strategy detail with version history), Memory, Reports (with transcript replay), Settings (keys write-only, model dropdowns from a cached OpenRouter catalog, notification save-and-test, Usage panel with real token costs). A first-run setup wizard collects keys so you never hand-edit `.env`.
+
+**Telegram** — the same agent, same conversation, same memory as web chat, mirrored both ways; `/account` switches Paper/Shadow; approvals are inline buttons. Pair once with `/start <web token>` in a private chat.
+
+**CLI** — `status`, `chat` (full REPL), `strategies`, `rearm`, `reviews list/approve/reject`, `breaker status/reset`, `memory show`, `check` (one sentinel pass), `serve`.
+
+## Two Accounts: Paper & Shadow
+
+Two always-on accounts run in parallel — separate strategies, memory, queues, reflection, and equity curves, one shared user profile:
+
+| Account | What it is |
+|---|---|
+| **Paper** | An Alpaca paper account — orders actually route to Alpaca's simulated execution. This is the competition account. |
+| **Shadow** | A local ledger that mirrors your **real** brokerage. It holds no real credentials and never routes an order — decisions are *recorded*, and the notification tells you to place the trade yourself if you agree. Import positions by chat, screenshot, or CSV. |
+
+The point is comparison: same market, same agent, two postures — the sandbox where failure is free versus the ledger that shadows what you actually hold. Every page and notification is unambiguous about which account you're looking at.
+
+## The Live Autonomous Run
+
+For the hackathon, the system runs a documented, reproducible experiment ([runbook](docs/experiment-autonomous-run.md)):
+
+- **Fresh $100k paper account**, zero human intervention after a single kickoff conversation.
+- The agent **validated the operator's market theses against live data** — accepted one (semis/software rotation, redesigned as long-NVDA + CRM-put after finding the two were co-moving), *rejected* another with evidence (no META catalyst in the window + pending litigation) — then drafted a five-strategy portfolio: every strategy `auto`, every strategy carrying a stock and/or option leg with paired profit/stop exits.
+- **Sentinel every 30 minutes; reflection every night** with revision auto-apply on — the agent re-arms its own spent triggers and amends its own strategies, inside the freeze and staleness guards.
+- Safety rails live: risk gate on every order, 15% drawdown breaker armed, expiry sweep on, market-hours discipline enforced.
+- Everything is journaled: every trade, every skip, every LLM decision, every nightly report with its full tool-call transcript — the audit trail *is* the demo.
+
+Judging criteria mapping — P&L (live equity curve on the dashboard), technology (this document), creativity (a self-revising memory-bearing agent, not a signal bot), execution (the paper trail above).
 
 ## Getting Started
 
-The fastest path: install, then run `serve` and open the URL — a first-run
-setup wizard walks you through an LLM key, then Alpaca paper keys, then
-importing your Shadow positions, so you never have to hand-edit `.env`.
-The steps below are the manual path, still the one `chat`/`status` from the
-terminal need.
+The fastest path: install, run `serve`, open the URL — a first-run setup wizard walks you through an LLM key, Alpaca paper keys, and optional Shadow import, so you never hand-edit `.env`.
 
 ### Prerequisites
 
 - Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/)
-- A free [Alpaca paper trading account](https://app.alpaca.markets/paper/dashboard/overview)
-- SQLite built with FTS5 (standard in official Python ≥ 3.11 builds) — needed for memory search
+- A free [Alpaca paper trading account](https://app.alpaca.markets/paper/dashboard/overview) (enable options level ≥ 2 for options strategies)
+- SQLite built with FTS5 (standard in official Python ≥ 3.11 builds)
 
 ### Installation
 
@@ -211,262 +390,95 @@ cd allpath-trading-agent
 uv sync
 ```
 
-### Configuration
-
-```bash
-cp .env.example .env
-# Edit .env and set ALPACA_API_KEY / ALPACA_SECRET_KEY
-```
-
-All credentials stay in this local file. `ALPACA_PAPER=true` is the default; live trading additionally requires enabling `allow_live` in the risk limits. This step is optional if you're only using the web interface — `serve` starts without Alpaca keys and its setup wizard collects them (see below); the CLI (`status`, `chat`) still reads keys from `.env` directly.
-
-### Verify
-
-```bash
-uv run allpath-trade status
-uv run allpath-trade chat   # talk to the agent (needs LLM + Alpaca keys in .env)
-```
-
-Expected output: your paper account equity, cash, buying power, open positions, and recent trade journal entries.
-
-### Run the web interface
+### Run
 
 ```bash
 uv run allpath-trade serve
 ```
 
-`serve` starts even without Alpaca keys configured. Open
-`http://localhost:8791` — on a fresh install a first-run setup wizard opens
-automatically and walks you through: an LLM key → Alpaca paper keys (with
-"where to get a key" steps and a Test button for each) → importing your
-Shadow positions → done. Skip any step; every page carries a "Setup
-incomplete" banner with a link back until both keys are saved, and
-Settings → Access has a "Re-run setup" link if you want to revisit it
-later.
+Open `http://localhost:8791` and follow the setup wizard. The access token is printed on startup and stored as `WEB_TOKEN` in `.env`. To reach it from your phone on the same network: `uv run allpath-trade serve --host 0.0.0.0` (only on a network you trust — there is no built-in HTTPS).
 
-The access token is printed on startup and
-stored as `WEB_TOKEN` in `.env`. To reach it from your phone on the same
-network, bind to all interfaces:
+The sentinel, nightly reflection, memory consolidation, and Telegram bridge all run inside this one process.
+
+### Verify from the terminal
 
 ```bash
-uv run allpath-trade serve --host 0.0.0.0
+uv run allpath-trade status    # account, positions, recent journal
+uv run allpath-trade chat      # talk to the agent in a REPL
 ```
 
-The sentinel runs inside the same process, so this one command covers
-monitoring, consolidation, and the interface.
+### Key configuration (`.env`)
 
-## Web Interface
-
-`allpath-trade serve` runs the FastAPI app and the sentinel scheduler in one
-process (default port 8791). The token is generated once on first run and
-stored in `.env`; later starts reuse it instead of reprinting it, and the
-Settings page can reset it if it leaks. Sign in with the token at the
-printed URL — the session cookie is `HttpOnly` and `SameSite=Strict`. There
-is no built-in HTTPS, so only bind `--host 0.0.0.0` on a network you trust.
-
-| Page | Purpose |
-|---|---|
-| Dashboard | Account equity, positions, active strategies (compact cards), recent trades, and a sentinel heartbeat so you can see at a glance that scheduled monitoring is actually running |
-| Chat | The same agent as `allpath-trade chat`, with inline approval cards for orders it proposes; your message appears instantly with a "thinking" indicator while the agent works. Attach images (📎, paste, or drag-drop) alongside your text — useful for a screenshot of positions, see [Two Accounts](#two-accounts) |
-| Pending | The confirmation queue — approve or reject agent-proposed orders and strategy revisions, each with a risk pre-check (orders) or a byte-exact staleness check (revisions) |
-| Reports | One row per day the reflection job ran, with a summary teaser; the detail view shows the full report and proposed revisions raised that day, and a transcript replay shows every tool call the session made |
-| Strategies | Strategy documents, lifecycle badges, and version history, read-only on this page itself, but ask the agent in Chat to draft or revise one — the proposal lands on Pending for your approval |
-| Memory | The four memory layers, tabbed, plus their change history — read-only |
-| Settings | LLM/broker keys (write-only, never redisplayed); model dropdowns fed by a cached OpenRouter catalog; email and ntfy push notification settings with a save-and-test button that reports each channel's outcome; sentinel interval and consolidation toggles |
-
-Orders the agent proposes in Chat never reach the broker directly — they
-land in the Pending queue exactly like a sentinel soft-rule trigger, and
-only your approval sends them on. Switching to live trading is not
-reachable from the web interface; that still requires editing `.env`
-directly (see [Safety Model](#safety-model)).
-
-Strategy changes work the same way: ask the agent to draft a brand-new
-strategy or revise an existing one, from the web Chat page or Telegram,
-and it lands on Pending as a side-by-side diff against the current file
-instead of being saved directly. Approving it is the only thing that
-writes the YAML. A new strategy starts as a `draft` — you activate it from
-its Strategies page when you're ready for the sentinel to evaluate it. If
-a proposal would flip a strategy's authorization to `auto` (hard rules
-place orders without a further approval) or its status from `active` to
-`draft`, the card carries a warning so you don't approve that change by
-accident.
-
-Daily memory consolidation reads the day's conversation turns from every
-web chat session, not just terminal ones, so lessons and preferences you
-share in the browser make it into curated memory the same as a terminal
-session would.
-
-## Telegram Chat
-
-Talk to the same agent from Telegram — one conversation, one memory, shared
-with the web Chat page. Create a bot with [@BotFather](https://t.me/BotFather)
-(`/newbot`), paste the token it gives you into Settings → Telegram, and pair
-your account by sending `/start <your web token>` in a private chat with
-your new bot (the same token you sign in to the web dashboard with). Delete
-that `/start` message afterward — it contains your web token, and while the
-bot tries to delete it for you automatically, it may lack the permission to.
-
-Once paired, everything is mirrored both ways: a message you send in the
-web Chat page also appears in Telegram (prefixed `You (web): ...`, followed
-by the agent's reply), and a message you send in Telegram gets the agent's
-reply back in-channel and shows up in the web Chat page too — same
-conversation, same tool access, same order-approval discipline (a proposed
-order still lands in the Pending queue either way; Telegram cannot approve
-or reject anything itself). Approval/reject receipts mirror to Telegram as
-well, so it doubles as a pocket record of what actually happened.
-
-Only one Telegram chat can be paired at a time (re-pairing with `/start`
-overwrites it); a message from any other chat is silently ignored. The
-poller only runs under `allpath-trade serve` — the headless `run` daemon
-has no Telegram channel, a known limitation — and a settings-page bot
-token change takes effect after the next restart, not immediately (a
-reset of your web token, the one you sign in and pair with, applies
-immediately instead — the old value stops pairing and the new one starts
-working right away).
-
-Web chat and Telegram share the same conversation lock: a long-running
-Telegram turn (a slow LLM call, several tool round-trips) holds that lock
-for its whole duration, so an Approve/Reject click on the web dashboard
-during that window will simply wait its turn rather than fail — expect a
-brief stall, not an error.
-
-Send a photo (or an image file) in the paired chat and it rides the same
-turn as typing — a caption becomes the message text, and up to four images
-sent together as a Telegram album become one turn, just like attaching
-several images at once in web chat. Nothing is stored beyond the turn; the
-transcript and the web mirror both keep only a placeholder line.
-
-To be precise about "not stored": no image is ever written to the database,
-the search index, a log, or any file this app keeps — a turn's only durable
-trace of one is its `[image: name, size]` placeholder. On the web upload
-path the HTTP layer may still spool a large request to an *unlinked*
-temporary file while parsing it, before any of this app's own code runs;
-that file is nameless, belongs to the one request, and is released when the
-request ends. Requests larger than the four-image budget are refused
-outright before they are parsed at all.
-
-## Two Accounts
-
-`allpath-trade` runs **two practice grounds at once, always active** — not a
-toggle you flip between, but two parallel pipelines (own sentinel, queue,
-memory, strategies, reflection, equity curve) sharing one process:
-
-| Account | What it is |
-|---|---|
-| **Paper** | An Alpaca paper-trading sandbox, starting from zero. Orders route through Alpaca's own simulated execution — exactly how this app has always worked. |
-| **Shadow** | A local ledger that **mirrors your real brokerage account**. It holds no real-broker credentials and never places a real order — every buy/sell the agent (or a rule) decides on is *recorded* here, and the notification tells you plainly to go place it yourself, in your real account, if you agree with it. |
-
-The point isn't just "paper trading is safer" — it's **comparison**. Feed
-both accounts the same stock, the same news, the same week, and watch where
-your paper-account instincts (free to fail, nothing real at stake) diverge
-from the account that actually shadows what you hold. Every page, every
-notification, and the Telegram bot make it unambiguous which account you're
-looking at, so that comparison never turns into confusion.
-
-**Switching accounts** — a chip in the top nav (`PAPER` in blue, `SHADOW` in
-amber) picks which account every page shows — dashboard, chat, pending
-queue, reports, memory, strategies. The choice is remembered in a cookie
-(default: paper, until you first switch); a small dot on the switcher for
-the account you're *not* looking at means it has something waiting for you.
-
-**Getting your real positions into Shadow** — tell the agent in Chat ("I
-hold 10 AAPL at $180 average cost"), attach a screenshot of your positions
-instead (PNG, JPEG, or WebP; up to 5 MB each, up to 4 images per message —
-the agent restates the table it read back to you before queuing anything),
-or go to Settings → Brokerage → Shadow and upload a CSV
-(`ticker,qty,avg_cost` per line, capped at 2,000 rows). Every path is a
-normal approval-queue proposal — nothing lands in the ledger until you
-approve it — and a "Reset ledger" button is there if you want to start
-clean.
-
-**Notifications** — every subject line is prefixed `[Paper]` or `[Shadow]`,
-so a rule trigger, an order receipt, or the daily digest can never be
-mistaken for the account you actually hold. A shadow order that gets
-recorded says so plainly:
-
-> *A buy order for TSLA was recorded in your shadow ledger — place this
-> order in your brokerage now: BUY 4.5 TSLA @ ~$332.01.*
-
-and a shadow item still waiting for your approval adds:
-
-> *If approved, you'll place it yourself — approving here only records it
-> in your shadow ledger.*
-
-**Telegram** — send `/account` to a paired bot to switch which account that
-chat talks to (inline Paper/Shadow buttons); every message, receipt, and
-approval prompt carries the same `[Paper]`/`[Shadow]` prefix as the web UI.
-
-**Cost** — reflection (the after-close deep-review pass) runs *per
-account*, gated on that account having at least one active strategy, so a
-fresh, empty Shadow ledger costs nothing extra. Once both accounts have
-active strategies, expect roughly **2× the nightly LLM spend** of running
-Paper alone — the Usage tab in Settings shows the real number, not an
-estimate you have to trust.
+| Variable | Default | Purpose |
+|---|---|---|
+| `SENTINEL_INTERVAL_MINUTES` | 60 | Sentinel cadence during market hours |
+| `OPTIONS_TRADING` | false | Enable the options backend (spawns the Alpaca MCP server) |
+| `DRAWDOWN_HALT_PCT` | 0.15 | Circuit-breaker threshold; 0 disables |
+| `EXPERIMENT_AUTO_APPLY_REVISIONS` | false | Reflection's own revisions auto-apply (bounded-experiment use) |
+| `DAILY_REFLECTION` | true | Nightly reflection pass |
+| `CHAT_MODEL` / `REVIEW_MODEL` / `MEMORY_MODEL` | — | Per-tier model choice, any OpenAI-compatible or Anthropic provider |
 
 ## Project Structure
 
 ```
-allpath_trade/          # import package (PyPI/CLI name: allpath-trade)
-├── broker/       # Broker abstraction + Alpaca adapter
-├── data/         # Market data sources (yfinance)
-├── risk/         # Deterministic risk gate
-├── store/        # SQLite persistence + trade journal
-├── execution.py  # Order executor — the single trading entry point
-├── config.py     # Settings + runtime-writable .env store
-└── cli.py        # Command-line interface
+allpath_trade/
+├── agent/          # LLM tool loop, chat/review/reflection tools, context assembly
+├── broker/         # Broker abstraction, Alpaca adapter, MCP options backend, shadow ledger
+├── data/           # Market data (yfinance, cached)
+├── risk/           # Risk gate + drawdown circuit breaker
+├── store/          # SQLite: journal, review queue, conversations, observations, app state
+├── strategy/       # YAML model, action grammar, whitelist-AST evaluator, versioned store
+├── web/            # FastAPI app: 7 pages, auth, account switcher, setup wizard
+├── notify/         # Email, ntfy, Telegram dispatch + event builders
+├── sentinel.py     # The monitoring pass: rules → dispatch → execute/queue/notify
+├── reflect.py      # Nightly reflection session
+├── execution.py    # Executor — the single trading entry point (stocks + options)
+├── scheduler.py    # APScheduler wiring: sentinel ticks + after-close chain
+└── cli.py          # CLI: status, chat, serve, breaker, reviews, rearm, ...
 ```
 
 ## Roadmap
 
 | Phase | Scope | Status |
 |:---:|---|:---:|
-| 1 | **Execution foundation** — broker abstraction, Alpaca (paper) adapter, market data, risk gate, trade journal, executor, CLI | ✅ Complete |
-| 2 | **Strategy engine + sentinel loop** — YAML strategy documents, restricted-expression rule evaluator, versioning, scheduled monitoring, hard-rule auto-execution | ✅ Complete |
-| 3 | **Agent core** — multi-provider LLM layer (Claude / OpenAI / OpenRouter), tool loop, context assembly, `allpath-trade chat` REPL, ReviewAgent-annotated sentinel triggers | ✅ Complete |
-| 4 | **Memory system** — four layers with cross-cutting consolidation after every loop | ✅ Complete |
-| 5 | **Web UI + notifications** — `allpath-trade serve`, token auth, chat, dashboard, pending-confirmation queue, settings, email | ✅ Complete |
-| 5.5 | **UI polish + notification completion** — sticky nav, compact strategy cards, chat instant feedback, strategy lifecycle badges, tabbed memory page, model dropdowns from a cached catalog, save-and-test notifications, sentinel heartbeat, ntfy push, daily consolidation reads web chat | ✅ Complete |
-| 6 | **Reflection loop** — after-close daily deep review, memory updates, strategy revision proposals, Reports page | ✅ Complete |
-| 6.5 | **Telegram chat channel** — two-way chat with the same agent from Telegram, paired to one private chat, full web→Telegram mirroring, no new write capability | ✅ Complete |
-| 6.6 | **Chat strategy proposals** — `draft_strategy` in web/Telegram chat queues a proposal on Pending instead of requiring a terminal, reusing the reflection revision pipeline (proposer chip, new-strategy and auto/status-regression warnings, superseding an earlier chat draft) | ✅ Complete |
-| 7 | **Shadow dual-active accounts** — a second, always-on account that mirrors your real brokerage (local ledger, no real-broker credentials, orders recorded not routed) running in parallel with Paper; account switcher, per-account chat/memory/strategies/reflection, row-bound Telegram/web approvals, CSV import, `[Paper]`/`[Shadow]`-prefixed notifications | ✅ Complete |
+| 1–4 | Execution foundation → strategy engine + sentinel → agent core → memory system | ✅ |
+| 5–5.5 | Web UI, notifications (email/ntfy), setup wizard, UI polish | ✅ |
+| 6–6.6 | Nightly reflection, Telegram channel, chat strategy proposals | ✅ |
+| 7 | Shadow dual-active accounts | ✅ |
+| 8 | **Autonomous operation** — auto tier hardening, drawdown circuit breaker, reflection revision auto-apply (experiment flag), broker socket timeouts | ✅ |
+| 9 | **Options via Alpaca MCP server** — single-leg calls/puts, deterministic contract selection, option risk checks, expiry sweep, market-hours discipline | ✅ |
+| Next | Multi-leg spreads, Greeks-aware selection, weekly/monthly report aggregation, holiday calendar, more brokers (IBKR via `ib_async`) | 🔜 |
 
 ## Development
 
 ```bash
-uv run pytest                  # unit tests (network-free)
-uv run pytest -m integration   # integration tests — requires Alpaca paper keys
+uv run pytest                  # 2368 tests, network-free
+uv run pytest -m integration   # live integration tests (Alpaca paper keys required)
 uv run ruff check .            # lint
-uv run allpath-trade chat          # talk to the agent (needs LLM + Alpaca keys in .env)
-uv run allpath-trade memory show   # view agent memory files
 ```
 
-**Engineering conventions**
-
-- Python ≥ 3.11; synchronous core (mid/long-term trading requires no async)
-- Monetary values are `Decimal`, never `float`
-- Money-path modules (risk gate, executor, journal) require exhaustive unit tests
-- Unit tests never touch the network; broker/data clients are injectable
+**Engineering conventions** — Python ≥ 3.11, synchronous core; monetary values are `Decimal`, never `float`; money-path modules ship with exhaustive unit tests; unit tests never touch the network (broker/data/MCP clients are injectable fakes); every feature is built spec-first with the design docs committed alongside the code.
 
 ## Contributing
 
 Contributions are welcome. High-impact areas:
 
 - **Broker adapters** — Interactive Brokers (via `ib_async`), Tradier, Charles Schwab
+- **Options depth** — multi-leg orders, Greeks-aware contract selection
 - **Data sources** — Tiingo (EOD), Finnhub (news / sentiment)
-- **Hardening** — edge cases, error handling, and test coverage on the money path
+- **Hardening** — edge cases and test coverage on the money path
 
-Please open an issue to discuss substantial changes before submitting a pull request. All money-path code is expected to ship with exhaustive tests.
+Please open an issue to discuss substantial changes before submitting a pull request.
 
 ## Security
 
 - Never commit `.env` or any credentials; the repository's `.gitignore` excludes them by default.
-- The adapter layer delegates all authentication and transport to official broker SDKs.
+- The adapter layer delegates all authentication and transport to official broker SDKs and Alpaca's official MCP server.
 - To report a vulnerability, please open a GitHub issue with minimal details and a contact method, and we will follow up privately.
 
 ## Disclaimer
 
-This is self-hosted software provided under the MIT license, **not investment advice**. Trading involves substantial risk of loss. You are solely responsible for your trading decisions, your credentials, and compliance with your broker's terms of service. Start with paper trading; enable live trading only after you fully understand and accept the risks.
+This is self-hosted software provided under the MIT license, **not investment advice**. Trading — especially options trading — involves substantial risk of loss. You are solely responsible for your trading decisions, your credentials, and compliance with your broker's terms of service. Start with paper trading; enable live trading only after you fully understand and accept the risks.
 
 ## License
 
