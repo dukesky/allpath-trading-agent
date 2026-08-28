@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import sys
 import time
 from datetime import UTC, datetime
@@ -339,6 +340,32 @@ class Executor:
                 reasons=[f"order placed but response unparseable: {exc}"])
             self.journal.record(order_intent, failed, None, status_override="error")
             raise ExecutionError(f"order placed but response unparseable: {exc}") from exc
+
+        if not payload.get("id"):
+            # Incident 2026-08-28: five option entries dispatched at 1:32am
+            # ET (market closed) all "succeeded" -- Alpaca's options venue
+            # doesn't accept orders outside regular hours, but the MCP
+            # server still returns a 200-shaped `data` envelope for the
+            # rejection, just one with no `id` because no order was ever
+            # created. `_order_from_payload` defaults a missing `id` to ""
+            # rather than raising (see its own docstring, and
+            # docs/TODO.md's now-resolved entry on the id-less case), so
+            # without this check that payload sails straight through to the
+            # "order placed" path below and gets journaled as an ordinary
+            # "submitted" row with broker_order_id="" -- a phantom order
+            # that silently burns whatever one-shot rule dispatched it, with
+            # nobody notified. Treat it exactly like the broker-error path
+            # above: no "submitted" row is ever written for it, and
+            # order=None here means broker_order_id lands NULL (not ""),
+            # keeping it out of TradeJournal.unfilled_recent's endless
+            # re-poll too.
+            snippet = json.dumps(payload, default=str)[:200]
+            reason = (
+                "order not created (no order id in broker response; "
+                f"market closed?): {snippet}")
+            failed = RiskDecision(approved=False, reasons=[reason])
+            self.journal.record(order_intent, failed, None, status_override="error")
+            raise ExecutionError(reason)
 
         self.journal.record(order_intent, decision, order)
         return ExecutionResult(submitted=True, order=order, decision=decision)

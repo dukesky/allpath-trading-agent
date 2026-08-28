@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextlib
 from datetime import UTC, datetime
+from datetime import time as dt_time
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
@@ -41,6 +43,41 @@ from allpath_trade.strategy.model import (
     StrategyDoc,
 )
 from allpath_trade.strategy.store import StrategyStore
+
+# Incident 2026-08-28: a manual `allpath-trade check` run (cli.py's
+# cmd_check calls Sentinel.run_once() directly, with none of scheduler.py's
+# own `is_market_hours()` gate around it) dispatched five option entry
+# orders at 1:32am ET. Alpaca's options venue doesn't accept orders outside
+# regular hours, and the MCP server's rejection payload had no `id` field --
+# Executor.execute_option now treats that as a placement failure (see its
+# own comment), but by the time that fix runs the one-shot rule has already
+# burned into a phantom "submitted" row. This helper is the other half of
+# the fix: keep an option rule ARMED while the market is closed instead of
+# letting it dispatch into a guaranteed failure at all.
+#
+# Duplicated (not imported) from scheduler.is_market_hours: scheduler.py
+# already imports SentinelReport from this module, so importing the other
+# way would be circular. Same tradeoff execution.py's own _OPTION_STATUS_MAP
+# comment makes -- cheaper to keep the same handful of lines in two places
+# than to restructure module ownership for it.
+#
+# Known limitation, inherited from scheduler.is_market_hours: no US market
+# holiday/half-day calendar yet (see docs/TODO.md's deferred pool) -- a
+# holiday or early close still reads as "open" here. That's judged
+# acceptable for now: on a holiday, Executor.execute_option's id-less-
+# payload guard turns the resulting rejection into a loud, journaled error
+# (and, for a buy rule, still burns the one-shot the way any other rejected
+# order would) instead of the silent phantom-submitted row this incident was
+# about -- not a silent failure any more, just not a pre-empted one.
+_MARKET_TZ = ZoneInfo("America/New_York")
+_MARKET_OPEN = dt_time(9, 30)
+_MARKET_CLOSE = dt_time(16, 0)
+
+
+def _us_market_open_now() -> bool:
+    """US regular session, weekday Mon-Fri 09:30-16:00 America/New_York."""
+    now = datetime.now(_MARKET_TZ)
+    return now.weekday() < 5 and _MARKET_OPEN <= now.time() < _MARKET_CLOSE
 
 
 class TriggerOutcome(BaseModel):
@@ -178,7 +215,14 @@ class Sentinel:
         # exercises a position (spec §"Out of scope"), so an option left
         # open through expiry would simply expire worthless/be auto-
         # exercised by the OCC with nobody watching.
-        if self.options_backend is not None:
+        # Incident 2026-08-28 (see _us_market_open_now's own comment): a
+        # sell-to-close order can't execute while the market is closed
+        # either -- without this gate, every overnight sentinel tick would
+        # now generate a loud, journaled "no order id" error row (via
+        # Executor.execute_option's id-less-payload guard) for every
+        # expiring position, instead of just quietly waiting for the next
+        # pass during market hours.
+        if self.options_backend is not None and _us_market_open_now():
             self._run_expiry_sweep(positions, report)
 
         # A single invalid strategy YAML must not stop monitoring for every
@@ -278,11 +322,30 @@ class Sentinel:
                 continue
             if not evaluate_condition(rule.condition, ctx):
                 continue
+            spec = parse_action(rule.action)
+            if is_option_action(spec) and not _us_market_open_now():
+                # Incident 2026-08-28: do NOT burn this rule. Alpaca's
+                # options venue rejects orders while the market is closed,
+                # so dispatching now would only produce a guaranteed
+                # failure (see Executor.execute_option's id-less-payload
+                # guard) -- and for a one-shot rule, that failure is
+                # unrecoverable: the rule would already read TRIGGERED and
+                # never get another chance to fire. Leaving it ARMED means
+                # it fires on the first tick after the market reopens
+                # instead. This applies to every option kind, buys AND
+                # close_options alike -- an exit rule (close_options) must
+                # survive the night still armed and ready to protect the
+                # position, not burn into a failed order while the market
+                # is closed. Stock rules are unaffected: their market
+                # orders queue fine outside hours (see
+                # execution.refresh_pending_fills's own docstring on DAY
+                # orders queued overnight), so they keep today's behavior.
+                continue
             # One-shot: persist TRIGGERED before any execution attempt.
             self.strategies.set_rule_state(doc.id, rule.id, RuleState.TRIGGERED)
             outcome = self._dispatch(doc, rule.id, rule.type, rule.condition,
-                                     rule.action, quote.price, position, equity,
-                                     ctx, positions)
+                                     rule.action, spec, quote.price, position,
+                                     equity, ctx, positions)
             report.outcomes.append(outcome)
             if self.observations is not None:
                 self.observations.add(
@@ -307,12 +370,15 @@ class Sentinel:
                 "target_weight": target_weight}
 
     def _dispatch(self, doc: StrategyDoc, rule_id: str, rule_type: RuleType,
-                  condition: str, action: str, price: Decimal,
+                  condition: str, action: str, spec: ActionSpec, price: Decimal,
                   position: Position | None, equity: Decimal,
                   ctx: dict[str, Decimal],
                   positions: dict[str, Position]) -> TriggerOutcome:
         reason = f"strategy {doc.id} rule {rule_id}: {condition} -> {action}"
-        spec = parse_action(action)
+        # `spec` is already parsed by `_check_strategy` (it needs
+        # `is_option_action(spec)` itself, for the closed-market ARM-don't-
+        # burn check above) -- reusing it here avoids parsing `action`
+        # twice for the same rule on the same tick.
         if is_option_action(spec):
             # Option ActionKinds must never reach `to_order_intent` below --
             # it raises on them by design (strategy/actions.py). The loader

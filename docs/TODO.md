@@ -375,14 +375,25 @@
       轮次，但这一条规则的记录方式会落到 per-strategy 的 `sentinel_error`
       而不是正常 outcome 列表里的 "error" disposition，跟其他期权错误路径
       不完全一致。
-- [ ] **`place_option_order` 返回体缺 `id` 字段时，这笔成交会被永远重新
-      拉取**：`execution.py` 的 `_order_from_payload` 对
+- [x] **`place_option_order` 返回体缺 `id` 字段时，这笔成交会被永远重新
+      拉取**：~~`execution.py` 的 `_order_from_payload` 对
       `payload.get("id", "")` 做了兜底，缺字段时 `Order.id`（进而
       journal 里的 `broker_order_id`）就是空字符串。`TradeJournal.
       unfilled_recent` 之后每一轮哨兵都会把这一行当"未确认成交"重新纳入
       `refresh_pending_fills`，后者拿这个空字符串去调
       `broker.get_order("")`，会一直失败、一直拿不到终态——这一行会长期
-      占着 `unfilled_recent` 的 20 条配额，直到人工介入清理，不会自愈。
+      占着 `unfilled_recent` 的 20 条配额，直到人工介入清理，不会自愈。~~
+      **2026-08-28 已修复**：这正是当天 1:32am ET（休市期间）哨兵误发五笔
+      期权开仓单的根因——Alpaca 期权柜台休市拒单，但 MCP server 仍然返回
+      200 形状的 `data`，只是没有 `id`。`Executor.execute_option` 现在把
+      "payload 解析成功但 `id` 缺失/为空"当成跟 broker 报错完全一样的下单
+      失败：落一条 `status="error"`、`order=None`（因此 `broker_order_id`
+      是 NULL 而不是空字符串，天然不会再进 `unfilled_recent` 的重试队列）
+      的 journal 记录，并 raise `ExecutionError`——不会再有"submitted"行
+      产生。配合 `sentinel.py` 新增的 `_us_market_open_now()` 闭市检查
+      （期权规则闭市时保持 ARMED 不触发、到期清仓扫描闭市时跳过），双重
+      防止这类幽灵单再次发生。见 `tests/test_execution.py` 的
+      `test_option_payload_without_id_journals_error_and_raises` 等用例。
 - [ ] **到期清仓扫描和同一轮 `close_options` 规则命中共用同一份持仓
       快照**：`run_once` 里 `_run_expiry_sweep` 和策略规则循环用的是同
       一个 `positions` 字典（这一轮 `broker.get_positions()` 的结果）。
