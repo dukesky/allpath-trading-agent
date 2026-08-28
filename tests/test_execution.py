@@ -724,6 +724,36 @@ def test_option_filled_status_without_filled_qty_degrades_to_submitted(tmp_path)
     assert row["status"] == "submitted"
 
 
+def test_option_payload_without_id_journals_error_and_raises(tmp_path):
+    # Incident 2026-08-28: Alpaca's options venue rejects orders outside
+    # regular hours, but the MCP server still returns a 200-shaped payload
+    # for the rejection -- just one missing `id` because no order was ever
+    # created. Before this fix, `_order_from_payload` defaulted the missing
+    # id to "" and the row sailed through as an ordinary "submitted" row.
+    backend = FakeOptionsBackend(payload={"status": "rejected"})
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    with pytest.raises(ExecutionError, match="no order id"):
+        ex.execute_option(opt_buy(premium="500"))
+    [row] = journal.recent()
+    assert row["status"] == "error"
+    assert "no order id" in row["risk_reasons"]
+    assert "market closed" in row["risk_reasons"]
+    # No submitted row was ever written for the phantom order -- and
+    # broker_order_id is NULL (not ""), which keeps it out of
+    # unfilled_recent's WHERE broker_order_id IS NOT NULL clause.
+    assert row["broker_order_id"] is None
+
+
+def test_option_payload_with_empty_string_id_is_also_a_placement_failure(tmp_path):
+    backend = FakeOptionsBackend(payload={"id": "", "status": "submitted"})
+    ex, _broker, journal = make_option_executor(tmp_path, options_backend=backend)
+    with pytest.raises(ExecutionError, match="no order id"):
+        ex.execute_option(opt_buy(premium="500"))
+    [row] = journal.recent()
+    assert row["status"] == "error"
+    assert row["broker_order_id"] is None
+
+
 def test_option_trades_today_shares_cap_with_stock_trades(tmp_path):
     backend = FakeOptionsBackend()
     ex, _broker, journal = make_option_executor(

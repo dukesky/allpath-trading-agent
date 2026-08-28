@@ -2,6 +2,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from allpath_trade.broker.base import (
     Account,
     Broker,
@@ -19,6 +21,18 @@ from allpath_trade.store.db import connect
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.model import RuleState
 from allpath_trade.strategy.store import StrategyStore
+
+
+@pytest.fixture(autouse=True)
+def _default_market_open(monkeypatch):
+    """Almost every test in this file exercises rule dispatch/exit logic
+    that has nothing to do with the wall-clock time the suite happens to
+    run at -- default every test to "market open" so they stay deterministic
+    regardless of when/where CI runs. The closed-market tests below (see
+    "market-hours gate" section) override this within their own test body
+    via their own `monkeypatch.setattr` call on the same target, which wins
+    over this fixture's patch for that test."""
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: True)
 
 
 def strategy_yaml(auth="auto", rule_type="hard", condition="price < 250",
@@ -1366,3 +1380,119 @@ def test_expiry_sweep_get_orders_failure_falls_back_to_sweeping_everything(tmp_p
     s.run_once()  # must not raise
 
     assert [i.occ_symbol for i in ex.option_calls] == [expiring]
+
+
+# ---------------------------------------------------------------------------
+# Incident 2026-08-28: a manual `allpath-trade check` run dispatched five
+# option entry orders at 1:32am ET. Alpaca's options venue rejects orders
+# outside regular hours, but the MCP payload still came back 200-shaped with
+# no `id` -- Executor.execute_option now treats that as a placement failure
+# (tests/test_execution.py's own job), and these tests cover the other half
+# of the fix: an option rule (buy or close_options) must not even attempt
+# to dispatch -- and must not burn -- while the market is closed. Every test
+# in this file defaults to "market open" via the `_default_market_open`
+# autouse fixture above; these override it explicitly.
+# ---------------------------------------------------------------------------
+
+def test_option_buy_rule_stays_armed_when_market_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: False)
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="buy_call $500"), backend=backend)
+
+    report = s.run_once()
+
+    assert report.outcomes == []
+    assert ex.option_calls == []
+    assert backend.pick_calls == []  # never even reached contract selection
+    assert n.sent == []
+    assert store.load("t").rules[0].state == RuleState.ARMED
+
+
+def test_close_options_rule_stays_armed_when_market_closed(tmp_path, monkeypatch):
+    # Exits must survive the night armed, not burn into a failed order and
+    # leave the position unprotected -- this applies to close_options just
+    # as much as to a buy, even though closes are otherwise exempt from the
+    # authorization gate (_dispatch_option's own comment).
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: False)
+    future_expiry = date.today() + timedelta(days=90)
+    aapl_call = _occ_symbol("AAPL", future_expiry)
+    backend = FakeOptionsBackend()
+    s, store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(action="close_options"), backend=backend,
+        extra_positions=[_occ_position(aapl_call)])
+
+    report = s.run_once()
+
+    assert report.outcomes == []
+    assert ex.option_calls == []
+    assert n.sent == []
+    assert store.load("t").rules[0].state == RuleState.ARMED
+
+
+def test_stock_rule_still_fires_when_market_closed_alongside_armed_option_rule(
+        tmp_path, monkeypatch):
+    # Stock market orders queue fine outside hours (they fill at the next
+    # open -- see execution.refresh_pending_fills), so a stock rule keeps
+    # today's behavior exactly, in the very same strategy and pass where an
+    # option rule is held back.
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: False)
+    yaml_text = """
+name: "T"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: opt_rule, type: hard, condition: "price < 250", action: "buy_call $500"}
+  - {id: stock_rule, type: hard, condition: "price < 250", action: "sell all"}
+"""
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, store, ex, _q, n = make_option(tmp_path, yaml_text, backend=backend)
+
+    report = s.run_once()
+
+    assert [o.rule_id for o in report.outcomes] == ["stock_rule"]
+    assert report.outcomes[0].disposition == "executed"
+    assert len(ex.calls) == 1  # the stock rule reached Executor.execute
+    assert ex.option_calls == []  # the option rule never reached execute_option
+    assert backend.pick_calls == []
+    assert len(n.sent) == 1
+
+    rules = {r.id: r.state for r in store.load("t").rules}
+    assert rules["opt_rule"] == RuleState.ARMED
+    assert rules["stock_rule"] == RuleState.TRIGGERED
+
+
+def test_expiry_sweep_skipped_when_market_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: False)
+    expiring = _occ_symbol("AAPL", date.today())  # DTE == 0 -- would sweep if open
+    backend = FakeOptionsBackend()
+    s, _store, ex, _q, n = make_option(
+        tmp_path, strategy_yaml(condition="price < 0"), backend=backend,
+        extra_positions=[_occ_position(expiring)])
+
+    report = s.run_once()
+
+    assert ex.option_calls == []
+    assert n.sent == []
+    assert report.outcomes == []
+    assert report.errors == []
+
+
+def test_option_rule_re_fires_on_first_open_tick_after_a_closed_tick(tmp_path, monkeypatch):
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, store, ex, _q, _n = make_option(
+        tmp_path, strategy_yaml(action="buy_call $500"), backend=backend)
+
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: False)
+    closed_report = s.run_once()
+    assert closed_report.outcomes == []
+    assert store.load("t").rules[0].state == RuleState.ARMED
+
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: True)
+    open_report = s.run_once()
+
+    [o] = open_report.outcomes
+    assert o.disposition == "executed"
+    assert len(ex.option_calls) == 1
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED
