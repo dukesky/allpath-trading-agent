@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  :root {
+    --ink:#0A0D12; --panel:#12161F; --line:#232A38;
+    --text:#F4F6FA; --muted:#8A93A6; --soft:#C8CFDC;
+    --amber:#F5B841; --up:#3ECF8E; --down:#EF6A5A;
+  }
+  @page { size: 1920px 1080px; margin:0; }
+  body { font-family:"Space Grotesk",sans-serif; color:var(--text); background:var(--ink); }
+  .slide { width:1920px; height:1080px; position:relative; overflow:hidden;
+    page-break-after:always; background:
+      radial-gradient(1200px 700px at 78% 30%, #131A26 0%, transparent 60%), var(--ink);
+    padding:72px 96px; display:flex; flex-direction:column; }
+  .grid { position:absolute; inset:0; pointer-events:none;
+    background-image:
+      linear-gradient(to right, rgba(138,147,166,.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(138,147,166,.05) 1px, transparent 1px);
+    background-size:96px 96px;
+    mask-image:radial-gradient(1400px 900px at 30% 40%, black 30%, transparent 75%); }
+  .eyebrow { font-family:"IBM Plex Mono",monospace; font-size:19px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--amber); }
+  .pageno { position:absolute; right:96px; bottom:52px; font-family:"IBM Plex Mono",monospace;
+    font-size:17px; color:var(--muted); }
+  .foot { position:absolute; left:96px; bottom:52px; font-family:"IBM Plex Mono",monospace;
+    font-size:17px; color:var(--muted); }
+  h1 { font-family:"Fraunces",serif; font-weight:600; letter-spacing:-.01em; }
+  h2 { font-family:"Fraunces",serif; font-weight:400; font-size:64px; line-height:1.1;
+    margin-top:20px; max-width:1400px; }
+  h2 em { font-style:italic; color:var(--amber); }
+  .mono { font-family:"IBM Plex Mono",monospace; }
+
+  /* --- S1 title --- */
+  .s1 { justify-content:center; }
+  .s1 .live { position:absolute; top:72px; right:96px; font-family:"IBM Plex Mono",monospace;
+    font-size:19px; letter-spacing:.14em; text-transform:uppercase; color:var(--amber); }
+  .s1 .live::before { content:"● "; }
+  .s1 .brand { font-size:172px; line-height:.95; }
+  .s1 .sub { font-family:"Fraunces",serif; font-style:italic; font-weight:300; font-size:76px;
+    color:var(--muted); margin-top:8px; }
+  .s1 .thesis { margin-top:56px; font-family:"Fraunces",serif; font-weight:300; font-size:44px;
+    line-height:1.35; color:#D7DCE6; max-width:1250px; }
+  .s1 .thesis em { font-style:italic; color:var(--amber); }
+  .s1 .links { margin-top:64px; font-family:"IBM Plex Mono",monospace; font-size:22px; color:var(--muted); }
+  .s1 .links b { color:var(--soft); font-weight:500; }
+
+  /* --- S2 problem --- */
+  .cols { display:flex; gap:36px; margin-top:72px; flex:1; }
+  .col { flex:1; border:1px solid var(--line); border-radius:18px; background:rgba(18,22,31,.66);
+    padding:44px 40px; display:flex; flex-direction:column; }
+  .col .tag { font-family:"IBM Plex Mono",monospace; font-size:18px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--muted); }
+  .col h3 { font-family:"Fraunces",serif; font-weight:500; font-size:40px; margin-top:18px; line-height:1.15; }
+  .col p { margin-top:22px; font-size:24px; line-height:1.55; color:var(--soft); }
+  .col.win { border-color:#6b5a26; background:rgba(245,184,65,.07); }
+  .col.win .tag { color:var(--amber); }
+
+  /* --- S3 loops --- */
+  .loops { display:flex; gap:36px; margin-top:64px; }
+  .loop { flex:1; border:1px solid var(--line); border-radius:18px; background:rgba(18,22,31,.66); padding:40px 38px; }
+  .loop .n { font-family:"IBM Plex Mono",monospace; font-size:18px; color:var(--amber); letter-spacing:.12em; text-transform:uppercase; }
+  .loop h3 { font-family:"Fraunces",serif; font-size:42px; font-weight:500; margin-top:14px; }
+  .loop p { margin-top:18px; font-size:23px; line-height:1.5; color:var(--soft); }
+  .flow { margin-top:56px; border-top:1px solid var(--line); padding-top:36px;
+    font-family:"IBM Plex Mono",monospace; font-size:26px; color:var(--soft); line-height:1.7; }
+  .flow b { color:var(--text); font-weight:500; }
+  .flow .a { color:var(--amber); }
+
+  /* --- S4 options pipeline --- */
+  .pipe { margin-top:56px; display:flex; flex-direction:column; gap:0; }
+  .step { display:flex; align-items:baseline; gap:34px; padding:21px 0; border-bottom:1px solid var(--line); }
+  .step .k { font-family:"IBM Plex Mono",monospace; font-size:19px; color:var(--amber); width:64px; }
+  .step .what { font-size:29px; width:640px; }
+  .step .how { font-family:"IBM Plex Mono",monospace; font-size:21px; color:var(--muted); flex:1; }
+  .s4notes { margin-top:40px; display:flex; gap:20px; }
+  .pill { font-family:"IBM Plex Mono",monospace; font-size:19px; color:var(--soft);
+    border:1px solid var(--line); border-radius:999px; padding:12px 22px; }
+
+  /* --- S5 self-revision --- */
+  .s5wrap { display:flex; gap:56px; margin-top:56px; flex:1; }
+  .s5left { width:46%; }
+  .s5left p { font-size:26px; line-height:1.6; color:var(--soft); margin-top:26px; }
+  .s5left p b { color:var(--text); }
+  .story { margin-top:36px; border-left:3px solid var(--amber); padding:6px 0 6px 28px;
+    font-family:"Fraunces",serif; font-style:italic; font-weight:300; font-size:27px;
+    line-height:1.5; color:#E4D9BD; }
+  .shot { border-radius:14px; overflow:hidden; border:1px solid #2B3342;
+    box-shadow:0 30px 80px rgba(0,0,0,.6); align-self:flex-start; }
+  .shot img { display:block; width:100%; }
+  .s5right { flex:1; }
+
+  /* --- S6 safety --- */
+  .rules { margin-top:52px; columns:2; column-gap:64px; }
+  .rule { break-inside:avoid; padding:17px 0; border-bottom:1px solid var(--line);
+    display:flex; gap:18px; align-items:baseline; }
+  .rule .tick { color:var(--up); font-family:"IBM Plex Mono",monospace; font-size:22px; }
+  .rule .txt { font-size:24.5px; color:var(--soft); line-height:1.4; }
+  .rule .txt b { color:var(--text); font-weight:500; }
+
+  /* --- S7 results --- */
+  .stats { display:flex; gap:28px; margin-top:52px; }
+  .stat { flex:1; border:1px solid var(--line); border-radius:18px; background:rgba(18,22,31,.66); padding:30px 30px; }
+  .stat .v { font-family:"Fraunces",serif; font-size:56px; font-weight:500; }
+  .stat .l { margin-top:8px; font-family:"IBM Plex Mono",monospace; font-size:17px;
+    letter-spacing:.1em; text-transform:uppercase; color:var(--muted); line-height:1.5; }
+  .ticker { margin-top:48px; border-top:1px solid var(--line); padding-top:14px; }
+  .trow { display:flex; gap:26px; align-items:baseline; font-family:"IBM Plex Mono",monospace;
+    font-size:21px; color:#B9C1CF; padding:9px 0; white-space:nowrap; }
+  .trow .t { color:var(--muted); width:140px; }
+  .trow .sym { color:var(--text); font-weight:500; width:430px; }
+  .trow .via { color:var(--muted); flex:1; }
+  .ok { color:var(--up); } .no { color:var(--down); }
+  .s7close { margin-top:46px; font-family:"Fraunces",serif; font-weight:300; font-size:36px; color:#D7DCE6; }
+  .s7close em { font-style:italic; color:var(--amber); }
+</style></head>
+<body>
+
+<!-- S1 · title -->
+<section class="slide s1">
+  <div class="grid"></div>
+  <div class="live">Live · autonomous since Aug 28</div>
+  <div class="eyebrow">Alpaca AI Trading Agents Hackathon — Options Alpha</div>
+  <h1 class="brand">AllPath</h1>
+  <div class="sub">trading agent</div>
+  <div class="thesis">One kickoff conversation. Then it researches, trades stocks &amp; options
+    through Alpaca's MCP server — and <em>rewrites its own strategies every night.</em></div>
+  <div class="links mono"><b>github.com/dukesky/allpath-trading-agent</b> · trading.all-path.com · self-hosted · open source · MIT · 2,368 tests</div>
+</section>
+
+<!-- S2 · problem -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">The problem</div>
+  <h2>Analysis bots can't trade.<br>Trading bots can't <em>think.</em></h2>
+  <div class="cols">
+    <div class="col">
+      <div class="tag">LLM trading projects</div>
+      <h3>Stop at "here's my analysis"</h3>
+      <p>Great research, zero execution. No broker, no risk model, no accountability
+        for whether the idea actually made money.</p>
+    </div>
+    <div class="col">
+      <div class="tag">Algorithmic frameworks</div>
+      <h3>Execute but can't reason</h3>
+      <p>Fast and deterministic — but they can't read the news, question a thesis,
+        remember what went wrong last month, or rewrite themselves.</p>
+    </div>
+    <div class="col win">
+      <div class="tag">AllPath</div>
+      <h3>Closes the loop</h3>
+      <p>An agent that researches like an analyst, executes like a machine,
+        journals every decision, and evolves its own strategies nightly —
+        inside guards no model can bypass.</p>
+    </div>
+  </div>
+</section>
+
+<!-- S3 · architecture -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">How it works</div>
+  <h2>Three loops, one process</h2>
+  <div class="loops">
+    <div class="loop">
+      <div class="n">On demand</div>
+      <h3>Conversation</h3>
+      <p>Web, Telegram, or CLI. The agent interviews you, researches live data,
+        and drafts strategies as readable YAML — thesis in prose, rules as code.
+        Anything touching money becomes an approval card.</p>
+    </div>
+    <div class="loop">
+      <div class="n">Every 30 min · zero LLM cost</div>
+      <h3>Sentinel</h3>
+      <p>Plain code evaluates every rule against live quotes. Hard rules execute
+        with no model in the path; soft rules wake a cheap review agent to
+        research before deciding.</p>
+    </div>
+    <div class="loop">
+      <div class="n">Nightly · after close</div>
+      <h3>Reflection</h3>
+      <p>A bounded agent session reviews the day against every thesis, writes
+        lessons to curated memory, re-arms spent triggers, and revises its own
+        strategies — as guarded diffs.</p>
+    </div>
+  </div>
+  <div class="flow">
+    rule fires <span class="a">→</span> contract selected via <b>Alpaca MCP</b>
+    <span class="a">→</span> <b>risk gate</b> (deterministic)
+    <span class="a">→</span> order <span class="a">→</span> journal
+    <span class="a">→</span> push receipt <span class="a">→</span> nightly reflection
+  </div>
+</section>
+
+<!-- S4 · options via MCP -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">Options, first-class — via Alpaca's official MCP server</div>
+  <h2>The LLM writes <em>intent.</em> Code picks the contract.</h2>
+  <div class="pipe">
+    <div class="step"><div class="k">01</div><div class="what">Agent writes a rule in its strategy</div><div class="how">buy_call $1500 dte>=5 otm=3%</div></div>
+    <div class="step"><div class="k">02</div><div class="what">Sentinel trigger → option chain via MCP</div><div class="how">get_option_contracts · expirations ≥ today+5, calls only</div></div>
+    <div class="step"><div class="k">03</div><div class="what">Deterministic contract selection</div><div class="how">nearest expiry · strike closest to spot × 1.03 · qty = ⌊$1500 / (ask × 100)⌋</div></div>
+    <div class="step"><div class="k">04</div><div class="what">Risk gate — plain code, non-bypassable</div><div class="how">premium ≤ per-order cap · options exposure ≤ 10% equity · cash reserve · daily cap</div></div>
+    <div class="step"><div class="k">05</div><div class="what">Order placed through MCP, journaled, notified</div><div class="how">place_option_order · buy_to_open · market · day</div></div>
+  </div>
+  <div class="s4notes">
+    <div class="pill">managed MCP subprocess · respawn + timeouts</div>
+    <div class="pill">DTE ≤ 1 expiry sweep — never rides into assignment</div>
+    <div class="pill">no order id in response ⇒ journaled as error, never “submitted”</div>
+  </div>
+</section>
+
+<!-- S5 · self-revision -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">Self-evolution</div>
+  <h2>It found its own bug — <em>and fixed it.</em></h2>
+  <div class="s5wrap">
+    <div class="s5left">
+      <p>Every night, reflection reviews the day against each strategy's thesis,
+        writes lessons into <b>curated markdown memory</b> (profile · strategies ·
+        stock dossiers · lessons), and proposes revisions as <b>diffs</b> —
+        version-checked, byte-exact against the file they were written for,
+        and frozen out of touching authorization.</p>
+      <div class="story">Day one: option entries gated on “no position yet” were
+        permanently disabled once the stock legs filled. Told what happened,
+        the agent rewrote its own entry conditions across four strategies,
+        kept the price ceilings after re-verifying them against live quotes,
+        and re-armed the rules. The calls filled the same session.</div>
+    </div>
+    <div class="s5right">
+      <div class="shot"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/pending.png"></div>
+    </div>
+  </div>
+</section>
+
+<!-- S6 · safety -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">Safety model</div>
+  <h2>The LLM can <em>never</em> bypass your limits</h2>
+  <div class="rules">
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>One path to the broker</b> — the executor is the only submitting code; the model can only produce intents</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>Deterministic risk gate</b> — order value, position weight, options exposure, cash reserve, daily cap</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>15% drawdown circuit breaker</b> — halts new risk on every channel; exits still execute</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>Risk reduction is never blocked</b> — stop-losses and option closes are exempt from value caps</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>Expiry sweep</b> — options with ≤1 day to expiry are closed automatically</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>Market-hours discipline</b> — closed-market option triggers stay armed instead of burning</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>No self-promotion</b> — reflection can never flip a strategy to auto; only a human can</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>Stale writes refused</b> — byte-exact base checks and strict version increase on every revision</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>Honest failure</b> — a response without an order id journals an error and alerts, never a phantom fill</div></div>
+    <div class="rule"><div class="tick">✓</div><div class="txt"><b>Hard rules survive outages</b> — stop-losses run with no LLM in the path</div></div>
+  </div>
+</section>
+
+<!-- S7 · live run -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">The live run — competition week</div>
+  <h2>Zero-intervention, fully journaled</h2>
+  <div class="stats">
+    <div class="stat"><div class="v">$100k</div><div class="l">fresh paper account · one kickoff chat, then hands-off</div></div>
+    <div class="stat"><div class="v">5</div><div class="l">strategies the agent drafted itself — stock + option legs, paired exits</div></div>
+    <div class="stat"><div class="v">9</div><div class="l">fills on day one · 4 stock legs + 5 option legs via Alpaca MCP</div></div>
+    <div class="stat"><div class="v">1<span style="font-size:34px">/night</span></div><div class="l">reflection report with full tool-call transcript · self-revisions applied</div></div>
+  </div>
+  <div class="ticker">
+    <div class="trow"><span class="t">09:32 ET</span><span class="sym">BUY 13.24 NVDA @ 226.45</span><span class="via">sentinel · entry-momentum · risk gate passed</span><span class="ok">filled</span></div>
+    <div class="trow"><span class="t">11:46 ET</span><span class="sym">BUY 13× NVDA 09/02 230C @ 1.08</span><span class="via">contract selected via Alpaca MCP</span><span class="ok">filled</span></div>
+    <div class="trow"><span class="t">11:46 ET</span><span class="sym">BUY 5× CRM 09/04 252.5P @ 2.79</span><span class="via">pair hedge — now offsetting the tech pullback</span><span class="ok">filled · +$405</span></div>
+    <div class="trow"><span class="t">11:45 ET</span><span class="sym">BUY 1× MU 09/02 965C</span><span class="via">risk gate: daily trade limit (10/10)</span><span class="no">rejected — re-armed by the agent</span></div>
+  </div>
+  <div class="s7close">Every trade, every skip, every LLM decision, every nightly report —
+    journaled. <em>The audit trail is the demo.</em></div>
+  <div class="foot">github.com/dukesky/allpath-trading-agent · trading.all-path.com</div>
+</section>
+
+<script>
+  // page numbers
+  document.querySelectorAll('.slide').forEach((s,i,a)=>{
+    if(i===0) return;
+    const n=document.createElement('div'); n.className='pageno';
+    n.textContent=String(i+1).padStart(2,'0')+' / '+String(a.length).padStart(2,'0');
+    s.appendChild(n);
+  });
+</script>
+</body></html>
