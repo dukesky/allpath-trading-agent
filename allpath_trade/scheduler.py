@@ -373,10 +373,15 @@ def run_daemon(get_accounts: Callable[[], dict], interval_minutes: int,
 # `TURN_MARKER_KEY`/`_turn_marker_key` shape memory/consolidate.py already
 # established, including the same one-time legacy-seed-for-paper fallback.
 DIGEST_LAST_DATE_KEY = "digest_last_date"
+PUBLISH_LAST_DATE_KEY = "publish_last_date"
 
 
 def _digest_date_key(account: str) -> str:
     return f"{DIGEST_LAST_DATE_KEY}:{account}"
+
+
+def _publish_date_key() -> str:
+    return PUBLISH_LAST_DATE_KEY
 
 
 def _last_digest_date(app_state: AppState, account: str) -> str | None:
@@ -660,11 +665,31 @@ def _run_publish_step(components, *, verbose: bool) -> bool:
         if verbose:
             print("[publish] skipped (not configured)")
         return True
+    # setup-wizard T1: the paper broker must be configured before we can
+    # read account data (equity, trades, positions) for the digest. Skip
+    # with success, same as every other step's unconfigured check, so an
+    # unfinished setup doesn't cause the whole nightly chain to retry.
+    if _is_unconfigured(components.accounts[DEFAULT_ACCOUNT]):
+        if verbose:
+            print("[publish] skipped (broker not configured)")
+        return True
     from allpath_trade.publish import build_daily_digest, publish_digest
+
+    today = datetime.now(UTC).astimezone(ET).date().isoformat()
+    # I4: publish idempotency marker, stamped only after a real successful
+    # POST. Same pattern as digest's digest_last_date:{account} watermark
+    # (see _digest_date_key, _send_one_digest). A failed POST leaves the
+    # marker unset so the chain's bounded retry re-attempts it.
+    if components.app_state.get(_publish_date_key()) == today:
+        if verbose:
+            print("[publish] skipped (already sent today)")
+        return True
 
     digest = build_daily_digest(components, today_et_date())
     ok = publish_digest(components.settings.publish_url,
                         components.settings.publish_token, digest)
+    if ok:
+        components.app_state.set(_publish_date_key(), today)
     if verbose:
         print("[publish] ok" if ok else "[publish] failed")
     return ok

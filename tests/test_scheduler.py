@@ -1901,3 +1901,61 @@ def test_run_daily_jobs_order_is_digest_reflection_consolidation_publish(monkeyp
     run_daily_jobs(components)
 
     assert order == ["digest", "reflection", "consolidation", "publish"]
+
+
+def test_run_daily_jobs_skips_publish_when_broker_not_configured(capsys):
+    """setup-wizard T1: unconfigured paper broker must not cause a
+    BrokerNotConfigured exception in build_daily_digest. Skip with success,
+    same as digest and reflection/consolidation, so an unfinished setup
+    doesn't cause the whole nightly chain to retry."""
+    accounts = {"paper": _unconfigured_bundle()}
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        accounts=accounts,
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    assert run_daily_jobs(components, verbose=True) is True
+
+    assert "[publish] skipped (broker not configured)" in capsys.readouterr().out
+
+
+def test_run_daily_jobs_publish_watermark_prevents_resend(monkeypatch):
+    """I4: publish idempotency marker (publish_last_date) prevents re-posting
+    the same day even if the nightly chain is retried. Failed POST leaves the
+    marker unset so the chain's bounded retry re-attempts it."""
+    import allpath_trade.publish as pub
+
+    calls = []
+    monkeypatch.setattr(
+        pub, "publish_digest",
+        lambda url, token, digest: calls.append(1) or True)
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    run_daily_jobs(components)   # first send -> watermark written
+    run_daily_jobs(components)   # second run same day -> watermark present, no POST
+
+    assert len(calls) == 1
+    today = datetime.now(UTC).astimezone(
+        __import__("zoneinfo").ZoneInfo("America/New_York")).date().isoformat()
+    assert components.app_state.get("publish_last_date") == today
+
+
+def test_run_daily_jobs_publish_watermark_not_set_on_failed_post(monkeypatch):
+    """I4b: failed POST does not set the watermark, so a retry on the next
+    tick will attempt it again (bounded by MAX_DAILY_ATTEMPTS)."""
+    import allpath_trade.publish as pub
+
+    calls = []
+    monkeypatch.setattr(
+        pub, "publish_digest",
+        lambda url, token, digest: calls.append(1) or False)  # always fail
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    run_daily_jobs(components)   # first attempt -> POST fails, no watermark
+
+    assert components.app_state.get("publish_last_date") is None
+    assert len(calls) == 1
