@@ -1,5 +1,6 @@
 import threading
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 from allpath_trade.scheduler import (
@@ -200,9 +201,10 @@ class FakeHolder:
 
 
 class FakeJournal:
-    def __init__(self, trades=0, unfilled=None):
+    def __init__(self, trades=0, unfilled=None, rows=None):
         self._trades = trades
         self._unfilled = unfilled if unfilled is not None else []
+        self._rows = rows if rows is not None else []
         self.refreshed = []
 
     def trades_today(self):
@@ -214,16 +216,33 @@ class FakeJournal:
     def refresh_fill(self, trade_id, order):
         self.refreshed.append((trade_id, order))
 
+    def recent(self, limit=50):
+        return self._rows[:limit]
+
 
 class FakeSchedulerBroker:
     """Minimal Broker stand-in for the fill-refresh sweep (deliverable 2) --
     build_jobs/run_daemon only need something to pass through to
     refresh_pending_fills; the sweep's own behavior is covered by
-    test_execution.py, so this just records get_order calls."""
+    test_execution.py, so this just records get_order calls.
 
-    def __init__(self, orders=None):
+    `get_account`/`get_equity_history` (journal-publisher step): only
+    exercised by scheduler-wiring tests that actually turn `publish_url`/
+    `publish_token` on -- build_daily_digest's own behavior against these
+    is covered in depth by test_publish.py, so the defaults here (a fixed
+    equity, no history) just need to be enough for build_daily_digest to
+    run without raising."""
+
+    def __init__(self, orders=None, equity=None):
         self._orders = orders or {}
         self.get_order_calls = []
+        self._equity = equity if equity is not None else Decimal("1000.00")
+
+    def get_account(self):
+        return SimpleNamespace(equity=self._equity)
+
+    def get_equity_history(self, days):
+        return []
 
     def get_order(self, order_id):
         self.get_order_calls.append(order_id)
@@ -236,6 +255,19 @@ class FakeQueue:
 
     def list(self, status="pending"):
         return self._pending
+
+
+class FakeReports:
+    """Stands in for ReportStore -- publish's own tests
+    (test_publish.py) cover build_daily_digest's reflection handling in
+    depth; this is just enough for the scheduler-wiring tests here to
+    exercise the publish step without a real report on any date."""
+
+    def __init__(self, rows=None):
+        self._rows = rows if rows is not None else {}
+
+    def get(self, date):
+        return self._rows.get(date)
 
 
 class FakeObservations:
@@ -313,7 +345,8 @@ def _account_bundle(sentinel=None, journal=None, broker=None, queue=None,
 def _components(sentinel, consolidator=None, daily_consolidation=True, interval=5,
                 journal=None, queue=None, notifier=None, observations=None,
                 app_state=None, reflector=None, daily_reflection=True, broker=None,
-                llm_usage=None, strategies=None, accounts=None):
+                llm_usage=None, strategies=None, accounts=None,
+                publish_url="", publish_token="", reports=None):
     # shadow-dual-active T4: every field below (sentinel/journal/broker/
     # queue/observations/reflector/consolidator/strategies) is ALSO
     # reachable as the flat legacy attribute (mirrors app.py's
@@ -349,10 +382,13 @@ def _components(sentinel, consolidator=None, daily_consolidation=True, interval=
         # existed.
         llm_usage=llm_usage if llm_usage is not None
         else SimpleNamespace(summary_for_day=lambda date_utc=None: []),
+        reports=reports if reports is not None else FakeReports(),
         accounts=accounts if accounts is not None else {"paper": bundle},
         settings=SimpleNamespace(daily_consolidation=daily_consolidation,
                                  daily_reflection=daily_reflection,
-                                 sentinel_interval_minutes=interval),
+                                 sentinel_interval_minutes=interval,
+                                 publish_url=publish_url,
+                                 publish_token=publish_token),
     )
 
 
@@ -1696,3 +1732,230 @@ def test_send_daily_digest_skips_an_unconfigured_account(monkeypatch):
 
     assert sched._send_daily_digest(components) is True
     assert components.notifier.sent == []
+
+
+# ---------------------------------------------------------------------------
+# Journal publisher: run_daily_jobs step 4 (allpath_trade/publish.py).
+# build_daily_digest itself runs for real against the Fake stores above in
+# most of these -- its own shape/behavior is covered in depth by
+# test_publish.py -- only the network call (publish_digest) is monkeypatched
+# out, so these tests are purely about the scheduler's gating/ordering/
+# isolation wiring, not about digest content.
+# ---------------------------------------------------------------------------
+
+class _RaisingAccountBroker:
+    """A broker whose get_account() always raises -- stands in for a dead
+    Alpaca connection to prove a build_daily_digest failure is isolated the
+    same way a publish_digest failure is."""
+
+    def get_account(self):
+        raise RuntimeError("broker down")
+
+    def get_equity_history(self, days):
+        return []
+
+
+class _OrderedNotifier:
+    def __init__(self, order):
+        self.order = order
+
+    def send(self, subject, body):
+        self.order.append("digest")
+        return True
+
+
+class _OrderedReflector:
+    def __init__(self, order):
+        self.order = order
+
+    def run_daily(self):
+        self.order.append("reflection")
+        return "ok"
+
+
+class _OrderedConsolidator:
+    def __init__(self, order):
+        self.order = order
+
+    def run_daily(self):
+        self.order.append("consolidation")
+        return "ok"
+
+
+def test_run_daily_jobs_skips_publish_when_not_configured(capsys):
+    components = _components(sentinel=None, reflector=FakeReflector(),
+                             consolidator=FakeConsolidator())
+
+    assert run_daily_jobs(components, verbose=True) is True
+
+    assert "[publish] skipped (not configured)" in capsys.readouterr().out
+
+
+def test_run_daily_jobs_is_quiet_about_publish_when_unconfigured_and_not_verbose(capsys):
+    components = _components(sentinel=None, reflector=FakeReflector(),
+                             consolidator=FakeConsolidator())
+
+    run_daily_jobs(components)
+
+    assert "publish" not in capsys.readouterr().out
+
+
+def test_run_daily_jobs_publishes_when_url_and_token_are_both_set(monkeypatch, capsys):
+    import allpath_trade.publish as pub
+
+    calls = []
+    monkeypatch.setattr(
+        pub, "publish_digest",
+        lambda url, token, digest: calls.append((url, token, digest)) or True)
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    assert run_daily_jobs(components, verbose=True) is True
+
+    assert len(calls) == 1
+    url, token, digest = calls[0]
+    assert url == "https://example.com/api/journal"
+    assert token == "tok-123"
+    assert digest["equity"] == "1000.00"
+    assert "[publish] ok" in capsys.readouterr().out
+
+
+def test_run_daily_jobs_missing_token_alone_does_not_publish():
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        publish_url="https://example.com/api/journal", publish_token="")
+
+    # Would raise trying to reach the network if the gate let it through --
+    # both settings are required, not just the URL.
+    assert run_daily_jobs(components) is True
+
+
+def test_run_daily_jobs_publish_failure_does_not_block_or_crash_other_steps(
+        monkeypatch, capsys):
+    import allpath_trade.publish as pub
+
+    monkeypatch.setattr(pub, "publish_digest", lambda url, token, digest: False)
+    reflector = FakeReflector()
+    consolidator = FakeConsolidator()
+    components = _components(
+        sentinel=None, reflector=reflector, consolidator=consolidator,
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    ok = run_daily_jobs(components, verbose=True)
+
+    # Not clean -- I4b needs this reported so a retry is attempted later --
+    # but every OTHER step still completed normally.
+    assert ok is False
+    assert reflector.calls == 1
+    assert consolidator.calls == 1
+    assert len(components.notifier.sent) == 1
+    assert "[publish] failed" in capsys.readouterr().out
+
+
+def test_run_daily_jobs_a_raising_publish_build_step_never_crashes_the_chain(
+        capsys):
+    reflector = FakeReflector()
+    consolidator = FakeConsolidator()
+    components = _components(
+        sentinel=None, reflector=reflector, consolidator=consolidator,
+        broker=_RaisingAccountBroker(),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    ok = run_daily_jobs(components)  # must not raise
+
+    assert ok is False
+    assert reflector.calls == 1
+    assert consolidator.calls == 1
+    assert "[publish] failed" in capsys.readouterr().err
+
+
+def test_run_daily_jobs_a_failed_earlier_step_does_not_block_publish(monkeypatch):
+    import allpath_trade.publish as pub
+
+    calls = []
+    monkeypatch.setattr(
+        pub, "publish_digest", lambda url, token, digest: calls.append(1) or True)
+    components = _components(
+        sentinel=None, reflector=FakeReflector(fail=True), consolidator=FakeConsolidator(),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    ok = run_daily_jobs(components)
+
+    assert ok is False  # reflection failed
+    assert calls == [1]  # publish still ran despite it
+
+
+def test_run_daily_jobs_order_is_digest_reflection_consolidation_publish(monkeypatch):
+    import allpath_trade.publish as pub
+
+    order = []
+    monkeypatch.setattr(
+        pub, "publish_digest",
+        lambda url, token, digest: order.append("publish") or True)
+    components = _components(
+        sentinel=None, reflector=_OrderedReflector(order),
+        consolidator=_OrderedConsolidator(order), notifier=_OrderedNotifier(order),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    run_daily_jobs(components)
+
+    assert order == ["digest", "reflection", "consolidation", "publish"]
+
+
+def test_run_daily_jobs_skips_publish_when_broker_not_configured(capsys):
+    """setup-wizard T1: unconfigured paper broker must not cause a
+    BrokerNotConfigured exception in build_daily_digest. Skip with success,
+    same as digest and reflection/consolidation, so an unfinished setup
+    doesn't cause the whole nightly chain to retry."""
+    accounts = {"paper": _unconfigured_bundle()}
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        accounts=accounts,
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    assert run_daily_jobs(components, verbose=True) is True
+
+    assert "[publish] skipped (broker not configured)" in capsys.readouterr().out
+
+
+def test_run_daily_jobs_publish_watermark_prevents_resend(monkeypatch):
+    """I4: publish idempotency marker (publish_last_date) prevents re-posting
+    the same day even if the nightly chain is retried. Failed POST leaves the
+    marker unset so the chain's bounded retry re-attempts it."""
+    import allpath_trade.publish as pub
+
+    calls = []
+    monkeypatch.setattr(
+        pub, "publish_digest",
+        lambda url, token, digest: calls.append(1) or True)
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    run_daily_jobs(components)   # first send -> watermark written
+    run_daily_jobs(components)   # second run same day -> watermark present, no POST
+
+    assert len(calls) == 1
+    today = datetime.now(UTC).astimezone(
+        __import__("zoneinfo").ZoneInfo("America/New_York")).date().isoformat()
+    assert components.app_state.get("publish_last_date") == today
+
+
+def test_run_daily_jobs_publish_watermark_not_set_on_failed_post(monkeypatch):
+    """I4b: failed POST does not set the watermark, so a retry on the next
+    tick will attempt it again (bounded by MAX_DAILY_ATTEMPTS)."""
+    import allpath_trade.publish as pub
+
+    calls = []
+    monkeypatch.setattr(
+        pub, "publish_digest",
+        lambda url, token, digest: calls.append(1) or False)  # always fail
+    components = _components(
+        sentinel=None, reflector=FakeReflector(), consolidator=FakeConsolidator(),
+        publish_url="https://example.com/api/journal", publish_token="tok-123")
+
+    run_daily_jobs(components)   # first attempt -> POST fails, no watermark
+
+    assert components.app_state.get("publish_last_date") is None
+    assert len(calls) == 1
