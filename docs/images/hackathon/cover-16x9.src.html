@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1920px; height:1080px; overflow:hidden; }
+  body {
+    --ink:#0A0D12; --panel:#12161F; --line:#232A38;
+    --text:#F4F6FA; --muted:#8A93A6;
+    --amber:#F5B841; --up:#3ECF8E; --down:#EF6A5A;
+    background:
+      radial-gradient(1200px 700px at 78% 30%, #131A26 0%, transparent 60%),
+      var(--ink);
+    color:var(--text);
+    font-family:"Space Grotesk",sans-serif;
+    position:relative;
+  }
+  /* faint chart grid, subject-native texture */
+  .grid {
+    position:absolute; inset:0;
+    background-image:
+      linear-gradient(to right, rgba(138,147,166,.055) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(138,147,166,.055) 1px, transparent 1px);
+    background-size:96px 96px;
+    mask-image:radial-gradient(1400px 900px at 30% 40%, black 30%, transparent 75%);
+  }
+
+  .frame { position:absolute; inset:0; padding:64px 84px 0; display:flex; flex-direction:column; }
+
+  .topbar { display:flex; align-items:baseline; justify-content:space-between;
+    font-family:"IBM Plex Mono",monospace; font-size:19px; letter-spacing:.14em;
+    color:var(--muted); text-transform:uppercase; }
+  .topbar .live { color:var(--amber); }
+  .topbar .live::before { content:"●"; margin-right:10px; font-size:14px; }
+
+  .main { flex:1; display:flex; gap:48px; margin-top:26px; }
+
+  /* ------- left column ------- */
+  .left { width:44%; display:flex; flex-direction:column; padding-top:36px; }
+  .wordmark { font-family:"Fraunces",serif; font-weight:600; font-size:118px;
+    line-height:.95; letter-spacing:-.015em; }
+  .wordmark .agent { display:block; font-weight:300; font-style:italic; font-size:64px;
+    color:var(--muted); margin-top:10px; letter-spacing:0; }
+  .thesis { margin-top:44px; font-family:"Fraunces",serif; font-weight:300;
+    font-size:38px; line-height:1.32; color:#D7DCE6; max-width:640px; }
+  .thesis em { font-style:italic; color:var(--amber); }
+  .chips { margin-top:46px; display:flex; flex-wrap:wrap; gap:14px; max-width:660px; }
+  .chip { font-family:"IBM Plex Mono",monospace; font-size:19px; color:#C8CFDC;
+    border:1px solid var(--line); background:rgba(18,22,31,.7);
+    padding:12px 20px; border-radius:999px; }
+  .chip b { color:var(--text); font-weight:500; }
+  .meta { margin-top:auto; padding-bottom:28px; font-family:"IBM Plex Mono",monospace;
+    font-size:19px; color:var(--muted); }
+  .meta span { color:#C8CFDC; }
+
+  /* ------- right collage ------- */
+  .right { flex:1; position:relative; }
+  .shot { position:absolute; border-radius:14px; overflow:hidden;
+    border:1px solid #2B3342; background:#fff;
+    box-shadow:0 34px 90px rgba(0,0,0,.62); }
+  .shot img { display:block; width:100%; }
+  .shot .cap { position:absolute; left:0; bottom:0; right:0;
+    font-family:"IBM Plex Mono",monospace; font-size:16px; letter-spacing:.1em;
+    text-transform:uppercase; color:#E7EBF3; background:linear-gradient(transparent, rgba(10,13,18,.88) 45%);
+    padding:34px 16px 12px; }
+  .s-strategy { width:580px; right:470px; top:6px; z-index:1; }
+  .s-pending  { width:580px; right:-16px; top:96px; z-index:2; }
+  .s-dash     { width:770px; right:170px; top:300px; z-index:3; }
+
+  /* ------- audit ticker ------- */
+  .ticker { position:relative; margin:0 -84px; border-top:1px solid var(--line);
+    background:rgba(9,11,16,.92); }
+  .ticker .label { position:absolute; left:84px; top:-15px;
+    font-family:"IBM Plex Mono",monospace; font-size:15px; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--amber); background:var(--ink); padding:0 12px 0 0; }
+  .rows { display:flex; flex-direction:column; gap:0; padding:26px 84px 24px; }
+  .row { display:flex; gap:26px; align-items:baseline;
+    font-family:"IBM Plex Mono",monospace; font-size:20.5px; color:#B9C1CF;
+    padding:7px 0; white-space:nowrap; }
+  .row .t { color:var(--muted); width:150px; }
+  .row .sym { color:var(--text); font-weight:500; width:400px; }
+  .row .via { color:var(--muted); flex:1; }
+  .ok { color:var(--up); } .no { color:var(--down); }
+</style></head>
+<body>
+  <div class="grid"></div>
+  <div class="frame">
+
+    <div class="topbar">
+      <div>Alpaca AI Trading Agents Hackathon — Options Alpha</div>
+      <div class="live">Live · autonomous since Aug 28</div>
+    </div>
+
+    <div class="main">
+      <div class="left">
+        <div class="wordmark">AllPath<span class="agent">trading agent</span></div>
+        <div class="thesis">One kickoff conversation. Then it researches, trades
+          stocks &amp; options through Alpaca's MCP server — and
+          <em>rewrites its own strategies every night.</em></div>
+        <div class="chips">
+          <div class="chip"><b>Options</b> via Alpaca MCP</div>
+          <div class="chip"><b>Deterministic</b> risk gate</div>
+          <div class="chip"><b>15%</b> drawdown breaker</div>
+          <div class="chip"><b>Nightly</b> self-revision</div>
+          <div class="chip"><b>Self-hosted</b> · open source · MIT</div>
+        </div>
+        <div class="meta">github.com/dukesky/allpath-trading-agent<br>trading.all-path.com · <span>2,368 tests · MIT</span></div>
+      </div>
+
+      <div class="right">
+        <div class="shot s-strategy"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/strategy-detail.png"></div>
+        <div class="shot s-pending"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/pending.png"></div>
+        <div class="shot s-dash"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/dashboard.png"><div class="cap">live account · paper</div></div>
+      </div>
+    </div>
+
+    <div class="ticker">
+      <div class="label">The audit trail is the demo</div>
+      <div class="rows">
+        <div class="row"><span class="t">09:32 ET</span><span class="sym">BUY 13.24 NVDA @ 226.45</span><span class="via">sentinel · entry-momentum · risk gate passed</span><span class="ok">filled</span></div>
+        <div class="row"><span class="t">11:46 ET</span><span class="sym">BUY 13× NVDA 09/02 230C @ 1.08</span><span class="via">contract selected via Alpaca MCP · dte>=5 otm=3%</span><span class="ok">filled</span></div>
+        <div class="row"><span class="t">11:46 ET</span><span class="sym">BUY 5× CRM 09/04 252.5P @ 2.79</span><span class="via">pair hedge · long semis vs software fade</span><span class="ok">filled</span></div>
+        <div class="row"><span class="t">11:45 ET</span><span class="sym">BUY 1× MU 09/02 965C</span><span class="via">risk gate: daily trade limit reached (10/10)</span><span class="no">rejected — then re-armed by the agent</span></div>
+      </div>
+    </div>
+
+  </div>
+</body></html>
