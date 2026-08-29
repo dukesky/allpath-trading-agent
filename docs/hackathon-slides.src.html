@@ -92,6 +92,15 @@
   .shot img { display:block; width:100%; }
   .s5right { flex:1; }
 
+  /* --- tour slides --- */
+  .tourwrap { display:flex; gap:56px; margin-top:52px; flex:1; align-items:flex-start; }
+  .tourtext { width:40%; }
+  .tourtext ul { margin-top:30px; list-style:none; }
+  .tourtext li { font-size:24.5px; line-height:1.45; color:var(--soft); padding:14px 0;
+    border-bottom:1px solid var(--line); }
+  .tourtext li b { color:var(--text); font-weight:500; }
+  .tourshot { flex:1; }
+
   /* --- S6 safety --- */
   .rules { margin-top:52px; columns:2; column-gap:64px; }
   .rule { break-inside:avoid; padding:17px 0; border-bottom:1px solid var(--line);
@@ -194,6 +203,61 @@
   </div>
 </section>
 
+
+<!-- tour A · dashboard -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">The product — dashboard</div>
+  <h2>Every position, every execution, <em>one glance</em></h2>
+  <div class="tourwrap">
+    <div class="tourtext">
+      <ul>
+        <li><b>Stocks and option legs together</b> — OCC contracts with live value and P&amp;L, next to the equity curve</li>
+        <li><b>Strategy cards</b> — authorization tier, progress toward target weight, profit/stop chips, "rule triggered" state</li>
+        <li><b>Sentinel heartbeat</b> — last check, interval, market-open badge; a halt banner if the breaker ever trips</li>
+        <li><b>Recent executions &amp; queue</b> — what just filled, what's waiting, straight from the journal</li>
+      </ul>
+    </div>
+    <div class="tourshot"><div class="shot"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/dashboard-activity.png"></div></div>
+  </div>
+</section>
+
+<!-- tour B · chat -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">The product — chat</div>
+  <h2>Share an idea. Get a <em>plan.</em></h2>
+  <div class="tourwrap">
+    <div class="tourtext">
+      <ul>
+        <li><b>It researches before it agrees</b> — live quotes, history, news; it validated our theses and rejected one with evidence</li>
+        <li><b>Plans become strategy drafts</b> — YAML proposals with rationale, old-vs-new conditions, checks against live prices</li>
+        <li><b>Honest about boundaries</b> — it states what it didn't touch and why, unprompted</li>
+        <li><b>Same conversation everywhere</b> — web and Telegram share one thread, one memory; screenshots can be attached and read</li>
+      </ul>
+    </div>
+    <div class="tourshot"><div class="shot"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/chat-plan.png"></div></div>
+  </div>
+</section>
+
+<!-- tour C · approvals -->
+<section class="slide">
+  <div class="grid"></div>
+  <div class="eyebrow">The product — approvals</div>
+  <h2>Approve from anywhere — <em>or not at all</em></h2>
+  <div class="tourwrap">
+    <div class="tourtext">
+      <ul>
+        <li><b>auto</b> — this week's mode: hard rules execute alone, straight through the risk gate; you get the receipt</li>
+        <li><b>confirm</b> — proposals queue on Pending with the review agent's analysis attached, human decides</li>
+        <li><b>Approve from your pocket</b> — web card, Telegram inline buttons, or a tokenized link right in the push notification</li>
+        <li><b>Every change is a diff</b> — strategy edits show base-vs-proposed side by side; stale versions are refused</li>
+      </ul>
+    </div>
+    <div class="tourshot"><div class="shot"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/pending.png"></div></div>
+  </div>
+</section>
+
 <!-- S4 · options via MCP -->
 <section class="slide">
   <div class="grid"></div>
@@ -225,14 +289,16 @@
         stock dossiers · lessons), and proposes revisions as <b>diffs</b> —
         version-checked, byte-exact against the file they were written for,
         and frozen out of touching authorization.</p>
-      <div class="story">Day one: option entries gated on “no position yet” were
-        permanently disabled once the stock legs filled. Told what happened,
-        the agent rewrote its own entry conditions across four strategies,
-        kept the price ceilings after re-verifying them against live quotes,
-        and re-armed the rules. The calls filled the same session.</div>
+      <div class="story">Night one, unprompted: reflection found a serious defect in
+        all five of its strategies — every stop-loss re-enabled its own entry
+        at a lower price, so the book would rebuy whatever it had just
+        stopped out of. It queued five revisions adding price floors above
+        each stop (plus a missing CRM exit), and they auto-applied through
+        the guarded pipeline. It also flagged its one winner as "profitable
+        but thesis unconfirmed — deliberately not enlarged."</div>
     </div>
     <div class="s5right">
-      <div class="shot"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/pending.png"></div>
+      <div class="shot"><img src="file:///Users/tianzhang/Projects/allpath-trading-agent/docs/images/hackathon/report-detail.png"></div>
     </div>
   </div>
 </section>
