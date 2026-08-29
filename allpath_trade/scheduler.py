@@ -633,20 +633,58 @@ def _run_account_daily(account: str, acc, settings, *, verbose: bool) -> bool:
     return ok
 
 
+def _run_publish_step(components, *, verbose: bool) -> bool:
+    """Step 4 of the nightly chain: POST today's ET digest (PAPER account
+    only -- `components.broker`/`.journal`/`.reports`/`.queue` are the
+    legacy aliases for `accounts["paper"]`, see app.py's `Components`
+    docstring) to the public journal page, gated purely on both
+    `publish_url` and `publish_token` being set. Off by default: an install
+    that hasn't opted in never even builds the digest.
+
+    Local imports (rather than a module-level import of publish.py) because
+    publish.py itself imports `ET`/`ts_to_et_date` from this module --
+    importing publish.py at scheduler.py's own module-load time would be a
+    circular import; deferring it to call time (same as `_llm_cost_line`'s
+    own local imports of llm/prices.py and web/format.py) avoids that
+    entirely.
+
+    Isolated in its own try/except by the caller (`run_daily_jobs`), same as
+    the digest and each account's reflection/consolidation pair -- a broken
+    publish endpoint must never take the rest of the night down, and the
+    reverse: a broken reflection must never suppress tonight's publish.
+
+    Returns whether the step succeeded (built AND sent) so `_maybe_run_daily`
+    can retry a night whose publish silently failed instead of marking the
+    day done, same I4b contract as every other step."""
+    if not (components.settings.publish_url and components.settings.publish_token):
+        if verbose:
+            print("[publish] skipped (not configured)")
+        return True
+    from allpath_trade.publish import build_daily_digest, publish_digest
+
+    digest = build_daily_digest(components, today_et_date())
+    ok = publish_digest(components.settings.publish_url,
+                        components.settings.publish_token, digest)
+    if verbose:
+        print("[publish] ok" if ok else "[publish] failed")
+    return ok
+
+
 def run_daily_jobs(components, verbose: bool = False) -> bool:
     """The after-close daily sequence, shared by `build_jobs` (`serve`) and
     `cli.py`'s `run` daemon so the two entry points can't drift out of sync
     again (docs/TODO.md's Phase 5 leftover: `run` used to skip the digest
     entirely and never gated consolidation on `daily_consolidation`).
 
-    Order: digest -> {reflection -> consolidation} PER ACCOUNT
-    (shadow-dual-active T4, spec §③) -- within one account, reflection
-    still runs before consolidation (spec §①: reflection's memory_update
-    conclusions need to land before consolidation runs, so the same
-    night's pass can pick them up); each account's whole
-    reflection+consolidation pair is further isolated in its own
-    try/except in the loop below, so paper's nightly chain failing outright
-    can never silently prevent shadow's from running, or the reverse.
+    Order: digest -> {reflection -> consolidation} PER ACCOUNT -> publish
+    (shadow-dual-active T4, spec §③, plus the journal-publisher step) --
+    within one account, reflection still runs before consolidation (spec
+    §①: reflection's memory_update conclusions need to land before
+    consolidation runs, so the same night's pass can pick them up); each
+    account's whole reflection+consolidation pair is further isolated in
+    its own try/except in the loop below, so paper's nightly chain failing
+    outright can never silently prevent shadow's from running, or the
+    reverse.
 
     The digest fires unconditionally, once per account, BEFORE the
     reflection/consolidation loop -- shadow-dual-active T7 (carried from
@@ -656,16 +694,24 @@ def run_daily_jobs(components, verbose: bool = False) -> bool:
     `[Paper]`/`[Shadow]`-prefixed digest per account, each gated on its
     own `digest_last_date:{account}` watermark.
 
+    The publish step runs LAST, once (paper only, not per account -- see
+    `_run_publish_step`), after every account's reflection/consolidation
+    pair -- the public journal's reflection_summary/reflection_body come
+    straight from that same night's reflection report, so publish has to
+    wait for it, and pending_proposals should reflect anything reflection
+    itself queued tonight.
+
     Callers are expected to wrap this in their own once-per-day gate (see
     `_maybe_run_daily`) -- this function itself is state-free.
 
     Returns whether the whole night completed cleanly: False if the digest
-    failed to send for any account, or if any account's reflection or
-    consolidation raised. Every failure is still swallowed and printed (one
-    account's bad night must not take the other's down), but I4b needs the
-    outcome REPORTED so `_maybe_run_daily` can leave the day open for a
-    retry instead of stamping it done. The retry is cheap because each
-    sub-step has its own persisted idempotency marker.
+    failed to send for any account, if any account's reflection or
+    consolidation raised, or if publish was configured but failed. Every
+    failure is still swallowed and printed (one step's bad night must not
+    take the others down), but I4b needs the outcome REPORTED so
+    `_maybe_run_daily` can leave the day open for a retry instead of
+    stamping it done. The retry is cheap because each sub-step has its own
+    persisted idempotency marker.
 
     `verbose=True` restores the success-path prints the headless `run`
     daemon had before this helper was extracted: `run` has no web UI, so
@@ -690,6 +736,12 @@ def run_daily_jobs(components, verbose: bool = False) -> bool:
             # steps individually, so this is not expected to be reachable).
             print(f"[daily:{account}] failed: {exc}", file=sys.stderr)
             ok = False
+
+    try:
+        ok = _run_publish_step(components, verbose=verbose) and ok
+    except Exception as exc:  # noqa: BLE001 — a failed publish must not stop the rest
+        print(f"[publish] failed: {exc}", file=sys.stderr)
+        ok = False
     return ok
 
 

@@ -184,6 +184,30 @@ class Settings(BaseSettings):
     # BotFather (@BotFather -> /newbot). Empty (the default) means the
     # channel is off -- no poller starts, no pairing is possible.
     telegram_bot_token: str = ""
+    # Journal publisher: posts a daily digest of the PAPER account to your
+    # public journal page (e.g. trading.all-path.com) after each trading
+    # day's close. Empty publish_url = off -- no digest is ever built or
+    # sent. .env-only by design, deliberately NOT on the settings page:
+    # publishing your paper account's trades and reflections to a public
+    # URL is a conscious .env decision, not something to flip casually from
+    # the web UI.
+    publish_url: str = ""
+    publish_token: str = ""
+
+    @field_validator("publish_url")
+    @classmethod
+    def _publish_url_needs_a_scheme(cls, v: str) -> str:
+        # Same shape as `_web_base_url_needs_a_scheme` above: fail loudly at
+        # settings-load time on a scheme-less or host-less value rather than
+        # let it reach urllib.request.Request later and raise there instead.
+        if not v:
+            return v
+        stripped = v.rstrip("/")
+        parsed = urlsplit(stripped)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+            raise ValueError(
+                "must be empty or a URL with http:// or https:// and a host")
+        return stripped
 
 
 def describe_validation_error(exc: ValidationError) -> str:
