@@ -46,3 +46,61 @@ A self-hosted agent that **plans with LLMs, trades with deterministic code, and 
 - **−4.9%** ($95,138): stock book ≈ flat (−$180); the 5-DTE options overlay paid −$4.7k tuition — **diagnosed in writing by the agent itself on night one**, then corrected all week
 
 > Judges' shortcut: the **Reports page** replays every nightly reflection with its full tool-call transcript — the audit trail *is* the demo.
+
+## Full framework — how the pieces connect
+
+![AllPath framework](images/framework-diagram.png)
+
+<details><summary>Same diagram as mermaid source</summary>
+
+```mermaid
+flowchart TB
+    subgraph Surfaces
+        WEB["Web UI<br/>(FastAPI + htmx)"]
+        TG["Telegram bot"]
+        CLI["CLI / REPL"]
+    end
+
+    subgraph Agent["Agent core (LLM)"]
+        CHAT["Chat agent<br/>research · draft_strategy · propose_order"]
+        REVIEW["ReviewAgent<br/>analyzes soft-rule triggers"]
+        REFLECT["Nightly Reflection<br/>lessons · re-arm · revisions"]
+    end
+
+    subgraph Engine["Deterministic engine (no LLM)"]
+        SENTINEL["Sentinel<br/>evaluates YAML rules every 30 min"]
+        BREAKER["Drawdown circuit breaker<br/>15% from peak → halt"]
+        GATE["Risk gate<br/>caps · exposure · cash reserve"]
+        EXEC["Executor<br/>the ONLY path to a broker"]
+    end
+
+    subgraph Brokers["Market access"]
+        ALPACA["alpaca-py<br/>stocks"]
+        MCP["Alpaca MCP server<br/>option chains + option orders"]
+        YF["yfinance quotes"]
+    end
+
+    subgraph State["Local state"]
+        YAML["Strategy YAML + versions"]
+        MEM["Memory (markdown ×4 layers)"]
+        DB["SQLite: journal · queue ·<br/>conversations · observations"]
+    end
+
+    WEB --> CHAT
+    TG --> CHAT
+    CLI --> CHAT
+    CHAT -- "proposals (approval-gated)" --> DB
+    SENTINEL --> BREAKER
+    SENTINEL -- "hard rules" --> GATE
+    SENTINEL -- "soft rules" --> REVIEW --> GATE
+    GATE --> EXEC
+    EXEC --> ALPACA
+    EXEC -- "options" --> MCP
+    SENTINEL --> YF
+    SENTINEL --> YAML
+    REFLECT --> MEM
+    REFLECT -- "revisions" --> YAML
+    EXEC --> DB
+```
+
+</details>
