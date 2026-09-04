@@ -326,18 +326,19 @@
 <section class="slide">
   <div class="grid"></div>
   <div class="eyebrow">The live run — competition week</div>
-  <h2>Zero-intervention, fully journaled</h2>
+  <h2>Five days hands-off, fully journaled</h2>
   <div class="stats">
-    <div class="stat"><div class="v">$100k</div><div class="l">fresh paper account · one kickoff chat, then hands-off</div></div>
-    <div class="stat"><div class="v">5</div><div class="l">strategies the agent drafted itself — stock + option legs, paired exits</div></div>
-    <div class="stat"><div class="v">9</div><div class="l">fills on day one · 4 stock legs + 5 option legs via Alpaca MCP</div></div>
-    <div class="stat"><div class="v">1<span style="font-size:34px">/night</span></div><div class="l">reflection report with full tool-call transcript · self-revisions applied</div></div>
+    <div class="stat"><div class="v">17</div><div class="l">fills over 5 days — every one rule-driven; zero human trading decisions after kickoff</div></div>
+    <div class="stat"><div class="v">12</div><div class="l">nightly self-revisions, auto-applied through the guarded pipeline — night one it found a real flaw in all 5 of its own strategies</div></div>
+    <div class="stat"><div class="v">~$1.1k</div><div class="l">of option premium recovered by salvage rules the agent wrote for itself mid-week</div></div>
+    <div class="stat"><div class="v">−4.9%</div><div class="l">honest P&amp;L: stock book ≈ flat (−$180) · the 5-DTE options overlay paid −$4.7k tuition — and the agent diagnosed both, in writing</div></div>
   </div>
   <div class="ticker">
-    <div class="trow"><span class="t">09:32 ET</span><span class="sym">BUY 13.24 NVDA @ 226.45</span><span class="via">sentinel · entry-momentum · risk gate passed</span><span class="ok">filled</span></div>
-    <div class="trow"><span class="t">11:46 ET</span><span class="sym">BUY 13× NVDA 09/02 230C @ 1.08</span><span class="via">contract selected via Alpaca MCP</span><span class="ok">filled</span></div>
-    <div class="trow"><span class="t">11:46 ET</span><span class="sym">BUY 5× CRM 09/04 252.5P @ 2.79</span><span class="via">pair hedge — now offsetting the tech pullback</span><span class="ok">filled · +$405</span></div>
-    <div class="trow"><span class="t">11:45 ET</span><span class="sym">BUY 1× MU 09/02 965C</span><span class="via">risk gate: daily trade limit (10/10)</span><span class="no">rejected — re-armed by the agent</span></div>
+    <div class="trow"><span class="t">Aug 28</span><span class="sym">9 entries: 4 stock legs + 5 option legs</span><span class="via">contracts selected & routed via Alpaca MCP</span><span class="ok">filled</span></div>
+    <div class="trow"><span class="t">night 1</span><span class="sym">reflection finds stop→re-entry loop in all 5 strategies</span><span class="via">5 revisions auto-applied</span><span class="ok">self-fixed</span></div>
+    <div class="trow"><span class="t">Sep 1</span><span class="sym">bond-yield selloff: NVDA & AMD stops fire</span><span class="via">sentinel · hard rules · no LLM in the path</span><span class="ok">exited as designed</span></div>
+    <div class="trow"><span class="t">Sep 2</span><span class="sym">SELL 5× CRM 09/04 252.5P @ 1.07</span><span class="via">salvage-decay rule the agent added itself</span><span class="ok">+$535 saved vs expiry</span></div>
+    <div class="trow"><span class="t">Sep 3</span><span class="sym">final reflection: "the fourth stop that harvested the intraday low"</span><span class="via">its own critique of its own stops</span><span class="no">lesson journaled</span></div>
   </div>
   <div class="s7close">Every trade, every skip, every LLM decision, every nightly report —
     journaled. <em>The audit trail is the demo.</em></div>

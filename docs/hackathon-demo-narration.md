@@ -101,18 +101,25 @@ showing the Telegram approve buttons.*
 > would re-enable its own entry at a lower price, so the book would buy
 > back whatever it had just stopped out of."
 
-> "It queued five revisions to fix that, they auto-applied through the
-> guarded pipeline — and it flagged its one profitable position as
-> 'thesis unconfirmed, deliberately not enlarged.' That's an agent being
-> honest about its own performance."
+> "It queued five revisions to fix that, and they auto-applied through
+> the guarded pipeline. And it kept going all week — twelve self-revisions
+> in five nights. It saw its short-dated calls decaying faster than the
+> stocks were moving, so it wrote salvage rules to cut them — those rules
+> alone recovered about eleven hundred dollars of premium. By the final
+> night it was critiquing its own stop placement: 'the fourth stop this
+> week that harvested the intraday low.' That's an agent being honest
+> about its own performance."
 
 ## 8 · Close — 4:30–5:00
 
 *Screen: Dashboard equity once more, then slides results page, hold on
 repo URL.*
 
-> "Every trade, every rejection, every LLM decision, and every nightly
-> report is journaled locally. The audit trail *is* the demo."
+> "The honest scoreboard: down four-point-nine percent on the week. The
+> stock book was basically flat — the tuition was the five-day options
+> overlay, and the agent diagnosed exactly that, in writing, on night
+> one. Every trade, every rejection, every LLM decision, and every
+> nightly report is journaled locally. The audit trail *is* the demo."
 
 > "AllPath is open source, MIT licensed, and everything you saw is in
 > the repo — including the full paper trail of this week. Thanks for
