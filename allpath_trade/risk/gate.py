@@ -23,6 +23,39 @@ class RiskLimits(BaseModel):
     allow_live: bool = False
 
 
+# The account whose ceilings are the bare settings themselves; it has no
+# prefixed overrides (a `paper_max_order_value` setting does not exist).
+DEFAULT_LIMIT_ACCOUNT = "paper"
+
+
+def limits_for_account(settings: object, account: str) -> RiskLimits:
+    """The risk ceilings that apply to ONE account.
+
+    Every field falls back to the bare setting (`max_order_value`, ...),
+    which is what the paper account and any future account use. The shadow
+    account additionally honours a `shadow_`-prefixed override per field,
+    because it mirrors a real brokerage whose size and concentration are
+    nothing like the paper sandbox's -- see `Settings`' own comment for why
+    one shared ceiling cannot serve both.
+
+    `None` on an override means "not set" and falls through to the base
+    value; it deliberately does NOT mean 0, so an operator can leave any
+    subset overridden. `settings` is duck-typed rather than imported as
+    `Settings` to keep `risk/` free of a dependency on the config layer.
+    """
+    fields = ("max_order_value", "max_position_weight", "max_options_weight",
+              "max_daily_trades", "min_cash_reserve")
+    values = {}
+    for name in fields:
+        base = getattr(settings, name, None)
+        override = (getattr(settings, f"{account}_{name}", None)
+                    if account != DEFAULT_LIMIT_ACCOUNT else None)
+        chosen = override if override is not None else base
+        if chosen is not None:
+            values[name] = chosen
+    return RiskLimits(**values)
+
+
 class RiskDecision(BaseModel):
     approved: bool
     reasons: list[str] = []

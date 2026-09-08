@@ -20,7 +20,7 @@ from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.email import build_notifier
 from allpath_trade.reflect import Reflector
 from allpath_trade.risk.breaker import DrawdownBreaker
-from allpath_trade.risk.gate import RiskGate, RiskLimits
+from allpath_trade.risk.gate import RiskGate, limits_for_account
 from allpath_trade.sentinel import Sentinel
 from allpath_trade.store.accounts import ACCOUNTS, DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
@@ -172,7 +172,7 @@ def _build_account_components(account: str, *, settings: Settings,
                               broker_override: Broker | None) -> AccountComponents:
     broker = _build_broker(account, settings, conn, data, broker_override)
     journal = TradeJournal(conn, account=account)
-    gate = RiskGate(RiskLimits())
+    gate = RiskGate(limits_for_account(settings, account))
     # Task 7: options trading is paper-only (spec §7) -- shadow's ledger
     # never touches a real brokerage, so it always gets `options_backend=
     # None` (the parameter's own default; nothing to pass for shadow). One

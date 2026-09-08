@@ -180,6 +180,31 @@ class Settings(BaseSettings):
     # docs/TODO.md's _broker_pool note) -- one hung call stalls a sentinel
     # tick silently. yfinance already defaults to 30s internally.
     broker_http_timeout_seconds: int = Field(default=30, ge=5)
+    # Risk ceilings. These are the values `RiskGate` enforces on every order;
+    # the defaults here are the ones `RiskLimits` has always carried, so an
+    # unconfigured install behaves exactly as before. Each is a per-ACCOUNT
+    # ceiling once resolved through `risk.gate.limits_for_account`: the bare
+    # setting applies to every account, and a `shadow_`-prefixed override
+    # takes precedence for the shadow account alone.
+    #
+    # Why shadow needs its own: shadow mirrors the user's REAL brokerage,
+    # which is a different size and posture from the paper sandbox. A
+    # $5,000 order cap is 5% of a $100k paper account but 1.7% of a $287k
+    # mirrored one, and a 25% position ceiling is already breached at import
+    # time by a real book whose largest holding is 43%. Shared limits would
+    # reject every meaningful rebalancing order the agent proposes there.
+    max_order_value: Decimal = Field(default=Decimal(5000), gt=0)
+    max_position_weight: Decimal = Field(default=Decimal("0.25"), gt=0, le=1)
+    max_options_weight: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
+    max_daily_trades: int = Field(default=10, ge=1)
+    min_cash_reserve: Decimal = Field(default=Decimal(0), ge=0)
+    # Shadow overrides. `None` (the default) means "no override" -- fall back
+    # to the matching bare setting above; it is NOT the same as 0.
+    shadow_max_order_value: Decimal | None = Field(default=None, gt=0)
+    shadow_max_position_weight: Decimal | None = Field(default=None, gt=0, le=1)
+    shadow_max_options_weight: Decimal | None = Field(default=None, ge=0, le=1)
+    shadow_max_daily_trades: int | None = Field(default=None, ge=1)
+    shadow_min_cash_reserve: Decimal | None = Field(default=None, ge=0)
     # Telegram chat channel (Task 1 of the Telegram plan): the bot token from
     # BotFather (@BotFather -> /newbot). Empty (the default) means the
     # channel is off -- no poller starts, no pairing is possible.

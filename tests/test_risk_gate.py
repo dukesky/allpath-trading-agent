@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from allpath_trade.broker.base import Account, OptionIntent, OrderIntent, OrderSide, Position
-from allpath_trade.risk.gate import RiskGate, RiskLimits
+from allpath_trade.risk.gate import RiskGate, RiskLimits, limits_for_account
 
 ACCT = Account(equity=Decimal(10000), cash=Decimal(5000), buying_power=Decimal(10000))
 AAPL_POS = Position(ticker="AAPL", qty=Decimal(10), avg_entry_price=Decimal(190),
@@ -279,3 +279,63 @@ def test_check_option_buy_still_rejects_daily_trade_limit():
     d = check_option(opt_buy(premium="100"), positions=[], trades_today=10)
     assert not d.approved
     assert any("daily trade" in r.lower() for r in d.reasons)
+
+
+# --- per-account limit resolution (limits_for_account) -----------------------
+
+
+class _FakeSettings:
+    """Duck-typed stand-in for Settings — only the fields the resolver reads."""
+
+    def __init__(self, **kw):
+        self.max_order_value = Decimal(5000)
+        self.max_position_weight = Decimal("0.25")
+        self.max_options_weight = Decimal("0.10")
+        self.max_daily_trades = 10
+        self.min_cash_reserve = Decimal(0)
+        self.shadow_max_order_value = None
+        self.shadow_max_position_weight = None
+        self.shadow_max_options_weight = None
+        self.shadow_max_daily_trades = None
+        self.shadow_min_cash_reserve = None
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_limits_for_account_paper_uses_base_settings():
+    lim = limits_for_account(_FakeSettings(), "paper")
+    assert lim.max_order_value == Decimal(5000)
+    assert lim.max_position_weight == Decimal("0.25")
+    assert lim.max_daily_trades == 10
+
+
+def test_limits_for_account_shadow_without_overrides_matches_base():
+    s = _FakeSettings()
+    assert limits_for_account(s, "shadow") == limits_for_account(s, "paper")
+
+
+def test_limits_for_account_shadow_overrides_win():
+    s = _FakeSettings(shadow_max_order_value=Decimal(30000),
+                      shadow_max_position_weight=Decimal("0.40"))
+    lim = limits_for_account(s, "shadow")
+    assert lim.max_order_value == Decimal(30000)
+    assert lim.max_position_weight == Decimal("0.40")
+    # unoverridden fields still fall back to the base values
+    assert lim.max_daily_trades == 10
+    assert lim.max_options_weight == Decimal("0.10")
+
+
+def test_shadow_overrides_never_leak_into_paper():
+    s = _FakeSettings(shadow_max_order_value=Decimal(30000),
+                      shadow_max_position_weight=Decimal("0.40"))
+    lim = limits_for_account(s, "paper")
+    assert lim.max_order_value == Decimal(5000)
+    assert lim.max_position_weight == Decimal("0.25")
+
+
+def test_zero_cash_reserve_override_is_honoured_not_treated_as_unset():
+    """0 is a real value; only None means "no override"."""
+    s = _FakeSettings(min_cash_reserve=Decimal(1000),
+                      shadow_min_cash_reserve=Decimal(0))
+    assert limits_for_account(s, "shadow").min_cash_reserve == Decimal(0)
+    assert limits_for_account(s, "paper").min_cash_reserve == Decimal(1000)
