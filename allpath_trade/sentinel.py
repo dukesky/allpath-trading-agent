@@ -19,7 +19,7 @@ from allpath_trade.broker.base import (
 )
 from allpath_trade.broker.options_mcp import OptionsBackend, OptionsBackendError
 from allpath_trade.data.base import DataSource
-from allpath_trade.execution import ExecutionError, Executor
+from allpath_trade.execution import ExecutionError, Executor, close_underlying_options
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
@@ -535,10 +535,18 @@ class Sentinel:
                                 positions: dict[str, Position],
                                 reason: str) -> TriggerOutcome:
         underlying = doc.position.ticker
-        to_close = [p for p in positions.values()
-                   if (parts := parse_occ_symbol(p.ticker)) is not None
-                   and parts.root == underlying]
-        if not to_close:
+        # Filter/parse/build/execute mechanics (including Finding 5's "build
+        # the intent INSIDE the try" fix, so one bad position's fractional
+        # qty never aborts the rest of the batch) now live in the shared
+        # close_underlying_options (execution.py) -- ReviewQueue.
+        # _run_option_close used to duplicate this whole block almost line
+        # for line. This method keeps only its own presentation (the
+        # "closed: .../errors: ..." detail text) and per-leg notifications,
+        # unchanged from before the extraction.
+        outcome = close_underlying_options(
+            self.executor, underlying, positions.values(),
+            reason=reason, strategy_id=doc.id)
+        if not outcome.legs:
             self._notify_rule(doc, rule_id, condition, "skipped")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="skipped",
@@ -546,37 +554,20 @@ class Sentinel:
 
         closed: list[str] = []
         issues: list[str] = []
-        for p in to_close:
-            # Finding 5: intent construction moved INSIDE the try (matching
-            # `_run_expiry_sweep`'s own pattern) -- `OptionIntent`'s
-            # `qty >= 1` validator can raise `ValidationError` for a
-            # position whose fractional qty truncates to 0 via `int(p.qty)`
-            # (e.g. 0.5 contracts, which should never happen but a bad
-            # broker payload could produce). With construction OUTSIDE the
-            # try, that raised straight out of this loop and abandoned
-            # every remaining position in `to_close` -- one bad position
-            # aborted the whole close_options batch. Inside the try, that
-            # position is recorded as an issue and the loop continues.
-            try:
-                parts = parse_occ_symbol(p.ticker)
-                intent = OptionIntent(underlying=underlying, right=parts.right,
-                                      occ_symbol=p.ticker, side=OrderSide.SELL,
-                                      qty=int(p.qty), est_premium=Decimal(0),
-                                      reason=reason, strategy_id=doc.id)
-                result = self.executor.execute_option(intent)
-            except Exception as exc:  # noqa: BLE001 — one bad close must not
-                # abort the rest of this strategy's option positions.
-                issues.append(f"{p.ticker}: {exc}")
-                self._notify_order(doc, p.ticker, "sell", False, str(exc))
+        for leg in outcome.legs:
+            ticker = leg.position.ticker
+            if leg.error is not None:
+                issues.append(f"{ticker}: {leg.error}")
+                self._notify_order(doc, ticker, "sell", False, leg.error)
                 continue
-            if result.submitted:
-                closed.append(p.ticker)
-                self._notify_order(doc, p.ticker, "sell", True, self._placed,
-                                   order=result.order)
+            if leg.result.submitted:
+                closed.append(ticker)
+                self._notify_order(doc, ticker, "sell", True, self._placed,
+                                   order=leg.result.order)
             else:
-                reasons = "; ".join(result.decision.reasons)
-                issues.append(f"{p.ticker}: {reasons}")
-                self._notify_order(doc, p.ticker, "sell", False, reasons)
+                reasons = "; ".join(leg.result.decision.reasons)
+                issues.append(f"{ticker}: {reasons}")
+                self._notify_order(doc, ticker, "sell", False, reasons)
 
         detail = f"closed: {', '.join(closed)}" if closed else ""
         if issues:

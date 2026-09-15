@@ -18,13 +18,13 @@ from allpath_trade.broker.base import (
     OptionIntent,
     OrderIntent,
     OrderSide,
-    parse_occ_symbol,
 )
 from allpath_trade.execution import (
     ExecutionError,
     ExecutionResult,
     Executor,
     OptionApprovalResult,
+    close_underlying_options,
 )
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
@@ -673,32 +673,31 @@ class ReviewQueue:
             positions = executor.broker.get_positions()
         except Exception as exc:  # claimed; must surface as ExecutionError
             raise ExecutionError(f"could not read positions at approval: {exc}") from exc
-        held = [p for p in positions
-                if (parts := parse_occ_symbol(p.ticker)) is not None
-                and parts.root == instruction.underlying]
-        if not held:
+        # Filter/parse/build/execute mechanics now live in the shared
+        # close_underlying_options (execution.py) -- Sentinel._dispatch_
+        # close_options used to duplicate this whole block almost line for
+        # line. This method keeps only its own presentation: the "no
+        # positions left" outcome and the "closed .../problems: ..."
+        # summary text, unchanged from before the extraction.
+        outcome = close_underlying_options(
+            executor, instruction.underlying, positions,
+            reason=instruction.reason, strategy_id=instruction.strategy_id)
+        if not outcome.legs:
             return OptionApprovalResult(submitted=False,
                                         summary="no option positions left to close")
         closed: list[str] = []
         issues: list[str] = []
         results: list[ExecutionResult] = []
-        for p in held:
-            try:
-                parts = parse_occ_symbol(p.ticker)
-                intent = OptionIntent(
-                    underlying=instruction.underlying, right=parts.right,
-                    occ_symbol=p.ticker, side=OrderSide.SELL, qty=int(p.qty),
-                    est_premium=Decimal(0), reason=instruction.reason,
-                    strategy_id=instruction.strategy_id)
-                res = executor.execute_option(intent)
-            except Exception as exc:  # noqa: BLE001 — one bad close must not stop the rest
-                issues.append(f"{p.ticker}: {exc}")
+        for leg in outcome.legs:
+            ticker = leg.position.ticker
+            if leg.error is not None:
+                issues.append(f"{ticker}: {leg.error}")
                 continue
-            results.append(res)
-            if res.submitted:
-                closed.append(f"{p.ticker} x{int(p.qty)}")
+            results.append(leg.result)
+            if leg.result.submitted:
+                closed.append(f"{ticker} x{int(leg.position.qty)}")
             else:
-                issues.append(f"{p.ticker}: " + "; ".join(res.decision.reasons))
+                issues.append(f"{ticker}: " + "; ".join(leg.result.decision.reasons))
         pieces = []
         if closed:
             pieces.append("closed " + ", ".join(closed))

@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import sys
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -16,6 +17,8 @@ from allpath_trade.broker.base import (
     OrderIntent,
     OrderSide,
     OrderStatus,
+    Position,
+    parse_occ_symbol,
 )
 from allpath_trade.broker.options_mcp import OptionsBackend
 from allpath_trade.data.base import DataSource
@@ -376,3 +379,67 @@ class Executor:
 
         self.journal.record(order_intent, decision, order)
         return ExecutionResult(submitted=True, order=order, decision=decision)
+
+
+class OptionCloseLegOutcome(BaseModel):
+    """One position `close_underlying_options` attempted to close: either a
+    submitted or risk-gate-rejected `ExecutionResult` (`result` set, `error`
+    None), or a pre-execution failure -- a fractional/zero qty that fails
+    `OptionIntent`'s `qty >= 1` validation, a broker exception -- (`error`
+    set to `str(exc)`, `result` None). Carries the original `Position` (not
+    just its ticker) so callers can build their own detail strings from it
+    (e.g. `ReviewQueue._run_option_close`'s "OCC xN" vs
+    `Sentinel._dispatch_close_options`'s bare OCC ticker) without a second
+    lookup."""
+    position: Position
+    result: ExecutionResult | None = None
+    error: str | None = None
+
+
+class OptionCloseOutcome(BaseModel):
+    legs: list[OptionCloseLegOutcome] = []
+
+
+def close_underlying_options(executor: Executor, underlying: str,
+                             positions: Iterable[Position], *, reason: str,
+                             strategy_id: str | None) -> OptionCloseOutcome:
+    """Close every option position among `positions` whose OCC root matches
+    `underlying`: one SELL `OptionIntent` (qty=int(position.qty),
+    est_premium=0) per matching position, via `executor.execute_option`.
+
+    `ReviewQueue._run_option_close` (approving a queued option_order close)
+    and `Sentinel._dispatch_close_options` (an auto-authorization strategy's
+    close_options rule) used to each carry their own copy of this
+    filter/parse/build/execute/except block, almost line for line -- a
+    future fix to the close mechanics (e.g. building the `OptionIntent`
+    INSIDE the try so a bad qty doesn't abort the batch) risked landing in
+    only one copy. This is now the one place that logic lives.
+
+    Deliberately returns raw per-leg outcomes rather than a formatted
+    summary: the two callers need different detail-string formats and
+    different side effects (reviews.py folds every leg into one
+    `execution_result` JSON; sentinel.py sends a per-leg notification via
+    `_notify_order` and folds every leg into one `TriggerOutcome`) -- this
+    function owns only the mechanics that were actually duplicated, not
+    either caller's own presentation or notifications.
+
+    One bad leg is recorded on that leg's `error` and never aborts the rest
+    of the batch -- the same contract both callers already relied on
+    separately (see `OptionCloseLegOutcome`'s docstring)."""
+    held = [p for p in positions
+           if (parts := parse_occ_symbol(p.ticker)) is not None
+           and parts.root == underlying]
+    legs: list[OptionCloseLegOutcome] = []
+    for p in held:
+        try:
+            parts = parse_occ_symbol(p.ticker)
+            intent = OptionIntent(
+                underlying=underlying, right=parts.right, occ_symbol=p.ticker,
+                side=OrderSide.SELL, qty=int(p.qty), est_premium=Decimal(0),
+                reason=reason, strategy_id=strategy_id)
+            result = executor.execute_option(intent)
+        except Exception as exc:  # noqa: BLE001 — one bad leg must not stop the rest
+            legs.append(OptionCloseLegOutcome(position=p, error=str(exc)))
+            continue
+        legs.append(OptionCloseLegOutcome(position=p, result=result))
+    return OptionCloseOutcome(legs=legs)

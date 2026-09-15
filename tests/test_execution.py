@@ -773,3 +773,38 @@ def test_option_approval_result_defaults():
     from allpath_trade.execution import OptionApprovalResult
     r = OptionApprovalResult(submitted=False, summary="nothing to close")
     assert r.reasons == [] and r.results == []
+
+
+# -- close_underlying_options (shared by ReviewQueue._run_option_close and
+# Sentinel._dispatch_close_options) ------------------------------------------
+
+def test_close_underlying_options_filters_by_root_and_handles_a_bad_leg(tmp_path):
+    from allpath_trade.execution import close_underlying_options
+
+    backend = FakeOptionsBackend()
+    ex, _broker, _journal = make_option_executor(tmp_path, options_backend=backend)
+    good = Position(ticker=CALL_OCC, qty=Decimal(1), avg_entry_price=Decimal("5.25"),
+                    market_value=Decimal(525), unrealized_pl=Decimal(0))
+    other_underlying = Position(ticker="AMD260918C00100000", qty=Decimal(1),
+                                avg_entry_price=Decimal(1), market_value=Decimal(100),
+                                unrealized_pl=Decimal(0))
+    # A 0.5-contract position truncates to qty=0 via int(p.qty), which fails
+    # OptionIntent's qty >= 1 validation -- this must be recorded as a
+    # per-leg error, not raise out of the whole call.
+    bad_qty = Position(ticker="META260918C00650000", qty=Decimal("0.5"),
+                       avg_entry_price=Decimal(1), market_value=Decimal(50),
+                       unrealized_pl=Decimal(0))
+
+    outcome = close_underlying_options(
+        ex, "META", [good, other_underlying, bad_qty],
+        reason="test", strategy_id="s1")
+
+    # AMD is filtered out -- only the two META positions are attempted.
+    assert [leg.position.ticker for leg in outcome.legs] == [CALL_OCC,
+                                                              "META260918C00650000"]
+    [good_leg, bad_leg] = outcome.legs
+    assert good_leg.error is None
+    assert good_leg.result is not None and good_leg.result.submitted
+    assert bad_leg.result is None
+    assert bad_leg.error is not None
+    assert backend.calls == [(CALL_OCC, "sell", 1, "sell_to_close")]
