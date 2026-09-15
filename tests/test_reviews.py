@@ -2,14 +2,24 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
-from allpath_trade.broker.base import OrderIntent, OrderSide
+from allpath_trade.broker.base import (
+    OptionInstruction,
+    OptionPositionRef,
+    OrderIntent,
+    OrderSide,
+    Position,
+)
+from allpath_trade.broker.options_mcp import OptionPick
+from allpath_trade.execution import ExecutionError, ExecutionResult, OptionApprovalResult
+from allpath_trade.risk.gate import RiskDecision
 from allpath_trade.store.db import connect
 from allpath_trade.store.reviews import (
+    OPTION_MARKET_CLOSED_MESSAGE,
     ReviewError,
     ReviewHandle,
     ReviewQueue,
@@ -1139,3 +1149,222 @@ def test_reject_shadow_edit_never_calls_applier(shadow_queue):
     assert calls == []
     row = shadow_queue.get(rid)
     assert row["status"] == "rejected" and row["resolution_note"] == "no"
+
+
+OPT_PICK = OptionPick(occ_symbol="NVDA261016C00220000", expiry=date(2026, 10, 16),
+                      strike=Decimal(220), ask=Decimal("4.65"), qty=2,
+                      est_premium=Decimal(930))
+
+
+class _Quote:
+    def __init__(self, price):
+        self.price = Decimal(price)
+
+
+class _Data:
+    def __init__(self, price="211"):
+        self.price = price
+
+    def get_quote(self, ticker):
+        return _Quote(self.price)
+
+
+class _Backend:
+    def __init__(self, pick=OPT_PICK):
+        self.pick = pick
+        self.calls = []
+
+    def pick_contract(self, underlying, right, min_dte, otm_pct, budget, spot):
+        self.calls.append((underlying, right, min_dte, otm_pct, budget, spot))
+        return self.pick
+
+
+class _Broker:
+    def __init__(self, positions=()):
+        self.positions = list(positions)
+
+    def get_positions(self):
+        return self.positions
+
+
+class OptionExecutor:
+    def __init__(self, *, pick=OPT_PICK, positions=(), reject=None, raise_on=None,
+                 backend=True):
+        self.data = _Data()
+        self.options_backend = _Backend(pick) if backend else None
+        self.broker = _Broker(positions)
+        self.reject = reject
+        self.raise_on = raise_on
+        self.option_calls = []
+
+    def execute_option(self, intent):
+        if self.raise_on == intent.occ_symbol:
+            raise ExecutionError("broker down")
+        self.option_calls.append(intent)
+        if self.reject:
+            return ExecutionResult(submitted=False, order=None,
+                                   decision=RiskDecision(approved=False, reasons=[self.reject]))
+        return ExecutionResult(submitted=True, order=None,
+                               decision=RiskDecision(approved=True))
+
+
+def _opt_pos(occ, qty="2"):
+    return Position(ticker=occ, qty=Decimal(qty), avg_entry_price=Decimal("4.65"),
+                    market_value=Decimal(930), unrealized_pl=Decimal(0))
+
+
+BUY_INSTR = OptionInstruction(op="buy", underlying="NVDA", reason="dip", strategy_id="s1",
+                              right="call", min_dte=30, otm_pct=Decimal("0.05"),
+                              budget=Decimal(1000), spot_at_trigger=Decimal(210))
+CLOSE_INSTR = OptionInstruction(op="close", underlying="NVDA", reason="stop", strategy_id="s1",
+                                positions_at_trigger=[OptionPositionRef(
+                                    occ_symbol="NVDA261016C00220000", qty=2)])
+
+
+def _opt_queue(tmp_path, executor):
+    return ReviewQueue(connect(tmp_path / "o.db"), executor)
+
+
+def _add_opt(q, instr=BUY_INSTR, preview=None):
+    return q.add_option_order(
+        strategy_id="s1", rule_id="entry-call", ticker="NVDA", rule_type="hard",
+        condition="price < 212", action="buy_call $1000 dte>=30 otm=5%",
+        snapshot={"price": "210", "preview": preview or json.loads(OPT_PICK.model_dump_json())},
+        instruction=instr)
+
+
+@pytest.fixture()
+def market_open(monkeypatch):
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: True)
+
+
+@pytest.fixture()
+def market_closed(monkeypatch):
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: False)
+
+
+def test_add_option_order_row_shape(tmp_path):
+    q = _opt_queue(tmp_path, OptionExecutor())
+    rid = _add_opt(q)
+    row = q.get(rid)
+    assert row["kind"] == "option_order" and row["status"] == "pending"
+    assert row["ticker"] == "NVDA" and row["source"] == "sentinel"
+    assert OptionInstruction.model_validate_json(row["intent"]) == BUY_INSTR
+    assert row["approval_token_hash"]
+
+
+def test_approve_option_buy_repicks_with_live_spot_and_executes(tmp_path, market_open):
+    ex = OptionExecutor()
+    q = _opt_queue(tmp_path, ex)
+    rid = _add_opt(q)
+    result = q.approve(rid)
+    assert isinstance(result, OptionApprovalResult) and result.submitted
+    assert ex.options_backend.calls == [("NVDA", "call", 30, Decimal("0.05"),
+                                        Decimal(1000), Decimal(211))]
+    [intent] = ex.option_calls
+    assert intent.occ_symbol == "NVDA261016C00220000" and intent.qty == 2
+    row = q.get(rid)
+    assert row["status"] == "approved"
+    er = json.loads(row["execution_result"])
+    assert er["op"] == "buy" and er["preview"]["occ_symbol"] == "NVDA261016C00220000"
+    assert er["picked"]["occ_symbol"] == "NVDA261016C00220000"
+    assert er["spot_at_approval"] == "211"
+
+
+def test_approve_option_buy_no_affordable_contract_at_approval(tmp_path, market_open):
+    ex = OptionExecutor(pick=None)
+    q = _opt_queue(tmp_path, ex)
+    rid = _add_opt(q)
+    result = q.approve(rid)
+    assert result.submitted is False and "no affordable" in result.summary
+    assert ex.option_calls == []
+    assert json.loads(q.get(rid)["execution_result"])["picked"] is None
+
+
+def test_approve_option_buy_risk_gate_rejection(tmp_path, market_open):
+    ex = OptionExecutor(reject="order value exceeds max_order_value")
+    q = _opt_queue(tmp_path, ex)
+    result = q.approve(_add_opt(q))
+    assert result.submitted is False
+    assert result.reasons == ["order value exceeds max_order_value"]
+
+
+def test_approve_option_close_rereads_positions(tmp_path, market_open):
+    ex = OptionExecutor(positions=[_opt_pos("NVDA261016C00220000"),
+                                   _opt_pos("AMD261016C00500000")])
+    q = _opt_queue(tmp_path, ex)
+    result = q.approve(_add_opt(q, CLOSE_INSTR, preview=[{"occ_symbol": "NVDA261016C00220000", "qty": 2}]))
+    assert result.submitted
+    [intent] = ex.option_calls
+    assert intent.occ_symbol == "NVDA261016C00220000" and intent.side.value == "sell"
+
+
+def test_approve_option_close_nothing_left(tmp_path, market_open):
+    ex = OptionExecutor(positions=[])
+    q = _opt_queue(tmp_path, ex)
+    result = q.approve(_add_opt(q, CLOSE_INSTR, preview=[]))
+    assert result.submitted is False and "no option positions left" in result.summary
+
+
+def test_approve_option_close_one_failure_does_not_stop_the_rest(tmp_path, market_open):
+    ex = OptionExecutor(positions=[_opt_pos("NVDA261016C00220000"),
+                                   _opt_pos("NVDA261120C00230000")],
+                        raise_on="NVDA261016C00220000")
+    q = _opt_queue(tmp_path, ex)
+    result = q.approve(_add_opt(q, CLOSE_INSTR, preview=[]))
+    assert result.submitted
+    assert [i.occ_symbol for i in ex.option_calls] == ["NVDA261120C00230000"]
+    assert any("NVDA261016C00220000" in r for r in result.reasons)
+
+
+def test_approve_option_while_market_closed_stays_pending(tmp_path, market_closed):
+    ex = OptionExecutor()
+    q = _opt_queue(tmp_path, ex)
+    rid = _add_opt(q)
+    with pytest.raises(ReviewError, match="market is closed"):
+        q.approve(rid)
+    row = q.get(rid)
+    assert row["status"] == "pending" and row["approval_token_hash"]
+    assert ex.option_calls == []
+    assert OPTION_MARKET_CLOSED_MESSAGE.startswith("market is closed")
+
+
+def test_approve_option_without_backend_stays_pending(tmp_path, market_open):
+    q = _opt_queue(tmp_path, OptionExecutor(backend=False))
+    rid = _add_opt(q)
+    with pytest.raises(ReviewError):
+        q.approve(rid)
+    assert q.get(rid)["status"] == "pending"
+
+
+def test_approve_option_corrupt_instruction_stays_pending(tmp_path, market_open):
+    q = _opt_queue(tmp_path, OptionExecutor())
+    rid = _add_opt(q)
+    q._conn.execute("UPDATE pending_reviews SET intent='{\"op\":\"buy\"}' WHERE id=?", (rid,))
+    q._conn.commit()
+    with pytest.raises(ReviewError, match="corrupt option instruction"):
+        q.approve(rid)
+    assert q.get(rid)["status"] == "pending"
+
+
+def test_approve_option_twice_second_is_refused(tmp_path, market_open):
+    q = _opt_queue(tmp_path, OptionExecutor())
+    rid = _add_opt(q)
+    q.approve(rid)
+    with pytest.raises(ReviewError):
+        q.approve(rid)
+
+
+def test_approve_option_quote_failure_after_claim_raises_execution_error(tmp_path, market_open):
+    ex = OptionExecutor()
+
+    def boom(ticker):
+        raise RuntimeError("quote down")
+    ex.data.get_quote = boom
+    q = _opt_queue(tmp_path, ex)
+    rid = _add_opt(q)
+    with pytest.raises(ExecutionError):
+        q.approve(rid)
+    row = q.get(rid)
+    assert row["status"] == "approved"
+    assert "quote down" in json.loads(row["execution_result"])["error"]

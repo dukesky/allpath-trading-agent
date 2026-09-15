@@ -12,12 +12,31 @@ from typing import Self
 
 from pydantic import ValidationError
 
-from allpath_trade.broker.base import OrderIntent
-from allpath_trade.execution import ExecutionError, ExecutionResult, Executor
+from allpath_trade import market_hours
+from allpath_trade.broker.base import (
+    OptionInstruction,
+    OptionIntent,
+    OrderIntent,
+    OrderSide,
+    parse_occ_symbol,
+)
+from allpath_trade.execution import (
+    ExecutionError,
+    ExecutionResult,
+    Executor,
+    OptionApprovalResult,
+)
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 
 # Approve-by-link token lifetime (Part A): 24h from issue, per row.
 TOKEN_TTL_SECONDS = 24 * 3600
+
+# Alpaca's option venue rejects closed-market orders (incident 2026-08-28):
+# an option_order approval attempted while the market is closed must leave
+# the row pending rather than claim it and fail.
+OPTION_MARKET_CLOSED_MESSAGE = (
+    "market is closed — option orders can only be approved during regular "
+    "hours (Mon–Fri 09:30–16:00 ET); the item is still pending")
 
 
 def _hash_token(token: str) -> str:
@@ -158,6 +177,26 @@ class ReviewQueue:
              json.dumps(snapshot, default=_json_default),
              intent.model_dump_json() if intent else None, source,
              conversation_id, risk_preview, token_hash, expires))
+        self._conn.commit()
+        return ReviewHandle(cur.lastrowid, token)
+
+    def add_option_order(self, *, strategy_id: str, rule_id: str, ticker: str,
+                         rule_type: str, condition: str, action: str,
+                         snapshot: dict, instruction: OptionInstruction) -> ReviewHandle:
+        """Queue an option trade from a confirm strategy for approval. `intent`
+        holds the option INSTRUCTION, not a contract -- the contract is
+        re-picked (buys) or positions re-read (closes) at approval time."""
+        token, token_hash, expires = self._issue_token()
+        cur = self._conn.execute(
+            "INSERT INTO pending_reviews (account, ts, strategy_id, rule_id, ticker,"
+            " rule_type, condition, action, snapshot, intent, source, kind,"
+            " approval_token_hash, token_expires_ts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._account, datetime.now(UTC).isoformat(), strategy_id, rule_id,
+             ticker, rule_type, condition, action,
+             json.dumps(snapshot, default=_json_default),
+             instruction.model_dump_json(), "sentinel", "option_order",
+             token_hash, expires))
         self._conn.commit()
         return ReviewHandle(cur.lastrowid, token)
 
@@ -472,7 +511,7 @@ class ReviewQueue:
             return None
         return row
 
-    def approve(self, review_id: int) -> ExecutionResult | None:
+    def approve(self, review_id: int) -> ExecutionResult | OptionApprovalResult | None:
         # kind decides which of two claim-then-act paths runs; route reads
         # kind first (Phase 6) rather than duplicating the branch into every
         # caller (routes/reviews.py, sentinel.py, the review-agent tool).
@@ -486,6 +525,8 @@ class ReviewQueue:
             return self._approve_order(review_id)
         if row["kind"] == "shadow_edit":
             return self._approve_shadow_edit(review_id)
+        if row["kind"] == "option_order":
+            return self._approve_option_order(review_id)
         raise ReviewError(f"unknown review kind: {row['kind']!r}")
 
     def _approve_order(self, review_id: int) -> ExecutionResult:
@@ -539,6 +580,132 @@ class ReviewQueue:
             (result.model_dump_json(), review_id, self._account))
         self._conn.commit()
         return result
+
+    def _approve_option_order(self, review_id: int) -> OptionApprovalResult:
+        row = self.get(review_id)
+        if row["status"] != "pending":
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
+        try:
+            instruction = OptionInstruction.model_validate_json(row["intent"] or "")
+        except (ValidationError, ValueError) as exc:
+            raise ReviewError(
+                f"review {review_id} has corrupt option instruction: {exc}") from exc
+        # Before claiming: a closed-market approval must leave the row pending
+        # (Alpaca's option venue rejects closed-market orders -- incident
+        # 2026-08-28).
+        if not market_hours.is_us_market_open():
+            raise ReviewError(OPTION_MARKET_CLOSED_MESSAGE)
+        executor = self._executor
+        if executor is None or getattr(executor, "options_backend", None) is None:
+            raise ReviewError("approve requires the options backend "
+                              "(options trading is disabled)")
+
+        resolved_ts = datetime.now(UTC).isoformat()
+        cur = self._conn.execute(
+            "UPDATE pending_reviews SET status=?, resolved_ts=?,"
+            " approval_token_hash=NULL, token_expires_ts=NULL "
+            "WHERE id=? AND status=? AND account=?",
+            ("approved", resolved_ts, review_id, "pending", self._account))
+        self._conn.commit()
+        if cur.rowcount == 0:
+            row = self.get(review_id)
+            raise ReviewError(f"review {review_id} is {row['status']}, not pending")
+
+        snapshot = json.loads(row["snapshot"]) if row["snapshot"] else {}
+        record: dict = {"op": instruction.op, "preview": snapshot.get("preview")}
+        try:
+            if instruction.op == "buy":
+                result = self._run_option_buy(executor, instruction, record)
+            else:
+                result = self._run_option_close(executor, instruction)
+        except ExecutionError as exc:
+            record["error"] = str(exc)
+            self._write_execution_result(review_id, record)
+            raise
+        record["summary"] = result.summary
+        record["reasons"] = result.reasons
+        record["results"] = [json.loads(r.model_dump_json()) for r in result.results]
+        self._write_execution_result(review_id, record)
+        return result
+
+    def _write_execution_result(self, review_id: int, record: dict) -> None:
+        self._conn.execute(
+            "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",
+            (json.dumps(record, default=_json_default), review_id, self._account))
+        self._conn.commit()
+
+    @staticmethod
+    def _run_option_buy(executor, instruction: OptionInstruction,
+                        record: dict) -> OptionApprovalResult:
+        try:
+            spot = executor.data.get_quote(instruction.underlying).price
+            pick = executor.options_backend.pick_contract(
+                instruction.underlying, instruction.right, instruction.min_dte,
+                instruction.otm_pct, instruction.budget, spot)
+        except Exception as exc:  # claimed; must surface as ExecutionError
+            raise ExecutionError(f"could not re-price the option at approval: {exc}") from exc
+        record["spot_at_approval"] = str(spot)
+        if pick is None:
+            record["picked"] = None
+            return OptionApprovalResult(
+                submitted=False,
+                summary="no affordable option contract at approval — nothing bought")
+        record["picked"] = json.loads(pick.model_dump_json())
+        intent = OptionIntent(
+            underlying=instruction.underlying, right=instruction.right,
+            occ_symbol=pick.occ_symbol, side=OrderSide.BUY, qty=pick.qty,
+            est_premium=pick.est_premium, reason=instruction.reason,
+            strategy_id=instruction.strategy_id)
+        res = executor.execute_option(intent)
+        if res.submitted:
+            return OptionApprovalResult(
+                submitted=True,
+                summary=f"bought {pick.qty}x {pick.occ_symbol} (est. ${pick.est_premium:,.2f})",
+                results=[res])
+        reasons = list(res.decision.reasons)
+        return OptionApprovalResult(
+            submitted=False, summary="rejected by the risk gate: " + "; ".join(reasons),
+            reasons=reasons, results=[res])
+
+    @staticmethod
+    def _run_option_close(executor, instruction: OptionInstruction) -> OptionApprovalResult:
+        try:
+            positions = executor.broker.get_positions()
+        except Exception as exc:  # claimed; must surface as ExecutionError
+            raise ExecutionError(f"could not read positions at approval: {exc}") from exc
+        held = [p for p in positions
+                if (parts := parse_occ_symbol(p.ticker)) is not None
+                and parts.root == instruction.underlying]
+        if not held:
+            return OptionApprovalResult(submitted=False,
+                                        summary="no option positions left to close")
+        closed: list[str] = []
+        issues: list[str] = []
+        results: list[ExecutionResult] = []
+        for p in held:
+            try:
+                parts = parse_occ_symbol(p.ticker)
+                intent = OptionIntent(
+                    underlying=instruction.underlying, right=parts.right,
+                    occ_symbol=p.ticker, side=OrderSide.SELL, qty=int(p.qty),
+                    est_premium=Decimal(0), reason=instruction.reason,
+                    strategy_id=instruction.strategy_id)
+                res = executor.execute_option(intent)
+            except Exception as exc:  # noqa: BLE001 — one bad close must not stop the rest
+                issues.append(f"{p.ticker}: {exc}")
+                continue
+            results.append(res)
+            if res.submitted:
+                closed.append(f"{p.ticker} x{int(p.qty)}")
+            else:
+                issues.append(f"{p.ticker}: " + "; ".join(res.decision.reasons))
+        pieces = []
+        if closed:
+            pieces.append("closed " + ", ".join(closed))
+        if issues:
+            pieces.append("problems: " + "; ".join(issues))
+        return OptionApprovalResult(submitted=bool(closed), summary="; ".join(pieces),
+                                    reasons=issues, results=results)
 
     def _approve_revision(self, review_id: int) -> None:
         # Mirrors `_approve_order`'s shape: reject up front (before touching
