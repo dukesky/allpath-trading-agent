@@ -803,19 +803,29 @@ def _queue_option_link(client):
     return q, int(handle), handle.token
 
 
-def test_option_link_while_market_closed_and_link_will_have_expired_by_next_open(
-        client, monkeypatch):
-    from datetime import datetime
+def _future_open():
+    # Relative to the real clock: the link token itself must still be valid
+    # (validate_token checks expiry against now), so fixed calendar dates
+    # break as soon as the wall clock passes them.
+    from datetime import datetime, timedelta
 
     from allpath_trade.market_hours import ET
+    return (datetime.now(ET) + timedelta(days=7)).replace(
+        hour=9, minute=30, second=0, microsecond=0)
+
+
+def test_option_link_while_market_closed_and_link_will_have_expired_by_next_open(
+        client, monkeypatch):
+    from datetime import timedelta
+
+    next_open = _future_open()
     monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: False)
-    monkeypatch.setattr(
-        "allpath_trade.market_hours.next_us_market_open",
-        lambda now=None: datetime(2026, 9, 15, 9, 30, tzinfo=ET))
+    monkeypatch.setattr("allpath_trade.market_hours.next_us_market_open",
+                        lambda now=None: next_open)
     q, rid, token = _queue_option_link(client)
     q._conn.execute(
         "UPDATE pending_reviews SET token_expires_ts=? WHERE id=?",
-        (datetime(2026, 9, 15, 9, 0, tzinfo=ET).isoformat(), rid))
+        ((next_open - timedelta(minutes=30)).isoformat(), rid))
     q._conn.commit()
     monkeypatch.setattr(q, "_executor", OptionExecutor())
     r = client.post(f"/a/{rid}/approve", data={"k": token})
@@ -828,22 +838,22 @@ def test_option_link_while_market_closed_and_link_will_have_expired_by_next_open
 
 def test_option_link_while_market_closed_and_link_still_works_at_next_open(
         client, monkeypatch):
-    from datetime import datetime
+    from datetime import timedelta
 
-    from allpath_trade.market_hours import ET
+    next_open = _future_open()
+    expires = next_open + timedelta(minutes=35)
     monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: False)
-    monkeypatch.setattr(
-        "allpath_trade.market_hours.next_us_market_open",
-        lambda now=None: datetime(2026, 9, 15, 9, 30, tzinfo=ET))
+    monkeypatch.setattr("allpath_trade.market_hours.next_us_market_open",
+                        lambda now=None: next_open)
     q, rid, token = _queue_option_link(client)
     q._conn.execute(
         "UPDATE pending_reviews SET token_expires_ts=? WHERE id=?",
-        (datetime(2026, 9, 15, 10, 5, tzinfo=ET).isoformat(), rid))
+        (expires.isoformat(), rid))
     q._conn.commit()
     monkeypatch.setattr(q, "_executor", OptionExecutor())
     r = client.post(f"/a/{rid}/approve", data={"k": token})
     assert "market is closed" in r.text
-    assert "This link works until Tue 10:05 ET" in r.text
+    assert f"This link works until {expires:%a} 10:05 ET" in r.text
     row = q.get(rid)
     assert row["status"] == "pending" and row["approval_token_hash"]
 
