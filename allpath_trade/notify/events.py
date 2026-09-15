@@ -139,7 +139,8 @@ def drawdown_halt(*, account: str, peak: Decimal, equity: Decimal,
 def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   strategy_id: str, recommendation: str = "",
                   trigger_price: str = "", est_shares: str = "",
-                  approve_url: str = "", kind: str = "order") -> tuple[str, str]:
+                  approve_url: str = "", kind: str = "order",
+                  option_preview: str = "") -> tuple[str, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -169,7 +170,10 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     itself, and a second "you'll place it yourself" line there would be
     actively confusing (there is nothing to place; the edit IS the whole
     action). Spec §⑤: "shadow 的订单文案 = 建议语气 + ...", applied to the
-    queued-review case as "if approved, you'll place it yourself"."""
+    queued-review case as "if approved, you'll place it yourself".
+
+    `option_preview`, when non-empty, adds a line describing the option order
+    context (e.g., "2x NVDA261016C00220000 ≈ $930.00")."""
     subject_noun = ticker or "Ledger"
     subject = f"{_prefix(account)}[AllPath] {subject_noun}: waiting for your approval"
     proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
@@ -180,6 +184,9 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
         lines.append(f"Price at trigger: {trigger_price}")
     if est_shares:
         lines.append(f"Est. size: ~{est_shares} shares at that price")
+    if option_preview:
+        lines.append(f"Option order at trigger: {option_preview} — re-priced and "
+                     "re-checked when you approve")
     if recommendation:
         lines.append(f"The agent recommends: {recommendation}")
     if account == "shadow" and kind == "order":

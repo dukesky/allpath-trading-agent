@@ -330,3 +330,21 @@ def test_every_builder_is_english_only_for_both_accounts():
         ]:
             for text in (subject, body):
                 assert_english_only(text)
+
+
+def test_review_queued_option_preview_line():
+    _subject, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA",
+        action="buy_call $1000 dte>=30 otm=5%", strategy_id="nvda-momentum-swing",
+        trigger_price="$209.36", kind="option_order",
+        option_preview="2x NVDA261016C00220000 ≈ $930.00")
+    assert ("Option order at trigger: 2x NVDA261016C00220000 ≈ $930.00 — "
+            "re-priced and re-checked when you approve") in body
+    assert "shares at that price" not in body
+
+
+def test_review_queued_without_option_preview_unchanged():
+    _s, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA", action="buy $3500",
+        strategy_id="s", trigger_price="$209.36", est_shares="16.72")
+    assert "Option order at trigger" not in body
