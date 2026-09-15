@@ -36,6 +36,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from allpath_trade import market_hours
 from allpath_trade.agent.attachments import (
     ALLOWED_MIMES,
     IMAGES_ONLY_TEXT,
@@ -56,7 +57,11 @@ from allpath_trade.store.app_state import (
     TELEGRAM_OFFSET_KEY,
     TELEGRAM_USER_ID_KEY,
 )
-from allpath_trade.store.reviews import ReviewError, RevisionValidationError
+from allpath_trade.store.reviews import (
+    OPTION_MARKET_CLOSED_MESSAGE,
+    ReviewError,
+    RevisionValidationError,
+)
 from allpath_trade.web.markdown import (
     MAX_TELEGRAM_REPLY_CHUNKS,
     split_for_telegram,
@@ -1193,6 +1198,12 @@ class TelegramPoller:
             return f"{prefix}❌ Rejected #{review_id}.", _toast("Rejected"), True
 
         # action == "approve"
+        if row["kind"] == "option_order" and not market_hours.is_us_market_open():
+            # Checked before approve(): nothing is claimed and the nonce stays
+            # valid, so acted=False keeps this message's buttons for a retry
+            # during regular hours. The toast is the only feedback.
+            return (f"{prefix}Not processed: {OPTION_MARKET_CLOSED_MESSAGE}",
+                    _toast("Market closed — approve 09:30–16:00 ET"), False)
         try:
             result = queue.approve(review_id)
         except RevisionValidationError as exc:
@@ -1233,6 +1244,15 @@ class TelegramPoller:
             _echo(f"{row['action']} applied")
             message = f"{prefix}✅ Approved #{review_id} — {row['action']} applied to the shadow ledger."
             return message, _toast("Approved"), True
+
+        if row["kind"] == "option_order":
+            _echo(result.summary)
+            if result.submitted:
+                return (f"{prefix}✅ Approved #{review_id} — {result.summary}",
+                        _toast("Approved"), True)
+            message = (f"{prefix}⚠️ Approved #{review_id}, but no option order was "
+                      f"placed: {result.summary}")
+            return message, _toast("No order placed"), True
 
         if not result.submitted:
             reasons = "; ".join(result.decision.reasons)

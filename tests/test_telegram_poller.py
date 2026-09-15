@@ -2172,3 +2172,51 @@ def test_real_api_end_to_end_oversize_photo_is_refused(tmp_path):
 
     assert chat.calls == []
     assert [m["text"] for m in transport.sent] == ["[Shadow] " + TOO_LARGE_MESSAGE]
+
+
+def _option_review(tmp_path):
+    import json
+
+    from tests.test_reviews import BUY_INSTR, OPT_PICK, OptionExecutor
+    queue = ReviewQueue(connect(tmp_path / "reviews.db"), OptionExecutor())
+    rid = int(queue.add_option_order(
+        strategy_id="s1", rule_id="entry-call", ticker="NVDA", rule_type="hard",
+        condition="price < 212", action="buy_call $1000 dte>=30 otm=5%",
+        snapshot={"price": "210", "preview": json.loads(OPT_PICK.model_dump_json())},
+        instruction=BUY_INSTR))
+    return queue, rid
+
+
+def test_option_approve_callback_while_market_closed_keeps_buttons(tmp_path, monkeypatch):
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: False)
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue, rid = _option_review(tmp_path)
+    nonce = nonce_for(queue, rid)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{rid}:{nonce}", message_id=42)]])
+    poller = make_review_poller(api, FakeChatService(), app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(rid)["status"] == "pending"
+    assert nonce_for(queue, rid) == nonce
+    assert api.edited_markups == []
+    assert "Market closed" in api.answered_callbacks[0][1]
+
+
+def test_option_approve_callback_during_market_hours(tmp_path, monkeypatch):
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: True)
+    app_state = make_app_state(tmp_path)
+    pair(app_state, "111")
+    queue, rid = _option_review(tmp_path)
+    nonce = nonce_for(queue, rid)
+    api = FakeTelegramAPI(batches=[[
+        _callback_update(1, 111, 111, f"rv:approve:{rid}:{nonce}", message_id=42)]])
+    poller = make_review_poller(api, FakeChatService(), app_state, queue)
+
+    poller.poll_once()
+
+    assert queue.get(rid)["status"] == "approved"
+    assert api.edited_markups == [("111", 42, None)]
+    assert any("bought 2x NVDA261016C00220000" in html for _cid, html in api.sent_messages)

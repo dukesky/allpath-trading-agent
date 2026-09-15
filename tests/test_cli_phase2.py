@@ -337,3 +337,50 @@ def test_cli_output_is_english_only(tmp_path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert_english_only(captured.out)
     assert_english_only(captured.err)
+
+
+def _queue_option_cli(tmp_path):
+    import json
+
+    from allpath_trade.store.db import connect
+    from allpath_trade.store.reviews import ReviewQueue
+    from tests.test_reviews import BUY_INSTR, OPT_PICK
+    conn = connect(tmp_path / "allpath-trade.db")
+    rid = int(ReviewQueue(conn, executor=None).add_option_order(
+        strategy_id="t", rule_id="entry-call", ticker="NVDA", rule_type="hard",
+        condition="price < 212", action="buy_call $1000 dte>=30 otm=5%",
+        snapshot={"price": "210", "preview": json.loads(OPT_PICK.model_dump_json())},
+        instruction=BUY_INSTR))
+    conn.close()
+    return rid
+
+
+def test_reviews_approve_option_order_while_market_closed(tmp_path, capsys, monkeypatch):
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: False)
+    rid = _queue_option_cli(tmp_path)
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+    assert code == 1
+    assert "market is closed" in capsys.readouterr().err
+
+
+def test_reviews_approve_option_order_prints_summary(tmp_path, capsys, monkeypatch):
+    from tests.test_reviews import OptionExecutor
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: True)
+    rid = _queue_option_cli(tmp_path)
+    # The row's own executor (None, from `_queue_option_cli`) never reaches
+    # `main()` -- `main` builds its own components fresh from `broker`
+    # (build_components -> _build_account_components -> `Executor(...)`,
+    # see allpath_trade/app.py). `ReviewQueue._executor` is a plain instance
+    # attribute `__init__` sets from that constructor call, so patching the
+    # class attribute (as originally drafted) is overwritten before
+    # `approve()` ever runs. The real seam is the `Executor` symbol
+    # `allpath_trade.app` imports and calls -- patch that name so
+    # `build_components` wires the fake `OptionExecutor` (with its
+    # options_backend) into the queue `main()` ends up using instead of a
+    # real `Executor`.
+    monkeypatch.setattr("allpath_trade.app.Executor", lambda *a, **kw: OptionExecutor())
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+    assert code == 0
+    assert "bought 2x NVDA261016C00220000" in capsys.readouterr().out

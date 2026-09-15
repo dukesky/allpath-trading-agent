@@ -252,6 +252,9 @@ def cmd_reviews(q, args, store=None) -> int:
                 # below would raise AttributeError on None for this kind,
                 # after the write already succeeded.
                 print("Ledger change applied.")
+            elif kind == "option_order":
+                # approve() returns OptionApprovalResult here (no .decision).
+                print(result.summary)
             else:
                 print("executed" if result.submitted
                       else f"rejected by risk gate: {'; '.join(result.decision.reasons)}")
