@@ -2,6 +2,41 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Option pending queue — 2026-09-14
+
+- **Option rule review queue for `confirm` strategies**:
+  `authorization: confirm` strategies can now write `buy_call $<budget>
+  [dte>=<days>] [otm=<pct>%]`, `buy_put ...`, and `close_options` rules
+  (previously restricted to `auto` only). Buys and closes now queue as a
+  pending review of kind `option_order` instead of auto-executing — the
+  web Pending page, approve-by-link, Telegram buttons, and CLI `reviews
+  approve` all handle option reviews identically to order proposals. At
+  trigger time (market open), a buy previews a contract and evaluates
+  risk; if neither is affordable, the rule is skipped and an error is
+  reported as before. At approval time (market hours only, Mon–Fri
+  09:30–16:00 ET, no holiday exceptions), buys re-price with a live
+  quote and re-run the risk gate; closes re-read live positions.
+  `execution_result` in the journal records both the preview and the
+  actual outcome. Approvals are refused outside market hours — the item
+  stays pending, and link/Telegram buttons remain usable.
+- **Safety exceptions remain automatic**: the DTE≤1 expiry sweep and
+  closes triggered once a `confirm` strategy's account's drawdown breaker
+  has tripped are not queued — both execute immediately as before, since
+  they reduce risk.
+- **`authorization: notify` option behavior**: an option rule on a
+  `notify` strategy (only reachable by hand-editing YAML; authoring
+  rejects it) now only notifies for both buys and closes. Previously a
+  buy was skipped and a close executed.
+- **New shared helpers**: `market_hours.py` (check US market open times)
+  and `close_underlying_options` / `option_positions_for` in
+  `execution.py` (helper functions for option closes).
+- **Known limitation**: approve links expire 24 hours after issue — a link
+  from an option rule that fires near Friday's close is dead by Monday's
+  open; use the Pending page or Telegram instead.
+- See `docs/superpowers/specs/2026-09-14-option-pending-queue-design.md`
+  and `docs/superpowers/plans/2026-09-14-option-pending-queue.md` for
+  the full design and task-by-task implementation record.
+
 ## Options trading via Alpaca MCP server — 2026-08-27
 
 - **Single-leg options, gated off by default**: `OPTIONS_TRADING` (`.env`

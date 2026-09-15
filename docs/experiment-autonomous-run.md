@@ -191,3 +191,33 @@ Then:
 3. Building the actual experiment report (equity curve, trade log,
    revision history, token cost) is a separate follow-up task, not part
    of this runbook.
+
+## 8. Human-verify baseline (2026-09-14)
+
+As of this date, the paper-account experiment strategies should use
+`authorization: confirm` to keep option trades under human review:
+
+- **All option trades queue for approval**: `buy_call`, `buy_put`, and
+  `close_options` rules on `confirm` strategies queue as pending reviews
+  instead of auto-executing. Approvals are gated by market hours
+  (Mon–Fri 09:30–16:00 ET, no US holiday calendar) and refuse to
+  complete outside those windows — the item stays pending and
+  approve-buttons stay usable until you approve during market hours.
+- **Two safety exceptions remain automatic** (documented for the
+  research paper):
+  - DTE≤1 expiry sweep: positions within one calendar day of expiry are
+    sold to close every sentinel tick, regardless of strategy
+    authorization, so a bad expiry never ties up capital or drags through
+    a weekend.
+  - Breaker-tripped closes: once a `confirm` strategy's account's
+    drawdown breaker has tripped, `close_options` rules on that strategy
+    execute immediately instead of queuing — close-to-safety is never
+    delayed.
+- **All other rules, including stock trades, follow the normal flow**:
+  `hard` rules with `authorization: confirm` wait for approval, then
+  execute during market hours; soft rules are not queued (agent proposals
+  only).
+
+This baseline ensures the agent proposes and executes option positions
+with meaningful human oversight while maintaining circuit-breaker
+protection and expiry hygiene.

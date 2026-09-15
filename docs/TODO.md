@@ -13,7 +13,8 @@
 
 ## 调度与数据
 
-- [ ] 美股节假日历法（当前仅按 ET 工作日 9:30–16:00 判断，节假日空跑无害但不精确）
+- [ ] 美股节假日历法（当前仅按 ET 工作日 9:30–16:00 判断，节假日空跑无害但不精确；
+      期权 pending-queue 批准也用同一套 market_hours 检查，同样不看节假日）
 - [ ] 数据源冗余：Tiingo（EOD）、Finnhub（新闻/情绪）、Alpaca data，yfinance 故障时自动切换
 - [ ] **搜索升级**：web_search 从 DuckDuckGo（免费默认）扩展到更高质量的付费信息源——Tavily / Brave Search API（通用搜索，需 key）、Finnhub / Polygon news（金融专用新闻流）；接口已设计为可插拔，用户配了 key 即自动启用
 
@@ -328,15 +329,13 @@
       （`buy_call`/`buy_put`/`close_options`），没有多腿组合单（如价差、
       跨式）。spec 里就是这样定的范围（同日截止的黑客松交付），多腿是
       明确的后续项，不是遗漏。
-- [ ] **期权 intent 没有走 pending-review 队列**：期权的自动交易能力完全
-      来自 sentinel 规则动作（`buy_call`/`buy_put`/`close_options`），而
-      不是 agent 的下单提案（`propose_order`）——因为提案需要人工审批，
-      会打断零干预运行。`strategy/loader.py` 强制期权动作只能出现在
-      `authorization: auto` 且 `type: hard` 的规则上，这是 v1 的既定限制，
-      文档已写进系统提示词（`OPTIONS_ACTIONS_NOTE`）。之后若要支持
-      `confirm`/`notify` 授权级别或 chat 发起的期权提案，需要给
-      `pending_reviews` 表和批准流水线加一条期权 intent 的分支——目前完全
-      没有。
+- [x] **期权 intent 走 pending-review 队列**：**已落地**（Task 8）。
+      `authorization: confirm` 策略的期权规则（`buy_call`/`buy_put`/`close_options`）
+      现在排队为 `option_order` 待审核，触发时预览合约与风控门槛，批准时
+      重新定价与持仓核实，市场时段外拒批。DTE≤1 清仓扫描与爆仓平仓继续
+      自动执行。`authorization: notify` 策略的期权规则只通知（之前 buy 被跳过、
+      close 自动执行）。已知限制：没有美股节假日历法，仅按 ET 工作日
+      09:30–16:00 判断；批准链接 24h 后失效。
 - [ ] **合约筛选不看 Greeks**：`McpOptionsBackend.pick_contract`（`broker/
       options_mcp.py`）只按到期日下限（最近一个满足 `dte` 的到期日）和
       行权价距离 spot 的 `otm` 百分比选合约，不查询、也不比较 delta/
