@@ -51,6 +51,15 @@ class StrategyValidationError(Exception):
         super().__init__(f"invalid strategy '{strategy_id}': " + "; ".join(errors))
 
 
+# Authorization tiers an option action may be AUTHORED on. `notify` never
+# executes anything, so an option action there is always a mistake. `confirm`
+# was added 2026-09-14 for the paper account's human-verify experiment
+# baseline: without it, a nightly reflection revision of a confirm strategy
+# that carries option rules is rejected at propose time, and the agent's only
+# way to get the revision through would be to strip the option rules.
+_OPTION_AUTHORIZATIONS = (Authorization.AUTO, Authorization.CONFIRM)
+
+
 def parse_strategy_text(strategy_id: str, text: str, *, authoring: bool = False) -> StrategyDoc:
     """Parse and validate strategy YAML text.
 
@@ -64,7 +73,8 @@ def parse_strategy_text(strategy_id: str, text: str, *, authoring: bool = False)
             a strategy YAML file). It enables two authoring-time-only
             checks that must never block a plain LOAD of an already-saved
             file: (1) an option action (buy_call/buy_put/close_options)
-            requires `authorization: auto` + `type: hard` on its rule, and
+            requires `authorization: auto` or `confirm` (never `notify`)
+            plus `type: hard` on its rule, and
             (2) a strategy with a buy_call/buy_put action must also carry
             at least one close_options rule (an exit for every entry).
 
@@ -74,10 +84,13 @@ def parse_strategy_text(strategy_id: str, text: str, *, authoring: bool = False)
             call site here that re-parses the CURRENT/base file just to
             diff a version or an authorization/status field against it --
             leaves this False. That matters because a strategy that was
-            valid when authored can later fail check (1): the drawdown
-            breaker (`risk/breaker.py`) demotes an `auto` strategy to
-            `confirm` by flipping one field, with no re-validation. If
-            loading enforced check (1), that demoted strategy would raise
+            valid when authored can later drift out of authoring-time
+            validity without anyone re-authoring it. Historically the
+            drawdown breaker (`risk/breaker.py`) demoted `auto` -> `confirm`
+            with no re-validation, which used to fail check (1) (since
+            2026-09-14 `confirm` is itself a valid tier for option actions,
+            so that case now passes). If loading enforced these checks, such
+            a file would raise
             `StrategyValidationError` on every subsequent `load_all` --
             `StrategyStore.load_all` treats that as "skip this file", so
             EVERY rule in it (including a `close_options` stop-loss)
@@ -129,11 +142,12 @@ def parse_strategy_text(strategy_id: str, text: str, *, authoring: bool = False)
                 # param's docstring above for why a plain load must never
                 # enforce this.
                 if authoring and not (
-                    doc.authorization == Authorization.AUTO and rule.type == RuleType.HARD
+                    doc.authorization in _OPTION_AUTHORIZATIONS
+                    and rule.type == RuleType.HARD
                 ):
                     errors.append(
                         f"rule {rule.id}: option actions require authorization: auto "
-                        "and rule type: hard (v1 limitation)"
+                        "or confirm and rule type: hard"
                     )
     # Finding 4: authoring-time only, same reasoning as above -- a strategy
     # that proposes an option ENTRY (buy_call/buy_put) without ANY

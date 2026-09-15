@@ -89,10 +89,12 @@ every open option position on the strategy's ticker, sell-to-close). `dte`
 and `otm` are optional; when omitted they default to `dte>=7 otm=2%`.
 `$<budget>` is the total premium to spend — the sentinel picks the nearest
 qualifying contract and sizes contracts to fit under it.
-Every rule using one of these three actions must sit on a strategy with
-`authorization: auto` and have `type: hard` — `draft_strategy` and
-`propose_strategy_revision` reject an option action anywhere else (v1
-limitation). Discipline: keep `$<budget>` to roughly 2% of account equity or
+Every rule using one of these three actions must have `type: hard` and sit on
+a strategy with `authorization: auto` or `authorization: confirm` (never
+`notify`) — `draft_strategy` and `propose_strategy_revision` reject an option
+action anywhere else. When revising a `confirm` strategy, keep its existing
+option rules; never strip them just to get a revision accepted.
+Discipline: keep `$<budget>` to roughly 2% of account equity or
 less per position, and never draft an option entry rule without a paired
 `close_options` exit — one hard rule for a profit target and one hard rule
 for a stop, at minimum. No multi-leg orders, no selling to open.

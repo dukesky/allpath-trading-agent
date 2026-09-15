@@ -321,6 +321,20 @@ def test_applier_accepts_a_valid_option_revision(tmp_path):
     assert (tmp_path / "strategies" / "s1.yaml").read_text() == OPTION_VALID
 
 
+def test_applier_accepts_reflection_option_revision_on_confirm_strategy(tmp_path):
+    # The nightly auto-apply path (source="reflection") against a confirm
+    # strategy that carries option rules -- the exact 2026-09-14 scenario.
+    store, _ = make(tmp_path)
+    base = OPTION_VALID.replace("authorization: auto", "authorization: confirm").replace(
+        "version: 2", "version: 1")
+    (tmp_path / "strategies" / "s1.yaml").write_text(base)
+    new = OPTION_VALID.replace("authorization: auto", "authorization: confirm").replace(
+        '"buy_call $500"', '"buy_call $600"')
+    apply_fn = apply_revision_factory(store)
+    apply_fn("s1", new, base, "reflection")
+    assert (tmp_path / "strategies" / "s1.yaml").read_text() == new
+
+
 # --- snapshot reason names the source -------------------------------------
 
 def test_reflection_snapshot_reason(tmp_path):

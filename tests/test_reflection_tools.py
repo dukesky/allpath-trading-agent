@@ -547,6 +547,26 @@ def test_propose_strategy_revision_rejects_option_action_on_soft_rule(tmp_path):
     assert queue.list() == []
 
 
+def test_propose_strategy_revision_accepts_option_revision_on_confirm_strategy(tmp_path):
+    # The 2026-09-14 regression this guards: the paper experiment's option
+    # strategies are authorization: confirm, and a nightly revision that keeps
+    # their option rules must queue rather than be rejected.
+    current = CURRENT_OPTION_AUTO.replace("authorization: auto", "authorization: confirm")
+    strategies_dir = tmp_path / "strategies"
+    strategies_dir.mkdir()
+    (strategies_dir / "s1.yaml").write_text(current)
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(strategies_dir, conn)
+    queue = ReviewQueue(conn, executor=None)
+    reg = ToolRegistry()
+    register_reflection_tools(reg, strategies=store, queue=queue)
+    proposed = current.replace('"buy_call $500"', '"buy_call $600"').replace(
+        "version: 1", "version: 2")
+    out = call(reg, strategy_id="s1", new_yaml=proposed, rationale="raise budget")
+    assert not out.startswith("error:"), out
+    assert len(queue.list()) == 1
+
+
 def test_propose_strategy_revision_accepts_a_valid_option_revision(tmp_path):
     reg, _store, queue = make_option(tmp_path)
     proposed = CURRENT_OPTION_AUTO.replace(

@@ -227,6 +227,7 @@ def test_system_prompt_includes_options_actions_guidance(tmp_path):
     assert "close_options" in prompt
     assert "dte>=7 otm=2%" in prompt
     assert "authorization: auto" in prompt and "type: hard" in prompt
+    assert "`authorization: auto` or `authorization: confirm`" in prompt
     assert "2% of account equity" in prompt
     assert "close_options` exit" in prompt
     # Not baked into the user-editable IDENTITY.md fallback.

@@ -200,14 +200,15 @@ def test_option_action_on_auto_hard_rule_parses():
     assert doc.rules[0].action == "buy_call $1000"
 
 
-def test_option_action_with_confirm_authorization_rejected():
-    # Finding 1a: this enforcement is authoring-time only now -- see the
-    # `authoring=False by default` tests below for the load-time behavior
-    # this same YAML must have instead (must NOT raise).
-    bad = OPTION_YAML_AUTO_HARD.replace("authorization: auto", "authorization: confirm")
+def test_option_action_with_notify_authorization_rejected():
+    # Finding 1a: this enforcement is authoring-time only -- see the
+    # `authoring=False by default` tests below for the load-time behavior.
+    # `notify` never executes, so an option action there is always a mistake;
+    # `auto` and `confirm` are both valid tiers (2026-09-14).
+    bad = OPTION_YAML_AUTO_HARD.replace("authorization: auto", "authorization: notify")
     with pytest.raises(StrategyValidationError) as ei:
         parse_strategy_text("aapl-calls", bad, authoring=True)
-    assert any("option actions require authorization: auto and rule type: hard" in e
+    assert any("option actions require authorization: auto or confirm and rule type: hard" in e
                for e in ei.value.errors)
 
 
@@ -215,7 +216,7 @@ def test_option_action_on_soft_rule_rejected():
     bad = OPTION_YAML_AUTO_HARD.replace("type: hard", "type: soft")
     with pytest.raises(StrategyValidationError) as ei:
         parse_strategy_text("aapl-calls", bad, authoring=True)
-    assert any("option actions require authorization: auto and rule type: hard" in e
+    assert any("option actions require authorization: auto or confirm and rule type: hard" in e
                for e in ei.value.errors)
 
 
@@ -255,11 +256,29 @@ def test_authoring_false_by_default_option_action_on_soft_rule_still_loads():
     assert doc.rules[0].type == RuleType.SOFT
 
 
-def test_authoring_true_rejects_option_action_with_confirm_authorization():
-    bad = OPTION_YAML_AUTO_HARD.replace("authorization: auto", "authorization: confirm")
+def test_authoring_true_accepts_option_action_with_confirm_authorization():
+    # Human-verify baseline (2026-09-14): a confirm strategy may carry option
+    # actions -- otherwise a nightly reflection revision of such a strategy is
+    # rejected, and the agent's only way to get it through is to strip the
+    # option rules. Exit rule added so Finding 4's entry-without-exit check
+    # doesn't fire instead.
+    text = OPTION_YAML_AUTO_HARD.replace(
+        "authorization: auto", "authorization: confirm").replace(
+        "review:", "  - {id: exit, type: hard, condition: \"price > 999\", "
+                    "action: \"close_options\"}\nreview:")
+    doc = parse_strategy_text("aapl-calls", text, authoring=True)
+    assert doc.authorization == Authorization.CONFIRM
+    assert doc.rules[0].action == "buy_call $1000"
+
+
+def test_authoring_true_rejects_option_action_with_notify_authorization():
+    text = OPTION_YAML_AUTO_HARD.replace(
+        "authorization: auto", "authorization: notify").replace(
+        "review:", "  - {id: exit, type: hard, condition: \"price > 999\", "
+                    "action: \"close_options\"}\nreview:")
     with pytest.raises(StrategyValidationError) as ei:
-        parse_strategy_text("aapl-calls", bad, authoring=True)
-    assert any("option actions require authorization: auto and rule type: hard" in e
+        parse_strategy_text("aapl-calls", text, authoring=True)
+    assert any("option actions require authorization: auto or confirm and rule type: hard" in e
                for e in ei.value.errors)
 
 
@@ -267,7 +286,7 @@ def test_authoring_true_rejects_option_action_on_soft_rule():
     bad = OPTION_YAML_AUTO_HARD.replace("type: hard", "type: soft")
     with pytest.raises(StrategyValidationError) as ei:
         parse_strategy_text("aapl-calls", bad, authoring=True)
-    assert any("option actions require authorization: auto and rule type: hard" in e
+    assert any("option actions require authorization: auto or confirm and rule type: hard" in e
                for e in ei.value.errors)
 
 

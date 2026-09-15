@@ -423,7 +423,8 @@ rules:
 OPTION_WITH_EXIT = OPTION_NO_EXIT + (
     '  - {id: exit, type: hard, condition: "price > 999", action: "close_options"}\n')
 
-OPTION_WRONG_AUTH = OPTION_WITH_EXIT.replace("authorization: auto", "authorization: confirm")
+OPTION_NOTIFY_AUTH = OPTION_WITH_EXIT.replace("authorization: auto", "authorization: notify")
+OPTION_CONFIRM_AUTH = OPTION_WITH_EXIT.replace("authorization: auto", "authorization: confirm")
 OPTION_WRONG_TYPE = OPTION_WITH_EXIT.replace(
     '{id: entry, type: hard,', '{id: entry, type: soft,')
 
@@ -446,13 +447,22 @@ def test_draft_strategy_accepts_option_entry_with_matching_exit_rule(tmp_path):
     assert prompts != []
 
 
-def test_draft_strategy_rejects_option_action_with_confirm_authorization(tmp_path):
+def test_draft_strategy_rejects_option_action_with_notify_authorization(tmp_path):
     reg, store, _, prompts = make(tmp_path, answers=[True])
-    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_WRONG_AUTH,
+    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_NOTIFY_AUTH,
               reason="x")
-    assert out.startswith("error:") and "authorization: auto" in out
+    assert out.startswith("error:") and "authorization: auto or confirm" in out
     assert prompts == []
     assert store.versions("calls") == []
+
+
+def test_draft_strategy_accepts_option_action_with_confirm_authorization(tmp_path):
+    reg, _store, _, prompts = make(tmp_path, answers=[True])
+    out = call(reg, "draft_strategy", strategy_id="calls", yaml_text=OPTION_CONFIRM_AUTH,
+              reason="x")
+    assert "saved calls v1" in out, out
+    assert (tmp_path / "strategies" / "calls.yaml").exists()
+    assert prompts != []
 
 
 def test_draft_strategy_rejects_option_action_on_soft_rule(tmp_path):
