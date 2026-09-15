@@ -213,6 +213,13 @@ class ExecutionResult(BaseModel):
     decision: RiskDecision
 
 
+class OptionApprovalResult(BaseModel):
+    submitted: bool                      # at least one option order submitted
+    summary: str                         # one human-readable line
+    reasons: list[str] = []
+    results: list[ExecutionResult] = []
+
+
 class Executor:
     """The single entry point for trading. Everything above (scheduler,
     agent tools) creates OrderIntents and calls execute()."""

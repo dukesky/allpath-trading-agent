@@ -767,3 +767,9 @@ def test_option_trades_today_shares_cap_with_stock_trades(tmp_path):
     assert not res.submitted
     assert backend.calls == []
     assert any("daily trade limit" in r for r in res.decision.reasons)
+
+
+def test_option_approval_result_defaults():
+    from allpath_trade.execution import OptionApprovalResult
+    r = OptionApprovalResult(submitted=False, summary="nothing to close")
+    assert r.reasons == [] and r.results == []

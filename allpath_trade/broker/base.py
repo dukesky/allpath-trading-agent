@@ -5,9 +5,9 @@ from abc import ABC, abstractmethod
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Sane upper bound for any order size this app ever deals with -- a value
 # like 1e400 IS finite per Decimal.is_finite() (pydantic's own
@@ -201,6 +201,43 @@ class OptionIntent(BaseModel):
         if v < 0:
             raise ValueError("est_premium must be >= 0")
         return v
+
+
+class OptionPositionRef(BaseModel):
+    occ_symbol: str
+    qty: int = Field(ge=1)
+
+
+class OptionInstruction(BaseModel):
+    op: Literal["buy", "close"]
+    underlying: str                      # upper-cased, non-empty
+    reason: str
+    strategy_id: str | None = None
+    # buy only (all required when op == "buy")
+    right: Literal["call", "put"] | None = None
+    min_dte: int | None = None
+    otm_pct: Decimal | None = None
+    budget: Decimal | None = None
+    spot_at_trigger: Decimal | None = None
+    # close only
+    positions_at_trigger: list[OptionPositionRef] = []
+
+    @field_validator("underlying")
+    @classmethod
+    def _upper(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v:
+            raise ValueError("underlying must be non-empty")
+        return v
+
+    @model_validator(mode="after")
+    def _buy_fields_present(self) -> OptionInstruction:
+        if self.op == "buy":
+            missing = [n for n in ("right", "min_dte", "otm_pct", "budget",
+                                   "spot_at_trigger") if getattr(self, n) is None]
+            if missing:
+                raise ValueError(f"buy instruction missing: {', '.join(missing)}")
+        return self
 
 
 class Order(BaseModel):

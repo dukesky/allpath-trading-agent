@@ -5,7 +5,14 @@ import pytest
 from pydantic import ValidationError
 
 from allpath_trade.broker.base import (
-    Broker, OrderIntent, OrderSide, OptionIntent, OccParts, parse_occ_symbol
+    Broker,
+    OccParts,
+    OptionInstruction,
+    OptionIntent,
+    OptionPositionRef,
+    OrderIntent,
+    OrderSide,
+    parse_occ_symbol,
 )
 
 
@@ -305,3 +312,36 @@ def test_option_intent_est_premium_validates():
         reason="test"
     )
     assert ok_positive.est_premium == Decimal("1000.50")
+
+
+# Test OptionInstruction and OptionPositionRef
+
+def _buy(**kw):
+    base = dict(op="buy", underlying="nvda", reason="r", right="call", min_dte=30,
+                otm_pct=Decimal("0.05"), budget=Decimal("1000"),
+                spot_at_trigger=Decimal("211"))
+    base.update(kw)
+    return OptionInstruction(**base)
+
+
+def test_buy_instruction_round_trips_and_uppercases():
+    i = _buy()
+    assert i.underlying == "NVDA"
+    assert OptionInstruction.model_validate_json(i.model_dump_json()) == i
+
+
+def test_buy_instruction_requires_buy_fields():
+    with pytest.raises(ValidationError):
+        _buy(budget=None)
+
+
+def test_close_instruction_needs_no_buy_fields():
+    i = OptionInstruction(op="close", underlying="NVDA", reason="r",
+                          positions_at_trigger=[OptionPositionRef(
+                              occ_symbol="NVDA261016C00220000", qty=2)])
+    assert i.positions_at_trigger[0].qty == 2
+
+
+def test_unknown_op_rejected():
+    with pytest.raises(ValidationError):
+        OptionInstruction(op="sell_to_open", underlying="NVDA", reason="r")
