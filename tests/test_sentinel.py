@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -932,7 +933,7 @@ def _breaker_make_option(tmp_path, yaml_text, *, backend, price="200", equity="8
     return s, store, executor, queue, notifier, breaker, app_state
 
 
-def test_breaker_demoted_auto_option_strategy_still_loads_buy_skipped_close_executes(tmp_path):
+def test_breaker_demoted_auto_option_strategy_still_loads_buy_queued_close_executes(tmp_path):
     # Finding 1 regression. Before the fix: DrawdownBreaker.check demotes
     # every `auto` strategy to `confirm` via StrategyStore.set_authorization
     # (risk/breaker.py), which does NOT re-validate the strategy. The very
@@ -944,13 +945,11 @@ def test_breaker_demoted_auto_option_strategy_still_loads_buy_skipped_close_exec
     # including a close_options stop-loss, precisely during the drawdown
     # the breaker exists to protect against.
     #
-    # After the fix: loading no longer enforces that check (only authoring
-    # does -- see loader.py's `authoring` param), so the strategy keeps
-    # loading; sentinel.py's `_dispatch_option` is the new runtime last
-    # line of defense that keeps its buy_call rule from firing anyway
-    # (skipped, not executed), while its close_options rule -- risk-
-    # reducing, and exempt from the authorization gate by design -- still
-    # executes.
+    # After the fix: loading stays tolerant of the demotion -- the strategy
+    # keeps loading. A demoted strategy's option buy now waits for approval
+    # (queued, not skipped and not auto-executed), and its close_options
+    # still executes immediately because the drawdown breaker has tripped
+    # (spec 2026-09-14: a halt must never strand an exit behind approval).
     future_expiry = date.today() + timedelta(days=90)
     aapl_call = _occ_symbol("AAPL", future_expiry)
     yaml_text = """
@@ -963,7 +962,7 @@ rules:
   - {id: exit, type: hard, condition: "price < 250", action: "close_options"}
 """
     backend = FakeOptionsBackend(pick=_PICK)
-    s, store, ex, _q, _n, _breaker, _app_state = _breaker_make_option(
+    s, store, ex, q, _n, _breaker, _app_state = _breaker_make_option(
         tmp_path, yaml_text, backend=backend, extra_positions=[_occ_position(aapl_call)])
 
     report = s.run_once()
@@ -977,12 +976,15 @@ rules:
     # entirely, leaving `report.outcomes` empty.
     outcomes = {o.rule_id: o for o in report.outcomes}
     assert set(outcomes) == {"entry", "exit"}
-    assert outcomes["entry"].disposition == "skipped"
-    assert "authorization: auto" in outcomes["entry"].detail
+    assert outcomes["entry"].disposition == "queued"
     assert outcomes["exit"].disposition == "executed"
     assert aapl_call in outcomes["exit"].detail
 
-    # The buy never reached the executor; the close did.
+    # The buy never reached the executor, but is now waiting for approval.
+    [row] = q.list()
+    assert row["kind"] == "option_order"
+
+    # The close did reach the executor.
     assert len(ex.option_calls) == 1
     assert ex.option_calls[0].side.value == "sell"
     assert ex.option_calls[0].occ_symbol == aapl_call
@@ -999,6 +1001,67 @@ rules:
 _PICK = OptionPick(
     occ_symbol="AAPL260101C00204000", expiry=date(2026, 1, 1),
     strike=Decimal("204"), ask=Decimal("2.50"), qty=2, est_premium=Decimal("500"))
+
+
+def test_confirm_buy_call_queues_option_order_with_preview(tmp_path):
+    backend = FakeOptionsBackend(pick=_PICK)
+    yaml_text = strategy_yaml(auth="confirm", action="buy_call $500")
+    s, _store, ex, q, n = make_option(tmp_path, yaml_text, backend=backend)
+
+    report = s.run_once()
+
+    [o] = report.outcomes
+    assert o.disposition == "queued"
+    assert ex.option_calls == []
+    [row] = q.list()
+    assert row["kind"] == "option_order" and row["ticker"] == "AAPL"
+    assert json.loads(row["intent"])["op"] == "buy"
+    assert json.loads(row["snapshot"])["preview"]["occ_symbol"] == _PICK.occ_symbol
+    assert any("Option order at trigger" in body for _s, body in n.sent)
+
+
+def test_confirm_buy_call_with_no_affordable_contract_still_skips(tmp_path):
+    backend = FakeOptionsBackend(pick=None)
+    yaml_text = strategy_yaml(auth="confirm", action="buy_call $500")
+    s, _store, _ex, q, _n = make_option(tmp_path, yaml_text, backend=backend)
+    [o] = s.run_once().outcomes
+    assert o.disposition == "skipped" and q.list() == []
+
+
+def test_confirm_close_options_queues_when_breaker_not_tripped(tmp_path):
+    occ = _occ_symbol("AAPL", datetime.now(UTC).date() + timedelta(days=60))
+    yaml_text = strategy_yaml(auth="confirm", action="close_options")
+    s, _store, ex, q, _n = make_option(
+        tmp_path, yaml_text, backend=FakeOptionsBackend(pick=_PICK),
+        extra_positions=[_occ_position(occ, "2")])
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued" and ex.option_calls == []
+    [row] = q.list()
+    intent = json.loads(row["intent"])
+    assert intent["op"] == "close"
+    assert intent["positions_at_trigger"] == [{"occ_symbol": occ, "qty": 2}]
+
+
+def test_confirm_close_options_executes_when_breaker_tripped(tmp_path):
+    occ = _occ_symbol("AAPL", datetime.now(UTC).date() + timedelta(days=60))
+    yaml_text = strategy_yaml(auth="confirm", action="close_options")
+    s, _store, ex, q, _n, _breaker, _app_state = _breaker_make_option(
+        tmp_path, yaml_text, backend=FakeOptionsBackend(pick=_PICK),
+        extra_positions=[_occ_position(occ, "2")])
+    report = s.run_once()
+    assert any("drawdown breaker" in e for e in report.errors)
+    [o] = report.outcomes
+    assert o.disposition == "executed"
+    assert [i.occ_symbol for i in ex.option_calls] == [occ]
+    assert q.list() == []
+
+
+def test_auto_buy_call_still_executes_immediately(tmp_path):
+    s, _store, ex, q, _n = make_option(
+        tmp_path, strategy_yaml(action="buy_call $500"),
+        backend=FakeOptionsBackend(pick=_PICK))
+    [o] = s.run_once().outcomes
+    assert o.disposition == "executed" and len(ex.option_calls) == 1 and q.list() == []
 
 
 def test_buy_call_executes_with_defaults_applied_when_action_omits_them(tmp_path):

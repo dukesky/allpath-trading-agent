@@ -230,5 +230,6 @@ def test_system_prompt_includes_options_actions_guidance(tmp_path):
     assert "`authorization: auto` or `authorization: confirm`" in prompt
     assert "2% of account equity" in prompt
     assert "close_options` exit" in prompt
+    assert "waits in Pending for your approval" in prompt
     # Not baked into the user-editable IDENTITY.md fallback.
     assert "Option actions" not in DEFAULT_IDENTITY

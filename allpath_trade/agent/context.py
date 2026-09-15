@@ -94,6 +94,9 @@ a strategy with `authorization: auto` or `authorization: confirm` (never
 `notify`) — `draft_strategy` and `propose_strategy_revision` reject an option
 action anywhere else. When revising a `confirm` strategy, keep its existing
 option rules; never strip them just to get a revision accepted.
+On a `confirm` strategy, an option rule that fires
+waits in Pending for your approval like a stock trade, and the contract is
+re-priced when it is approved.
 Discipline: keep `$<budget>` to roughly 2% of account equity or
 less per position, and never draft an option entry rule without a paired
 `close_options` exit — one hard rule for a profit target and one hard rule

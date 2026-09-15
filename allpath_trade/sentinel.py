@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -10,7 +11,9 @@ from allpath_trade import market_hours
 from allpath_trade.broker.base import (
     Broker,
     BrokerNotConfigured,
+    OptionInstruction,
     OptionIntent,
+    OptionPositionRef,
     Order,
     OrderIntent,
     OrderSide,
@@ -369,15 +372,13 @@ class Sentinel:
         # twice for the same rule on the same tick.
         if is_option_action(spec):
             # Option ActionKinds must never reach `to_order_intent` below --
-            # it raises on them by design (strategy/actions.py). The loader
-            # (strategy/loader.py) already refuses to load a strategy with
-            # an option action unless authorization=auto and the rule is
-            # hard, so there is no confirm/notify/soft branching to do here
-            # the way the stock path below still has to -- straight to
-            # execution, defensively guarded against `options_backend`
-            # being off inside `_dispatch_option` itself.
+            # it raises on them by design (strategy/actions.py). Auth
+            # branching for option actions (auto vs confirm, and the
+            # breaker-tripped exception for close_options) now lives inside
+            # `_dispatch_option` itself -- see docs/superpowers/specs/
+            # 2026-09-14-option-pending-queue-design.md §2.
             return self._dispatch_option(doc, rule_id, condition, rule_type, spec, price,
-                                         positions, reason)
+                                         positions, reason, action=action)
         intent = to_order_intent(spec, strategy=doc,
                                  rule_id=rule_id, price=price,
                                  position=position, equity=equity, reason=reason)
@@ -430,57 +431,114 @@ class Sentinel:
     def _dispatch_option(self, doc: StrategyDoc, rule_id: str, condition: str,
                          rule_type: RuleType, spec: ActionSpec, price: Decimal,
                          positions: dict[str, Position],
-                         reason: str) -> TriggerOutcome:
+                         reason: str, action: str) -> TriggerOutcome:
         if self.options_backend is None:
             # Defensive: the loader guarantees every option action lives on
-            # an auto+hard rule, but it cannot guarantee the operator left
-            # options_trading on -- turning it off must degrade this one
-            # rule to a reported error, never crash the whole sentinel pass.
+            # a hard rule on an auto or confirm strategy, but it cannot
+            # guarantee the operator left options_trading on -- turning it
+            # off must degrade this one rule to a reported error, never
+            # crash the whole sentinel pass.
             self._notify_rule(doc, rule_id, condition, "error")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="error",
                                   detail="options trading disabled")
         if spec.kind == ActionKind.CLOSE_OPTIONS:
-            # Finding 1b, close half: still gated on rule_type == HARD (the
-            # loader's authoring-time validation already guarantees this
-            # for every option action -- this is defense in depth, not
-            # reliance on that guarantee alone). Deliberately NOT gated on
-            # doc.authorization == AUTO, unlike the buy path below: a close
-            # can only shrink existing option exposure, never grow it, and
-            # the v1 pending-review queue has no support for holding an
-            # OptionIntent for confirm/notify authorization to resolve
-            # later. If a demoted (authorization: confirm) strategy's
-            # close_options rule stopped firing here, a drawdown-breaker
-            # demotion would silently disable the very stop-loss exit it
-            # exists to protect -- exactly Finding 1's failure mode, just
-            # from the opposite direction.
             if rule_type != RuleType.HARD:
                 self._notify_rule(doc, rule_id, condition, "skipped")
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                       disposition="skipped",
                                       detail="close_options requires rule type: hard")
-            return self._dispatch_close_options(doc, rule_id, condition, positions, reason)
-        # BUY_CALL / BUY_PUT.
-        # Finding 1b, buy half -- runtime last line of defense: the
-        # loader's authoring-time validation normally guarantees
-        # authorization: auto + type: hard for every option action, but a
-        # strategy that WAS valid at authoring time can be demoted later
-        # (DrawdownBreaker flips authorization: auto -> confirm without
-        # re-validating, and loading was deliberately changed to no longer
-        # enforce this check -- see strategy/loader.py's `authoring` param
-        # docstring -- precisely so a demoted strategy keeps LOADING).
-        # Without this check, a demoted strategy's buy_call/buy_put rule
-        # would still fire and place a brand-new autonomous option order
-        # with nobody having confirmed it -- exactly what
-        # authorization: confirm exists to prevent, and exactly the wrong
-        # direction to fail during a drawdown halt.
-        if not (doc.authorization == Authorization.AUTO and rule_type == RuleType.HARD):
+            # auto executes as before. A confirm strategy's close waits for the
+            # user -- EXCEPT once the drawdown breaker has tripped: a halt must
+            # never strand an exit behind an approval (spec 2026-09-14).
+            if doc.authorization == Authorization.AUTO or self._breaker_tripped():
+                return self._dispatch_close_options(doc, rule_id, condition, positions, reason)
+            return self._queue_option_close(doc, rule_id, rule_type, condition, action,
+                                            positions, price, reason)
+        # BUY_CALL / BUY_PUT
+        if rule_type != RuleType.HARD:
             self._notify_rule(doc, rule_id, condition, "skipped")
-            return TriggerOutcome(
-                strategy_id=doc.id, rule_id=rule_id, disposition="skipped",
-                detail="option buys require authorization: auto -- strategy "
-                       "demoted or misconfigured")
-        return self._dispatch_option_buy(doc, rule_id, condition, spec, price, reason)
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="skipped",
+                                  detail="option buys require rule type: hard")
+        if doc.authorization == Authorization.AUTO:
+            return self._dispatch_option_buy(doc, rule_id, condition, spec, price, reason)
+        return self._queue_option_buy(doc, rule_id, rule_type, condition, action,
+                                      spec, price, reason)
+
+    def _breaker_tripped(self) -> bool:
+        return self.breaker is not None and self.breaker.tripped_at() is not None
+
+    def _queue_option_buy(self, doc: StrategyDoc, rule_id: str, rule_type: RuleType,
+                          condition: str, action: str, spec: ActionSpec,
+                          price: Decimal, reason: str) -> TriggerOutcome:
+        right = "call" if spec.kind == ActionKind.BUY_CALL else "put"
+        min_dte = spec.min_dte if spec.min_dte is not None else 7
+        otm_pct = spec.otm_pct if spec.otm_pct is not None else Decimal("0.02")
+        underlying = doc.position.ticker
+        try:
+            pick = self.options_backend.pick_contract(
+                underlying, right, min_dte, otm_pct, spec.amount, price)
+        except OptionsBackendError as exc:
+            self._notify_rule(doc, rule_id, condition, "error")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="error", detail=str(exc))
+        if pick is None:
+            self._notify_rule(doc, rule_id, condition, "skipped")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="skipped",
+                                  detail="no affordable option contract")
+        instruction = OptionInstruction(
+            op="buy", underlying=underlying, reason=reason, strategy_id=doc.id,
+            right=right, min_dte=min_dte, otm_pct=otm_pct, budget=spec.amount,
+            spot_at_trigger=price)
+        snapshot = {"price": str(price), "preview": json.loads(pick.model_dump_json())}
+        rid = self.queue.add_option_order(
+            strategy_id=doc.id, rule_id=rule_id, ticker=underlying,
+            rule_type=rule_type.value, condition=condition, action=action,
+            snapshot=snapshot, instruction=instruction)
+        preview = f"{pick.qty}x {pick.occ_symbol} ≈ ${pick.est_premium:,.2f}"
+        return self._queued_option_review(rid, doc, rule_id, rule_type, condition,
+                                          action, price, preview)
+
+    def _queue_option_close(self, doc: StrategyDoc, rule_id: str, rule_type: RuleType,
+                            condition: str, action: str,
+                            positions: dict[str, Position], price: Decimal,
+                            reason: str) -> TriggerOutcome:
+        underlying = doc.position.ticker
+        refs = [OptionPositionRef(occ_symbol=p.ticker, qty=int(p.qty))
+               for p in positions.values()
+               if (parts := parse_occ_symbol(p.ticker)) is not None
+               and parts.root == underlying and int(p.qty) >= 1]
+        if not refs:
+            self._notify_rule(doc, rule_id, condition, "skipped")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="skipped",
+                                  detail="no option positions to close")
+        instruction = OptionInstruction(op="close", underlying=underlying, reason=reason,
+                                        strategy_id=doc.id, positions_at_trigger=refs)
+        snapshot = {"price": str(price),
+                   "preview": [json.loads(r.model_dump_json()) for r in refs]}
+        rid = self.queue.add_option_order(
+            strategy_id=doc.id, rule_id=rule_id, ticker=underlying,
+            rule_type=rule_type.value, condition=condition, action=action,
+            snapshot=snapshot, instruction=instruction)
+        preview = "close " + ", ".join(f"{r.occ_symbol} x{r.qty}" for r in refs)
+        return self._queued_option_review(rid, doc, rule_id, rule_type, condition,
+                                          action, price, preview)
+
+    def _queued_option_review(self, rid: int, doc: StrategyDoc, rule_id: str,
+                              rule_type: RuleType, condition: str, action: str,
+                              price: Decimal, preview: str) -> TriggerOutcome:
+        ticker = doc.position.ticker
+        if self.review_agent is None:
+            self._notify_queued(doc, rid, ticker, action, "", price=price,
+                                kind="option_order", option_preview=preview)
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="queued")
+        return self._agent_review(rid, doc, rule_id, rule_type, condition, action,
+                                  None, price=price, kind="option_order",
+                                  option_preview=preview)
 
     def _dispatch_option_buy(self, doc: StrategyDoc, rule_id: str, condition: str,
                              spec: ActionSpec, price: Decimal,
@@ -578,7 +636,8 @@ class Sentinel:
 
     def _agent_review(self, rid: int, doc: StrategyDoc, rule_id: str,
                       rule_type: RuleType, condition: str, action: str,
-                      intent: OrderIntent, *, price: Decimal | None = None) -> TriggerOutcome:
+                      intent: OrderIntent | None, *, price: Decimal | None = None,
+                      kind: str = "order", option_preview: str = "") -> TriggerOutcome:
         base = {"strategy_id": doc.id, "rule_id": rule_id}
         ticker = doc.position.ticker
         # Analysis phase: the review row is still pending here, so any
@@ -587,7 +646,8 @@ class Sentinel:
             analysis = self.review_agent.analyze(dict(self.queue.get(rid)))
             self.queue.attach_analysis(rid, analysis.model_dump_json())
         except Exception as exc:  # noqa: BLE001 — a failed review must never lose the trigger
-            self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent)
+            self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent,
+                                kind=kind, option_preview=option_preview)
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
 
@@ -595,17 +655,22 @@ class Sentinel:
             # The LLM's output couldn't be parsed as a recommendation at all —
             # this is not a genuine "skip" decision, so don't act on it.
             # Leave the trigger pending for human review.
-            self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent)
+            self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent,
+                                kind=kind, option_preview=option_preview)
             return TriggerOutcome(
                 **base, disposition="queued",
                 detail="analysis unparseable — left for human review")
 
+        # Option rules are always hard (never soft), so this branch never
+        # actually sees kind == "option_order" today -- the `kind == "order"`
+        # guard is defense in depth, not reliance on that invariant alone.
         autonomous = (doc.authorization == Authorization.AUTO
-                      and rule_type == RuleType.SOFT)
+                      and rule_type == RuleType.SOFT and kind == "order")
         if not autonomous:
             recommendation = f"{analysis.recommendation} — {analysis.reasoning[:300]}"
             self._notify_queued(doc, rid, ticker, action, recommendation,
-                                price=price, intent=intent)
+                                price=price, intent=intent, kind=kind,
+                                option_preview=option_preview)
             return TriggerOutcome(**base, disposition="queued",
                                   detail="analysis attached: " + recommendation)
 
@@ -679,7 +744,8 @@ class Sentinel:
 
     def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
                        recommendation: str, *, price: Decimal | None = None,
-                       intent: OrderIntent | None = None) -> None:
+                       intent: OrderIntent | None = None, kind: str = "order",
+                       option_preview: str = "") -> None:
         # Part B: the price context available at the instant this item was
         # queued -- the exact sample the rule triggered on, not a second,
         # separately re-fetched "live" quote (see review_queued's
@@ -700,7 +766,7 @@ class Sentinel:
             account=self.account, review_id=review_id, ticker=ticker, action=action,
             strategy_id=doc.id, recommendation=recommendation,
             trigger_price=trigger_price, est_shares=est_shares,
-            approve_url=approve_url)
+            approve_url=approve_url, kind=kind, option_preview=option_preview)
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's
