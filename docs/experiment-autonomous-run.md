@@ -199,10 +199,14 @@ As of this date, the paper-account experiment strategies should use
 
 - **All option trades queue for approval**: `buy_call`, `buy_put`, and
   `close_options` rules on `confirm` strategies queue as pending reviews
-  instead of auto-executing. Approvals are gated by market hours
-  (Mon–Fri 09:30–16:00 ET, no US holiday calendar) and refuse to
-  complete outside those windows — the item stays pending and
-  approve-buttons stay usable until you approve during market hours.
+  instead of auto-executing. Only OPTION approvals are gated by market
+  hours (Mon–Fri 09:30–16:00 ET, no US holiday calendar) — attempting to
+  approve one outside those windows leaves the item pending rather than
+  failing it. The approve-by-link (the one-click link in an email/push
+  notification) expires 24h after the review was queued; the Telegram
+  Approve/Reject buttons and the in-app Pending page carry no such
+  expiry and stay usable until the item is resolved, regardless of
+  market hours.
 - **Two safety exceptions remain automatic** (documented for the
   research paper):
   - DTE≤1 expiry sweep: positions within one calendar day of expiry are
@@ -213,10 +217,24 @@ As of this date, the paper-account experiment strategies should use
     drawdown breaker has tripped, `close_options` rules on that strategy
     execute immediately instead of queuing — close-to-safety is never
     delayed.
-- **All other rules, including stock trades, follow the normal flow**:
-  `hard` rules with `authorization: confirm` wait for approval, then
-  execute during market hours; soft rules are not queued (agent proposals
-  only).
+- **Stock trades follow the normal review flow and are NOT gated by
+  market hours**: on a `confirm` strategy, both `hard` and `soft` rules
+  queue for approval (soft rules are not skipped — an `auto` strategy's
+  own `soft` rules queue too; only `auto` + `hard` executes immediately
+  with no review). A queued stock approval, unlike an option approval,
+  executes as soon as you approve it, any time of day.
+- **Edge cases the paper should also state**:
+  - A close approval acts on whatever option positions are actually held
+    on the underlying AT APPROVAL TIME — every one of them, including a
+    position opened after the rule triggered, not just the one(s) named
+    in the original trigger snapshot.
+  - An approved `confirm` option buy can still execute while the
+    drawdown breaker is tripped (the breaker only forces `close_options`
+    to bypass the queue — see above; it does not block a buy a human has
+    already approved), same as a stock confirm approval.
+  - There is no US holiday calendar (see above) — a US market holiday
+    reads as an ordinary open session for every market-hours gate in
+    this system.
 
 This baseline ensures the agent proposes and executes option positions
 with meaningful human oversight while maintaining circuit-breaker

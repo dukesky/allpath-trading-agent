@@ -1251,7 +1251,7 @@ class TelegramPoller:
                 return (f"{prefix}✅ Approved #{review_id} — {result.summary}",
                         _toast("Approved"), True)
             message = (f"{prefix}⚠️ Approved #{review_id}, but no option order was "
-                      f"placed: {result.summary}")
+                      f"confirmed: {result.summary}")
             return message, _toast("No order placed"), True
 
         if not result.submitted:

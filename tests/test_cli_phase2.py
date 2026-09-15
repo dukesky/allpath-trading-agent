@@ -384,3 +384,24 @@ def test_reviews_approve_option_order_prints_summary(tmp_path, capsys, monkeypat
     code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
     assert code == 0
     assert "bought 2x NVDA261016C00220000" in capsys.readouterr().out
+
+
+def test_reviews_approve_option_order_execution_error_reports_cleanly_not_a_traceback(
+        tmp_path, capsys, monkeypatch):
+    # Minor 6: `cmd_reviews` only caught `ReviewError` -- an `ExecutionError`
+    # raised after the row was already claimed "approved" (e.g. the broker
+    # call itself blows up) used to escape uncaught and print a raw
+    # traceback instead of the same clean "error: ..." line every other
+    # approve failure gets.
+    from tests.test_reviews import OptionExecutor
+    setup_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: True)
+    rid = _queue_option_cli(tmp_path)
+    monkeypatch.setattr(
+        "allpath_trade.app.Executor",
+        lambda *a, **kw: OptionExecutor(raise_on="NVDA261016C00220000"))
+    code = main(["reviews", "approve", str(rid)], broker_factory=lambda s: FakeBroker())
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error: approved, but execution failed" in err
+    assert "Traceback" not in err

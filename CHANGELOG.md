@@ -11,14 +11,17 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
   pending review of kind `option_order` instead of auto-executing — the
   web Pending page, approve-by-link, Telegram buttons, and CLI `reviews
   approve` all handle option reviews identically to order proposals. At
-  trigger time (market open), a buy previews a contract and evaluates
-  risk; if neither is affordable, the rule is skipped and an error is
-  reported as before. At approval time (market hours only, Mon–Fri
-  09:30–16:00 ET, no holiday exceptions), buys re-price with a live
-  quote and re-run the risk gate; closes re-read live positions.
-  `execution_result` in the journal records both the preview and the
-  actual outcome. Approvals are refused outside market hours — the item
-  stays pending, and link/Telegram buttons remain usable.
+  trigger time (market open), a buy only picks a preview contract — the
+  risk gate does not run yet. If no affordable contract exists, the rule
+  is skipped; if the options backend itself errors, that's reported as
+  an error instead (both as before). The risk gate first runs at
+  approval time (market hours only, Mon–Fri 09:30–16:00 ET, no holiday
+  exceptions), when buys also re-price with a live quote; closes re-read
+  live positions at approval instead. `execution_result` in the journal
+  records both the preview and the actual outcome. Approvals are refused
+  outside market hours — the item stays pending; see the known
+  limitation below for how long the approve-by-link itself stays usable
+  once that happens.
 - **Safety exceptions remain automatic**: the DTE≤1 expiry sweep and
   closes triggered once a `confirm` strategy's account's drawdown breaker
   has tripped are not queued — both execute immediately as before, since
@@ -30,9 +33,19 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
 - **New shared helpers**: `market_hours.py` (check US market open times)
   and `close_underlying_options` / `option_positions_for` in
   `execution.py` (helper functions for option closes).
-- **Known limitation**: approve links expire 24 hours after issue — a link
-  from an option rule that fires near Friday's close is dead by Monday's
-  open; use the Pending page or Telegram instead.
+- **Known limitation**: the approve-by-link expires 24 hours after issue
+  — a link from an option rule that fires near Friday's close is
+  typically dead by Monday's open. The Telegram Approve/Reject buttons
+  and the in-app Pending page carry no such expiry and stay usable
+  until the item is resolved; the market-closed approve-link page now
+  tells you which of those two outcomes applies to that link before you
+  tap it.
+- **Close-approval wording**: a close approval leg that raised an
+  exception (a broker error, an unparseable response) rather than being
+  rejected by the risk gate now reports "order status unknown" instead
+  of implying nothing was placed — `execute_option` can raise after an
+  order was already genuinely submitted, so claiming "not placed" could
+  be false.
 - See `docs/superpowers/specs/2026-09-14-option-pending-queue-design.md`
   and `docs/superpowers/plans/2026-09-14-option-pending-queue.md` for
   the full design and task-by-task implementation record.

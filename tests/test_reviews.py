@@ -1289,6 +1289,31 @@ def test_approve_option_buy_risk_gate_rejection(tmp_path, market_open):
     assert result.reasons == ["order value exceeds max_order_value"]
 
 
+def test_approve_option_buy_non_execution_error_after_claim_becomes_execution_error(
+        tmp_path, market_open):
+    # Minor 5: `OptionIntent(...)`/`executor.execute_option(...)` used to sit
+    # outside any try in `_run_option_buy` -- a non-`ExecutionError` there
+    # (e.g. a broker client raising something else entirely) left the row
+    # "approved" with no execution_result and a bare 500 on the web. It
+    # must instead be wrapped into an `ExecutionError` so `_approve_option_
+    # order`'s existing handler records op/preview/error like every other
+    # failure mode.
+    ex = OptionExecutor()
+
+    def boom(intent):
+        raise RuntimeError("network reset mid-request")
+    ex.execute_option = boom
+    q = _opt_queue(tmp_path, ex)
+    rid = _add_opt(q)
+    with pytest.raises(ExecutionError, match="option order failed after approval"):
+        q.approve(rid)
+    row = q.get(rid)
+    assert row["status"] == "approved"
+    er = json.loads(row["execution_result"])
+    assert er["op"] == "buy" and "error" in er
+    assert "network reset mid-request" in er["error"]
+
+
 def test_approve_option_close_rereads_positions(tmp_path, market_open):
     ex = OptionExecutor(positions=[_opt_pos("NVDA261016C00220000"),
                                    _opt_pos("AMD261016C00500000")])
@@ -1315,6 +1340,29 @@ def test_approve_option_close_one_failure_does_not_stop_the_rest(tmp_path, marke
     assert result.submitted
     assert [i.occ_symbol for i in ex.option_calls] == ["NVDA261120C00230000"]
     assert any("NVDA261016C00220000" in r for r in result.reasons)
+
+
+def test_approve_option_close_leg_exception_is_order_status_unknown_not_not_placed(
+        tmp_path, market_open):
+    # I1: `execute_option` can raise ExecutionError even after an order was
+    # genuinely placed (an unparseable response, a missing id) -- unlike a
+    # risk-gate rejection, which never places anything. When the only
+    # matching leg fails this way, the summary must not claim "no option
+    # order was placed" (it might have been); it must say the order status
+    # is unknown instead.
+    ex = OptionExecutor(positions=[_opt_pos("NVDA261016C00220000")],
+                        raise_on="NVDA261016C00220000")
+    q = _opt_queue(tmp_path, ex)
+    rid = _add_opt(q, CLOSE_INSTR, preview=[])
+    result = q.approve(rid)
+    assert result.submitted is False
+    assert "order status unknown" in result.summary
+    assert "NVDA261016C00220000" in result.summary
+    row = q.get(rid)
+    assert row["status"] == "approved"
+    er = json.loads(row["execution_result"])
+    assert er["op"] == "close" and "preview" in er
+    assert any("NVDA261016C00220000" in r for r in er["reasons"])
 
 
 def test_approve_option_while_market_closed_stays_pending(tmp_path, market_closed):

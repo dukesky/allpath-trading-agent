@@ -651,12 +651,28 @@ class ReviewQueue:
                 submitted=False,
                 summary="no affordable option contract at approval — nothing bought")
         record["picked"] = json.loads(pick.model_dump_json())
-        intent = OptionIntent(
-            underlying=instruction.underlying, right=instruction.right,
-            occ_symbol=pick.occ_symbol, side=OrderSide.BUY, qty=pick.qty,
-            est_premium=pick.est_premium, reason=instruction.reason,
-            strategy_id=instruction.strategy_id)
-        res = executor.execute_option(intent)
+        try:
+            intent = OptionIntent(
+                underlying=instruction.underlying, right=instruction.right,
+                occ_symbol=pick.occ_symbol, side=OrderSide.BUY, qty=pick.qty,
+                est_premium=pick.est_premium, reason=instruction.reason,
+                strategy_id=instruction.strategy_id)
+            res = executor.execute_option(intent)
+        except ExecutionError:
+            # Already the right shape (a placed-or-not-placed order status
+            # `_approve_option_order`'s caller already knows how to record)
+            # -- propagate unchanged.
+            raise
+        except Exception as exc:
+            # Minor 5: this used to sit outside any try -- a non-
+            # `ExecutionError` here (a bad `OptionIntent` construction, a
+            # broker client raising something else entirely) left the row
+            # "approved" with no `execution_result` at all and a bare 500
+            # on the web. Wrapping it lets `_approve_option_order`'s
+            # existing `except ExecutionError` handler record op/preview/
+            # error for this row the same as every other failure mode.
+            raise ExecutionError(
+                f"option order failed after approval: {exc}") from exc
         if res.submitted:
             return OptionApprovalResult(
                 submitted=True,
@@ -691,7 +707,16 @@ class ReviewQueue:
         for leg in outcome.legs:
             ticker = leg.position.ticker
             if leg.error is not None:
-                issues.append(f"{ticker}: {leg.error}")
+                # I1: `leg.error` covers every exception `execute_option`
+                # (or building its `OptionIntent`) can raise for this leg,
+                # including `ExecutionError` -- which `execute_option` can
+                # raise even AFTER genuinely placing the order (an
+                # unparseable response, a missing id; see its own
+                # docstring). That's not the same as a risk-gate rejection
+                # (handled below, via `leg.result`), which never places
+                # anything -- so this leg's fate is honestly unknown, not
+                # "not placed".
+                issues.append(f"{ticker}: order status unknown — {leg.error}")
                 continue
             results.append(leg.result)
             if leg.result.submitted:

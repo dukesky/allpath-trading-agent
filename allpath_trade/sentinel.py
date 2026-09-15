@@ -144,13 +144,15 @@ class Sentinel:
         # Task 6: the options MCP backend -- optional (None by default), so
         # every Sentinel constructed without it (every pre-existing call
         # site, and any account with options_trading off) behaves exactly
-        # as it did before options existed: option ActionKinds can only
-        # reach `_dispatch_option` because the strategy loader already
-        # refuses to load a strategy containing one unless
-        # authorization=auto and the rule is hard (strategy/loader.py), but
-        # `_dispatch_option` itself is still defensive against `None` here
-        # (the operator can turn the flag off with strategies still on
-        # disk) rather than trusting that invariant alone.
+        # as it did before options existed: option ActionKinds mainly reach
+        # `_dispatch_option` because the strategy loader's AUTHORING-time
+        # check requires authorization: auto or confirm plus a hard rule
+        # (strategy/loader.py) -- but that check doesn't re-run on a plain
+        # LOAD, so a strategy the breaker later demoted auto -> confirm
+        # still loads and dispatches here. `_dispatch_option` itself stays
+        # defensive against `None` here (the operator can turn the flag off
+        # with strategies still on disk) rather than trusting either
+        # invariant alone.
         self.options_backend = options_backend
 
     def run_once(self) -> SentinelReport:

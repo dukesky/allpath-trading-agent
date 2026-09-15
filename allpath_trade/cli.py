@@ -207,6 +207,7 @@ def _approve_needs_broker(settings: Settings, review_id: int, account: str) -> b
 
 
 def cmd_reviews(q, args, store=None) -> int:
+    from allpath_trade.execution import ExecutionError
     from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 
     try:
@@ -264,6 +265,15 @@ def cmd_reviews(q, args, store=None) -> int:
         return 0
     except ReviewError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ExecutionError as exc:
+        # Minor 6: an approve() that claims the row "approved" and then
+        # fails during execution (a broker call blowing up, an option
+        # order failing after approval -- see _run_option_buy) raises
+        # ExecutionError, not ReviewError. Left uncaught, this printed a
+        # raw traceback instead of the same clean "error: ..." line every
+        # other approve failure gets.
+        print(f"error: approved, but execution failed: {exc}", file=sys.stderr)
         return 1
 
 

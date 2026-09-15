@@ -514,7 +514,7 @@ def approve(request: Request, review_id: int) -> Response:
         if result.submitted:
             return _back_to_reviews_ok(f"Approved #{review_id} — {result.summary}")
         return _back_to_reviews(
-            f"Approved #{review_id}, but no option order was placed: {result.summary}")
+            f"Approved #{review_id}, but no option order was confirmed: {result.summary}")
 
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)

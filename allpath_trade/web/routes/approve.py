@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Form, Request
@@ -47,6 +48,23 @@ _SECURITY_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referre
 # resolution always goes through the same ReviewQueue.approve/reject the
 # in-app /reviews page uses.
 PREFIX = "/a"
+
+
+def _parse_iso(value: object) -> datetime | None:
+    """Best-effort parse of a `token_expires_ts`-shaped ISO string. Mirrors
+    `ReviewQueue._token_ok`'s own parsing (store/reviews.py) -- anything
+    not a parseable ISO string (missing, wrong type, malformed) yields
+    `None` rather than raising; a naive result is treated as UTC, same
+    convention as `market_hours.is_us_market_open`."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _invalid_page(request: Request) -> HTMLResponse:
@@ -286,10 +304,28 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
                          "nothing was done. Resolve it from the app."))
         if (preview is not None and preview["kind"] == "option_order"
                 and not market_hours.is_us_market_open()):
+            # I2: this link's token expires TOKEN_TTL_SECONDS (24h) after
+            # issue (store/reviews.py) -- option rules only fire during
+            # market hours, so an after-close tap usually has less than a
+            # day left before the NEXT open, and can easily have already
+            # expired by then. Telling every visitor "this link still
+            # works during regular hours" was simply false whenever that's
+            # the case. Compare the row's own recorded expiry against the
+            # next session's open and say which is actually true; the
+            # Telegram buttons (nonce only, no expiry) and the Pending page
+            # stay usable regardless, so point there when the link itself
+            # won't make it.
+            expires = _parse_iso(preview["token_expires_ts"])
+            next_open = market_hours.next_us_market_open()
+            if expires is None or expires < next_open:
+                tail = ("This link will have expired by then — approve it "
+                         "from the Pending page or Telegram.")
+            else:
+                expiry_et = expires.astimezone(market_hours.ET)
+                tail = f"This link works until {expiry_et.strftime('%a %H:%M ET')}."
             return _result_page(
                 request, ok=False, burned=False, account=b.account,
-                message=(f"Not processed: {OPTION_MARKET_CLOSED_MESSAGE}. "
-                         "This link still works during regular hours."))
+                message=f"Not processed: {OPTION_MARKET_CLOSED_MESSAGE}. {tail}")
 
     # Burns the token BEFORE acting (see ReviewQueue.consume_token's
     # docstring for why that ordering specifically matters for the
@@ -339,8 +375,13 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
             request, ok=True, account=b.account,
             message=f"{row['action']} applied to the shadow ledger.")
     if row["kind"] == "option_order":
-        return _result_page(request, ok=result.submitted, account=b.account,
-                            message=f"Approved #{review_id} — {result.summary}")
+        if result.submitted:
+            return _result_page(request, ok=True, account=b.account,
+                                message=f"Approved #{review_id} — {result.summary}")
+        return _result_page(
+            request, ok=False, account=b.account,
+            message=(f"Approved #{review_id}, but no option order was "
+                     f"confirmed: {result.summary}"))
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
         return _result_page(request, ok=False, account=b.account,
