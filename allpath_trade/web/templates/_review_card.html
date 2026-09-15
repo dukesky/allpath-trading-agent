@@ -83,7 +83,19 @@
   {% if item['source'] == 'chat' and item['kind'] not in ('strategy_revision', 'shadow_edit') and item['action'] %}
   <p class="review-reason">{{ item['action'] }}</p>
   {% endif %}
-  {% if item['intent'] %}
+  {% if item['kind'] == 'option_order' and item['intent'] %}
+  {% set oi = item['intent'] %}
+  {% set pv = item['snapshot'].get('preview') if item['snapshot'] is mapping else none %}
+  <p style="font-family:var(--mono);font-size:14px;margin:6px 0">
+    {% if oi['op'] == 'buy' %}
+    buy {{ oi['right'] }} · {{ oi['underlying'] }} · budget {{ oi['budget'] | money }}
+    {% if pv %}<br><span class="muted">At trigger: {{ pv['qty'] }}x {{ pv['occ_symbol'] }} ≈ {{ pv['est_premium'] | money }} — re-priced at approval</span>{% endif %}
+    {% else %}
+    close options · {{ oi['underlying'] }}
+    <br><span class="muted">At trigger: {% for p in oi['positions_at_trigger'] %}{{ p['occ_symbol'] }} x{{ p['qty'] }}{% if not loop.last %}, {% endif %}{% endfor %} — re-checked at approval</span>
+    {% endif %}
+  </p>
+  {% elif item['intent'] %}
   <p style="font-family:var(--mono);font-size:14px;margin:6px 0">
     {{ item['intent']['side'] }}
     {% if item['intent']['qty'] %}{{ item['intent']['qty'] }} shares{% else %}{{ item['intent']['notional'] | money }}{% endif %}
@@ -196,6 +208,14 @@
     Applied to the shadow ledger
     {% elif er and er.get('error') %}
     Failed after approval — {{ er['error'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
+    {% elif item['kind'] == 'option_order' %}
+    {% if er and er.get('error') %}
+    Execution failed (review claimed, order status unknown) — {{ er['error'] }}
+    {% elif er and er.get('summary') %}
+    {{ er['summary'] }}
     {% else %}
     {{ item['status'] }}
     {% endif %}

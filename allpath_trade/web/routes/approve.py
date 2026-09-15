@@ -6,9 +6,14 @@ from decimal import Decimal, InvalidOperation
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
+from allpath_trade import market_hours
 from allpath_trade.agent.shadow_tools import current_shadow_state
 from allpath_trade.execution import ExecutionError
-from allpath_trade.store.reviews import ReviewError, RevisionValidationError
+from allpath_trade.store.reviews import (
+    OPTION_MARKET_CLOSED_MESSAGE,
+    ReviewError,
+    RevisionValidationError,
+)
 from allpath_trade.web.account_ctx import bundle_for
 from allpath_trade.web.deps import components
 from allpath_trade.web.routes.dashboard import order_price_context
@@ -157,6 +162,25 @@ def _confirm_context(c, row) -> dict:
         ctx["diff_left_label"] = ("— (new strategy)" if ctx["is_new"]
                                   else "Base (at proposal)")
         return ctx
+    if kind == "option_order":
+        # No stock price context: approve_confirm.html gates the price block
+        # on kind == "order". The contract is re-picked at approval.
+        instruction = json.loads(row["intent"]) if row["intent"] else {}
+        snapshot = json.loads(row["snapshot"]) if row["snapshot"] else {}
+        preview = snapshot.get("preview")
+        if instruction.get("op") == "buy":
+            ctx["side"] = f"Buy {instruction.get('right', 'option')}"
+            if isinstance(preview, dict):
+                ctx["amount_label"] = (
+                    f"At trigger: {preview['qty']}x {preview['occ_symbol']} ≈ "
+                    f"${Decimal(str(preview['est_premium'])):,.2f} — re-priced at approval")
+        else:
+            ctx["side"] = "Close options"
+            refs = instruction.get("positions_at_trigger", [])
+            ctx["amount_label"] = ("At trigger: "
+                                   + ", ".join(f"{p['occ_symbol']} x{p['qty']}" for p in refs)
+                                   + " — re-checked at approval")
+        return ctx
 
     intent = json.loads(row["intent"]) if row["intent"] else None
     if intent is not None:
@@ -260,6 +284,12 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
                 request, ok=False, burned=False, account=b.account,
                 message=(f"Review #{rid} has no executable order attached; "
                          "nothing was done. Resolve it from the app."))
+        if (preview is not None and preview["kind"] == "option_order"
+                and not market_hours.is_us_market_open()):
+            return _result_page(
+                request, ok=False, burned=False, account=b.account,
+                message=(f"Not processed: {OPTION_MARKET_CLOSED_MESSAGE}. "
+                         "This link still works during regular hours."))
 
     # Burns the token BEFORE acting (see ReviewQueue.consume_token's
     # docstring for why that ordering specifically matters for the
@@ -308,6 +338,9 @@ def _resolve(request: Request, review_id: str, token: str, *, reject: bool) -> H
         return _result_page(
             request, ok=True, account=b.account,
             message=f"{row['action']} applied to the shadow ledger.")
+    if row["kind"] == "option_order":
+        return _result_page(request, ok=result.submitted, account=b.account,
+                            message=f"Approved #{review_id} — {result.summary}")
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
         return _result_page(request, ok=False, account=b.account,

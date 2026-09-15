@@ -787,3 +787,42 @@ def test_post_approve_stale_shadow_edit_says_ledger_change_not_revision(client):
 
     assert "Ledger change failed re-validation" in r.text
     assert "Revision failed re-validation" not in r.text
+
+
+from tests.test_reviews import BUY_INSTR, OPT_PICK, OptionExecutor
+
+
+def _queue_option_link(client):
+    import json
+    q = client.app.state.holder.get().queue
+    handle = q.add_option_order(
+        strategy_id="s1", rule_id="entry-call", ticker="NVDA", rule_type="hard",
+        condition="price < 212", action="buy_call $1000 dte>=30 otm=5%",
+        snapshot={"price": "210", "preview": json.loads(OPT_PICK.model_dump_json())},
+        instruction=BUY_INSTR)
+    return q, int(handle), handle.token
+
+
+def test_option_link_while_market_closed_keeps_the_link_alive(client, monkeypatch):
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: False)
+    q, rid, token = _queue_option_link(client)
+    monkeypatch.setattr(q, "_executor", OptionExecutor())
+    r = client.post(f"/a/{rid}/approve", data={"k": token})
+    assert "market is closed" in r.text
+    row = q.get(rid)
+    assert row["status"] == "pending" and row["approval_token_hash"]
+
+
+def test_option_link_during_market_hours_approves(client, monkeypatch):
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open", lambda now=None: True)
+    q, rid, token = _queue_option_link(client)
+    monkeypatch.setattr(q, "_executor", OptionExecutor())
+    r = client.post(f"/a/{rid}/approve", data={"k": token})
+    assert "bought 2x NVDA261016C00220000" in r.text
+    assert q.get(rid)["status"] == "approved"
+
+
+def test_option_link_confirm_page_shows_preview(client):
+    _q, rid, token = _queue_option_link(client)
+    r = client.get(f"/a/{rid}?k={token}")
+    assert "NVDA261016C00220000" in r.text and "re-priced at approval" in r.text

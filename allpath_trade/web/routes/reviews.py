@@ -507,6 +507,15 @@ def approve(request: Request, review_id: int) -> Response:
                          f"{row['action']} applied")
         return _back_to_reviews_ok(message)
 
+    if kind == "option_order":
+        # approve() returns OptionApprovalResult here -- no `.decision`;
+        # the queue already wrote preview-vs-actual into execution_result.
+        _echo_resolution(request, account, review_id, row_source, result.summary)
+        if result.submitted:
+            return _back_to_reviews_ok(f"Approved #{review_id} — {result.summary}")
+        return _back_to_reviews(
+            f"Approved #{review_id}, but no option order was placed: {result.summary}")
+
     if not result.submitted:
         reasons = "; ".join(result.decision.reasons)
         _echo_resolution(request, account, review_id, row_source,

@@ -1250,3 +1250,65 @@ def test_resolved_paper_order_card_still_says_submitted(client, monkeypatch):
 
     assert "Order submitted" in body
     assert "Order recorded (shadow)" not in body
+
+
+import json as _json
+
+from tests.test_reviews import BUY_INSTR, OPT_PICK, OptionExecutor
+
+
+def queue_option(client, instruction=BUY_INSTR):
+    q = client.app.state.holder.get().queue
+    return q.add_option_order(
+        strategy_id="s1", rule_id="entry-call", ticker="NVDA", rule_type="hard",
+        condition="price < 212", action="buy_call $1000 dte>=30 otm=5%",
+        snapshot={"price": "210", "preview": _json.loads(OPT_PICK.model_dump_json())},
+        instruction=instruction)
+
+
+def _market(monkeypatch, is_open):
+    monkeypatch.setattr("allpath_trade.market_hours.is_us_market_open",
+                        lambda now=None: is_open)
+
+
+def test_pending_option_order_card_shows_preview(client):
+    queue_option(client)
+    body = client.get("/reviews").text
+    assert "NVDA261016C00220000" in body and "re-priced at approval" in body
+
+
+def test_approve_option_order_during_market_hours(client, monkeypatch):
+    _market(monkeypatch, True)
+    q = client.app.state.holder.get().queue
+    monkeypatch.setattr(q, "_executor", OptionExecutor())
+    rid = queue_option(client)
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=True)
+    assert "bought 2x NVDA261016C00220000" in r.text
+    assert q.get(rid)["status"] == "approved"
+    # resolved card renders the stored summary
+    assert "bought 2x NVDA261016C00220000" in client.get("/reviews").text
+
+
+def test_approve_option_order_while_market_closed_stays_pending(client, monkeypatch):
+    _market(monkeypatch, False)
+    q = client.app.state.holder.get().queue
+    monkeypatch.setattr(q, "_executor", OptionExecutor())
+    rid = queue_option(client)
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=True)
+    assert "market is closed" in r.text
+    assert q.get(rid)["status"] == "pending"
+
+
+def test_resolved_option_order_failure_renders_error(client, monkeypatch):
+    _market(monkeypatch, True)
+    q = client.app.state.holder.get().queue
+    ex = OptionExecutor()
+
+    def boom(ticker):
+        raise RuntimeError("quote down")
+    ex.data.get_quote = boom
+    monkeypatch.setattr(q, "_executor", ex)
+    rid = queue_option(client)
+    r = client.post(f"/reviews/{rid}/approve", follow_redirects=True)
+    assert "execution failed" in r.text and "quote down" in r.text
+
