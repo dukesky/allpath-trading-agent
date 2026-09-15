@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from allpath_trade import market_hours
 from allpath_trade.broker.unconfigured import UnconfiguredBroker
 from allpath_trade.execution import refresh_pending_fills
 from allpath_trade.notify import events
@@ -89,11 +90,7 @@ DAILY_JOB_ID = "daily_chain"
 
 def is_market_hours(now: datetime | None = None) -> bool:
     """US regular session, no holiday calendar yet (see docs/TODO.md)."""
-    now = now or datetime.now(UTC)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=UTC)
-    et = now.astimezone(ET)
-    return et.weekday() < 5 and OPEN <= et.time() < CLOSE
+    return market_hours.is_us_market_open(now)
 
 
 def _is_after_close(now: datetime | None = None) -> bool:

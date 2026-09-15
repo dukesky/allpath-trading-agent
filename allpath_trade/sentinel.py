@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import contextlib
 from datetime import UTC, datetime
-from datetime import time as dt_time
 from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
+from allpath_trade import market_hours
 from allpath_trade.broker.base import (
     Broker,
     BrokerNotConfigured,
@@ -55,29 +54,18 @@ from allpath_trade.strategy.store import StrategyStore
 # the fix: keep an option rule ARMED while the market is closed instead of
 # letting it dispatch into a guaranteed failure at all.
 #
-# Duplicated (not imported) from scheduler.is_market_hours: scheduler.py
-# already imports SentinelReport from this module, so importing the other
-# way would be circular. Same tradeoff execution.py's own _OPTION_STATUS_MAP
-# comment makes -- cheaper to keep the same handful of lines in two places
-# than to restructure module ownership for it.
-#
-# Known limitation, inherited from scheduler.is_market_hours: no US market
-# holiday/half-day calendar yet (see docs/TODO.md's deferred pool) -- a
-# holiday or early close still reads as "open" here. That's judged
-# acceptable for now: on a holiday, Executor.execute_option's id-less-
-# payload guard turns the resulting rejection into a loud, journaled error
-# (and, for a buy rule, still burns the one-shot the way any other rejected
-# order would) instead of the silent phantom-submitted row this incident was
-# about -- not a silent failure any more, just not a pre-empted one.
-_MARKET_TZ = ZoneInfo("America/New_York")
-_MARKET_OPEN = dt_time(9, 30)
-_MARKET_CLOSE = dt_time(16, 0)
+# US regular session (Mon-Fri 09:30-16:00 ET): no holiday calendar yet
+# (see docs/TODO.md) -- a holiday or early close still reads as "open" here.
+# That's judged acceptable for now: on a holiday, Executor.execute_option's
+# id-less-payload guard turns the resulting rejection into a loud, journaled
+# error (and, for a buy rule, still burns the one-shot the way any other
+# rejected order would) instead of the silent phantom-submitted row this
+# incident was about -- not a silent failure any more, just not pre-empted.
 
 
 def _us_market_open_now() -> bool:
     """US regular session, weekday Mon-Fri 09:30-16:00 America/New_York."""
-    now = datetime.now(_MARKET_TZ)
-    return now.weekday() < 5 and _MARKET_OPEN <= now.time() < _MARKET_CLOSE
+    return market_hours.is_us_market_open()
 
 
 class TriggerOutcome(BaseModel):
