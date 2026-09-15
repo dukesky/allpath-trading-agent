@@ -400,6 +400,23 @@ class OptionCloseOutcome(BaseModel):
     legs: list[OptionCloseLegOutcome] = []
 
 
+def option_positions_for(underlying: str, positions: Iterable[Position]) -> list[Position]:
+    """Every position among `positions` whose OCC root matches `underlying`
+    -- the read-only half of `close_underlying_options`'s own filter below,
+    split out so a caller that only needs a preview (never executes
+    anything) doesn't have to duplicate the OCC-parse-and-compare.
+    `close_underlying_options` uses this for its own `held` list;
+    `Sentinel._queue_option_close` (a confirm strategy's close_options
+    preview) uses it too, then applies its own `qty >= 1` check on top --
+    a queued preview must never offer to close a fractional/zero position,
+    while `close_underlying_options` already tolerates that at execution
+    time via its own per-leg try/except, so both callers keep exactly the
+    semantics they had before this was split out."""
+    return [p for p in positions
+           if (parts := parse_occ_symbol(p.ticker)) is not None
+           and parts.root == underlying]
+
+
 def close_underlying_options(executor: Executor, underlying: str,
                              positions: Iterable[Position], *, reason: str,
                              strategy_id: str | None) -> OptionCloseOutcome:
@@ -426,9 +443,7 @@ def close_underlying_options(executor: Executor, underlying: str,
     One bad leg is recorded on that leg's `error` and never aborts the rest
     of the batch -- the same contract both callers already relied on
     separately (see `OptionCloseLegOutcome`'s docstring)."""
-    held = [p for p in positions
-           if (parts := parse_occ_symbol(p.ticker)) is not None
-           and parts.root == underlying]
+    held = option_positions_for(underlying, positions)
     legs: list[OptionCloseLegOutcome] = []
     for p in held:
         try:

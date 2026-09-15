@@ -1064,6 +1064,29 @@ def test_auto_buy_call_still_executes_immediately(tmp_path):
     assert o.disposition == "executed" and len(ex.option_calls) == 1 and q.list() == []
 
 
+def test_notify_buy_call_only_notifies_no_queue_no_pick(tmp_path):
+    backend = FakeOptionsBackend(pick=_PICK)
+    yaml_text = strategy_yaml(auth="notify", action="buy_call $500")
+    s, _store, ex, q, _n = make_option(tmp_path, yaml_text, backend=backend)
+    [o] = s.run_once().outcomes
+    assert o.disposition == "notified"
+    assert q.list() == []
+    assert backend.pick_calls == []
+    assert ex.option_calls == []
+
+
+def test_notify_close_options_only_notifies_no_queue_no_execute(tmp_path):
+    occ = _occ_symbol("AAPL", datetime.now(UTC).date() + timedelta(days=60))
+    yaml_text = strategy_yaml(auth="notify", action="close_options")
+    s, _store, ex, q, _n = make_option(
+        tmp_path, yaml_text, backend=FakeOptionsBackend(pick=_PICK),
+        extra_positions=[_occ_position(occ, "2")])
+    [o] = s.run_once().outcomes
+    assert o.disposition == "notified"
+    assert q.list() == []
+    assert ex.option_calls == []
+
+
 def test_buy_call_executes_with_defaults_applied_when_action_omits_them(tmp_path):
     backend = FakeOptionsBackend(pick=_PICK)
     s, store, ex, _q, n = make_option(

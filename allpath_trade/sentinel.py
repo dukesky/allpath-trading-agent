@@ -20,9 +20,14 @@ from allpath_trade.broker.base import (
     Position,
     parse_occ_symbol,
 )
-from allpath_trade.broker.options_mcp import OptionsBackend, OptionsBackendError
+from allpath_trade.broker.options_mcp import OptionPick, OptionsBackend, OptionsBackendError
 from allpath_trade.data.base import DataSource
-from allpath_trade.execution import ExecutionError, Executor, close_underlying_options
+from allpath_trade.execution import (
+    ExecutionError,
+    Executor,
+    close_underlying_options,
+    option_positions_for,
+)
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
@@ -433,11 +438,15 @@ class Sentinel:
                          positions: dict[str, Position],
                          reason: str, action: str) -> TriggerOutcome:
         if self.options_backend is None:
-            # Defensive: the loader guarantees every option action lives on
-            # a hard rule on an auto or confirm strategy, but it cannot
-            # guarantee the operator left options_trading on -- turning it
-            # off must degrade this one rule to a reported error, never
-            # crash the whole sentinel pass.
+            # Defensive: AUTHORING-time validation (strategy/loader.py's
+            # `authoring` param) requires every option action to sit on a
+            # hard rule on an auto/confirm strategy, but LOADING deliberately
+            # does not re-enforce that -- a strategy the drawdown breaker
+            # demoted from auto to confirm must keep loading (see
+            # docs/superpowers/specs/2026-09-14-option-pending-queue-design.md
+            # §2) -- and loading can't guarantee the operator left
+            # options_trading on either. Turning that flag off must degrade
+            # this one rule to a reported error, never crash the whole pass.
             self._notify_rule(doc, rule_id, condition, "error")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="error",
@@ -448,9 +457,18 @@ class Sentinel:
                 return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                       disposition="skipped",
                                       detail="close_options requires rule type: hard")
+            if doc.authorization == Authorization.NOTIFY:
+                # notify never creates an approvable row, for options any
+                # more than for stock (spec 2026-09-14 §2) -- notify only
+                # notifies.
+                self._notify_rule(doc, rule_id, condition, "notified")
+                return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                      disposition="notified")
             # auto executes as before. A confirm strategy's close waits for the
-            # user -- EXCEPT once the drawdown breaker has tripped: a halt must
-            # never strand an exit behind an approval (spec 2026-09-14).
+            # user -- EXCEPT once the drawdown breaker has tripped: loading
+            # tolerates a demoted (auto->confirm) strategy (see the guard
+            # above), and a halt must never strand an exit behind an approval
+            # (spec 2026-09-14 §2).
             if doc.authorization == Authorization.AUTO or self._breaker_tripped():
                 return self._dispatch_close_options(doc, rule_id, condition, positions, reason)
             return self._queue_option_close(doc, rule_id, rule_type, condition, action,
@@ -461,6 +479,11 @@ class Sentinel:
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="skipped",
                                   detail="option buys require rule type: hard")
+        if doc.authorization == Authorization.NOTIFY:
+            # notify only notifies -- see the CLOSE_OPTIONS branch above.
+            self._notify_rule(doc, rule_id, condition, "notified")
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="notified")
         if doc.authorization == Authorization.AUTO:
             return self._dispatch_option_buy(doc, rule_id, condition, spec, price, reason)
         return self._queue_option_buy(doc, rule_id, rule_type, condition, action,
@@ -469,10 +492,27 @@ class Sentinel:
     def _breaker_tripped(self) -> bool:
         return self.breaker is not None and self.breaker.tripped_at() is not None
 
-    def _queue_option_buy(self, doc: StrategyDoc, rule_id: str, rule_type: RuleType,
-                          condition: str, action: str, spec: ActionSpec,
-                          price: Decimal, reason: str) -> TriggerOutcome:
+    def _pick_option_contract(
+            self, doc: StrategyDoc, rule_id: str, condition: str, spec: ActionSpec,
+            price: Decimal
+    ) -> tuple[str, int, Decimal, OptionPick | None, TriggerOutcome | None]:
+        """Resolve a buy_call/buy_put rule's contract params (right/min_dte/
+        otm_pct, defaults applied) and pick a contract -- shared by the
+        immediate-execute (`_dispatch_option_buy`, auto) and queue-for-
+        approval (`_queue_option_buy`, confirm) paths, which used to each
+        carry their own copy of this defaults+pick_contract+error/None
+        handling almost line for line.
+
+        Returns `(right, min_dte, otm_pct, pick, early_outcome)`.
+        `early_outcome` is non-None when the caller should return it as-is
+        without building an order/instruction -- an `OptionsBackendError`
+        ("error", already notified) or `pick is None` ("skipped: no
+        affordable option contract", already notified). Otherwise `pick` is
+        the chosen `OptionPick` and `early_outcome` is None."""
         right = "call" if spec.kind == ActionKind.BUY_CALL else "put"
+        # Defaults (dte 7, otm 2%) are applied HERE, not by the parser --
+        # strategy/actions.py's ActionSpec deliberately leaves them None
+        # when the rule text omits them (see its own docstring).
         min_dte = spec.min_dte if spec.min_dte is not None else 7
         otm_pct = spec.otm_pct if spec.otm_pct is not None else Decimal("0.02")
         underlying = doc.position.ticker
@@ -481,13 +521,26 @@ class Sentinel:
                 underlying, right, min_dte, otm_pct, spec.amount, price)
         except OptionsBackendError as exc:
             self._notify_rule(doc, rule_id, condition, "error")
-            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                                  disposition="error", detail=str(exc))
+            return right, min_dte, otm_pct, None, TriggerOutcome(
+                strategy_id=doc.id, rule_id=rule_id, disposition="error", detail=str(exc))
         if pick is None:
+            # Not an error -- pick_contract's own contract (broker/
+            # options_mcp.py) returns None rather than raising when no
+            # affordable/tradable contract exists.
             self._notify_rule(doc, rule_id, condition, "skipped")
-            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                                  disposition="skipped",
-                                  detail="no affordable option contract")
+            return right, min_dte, otm_pct, None, TriggerOutcome(
+                strategy_id=doc.id, rule_id=rule_id, disposition="skipped",
+                detail="no affordable option contract")
+        return right, min_dte, otm_pct, pick, None
+
+    def _queue_option_buy(self, doc: StrategyDoc, rule_id: str, rule_type: RuleType,
+                          condition: str, action: str, spec: ActionSpec,
+                          price: Decimal, reason: str) -> TriggerOutcome:
+        underlying = doc.position.ticker
+        right, min_dte, otm_pct, pick, early = self._pick_option_contract(
+            doc, rule_id, condition, spec, price)
+        if early is not None:
+            return early
         instruction = OptionInstruction(
             op="buy", underlying=underlying, reason=reason, strategy_id=doc.id,
             right=right, min_dte=min_dte, otm_pct=otm_pct, budget=spec.amount,
@@ -507,9 +560,8 @@ class Sentinel:
                             reason: str) -> TriggerOutcome:
         underlying = doc.position.ticker
         refs = [OptionPositionRef(occ_symbol=p.ticker, qty=int(p.qty))
-               for p in positions.values()
-               if (parts := parse_occ_symbol(p.ticker)) is not None
-               and parts.root == underlying and int(p.qty) >= 1]
+               for p in option_positions_for(underlying, positions.values())
+               if int(p.qty) >= 1]
         if not refs:
             self._notify_rule(doc, rule_id, condition, "skipped")
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
@@ -543,29 +595,11 @@ class Sentinel:
     def _dispatch_option_buy(self, doc: StrategyDoc, rule_id: str, condition: str,
                              spec: ActionSpec, price: Decimal,
                              reason: str) -> TriggerOutcome:
-        right = "call" if spec.kind == ActionKind.BUY_CALL else "put"
-        # Defaults (dte 7, otm 2%) are applied HERE, not by the parser --
-        # strategy/actions.py's ActionSpec deliberately leaves them None
-        # when the rule text omits them (see its own docstring).
-        min_dte = spec.min_dte if spec.min_dte is not None else 7
-        otm_pct = spec.otm_pct if spec.otm_pct is not None else Decimal("0.02")
         underlying = doc.position.ticker
-
-        try:
-            pick = self.options_backend.pick_contract(
-                underlying, right, min_dte, otm_pct, spec.amount, price)
-        except OptionsBackendError as exc:
-            self._notify_rule(doc, rule_id, condition, "error")
-            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                                  disposition="error", detail=str(exc))
-        if pick is None:
-            # Not an error -- pick_contract's own contract (broker/
-            # options_mcp.py) returns None rather than raising when no
-            # affordable/tradable contract exists.
-            self._notify_rule(doc, rule_id, condition, "skipped")
-            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
-                                  disposition="skipped",
-                                  detail="no affordable option contract")
+        right, _min_dte, _otm_pct, pick, early = self._pick_option_contract(
+            doc, rule_id, condition, spec, price)
+        if early is not None:
+            return early
 
         intent = OptionIntent(underlying=underlying, right=right,
                               occ_symbol=pick.occ_symbol, side=OrderSide.BUY,
