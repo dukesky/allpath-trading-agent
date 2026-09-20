@@ -186,6 +186,10 @@ SUMMARY
 The line containing only the word SUMMARY marks where the report ends and
 the notification text begins -- both sections are required and must be
 non-empty.
+
+Write the whole report and its SUMMARY in English. Both are published to a
+public journal page read in English, and the SUMMARY is the push
+notification text.
 """
 
 

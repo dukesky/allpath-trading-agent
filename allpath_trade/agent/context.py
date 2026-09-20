@@ -135,6 +135,25 @@ def _account_section(account: str) -> str:
     return f"\n## Account\nACCOUNT: {account} — {note}\n"
 
 
+# 2026-09-20 (user request): assembled-prompt content, not IDENTITY.md, for
+# the same reason MARKET_MECHANICS_NOTE is -- IDENTITY.md is user-editable
+# and this must survive the user replacing that file. Nothing used to state
+# a language, so the model picked one per run: the 2026-09-18 paper
+# reflection came out in Chinese while the same night's shadow reflection
+# was English, and the public journal page (trading.all-path.com) showed
+# the mix. Everything this agent writes is read in English -- the journal,
+# the Reports page, memory files, notifications -- so the rule is
+# unconditional here rather than something the user has to repeat in chat
+# (which is how it was enforced during the hackathon, and it drifted).
+OUTPUT_LANGUAGE_NOTE = """\
+
+## Output language
+Write everything you produce in English: chat replies, reflection reports
+and their SUMMARY, memory writes, strategy text, and proposal rationales.
+Do this even when the user writes to you in another language.
+"""
+
+
 def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
                         strategies: StrategyStore, queue: ReviewQueue,
                         memory: MemoryStore | None = None,
@@ -147,7 +166,8 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
     before; only callers that already know which account they're running
     against (the Reflector, per shadow-dual-active T4) pass it.
     """
-    parts = [identity, MARKET_MECHANICS_NOTE, SCREENSHOT_NOTE, OPTIONS_ACTIONS_NOTE]
+    parts = [identity, OUTPUT_LANGUAGE_NOTE, MARKET_MECHANICS_NOTE, SCREENSHOT_NOTE,
+             OPTIONS_ACTIONS_NOTE]
     if account is not None:
         parts.append(_account_section(account))
     parts.append("\n## Current snapshot (as of session start)\n")

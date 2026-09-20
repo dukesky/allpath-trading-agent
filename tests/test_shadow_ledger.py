@@ -264,16 +264,25 @@ def test_get_account_survives_equity_write_failure(tmp_path, monkeypatch):
 
 
 def test_get_equity_history_ordering_and_cutoff(tmp_path):
+    # Dates are relative to today: the cutoff is `days` back from now, so
+    # fixed calendar dates silently fall out of the window as the wall
+    # clock advances (this test broke on 2026-09-20 with hardcoded August
+    # dates).
+    from datetime import UTC, datetime, timedelta
+
+    today = datetime.now(UTC).date()
+    recent = [(today - timedelta(days=3)).isoformat(),
+              (today - timedelta(days=2)).isoformat()]
     ledger, conn, _ = make_ledger(tmp_path, prices={})
     conn.execute(
         "INSERT INTO shadow_equity_daily (date, equity, cash) VALUES"
         " ('2020-01-01', '100', '100'),"
-        " ('2026-08-18', '200', '200'),"
-        " ('2026-08-19', '300', '300')")
+        f" ('{recent[0]}', '200', '200'),"
+        f" ('{recent[1]}', '300', '300')")
     conn.commit()
     history = ledger.get_equity_history(days=30)
     dates = [d.date().isoformat() for d, _ in history]
-    assert dates == ["2026-08-18", "2026-08-19"] or dates[-2:] == ["2026-08-18", "2026-08-19"]
+    assert dates == recent or dates[-2:] == recent
     # oldest first
     assert history == sorted(history, key=lambda t: t[0])
 

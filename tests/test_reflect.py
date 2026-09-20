@@ -1074,3 +1074,11 @@ def test_auto_apply_guard_rejection_leaves_pending_and_observes(tmp_path):
     assert row["status"] == "pending"
     texts = [o["text"] for o in components.observations.recent()]
     assert any("NOT auto-applied" in t for t in texts)
+
+
+def test_reflection_instructions_require_an_english_report():
+    # The report body and its SUMMARY are what reach the public journal
+    # page and the push notification, so the language rule is repeated here
+    # verbatim rather than relying on the system prompt alone.
+    from allpath_trade.reflect import REFLECTION_INSTRUCTIONS
+    assert "in English" in REFLECTION_INSTRUCTIONS

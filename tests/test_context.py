@@ -233,3 +233,22 @@ def test_system_prompt_includes_options_actions_guidance(tmp_path):
     assert "waits in Pending for your approval" in prompt
     # Not baked into the user-editable IDENTITY.md fallback.
     assert "Option actions" not in DEFAULT_IDENTITY
+
+
+def test_system_prompt_requires_english_output(tmp_path):
+    # 2026-09-20: the 2026-09-18 paper reflection came out in Chinese while
+    # the same night's shadow reflection was English -- nothing in the
+    # prompt asked for a language, so the model picked one per run and the
+    # public journal page ended up mixed. The rule lives here, in assembled
+    # prompt content, for the same reason MARKET_MECHANICS_NOTE does:
+    # IDENTITY.md is user-editable and this must survive replacing it.
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "## Output language" in prompt
+    assert "Write everything you produce in English" in prompt
+    assert "even when the user writes to you in another language" in prompt
