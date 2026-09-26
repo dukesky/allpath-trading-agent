@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -40,6 +41,18 @@ from allpath_trade.data.base import Bar, DataSource, Quote
 _QUOTE_CACHE_TTL_SECONDS = 60
 _quote_cache: dict[str, tuple[float, Quote | Exception]] = {}
 _quote_cache_lock = threading.Lock()
+
+
+def _finite(value: object) -> object | None:
+    """`value` unless it is NaN, infinite, or not a number at all -- in which
+    case None, the same "not known" every Quote field already understands.
+    yfinance reports a missing number as float NaN, not as None."""
+    if value is None:
+        return None
+    try:
+        return value if math.isfinite(float(value)) else None
+    except (TypeError, ValueError):
+        return None
 
 
 class YFinanceSource(DataSource):
@@ -86,7 +99,7 @@ class YFinanceSource(DataSource):
         # costs no extra network round trip.
         fast_info = self._ticker(ticker).fast_info
         try:
-            price = fast_info["last_price"]
+            price = _finite(fast_info["last_price"])
         except KeyError:
             price = None
         if price is None:
@@ -99,6 +112,11 @@ class YFinanceSource(DataSource):
             # comparison point must not cost the price itself, which is
             # already resolved above.
             previous_close = None
+        # Incident 2026-09-23: Yahoo served NaN here for ~6 hours. NaN is a
+        # float, not an exception, so it slipped past the except above and
+        # failed Quote's finite-number validation -- losing the price too,
+        # which this whole block exists to prevent.
+        previous_close = _finite(previous_close)
         return Quote(
             ticker=ticker,
             price=Decimal(str(price)),

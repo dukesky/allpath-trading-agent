@@ -106,6 +106,40 @@ def test_get_quote_raises_when_no_price():
         source.get_quote("aapl")
 
 
+class NaNPreviousCloseTicker:
+    """Real incident, 2026-09-23: for ~6 hours yfinance returned a NaN
+    `regular_market_previous_close` for every ticker. Decimal('NaN') fails
+    Quote's finite-number validation, so the whole quote raised and every
+    strategy's sentinel check was skipped (60 paper sentinel_error rows)."""
+
+    fast_info: ClassVar[dict] = {"last_price": 201.37,
+                                 "regular_market_previous_close": float("nan")}
+
+    def history(self, period, interval="1d"):
+        return pd.DataFrame()
+
+
+class NaNPriceTicker:
+    fast_info: ClassVar[dict] = {"last_price": float("nan"),
+                                 "regular_market_previous_close": 198.20}
+
+    def history(self, period, interval="1d"):
+        return pd.DataFrame()
+
+
+def test_get_quote_nan_previous_close_leaves_price_intact():
+    source = YFinanceSource(ticker_factory=lambda t: NaNPreviousCloseTicker())
+    q = source.get_quote("aapl")
+    assert q.price == Decimal("201.37")
+    assert q.previous_close is None
+
+
+def test_get_quote_nan_price_raises_no_price_not_a_validation_error():
+    source = YFinanceSource(ticker_factory=lambda t: NaNPriceTicker())
+    with pytest.raises(ValueError, match="no price available for AAPL"):
+        source.get_quote("aapl")
+
+
 # -- shadow-dual-active T4 review Important 3: quote-fetch amplification ----
 
 class CountingTickerFactory:
