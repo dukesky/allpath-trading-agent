@@ -57,6 +57,13 @@ def build_notifier(settings: Settings) -> Notifier:
                                       settings.smtp_from, settings.notify_to))
     if settings.ntfy_url:
         channels.append(NtfyNotifier(settings.ntfy_url))
+    if settings.agent_webhook_url:
+        # Lazy: notify/agent.py imports base.py, same circularity note as
+        # send_report's.
+        from allpath_trade.notify.agent import AgentWebhookNotifier
+
+        channels.append(AgentWebhookNotifier(settings.agent_webhook_url,
+                                             settings.agent_webhook_token))
     if len(channels) > 1:
         return MultiNotifier(channels)
     if channels:

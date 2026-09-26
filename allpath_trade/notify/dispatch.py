@@ -28,6 +28,7 @@ has already committed."""
 
 from __future__ import annotations
 
+from allpath_trade.notify.agent import send_agent_only
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.events import _prefix
 from allpath_trade.store.accounts import ACCOUNTS
@@ -159,6 +160,10 @@ def notify_review_queued(*, queue: ReviewQueue, notifier: Notifier | None,
     itself" reasoning for its own email leg)."""
     if notify_email and notifier is not None:
         notifier.send(subject, body)
+    else:
+        # The agent feed is never muted by `notify_email` (a human-inbox
+        # preference) -- see notify/agent.py's send_agent_only.
+        send_agent_only(notifier, subject, body)
     push_telegram_review_queued(queue=queue, app_state=app_state,
                                 telegram_bot_token=telegram_bot_token,
                                 review_id=review_id, body=body, account=account)

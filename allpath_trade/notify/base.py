@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+import base64
 from abc import ABC, abstractmethod
+
+
+def header_safe(text: str) -> str:
+    """`text` as an HTTP header value that http.client can actually send.
+
+    http.client encodes header values as latin-1, so a subject containing
+    e.g. an em dash (every shadow `order_result`: "order recorded — place
+    it yourself") raised UnicodeEncodeError inside the send and the push
+    was silently dropped. Non-ASCII text goes out as an RFC 2047 encoded
+    word instead, which ntfy decodes back to the original title."""
+    if text.isascii():
+        return text
+    return "=?UTF-8?B?" + base64.b64encode(text.encode("utf-8")).decode("ascii") + "?="
 
 
 class Notifier(ABC):
