@@ -57,12 +57,56 @@ def _to_decimal(raw: object, *, percent: bool) -> Decimal:
         raise ValueError(f"not a number: {raw!r}") from exc
 
 
+REARM_MIN_MINUTES = 15
+DEFAULT_MAX_FIRES_PER_DAY = 3
+MAX_FIRES_PER_DAY_LIMIT = 20
+
+
 class Rule(BaseModel):
     id: str
     type: RuleType
     condition: str
     action: str
     state: RuleState = RuleState.ARMED
+    # Opt-in re-arming (spec 2026-09-26-rule-rearm-design.md). None = one-shot,
+    # today's behavior. Minutes after a fire before the sentinel may re-arm it.
+    rearm: int | None = None
+    max_fires_per_day: int | None = None
+
+    @field_validator("rearm", mode="before")
+    @classmethod
+    def _parse_rearm(cls, v: object) -> object:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            # ValueError, not TypeError: pydantic validators only convert
+            # ValueError/AssertionError into a ValidationError.
+            raise ValueError("rearm must be a duration like 60m or 2h")  # noqa: TRY004
+        if isinstance(v, int):
+            return v
+        text = str(v).strip().lower()
+        try:
+            if text.endswith("m"):
+                return int(text[:-1])
+            if text.endswith("h"):
+                return int(text[:-1]) * 60
+            return int(text)
+        except ValueError as exc:
+            raise ValueError(f"rearm must be a duration like 60m or 2h, got {v!r}") from exc
+
+    @model_validator(mode="after")
+    def _rearm_consistent(self) -> Rule:
+        if self.rearm is None:
+            if self.max_fires_per_day is not None:
+                raise ValueError("max_fires_per_day requires rearm")
+            return self
+        if self.rearm < REARM_MIN_MINUTES:
+            raise ValueError(f"rearm must be at least {REARM_MIN_MINUTES}m")
+        if self.max_fires_per_day is None:
+            self.max_fires_per_day = DEFAULT_MAX_FIRES_PER_DAY
+        if not 1 <= self.max_fires_per_day <= MAX_FIRES_PER_DAY_LIMIT:
+            raise ValueError(f"max_fires_per_day must be 1-{MAX_FIRES_PER_DAY_LIMIT}")
+        return self
 
 
 class PositionPlan(BaseModel):

@@ -92,6 +92,36 @@ def _eval(node: ast.AST, ctx: dict[str, Decimal]) -> object:
     raise ConditionError(f"unexpected node during eval: {ast.dump(node)}")
 
 
+def caps_position_weight(text: str) -> bool:
+    """True when the condition can only be true while position_weight is below
+    some bound. Used to stop a re-arming buy rule from re-buying without limit:
+    an `and` chain needs one capping term, an `or` needs every branch capped,
+    and `not` is never treated as a cap."""
+    return _caps(parse_condition(text).body)
+
+
+def _is_position_weight(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "position_weight"
+
+
+def _caps(node: ast.AST) -> bool:
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            return any(_caps(v) for v in node.values)
+        return all(_caps(v) for v in node.values)
+    if isinstance(node, ast.Compare):
+        left = node.left
+        for op, right in zip(node.ops, node.comparators, strict=True):
+            if (_is_position_weight(left) and isinstance(op, (ast.Lt, ast.LtE))
+                    and not _is_position_weight(right)):
+                return True
+            if (_is_position_weight(right) and isinstance(op, (ast.Gt, ast.GtE))
+                    and not _is_position_weight(left)):
+                return True
+            left = right
+    return False
+
+
 def _operand(node: ast.AST, ctx: dict[str, Decimal]) -> Decimal:
     if isinstance(node, ast.Name):
         try:

@@ -334,3 +334,70 @@ def test_authoring_true_close_options_alone_is_fine_no_entry_required():
     text = OPTION_YAML_AUTO_HARD.replace('"buy_call $1000"', '"close_options"')
     doc = parse_strategy_text("aapl-calls", text, authoring=True)
     assert doc.rules[0].action == "close_options"
+
+
+# --- rule re-arm (cooldown) fields -----------------------------------------
+
+REARM_BASE = """
+name: "T"
+status: active
+authorization: auto
+position: {{ticker: AAPL, target_weight: 15%}}
+rules:
+  - {{id: r1, type: hard, condition: "{condition}", action: "{action}"{extra}}}
+"""
+
+
+def _rearm_doc(condition="price < 480 and position_weight < 0.3", action="buy $10000",
+               extra=", rearm: 60m", authoring=False):
+    return parse_strategy_text("t", REARM_BASE.format(condition=condition, action=action,
+                                                      extra=extra), authoring=authoring)
+
+
+def test_rearm_parses_minutes_hours_and_bare_int():
+    assert _rearm_doc(extra=", rearm: 60m").rules[0].rearm == 60
+    assert _rearm_doc(extra=", rearm: 2h").rules[0].rearm == 120
+    assert _rearm_doc(extra=", rearm: 90").rules[0].rearm == 90
+
+
+def test_rearm_defaults_daily_cap_to_three():
+    assert _rearm_doc().rules[0].max_fires_per_day == 3
+
+
+def test_rule_without_rearm_has_no_cap():
+    r = _rearm_doc(extra="").rules[0]
+    assert r.rearm is None and r.max_fires_per_day is None
+
+
+@pytest.mark.parametrize("extra", [
+    ", rearm: 5m",                              # below 15-minute minimum
+    ", rearm: soon",                            # unparseable
+    ", max_fires_per_day: 3",                   # cap without rearm
+    ", rearm: 60m, max_fires_per_day: 0",
+    ", rearm: 60m, max_fires_per_day: 21",
+])
+def test_rearm_invalid_values_rejected(extra):
+    with pytest.raises(StrategyValidationError):
+        _rearm_doc(extra=extra)
+
+
+def test_authoring_rejects_rearm_on_option_buy():
+    with pytest.raises(StrategyValidationError, match="cannot re-arm"):
+        parse_strategy_text("t", REARM_BASE.format(
+            condition="price < 480", action="buy_call $1000",
+            extra=", rearm: 60m") + "  - {id: x, type: hard, condition: \"price > 600\","
+            " action: \"close_options\"}\n", authoring=True)
+
+
+def test_authoring_rejects_uncapped_rearming_buy():
+    with pytest.raises(StrategyValidationError, match="position_weight"):
+        _rearm_doc(condition="price < 480", authoring=True)
+
+
+def test_authoring_accepts_capped_rearming_buy_and_uncapped_rearming_sell():
+    _rearm_doc(authoring=True)
+    _rearm_doc(condition="price > 520", action="sell 25%", authoring=True)
+
+
+def test_plain_load_tolerates_uncapped_rearming_buy():
+    assert _rearm_doc(condition="price < 480").rules[0].rearm == 60

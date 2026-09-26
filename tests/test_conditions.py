@@ -4,6 +4,7 @@ import pytest
 
 from allpath_trade.strategy.conditions import (
     ConditionError,
+    caps_position_weight,
     evaluate_condition,
     parse_condition,
 )
@@ -72,3 +73,22 @@ def test_rejects_more_adversarial_inputs(bad):
 def test_chained_comparison_supported():
     assert evaluate_condition("100 < price < 300", {"price": Decimal(200)}) is True
     assert evaluate_condition("100 < price < 150", {"price": Decimal(200)}) is False
+
+
+def test_caps_position_weight_and_chain():
+    assert caps_position_weight("price < 480 and position_weight < 0.3")
+    assert caps_position_weight("position_weight <= 0.25")
+    assert caps_position_weight("0.3 > position_weight and price < 480")
+    assert caps_position_weight("0 < position_weight < 0.4")
+
+
+def test_caps_position_weight_rejects_uncapped():
+    assert not caps_position_weight("price < 480")
+    assert not caps_position_weight("position_weight > 0.1")
+    assert not caps_position_weight("price < 400 or position_weight < 0.3")
+    assert not caps_position_weight("not position_weight > 0.3")
+
+
+def test_caps_position_weight_or_needs_every_branch():
+    assert caps_position_weight(
+        "(price < 400 and position_weight < 0.3) or position_weight < 0.1")

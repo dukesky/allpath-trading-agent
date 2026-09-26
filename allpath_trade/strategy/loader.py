@@ -14,7 +14,11 @@ from allpath_trade.strategy.actions import (
     is_option_action,
     parse_action,
 )
-from allpath_trade.strategy.conditions import ConditionError, parse_condition
+from allpath_trade.strategy.conditions import (
+    ConditionError,
+    caps_position_weight,
+    parse_condition,
+)
 from allpath_trade.strategy.model import Authorization, RuleType, StrategyDoc
 
 _VALID_STRATEGY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -124,9 +128,11 @@ def parse_strategy_text(strategy_id: str, text: str, *, authoring: bool = False)
     has_option_entry = False
     has_option_exit = False
     for rule in doc.rules:
+        condition_ok = True
         try:
             parse_condition(rule.condition)
         except ConditionError as exc:
+            condition_ok = False
             errors.append(f"rule {rule.id}: {exc}")
         try:
             action_spec = parse_action(rule.action)
@@ -149,6 +155,15 @@ def parse_strategy_text(strategy_id: str, text: str, *, authoring: bool = False)
                         f"rule {rule.id}: option actions require authorization: auto "
                         "or confirm and rule type: hard"
                     )
+            if authoring and rule.rearm is not None:
+                if action_spec.kind in (ActionKind.BUY_CALL, ActionKind.BUY_PUT):
+                    errors.append(f"rule {rule.id}: option buys cannot re-arm "
+                                  "(remove rearm, or use a stock buy)")
+                elif (action_spec.kind in (ActionKind.BUY_VALUE, ActionKind.BUY_TO_TARGET)
+                      and condition_ok and not caps_position_weight(rule.condition)):
+                    errors.append(
+                        f"rule {rule.id}: a re-arming buy rule must cap position_weight "
+                        "in its condition, e.g. `... and position_weight < 0.3`")
     # Finding 4: authoring-time only, same reasoning as above -- a strategy
     # that proposes an option ENTRY (buy_call/buy_put) without ANY
     # close_options rule anywhere in it has no way to exit that position
