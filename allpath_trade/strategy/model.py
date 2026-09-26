@@ -3,7 +3,13 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class RuleType(str, Enum):
@@ -94,6 +100,18 @@ class Rule(BaseModel):
         except ValueError as exc:
             raise ValueError(f"rearm must be a duration like 60m or 2h, got {v!r}") from exc
 
+    @field_validator("max_fires_per_day", mode="before")
+    @classmethod
+    def _reject_bool_max_fires_per_day(cls, v: object) -> object:
+        if isinstance(v, bool):
+            # Same hole as `rearm` above: bool is an int subclass, so
+            # pydantic would otherwise silently coerce True/False to 1/0
+            # instead of raising. ValueError, not TypeError -- see
+            # `_parse_rearm`'s comment above for why.
+            msg = f"max_fires_per_day must be an integer 1-{MAX_FIRES_PER_DAY_LIMIT}"
+            raise ValueError(msg)  # noqa: TRY004
+        return v
+
     @model_validator(mode="after")
     def _rearm_consistent(self) -> Rule:
         if self.rearm is None:
@@ -107,6 +125,23 @@ class Rule(BaseModel):
         if not 1 <= self.max_fires_per_day <= MAX_FIRES_PER_DAY_LIMIT:
             raise ValueError(f"max_fires_per_day must be 1-{MAX_FIRES_PER_DAY_LIMIT}")
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_rearm_fields(self, handler: SerializerFunctionWrapHandler) -> dict:
+        """Drop `rearm`/`max_fires_per_day` from the dump when a rule never
+        had them, so every existing one-shot rule -- and every strategy
+        YAML rewrite path (StrategyStore.set_authorization/
+        snapshot_version, the web notify_email/status toggles,
+        draft_strategy's diff) -- keeps emitting exactly what it did before
+        this feature existed, instead of two new `null` lines per rule.
+        `exclude_none` at those call sites was ruled out: it would also
+        drop pre-existing null fields like `horizon`/`bias` and churn every
+        strategy file on its next write."""
+        data = handler(self)
+        if self.rearm is None:
+            data.pop("rearm", None)
+            data.pop("max_fires_per_day", None)
+        return data
 
 
 class PositionPlan(BaseModel):

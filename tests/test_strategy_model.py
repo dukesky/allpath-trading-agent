@@ -375,6 +375,7 @@ def test_rule_without_rearm_has_no_cap():
     ", max_fires_per_day: 3",                   # cap without rearm
     ", rearm: 60m, max_fires_per_day: 0",
     ", rearm: 60m, max_fires_per_day: 21",
+    ", rearm: 60m, max_fires_per_day: true",    # bool must not silently coerce to 1
 ])
 def test_rearm_invalid_values_rejected(extra):
     with pytest.raises(StrategyValidationError):
@@ -401,3 +402,20 @@ def test_authoring_accepts_capped_rearming_buy_and_uncapped_rearming_sell():
 
 def test_plain_load_tolerates_uncapped_rearming_buy():
     assert _rearm_doc(condition="price < 480").rules[0].rearm == 60
+
+
+# --- Rule.model_dump() omits rearm/max_fires_per_day when unset ------------
+
+def test_rule_without_rearm_round_trips_with_neither_key_present():
+    r = _rearm_doc(extra="").rules[0]
+    dumped = r.model_dump()
+    assert "rearm" not in dumped and "max_fires_per_day" not in dumped
+    dumped_json = r.model_dump(mode="json")
+    assert "rearm" not in dumped_json and "max_fires_per_day" not in dumped_json
+
+
+def test_rule_with_rearm_still_emits_both_keys():
+    r = _rearm_doc().rules[0]
+    dumped = r.model_dump()
+    assert dumped["rearm"] == 60
+    assert dumped["max_fires_per_day"] == 3

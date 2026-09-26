@@ -281,3 +281,38 @@ rules:
     doc = store.load("s1")
     assert doc.authorization == Authorization.CONFIRM
     assert doc.rules[0].action == "buy_call $500"
+
+
+def test_set_authorization_rewrite_omits_rearm_fields_for_a_one_shot_rule(store):
+    # `store` (the module fixture) has "a.yaml", whose one rule never set
+    # rearm/max_fires_per_day -- the YAML rewrite this triggers must not add
+    # two `null` lines per rule (Rule's model_serializer, not exclude_none
+    # at this call site, is what keeps horizon/bias's existing nulls intact
+    # elsewhere in the same dump).
+    store.set_authorization("a", Authorization.CONFIRM, "drawdown breaker")
+    text = (store.directory / "a.yaml").read_text()
+    assert "rearm" not in text
+    assert "max_fires_per_day" not in text
+
+
+def test_set_authorization_rewrite_keeps_rearm_fields_for_a_rearming_rule(tmp_path):
+    s2_yaml = """
+name: "S2"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100 and position_weight < 0.3",
+     action: "buy $1000", rearm: 60m}
+"""
+    (tmp_path / "s2.yaml").write_text(s2_yaml)
+    store = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+
+    store.set_authorization("s2", Authorization.CONFIRM, "drawdown breaker")
+
+    text = (store.directory / "s2.yaml").read_text()
+    assert "rearm: 60" in text
+    assert "max_fires_per_day: 3" in text
+    doc = store.load("s2")
+    assert doc.rules[0].rearm == 60
+    assert doc.rules[0].max_fires_per_day == 3
