@@ -2,6 +2,34 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Rule re-arming — 2026-09-26
+
+- **Opt-in repeated rule firing**: every rule can now add `rearm: <cooldown>`
+  (minimum 15m, e.g. `rearm: 60m`) and optionally `max_fires_per_day: <limit>`
+  (default 3, 1–20) to fire repeatedly at intervals, subject to daily caps.
+  Rules re-arm only during US market hours (Mon–Fri 09:30–16:00 ET, no
+  holiday exceptions). A re-arming buy rule must cap `position_weight` in
+  its condition or it is rejected; option buys (`buy_call`/`buy_put`) cannot
+  re-arm (stock sells and `close_options` can).
+- **New `rule_fires` log table**: tracks rule firing history — when each
+  rule fired, its trigger price, and position state at fire time. Used for
+  re-arm cooldown enforcement and max-fires-per-day tracking.
+- **Sentinel re-arm logic**: a dedicated `sentinel_rearm` step runs once per
+  market day and re-arms eligible rules when the market opens, writing
+  `sentinel_rearm` observations to support debugging and auditing.
+- **Authoring checks** (applied during `parse_strategy_text(...,
+  authoring=True)`): re-arming buys must cap position_weight; option buys
+  cannot re-arm.
+
+## Quote resilience fix — 2026-09-26
+
+- **NaN previous close no longer voids the whole quote**: yfinance's
+  `previous_close` field can be NaN (especially near IPO/delisting), and the
+  prior logic treated a single NaN as a data-retrieval failure, rejecting the
+  entire quote and all its usable fields. Now only the missing previous_close
+  is replaced with a fallback — the rest of the quote (price, bid/ask, date)
+  still serves the agent and order-filling logic.
+
 ## Option pending queue — 2026-09-14
 
 - **Option rule review queue for `confirm` strategies**:

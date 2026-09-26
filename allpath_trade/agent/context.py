@@ -103,6 +103,23 @@ less per position, and never draft an option entry rule without a paired
 for a stop, at minimum. No multi-leg orders, no selling to open.
 """
 
+# Task 3 (rule re-arm): assembled-prompt content, not IDENTITY.md, for
+# the same reason MARKET_MECHANICS_NOTE is -- this describes a product
+# feature (repeated rule firing) and must survive the user replacing that
+# file. Contains an example rule that passes authoring validation.
+REARM_NOTE = """\
+
+## Re-arming rules
+By default a rule fires once and then stays triggered until a revision re-arms it.
+To let a rule fire repeatedly, add `rearm` (cooldown after each fire: `60m`, `2h`,
+minimum 15m) and optionally `max_fires_per_day` (default 3, maximum 20), e.g.
+  - {id: dip-buy, type: hard, condition: "price < 480 and position_weight < 0.30",
+     action: "buy $10000", rearm: 60m, max_fires_per_day: 3}
+Rules re-arm only during US market hours. A re-arming buy rule must cap
+position_weight in its condition (as above) or it is rejected. Option buys
+(buy_call/buy_put) cannot re-arm; close_options and stock sells can.
+"""
+
 
 def load_identity(path: Path = Path("IDENTITY.md")) -> str:
     if path.exists():
@@ -167,7 +184,7 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
     against (the Reflector, per shadow-dual-active T4) pass it.
     """
     parts = [identity, OUTPUT_LANGUAGE_NOTE, MARKET_MECHANICS_NOTE, SCREENSHOT_NOTE,
-             OPTIONS_ACTIONS_NOTE]
+             OPTIONS_ACTIONS_NOTE, REARM_NOTE]
     if account is not None:
         parts.append(_account_section(account))
     parts.append("\n## Current snapshot (as of session start)\n")

@@ -252,3 +252,24 @@ def test_system_prompt_requires_english_output(tmp_path):
     assert "## Output language" in prompt
     assert "Write everything you produce in English" in prompt
     assert "even when the user writes to you in another language" in prompt
+
+
+def test_system_prompt_includes_rearm_guidance(tmp_path):
+    # Task 3: re-arm feature guidance for the agent — rules can fire
+    # repeatedly at specified intervals, with daily limits. The guidance
+    # lives in assembled prompt content (not IDENTITY.md) for the same
+    # reason MARKET_MECHANICS_NOTE does: it describes a product feature
+    # and must survive the user replacing IDENTITY.md.
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "## Re-arming rules" in prompt
+    assert "rearm: 60m" in prompt
+    assert "position_weight" in prompt and "max_fires_per_day" in prompt
+    # Not baked into the user-editable IDENTITY.md fallback.
+    from allpath_trade.agent.context import DEFAULT_IDENTITY
+    assert "Re-arming rules" not in DEFAULT_IDENTITY

@@ -239,3 +239,63 @@ As of this date, the paper-account experiment strategies should use
 This baseline ensures the agent proposes and executes option positions
 with meaningful human oversight while maintaining circuit-breaker
 protection and expiry hygiene.
+
+## 9. Phase 3 — high-activity paper testing (from 2026-09-26)
+
+This phase transitions from human-verified baseline (2026-09-14 to 2026-09-25)
+to autonomous rule re-arming and higher activity. **Do not pool baseline data
+with phase 3 data** — the strategy behavior and risk posture diverge sharply
+once re-arming fires.
+
+### New environment settings
+
+For the duration of phase 3, set these in `.env`:
+
+```bash
+EXPERIMENT_AUTO_APPLY_REVISIONS=true
+SENTINEL_INTERVAL_MINUTES=15
+DRAWDOWN_HALT_PCT=0.15
+MAX_ORDER_VALUE=25000
+MAX_POSITION_WEIGHT=0.50
+MAX_DAILY_TRADES=50
+OPTIONS_TRADING=true
+```
+
+The first three match the earlier baseline run mechanics. The new settings
+raise limits to support high-activity automated trading:
+- `MAX_ORDER_VALUE`: individual order size cap (doubled from default ~12500).
+- `MAX_POSITION_WEIGHT`: position concentration limit (0.50 = 50% of account equity per position).
+- `MAX_DAILY_TRADES`: maximum trades per day (50, up from default ~10).
+- Paper trading is back in `auto` mode for strategies (no `confirm` review queue).
+- `OPTIONS_TRADING=true` for option rule testing.
+
+### Re-arming rules
+
+Rules on strategies can now specify `rearm` (cooldown interval: `60m`, `2h`,
+minimum 15 minutes) and `max_fires_per_day` (default 3, 1–20) to fire
+repeatedly. Re-arming buys must cap `position_weight` in their condition;
+option buys (`buy_call`/`buy_put`) cannot re-arm; stock sells and
+`close_options` can.
+
+Example rule:
+```yaml
+  - {id: dip-buy, type: hard, condition: "price < 480 and position_weight < 0.30",
+     action: "buy $10000", rearm: 60m, max_fires_per_day: 3}
+```
+
+Re-arming only occurs during US market hours (Mon–Fri 09:30–16:00 ET, no US
+holiday exceptions). The sentinel logs each re-arm event with `rule_fires`
+table entries and `sentinel_rearm` observations.
+
+### Key differences from baseline
+
+1. **Strategy authorization**: revert strategies to `authorization: auto`
+   (phase 3 is unattended).
+2. **Activity level**: with re-arming, each strategy can now fire multiple
+   times per day, increasing position turnover and token usage.
+3. **Risk monitoring**: drawdown breaker remains at 15%, but max position
+   weight is higher (0.50 vs baseline ~0.30) to allow for the intended
+   high-activity posture.
+4. **Data segregation**: fund a fresh paper account for phase 3 or explicitly
+   archive the baseline experiment data before starting, to ensure clean
+   phase 3 baseline for future analysis.
