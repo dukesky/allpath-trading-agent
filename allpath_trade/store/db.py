@@ -51,6 +51,18 @@ CREATE TABLE IF NOT EXISTS rule_states (
     PRIMARY KEY (account, strategy_id, rule_id)
 );
 
+-- Every rule fire (re-arming or not): drives rearm cooldown/daily caps
+-- (spec 2026-09-26-rule-rearm-design.md) and records when each rule fired.
+CREATE TABLE IF NOT EXISTS rule_fires (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL DEFAULT 'paper',
+    strategy_id TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rule_fires_rule
+    ON rule_fires (account, strategy_id, rule_id, ts);
+
 CREATE TABLE IF NOT EXISTS pending_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1

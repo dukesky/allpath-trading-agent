@@ -8,7 +8,11 @@ import yaml
 
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.strategy.loader import (
-    StrategyValidationError, atomic_write_text, load_strategy, parse_strategy_text)
+    StrategyValidationError,
+    atomic_write_text,
+    load_strategy,
+    parse_strategy_text,
+)
 from allpath_trade.strategy.model import Authorization, RuleState, StrategyDoc, StrategyStatus
 
 
@@ -92,6 +96,31 @@ class StrategyStore:
 
     def rearm(self, strategy_id: str, rule_id: str) -> None:
         self.set_rule_state(strategy_id, rule_id, RuleState.ARMED)
+
+    def record_fire(self, strategy_id: str, rule_id: str, ts: datetime) -> None:
+        """Append a `rule_fires` row (Task 2, spec 2026-09-26-rule-rearm-
+        design.md): the sentinel's cooldown/daily-cap check and the
+        research paper's fire history both read this log. Account-scoped
+        like every other write here."""
+        self._conn.execute(
+            "INSERT INTO rule_fires (account, strategy_id, rule_id, ts) VALUES (?, ?, ?, ?)",
+            (self._account, strategy_id, rule_id, ts.astimezone(UTC).isoformat()))
+        self._conn.commit()
+
+    def last_fire(self, strategy_id: str, rule_id: str) -> datetime | None:
+        row = self._conn.execute(
+            "SELECT MAX(ts) AS ts FROM rule_fires"
+            " WHERE account = ? AND strategy_id = ? AND rule_id = ?",
+            (self._account, strategy_id, rule_id)).fetchone()
+        return datetime.fromisoformat(row["ts"]) if row and row["ts"] else None
+
+    def fire_count_since(self, strategy_id: str, rule_id: str, since: datetime) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM rule_fires"
+            " WHERE account = ? AND strategy_id = ? AND rule_id = ? AND ts >= ?",
+            (self._account, strategy_id, rule_id, since.astimezone(UTC).isoformat())
+        ).fetchone()
+        return int(row["n"])
 
     def set_authorization(self, strategy_id: str, authorization: Authorization,
                           reason: str) -> None:

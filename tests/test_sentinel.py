@@ -1582,3 +1582,127 @@ def test_option_rule_re_fires_on_first_open_tick_after_a_closed_tick(tmp_path, m
     assert o.disposition == "executed"
     assert len(ex.option_calls) == 1
     assert store.load("t").rules[0].state == RuleState.TRIGGERED
+
+
+# ---------------------------------------------------------------------------
+# Task 2: fire log and sentinel re-arm (spec 2026-09-26-rule-rearm-design.md)
+# ---------------------------------------------------------------------------
+
+REARM_YAML = """
+name: "T"
+status: active
+authorization: auto
+position: {{ticker: AAPL, target_weight: 15%}}
+rules:
+  - {{id: r1, type: hard, condition: "price < 250 and position_weight < 0.9",
+      action: "buy $500"{extra}}}
+"""
+
+
+class _Clock:
+    def __init__(self, start):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture()
+def clock(monkeypatch):
+    c = _Clock(datetime(2026, 9, 28, 14, 0, tzinfo=UTC))  # Mon 10:00 ET
+    monkeypatch.setattr("allpath_trade.sentinel._now", c)
+    return c
+
+
+def test_rule_without_rearm_stays_one_shot(tmp_path, clock):
+    s, _store, ex, _q, _n = make(tmp_path, REARM_YAML.format(extra=""))
+    s.run_once()
+    clock.now += timedelta(hours=3)
+    s.run_once()
+    assert len(ex.calls) == 1
+
+
+def test_rearm_fires_again_after_cooldown_not_before(tmp_path, clock):
+    s, store, ex, _q, _n = make(tmp_path, REARM_YAML.format(extra=", rearm: 60m"))
+    s.run_once()
+    clock.now += timedelta(minutes=30)
+    s.run_once()
+    assert len(ex.calls) == 1
+    clock.now += timedelta(minutes=31)
+    s.run_once()
+    assert len(ex.calls) == 2
+    assert store.fire_count_since("t", "r1", clock.now - timedelta(days=1)) == 2
+
+
+def test_rearm_respects_daily_cap_and_resets_next_et_day(tmp_path, clock):
+    s, _store, ex, _q, _n = make(
+        tmp_path, REARM_YAML.format(extra=", rearm: 60m, max_fires_per_day: 2"))
+    for _ in range(4):
+        s.run_once()
+        clock.now += timedelta(minutes=61)
+    assert len(ex.calls) == 2
+    clock.now = datetime(2026, 9, 29, 14, 0, tzinfo=UTC)  # next ET day
+    s.run_once()
+    assert len(ex.calls) == 3
+
+
+def test_no_rearm_while_market_closed(tmp_path, clock, monkeypatch):
+    s, _store, ex, _q, _n = make(tmp_path, REARM_YAML.format(extra=", rearm: 60m"))
+    s.run_once()
+    monkeypatch.setattr("allpath_trade.sentinel._us_market_open_now", lambda: False)
+    clock.now += timedelta(hours=2)
+    s.run_once()
+    assert len(ex.calls) == 1
+
+
+def test_disabled_rule_never_rearms(tmp_path, clock):
+    from allpath_trade.strategy.model import RuleState
+
+    s, store, ex, _q, _n = make(tmp_path, REARM_YAML.format(extra=", rearm: 60m"))
+    store.set_rule_state("t", "r1", RuleState.DISABLED)
+    s.run_once()
+    clock.now += timedelta(hours=2)
+    s.run_once()
+    assert ex.calls == []
+
+
+def test_rearm_writes_an_observation(tmp_path, clock):
+    from allpath_trade.memory.observations import ObservationLog
+
+    s, _store, ex, q, _n = make(tmp_path, REARM_YAML.format(extra=", rearm: 60m"))
+    s.observations = ObservationLog(q._conn)
+    s.run_once()
+    clock.now += timedelta(minutes=61)
+    s.run_once()
+    assert len(ex.calls) == 2
+
+    rows = s.observations.recent()
+    rearm_rows = [r for r in rows if r["source"] == "sentinel_rearm"]
+    assert len(rearm_rows) == 1
+    assert "t/r1" in rearm_rows[0]["text"] and "60" in rearm_rows[0]["text"]
+    assert rearm_rows[0]["subject"] == "AAPL"
+
+
+def test_option_buy_never_rearms(tmp_path, clock):
+    # Hand-written (non-authoring) YAML: authoring would reject `rearm` on
+    # a buy_call rule (spec decision 4), but the sentinel must still refuse
+    # to re-arm one at runtime even if it somehow reached disk this way.
+    yaml_text = """
+name: "T"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: entry, type: hard, condition: "price < 250", action: "buy_call $500",
+     rearm: 60m}
+  - {id: exit, type: hard, condition: "price < 250", action: "close_options"}
+"""
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, _store, ex, _q, _n = make_option(tmp_path, yaml_text, backend=backend)
+
+    s.run_once()
+    assert len(ex.option_calls) == 1
+
+    clock.now += timedelta(hours=2)
+    s.run_once()
+    assert len(ex.option_calls) == 1

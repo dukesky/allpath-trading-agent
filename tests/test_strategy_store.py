@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -316,3 +317,25 @@ rules:
     doc = store.load("s2")
     assert doc.rules[0].rearm == 60
     assert doc.rules[0].max_fires_per_day == 3
+
+
+# --- Task 2: fire log (rule_fires) ------------------------------------------
+
+def test_record_fire_last_fire_and_fire_count_since(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    paper = StrategyStore(tmp_path, conn)
+    other_account = StrategyStore(tmp_path, conn, account="shadow")
+
+    t0 = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
+    paper.record_fire("s1", "r1", t0)
+    paper.record_fire("s1", "r1", t0 + timedelta(hours=1))
+    paper.record_fire("s1", "r1", t0 + timedelta(hours=2))
+    paper.record_fire("s1", "r2", t0)
+
+    assert paper.last_fire("s1", "r1") == t0 + timedelta(hours=2)
+    assert paper.fire_count_since("s1", "r1", t0 + timedelta(minutes=30)) == 2
+    assert paper.last_fire("s1", "missing") is None
+
+    # A store scoped to a different account must see none of these fires.
+    assert other_account.last_fire("s1", "r1") is None
+    assert other_account.fire_count_since("s1", "r1", t0 - timedelta(days=1)) == 0

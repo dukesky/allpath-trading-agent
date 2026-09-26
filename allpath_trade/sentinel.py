@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel
@@ -28,6 +28,7 @@ from allpath_trade.execution import (
     close_underlying_options,
     option_positions_for,
 )
+from allpath_trade.market_hours import ET
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
@@ -36,6 +37,7 @@ from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, ReviewQueue
 from allpath_trade.strategy.actions import (
+    ActionError,
     ActionKind,
     ActionSpec,
     is_option_action,
@@ -45,6 +47,7 @@ from allpath_trade.strategy.actions import (
 from allpath_trade.strategy.conditions import evaluate_condition
 from allpath_trade.strategy.model import (
     Authorization,
+    Rule,
     RuleState,
     RuleType,
     StrategyDoc,
@@ -74,6 +77,11 @@ from allpath_trade.strategy.store import StrategyStore
 def _us_market_open_now() -> bool:
     """US regular session, weekday Mon-Fri 09:30-16:00 America/New_York."""
     return market_hours.is_us_market_open()
+
+
+def _now() -> datetime:
+    """Wall clock for re-arm cooldowns; a function so tests can move time."""
+    return datetime.now(UTC)
 
 
 class TriggerOutcome(BaseModel):
@@ -316,6 +324,15 @@ class Sentinel:
         ctx = self._build_ctx(doc, quote.price, position, equity)
 
         for rule in doc.rules:
+            if (rule.state == RuleState.TRIGGERED and rule.rearm is not None
+                    and self._should_rearm(doc.id, rule)):
+                self.strategies.set_rule_state(doc.id, rule.id, RuleState.ARMED)
+                rule.state = RuleState.ARMED
+                if self.observations is not None:
+                    self.observations.add(
+                        "sentinel_rearm",
+                        f"{doc.id}/{rule.id} re-armed after {rule.rearm}m cooldown",
+                        subject=doc.position.ticker)
             if rule.state != RuleState.ARMED:
                 continue
             if not evaluate_condition(rule.condition, ctx):
@@ -341,6 +358,7 @@ class Sentinel:
                 continue
             # One-shot: persist TRIGGERED before any execution attempt.
             self.strategies.set_rule_state(doc.id, rule.id, RuleState.TRIGGERED)
+            self.strategies.record_fire(doc.id, rule.id, _now())
             outcome = self._dispatch(doc, rule.id, rule.type, rule.condition,
                                      rule.action, spec, quote.price, position,
                                      equity, ctx, positions)
@@ -351,6 +369,25 @@ class Sentinel:
                     f"{doc.id}/{rule.id} {rule.condition} -> {rule.action}: "
                     f"{outcome.disposition} {outcome.detail}".strip(),
                     subject=doc.position.ticker)
+
+    def _should_rearm(self, strategy_id: str, rule: Rule) -> bool:
+        """Spec 2026-09-26-rule-rearm-design.md, decision 2. Option buys never
+        re-arm, even from a hand-edited file that authoring would have
+        rejected: each re-fire would pick and stack another contract."""
+        try:
+            if parse_action(rule.action).kind in (ActionKind.BUY_CALL, ActionKind.BUY_PUT):
+                return False
+        except ActionError:
+            return False
+        if not _us_market_open_now():
+            return False
+        now = _now()
+        last = self.strategies.last_fire(strategy_id, rule.id)
+        if last is not None and now - last < timedelta(minutes=rule.rearm):
+            return False
+        day_start = now.astimezone(ET).replace(hour=0, minute=0, second=0, microsecond=0)
+        return (self.strategies.fire_count_since(strategy_id, rule.id, day_start)
+                < rule.max_fires_per_day)
 
     @staticmethod
     def _build_ctx(doc: StrategyDoc, price: Decimal, position: Position | None,
