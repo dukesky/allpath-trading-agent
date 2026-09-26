@@ -92,3 +92,31 @@ def test_caps_position_weight_rejects_uncapped():
 def test_caps_position_weight_or_needs_every_branch():
     assert caps_position_weight(
         "(price < 400 and position_weight < 0.3) or position_weight < 0.1")
+
+
+# --- Finding 4: only a *meaningful* bound counts as a cap -------------------
+# (a numeric literal <= 1, or the name `target_weight`) -- otherwise a
+# re-arming buy rule could keep buying past 100% of equity.
+
+def test_caps_position_weight_rejects_uncapped_numeric_bounds():
+    assert not caps_position_weight("position_weight < 5")
+    assert not caps_position_weight("position_weight < 1.5")
+    assert not caps_position_weight("position_weight < price")
+
+
+def test_caps_position_weight_accepts_weak_but_legal_bound_of_exactly_one():
+    assert caps_position_weight("position_weight <= 1")
+
+
+def test_caps_position_weight_accepts_target_weight_bound():
+    assert caps_position_weight("position_weight < target_weight")
+    assert caps_position_weight("target_weight > position_weight")
+
+
+def test_caps_position_weight_handles_unary_minus_on_constant_bound():
+    # The condition grammar allows a unary minus on constants. A negative
+    # bound can never actually let the rule fire (position_weight can't be
+    # negative), so either treatment is safe -- this pins the chosen
+    # behavior (treated as a literal <= 1, so it counts as a cap) so it
+    # can't drift silently.
+    assert caps_position_weight("position_weight < -5")

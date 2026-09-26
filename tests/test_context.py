@@ -273,3 +273,20 @@ def test_system_prompt_includes_rearm_guidance(tmp_path):
     # Not baked into the user-editable IDENTITY.md fallback.
     from allpath_trade.agent.context import DEFAULT_IDENTITY
     assert "Re-arming rules" not in DEFAULT_IDENTITY
+
+
+def test_rearm_guidance_documents_bare_minutes_and_the_disable_switch(tmp_path):
+    # Fix pass 2026-09-26, finding 2: the agent-facing note must say `rearm`
+    # accepts a bare integer number of minutes (not just `60m`/`2h`), and
+    # that re-arming only ever happens from `triggered` -- `state: disabled`
+    # is the off switch, full stop.
+    (tmp_path / "strategies").mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    prompt = build_system_prompt(
+        identity="IDENT", broker=FakeBroker(),
+        journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None))
+    assert "bare integer number of minutes" in prompt
+    assert "state: disabled" in prompt
+    assert "off switch" in prompt

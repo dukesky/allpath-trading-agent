@@ -376,10 +376,15 @@ def test_rule_without_rearm_has_no_cap():
     ", rearm: 60m, max_fires_per_day: 0",
     ", rearm: 60m, max_fires_per_day: 21",
     ", rearm: 60m, max_fires_per_day: true",    # bool must not silently coerce to 1
+    ", rearm: 10081",                           # above the 7-day (10080m) maximum
 ])
 def test_rearm_invalid_values_rejected(extra):
     with pytest.raises(StrategyValidationError):
         _rearm_doc(extra=extra)
+
+
+def test_rearm_accepts_exactly_the_seven_day_maximum():
+    assert _rearm_doc(extra=", rearm: 10080").rules[0].rearm == 10080
 
 
 def test_authoring_rejects_rearm_on_option_buy():
@@ -398,6 +403,14 @@ def test_authoring_rejects_uncapped_rearming_buy():
 def test_authoring_accepts_capped_rearming_buy_and_uncapped_rearming_sell():
     _rearm_doc(authoring=True)
     _rearm_doc(condition="price > 520", action="sell 25%", authoring=True)
+
+
+def test_authoring_rejects_rearming_buy_with_uncapped_or_branch():
+    # Finding 4: a bound > 1 (here `5`) is not a meaningful position_weight
+    # cap -- an `or` needs EVERY branch capped, so this must still be
+    # rejected even though one branch mentions position_weight at all.
+    with pytest.raises(StrategyValidationError, match="position_weight"):
+        _rearm_doc(condition="price < 480 or position_weight < 5", authoring=True)
 
 
 def test_plain_load_tolerates_uncapped_rearming_buy():

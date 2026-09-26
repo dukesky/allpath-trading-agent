@@ -84,6 +84,14 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+# Finding 5 (fix pass 2026-09-26): a 15-minute sentinel tick doesn't land at
+# exactly :00 -- the next pass after a fire can be a few seconds short of the
+# cooldown, which would silently double the effective cooldown (30m instead
+# of 15m) until the tick after that. Treat the cooldown as elapsed within
+# this grace of its exact deadline so ordinary tick jitter can't do that.
+_REARM_COOLDOWN_GRACE = timedelta(seconds=60)
+
+
 class TriggerOutcome(BaseModel):
     strategy_id: str
     rule_id: str
@@ -324,15 +332,25 @@ class Sentinel:
         ctx = self._build_ctx(doc, quote.price, position, equity)
 
         for rule in doc.rules:
-            if (rule.state == RuleState.TRIGGERED and rule.rearm is not None
-                    and self._should_rearm(doc.id, rule)):
-                self.strategies.set_rule_state(doc.id, rule.id, RuleState.ARMED)
-                rule.state = RuleState.ARMED
-                if self.observations is not None:
-                    self.observations.add(
-                        "sentinel_rearm",
-                        f"{doc.id}/{rule.id} re-armed after {rule.rearm}m cooldown",
-                        subject=doc.position.ticker)
+            if rule.state == RuleState.TRIGGERED and rule.rearm is not None:
+                # Finding 3 (fix pass 2026-09-26): a re-arm check that raises
+                # (e.g. a store failure) must never take down evaluation of
+                # this strategy's OTHER rules -- a stop-loss later in the
+                # same strategy must still fire. Leave the rule exactly as
+                # it was (still TRIGGERED, so the `!= ARMED` check right
+                # below skips firing it this pass) and keep going.
+                try:
+                    if self._should_rearm(doc.id, rule):
+                        self.strategies.set_rule_state(doc.id, rule.id, RuleState.ARMED)
+                        rule.state = RuleState.ARMED
+                        if self.observations is not None:
+                            self.observations.add(
+                                "sentinel_rearm",
+                                f"{doc.id}/{rule.id} re-armed after {rule.rearm}m cooldown",
+                                subject=doc.position.ticker)
+                except Exception as exc:  # noqa: BLE001 — isolate one rule's re-arm failure
+                    report.errors.append(
+                        f"{doc.id}/{rule.id}: re-arm check failed: {exc}")
             if rule.state != RuleState.ARMED:
                 continue
             if not evaluate_condition(rule.condition, ctx):
@@ -356,9 +374,13 @@ class Sentinel:
                 # execution.refresh_pending_fills's own docstring on DAY
                 # orders queued overnight), so they keep today's behavior.
                 continue
-            # One-shot: persist TRIGGERED before any execution attempt.
-            self.strategies.set_rule_state(doc.id, rule.id, RuleState.TRIGGERED)
+            # Finding 6 (fix pass 2026-09-26): log the fire BEFORE the
+            # one-shot TRIGGERED write, both still before any execution
+            # attempt. If `record_fire` raises, the rule stays ARMED (and
+            # nothing is dispatched) instead of a one-shot rule burning into
+            # TRIGGERED with no fire ever logged and no order ever placed.
             self.strategies.record_fire(doc.id, rule.id, _now())
+            self.strategies.set_rule_state(doc.id, rule.id, RuleState.TRIGGERED)
             outcome = self._dispatch(doc, rule.id, rule.type, rule.condition,
                                      rule.action, spec, quote.price, position,
                                      equity, ctx, positions)
@@ -383,7 +405,8 @@ class Sentinel:
             return False
         now = _now()
         last = self.strategies.last_fire(strategy_id, rule.id)
-        if last is not None and now - last < timedelta(minutes=rule.rearm):
+        if (last is not None
+                and now - last < timedelta(minutes=rule.rearm) - _REARM_COOLDOWN_GRACE):
             return False
         day_start = now.astimezone(ET).replace(hour=0, minute=0, second=0, microsecond=0)
         return (self.strategies.fire_count_since(strategy_id, rule.id, day_start)

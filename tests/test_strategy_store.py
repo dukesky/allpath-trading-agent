@@ -339,3 +339,59 @@ def test_record_fire_last_fire_and_fire_count_since(tmp_path):
     # A store scoped to a different account must see none of these fires.
     assert other_account.last_fire("s1", "r1") is None
     assert other_account.fire_count_since("s1", "r1", t0 - timedelta(days=1)) == 0
+
+
+# --- Finding 1: a YAML `state: disabled` rule must stay disabled no matter
+# what the DB's rule_states row says (the DB can only ever hold ARMED, via
+# rearm()/the web rearm route, or TRIGGERED, via the sentinel's one-shot
+# write -- see the fix report for the full grep of set_rule_state callers).
+
+DISABLED_IN_YAML = """
+name: "A"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100 and position_weight < 0.3",
+     action: "buy $1000", rearm: 60m, state: disabled}
+"""
+
+
+def test_yaml_disabled_beats_db_triggered_row(tmp_path):
+    (tmp_path / "a.yaml").write_text(DISABLED_IN_YAML)
+    s = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+    # Simulate the bug scenario: the rule fired before the author disabled
+    # it, so the DB still carries a stale TRIGGERED row from that fire.
+    s.set_rule_state("a", "r1", RuleState.TRIGGERED)
+    assert s.load("a").rules[0].state == RuleState.DISABLED
+
+
+def test_yaml_disabled_beats_db_armed_row_too(tmp_path):
+    # Not just TRIGGERED -- a stray ARMED row (e.g. from the manual "rearm"
+    # web action taken before the author disabled the rule) must not
+    # resurrect a YAML-disabled rule either.
+    (tmp_path / "a.yaml").write_text(DISABLED_IN_YAML)
+    s = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+    s.set_rule_state("a", "r1", RuleState.ARMED)
+    assert s.load("a").rules[0].state == RuleState.DISABLED
+
+
+# --- Finding 7: rearm_warning must not tell the user to hand-rearm a rule
+# that re-arms itself -- a manual rearm bypasses cooldown/daily-cap entirely.
+
+def test_rearm_warning_excludes_rules_that_self_rearm(tmp_path):
+    yaml_text = """
+name: "A"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100 and position_weight < 0.3",
+     action: "buy $1000", rearm: 60m}
+"""
+    (tmp_path / "a.yaml").write_text(yaml_text)
+    s = StrategyStore(tmp_path, connect(tmp_path / "t.db"))
+    s.set_rule_state("a", "r1", RuleState.TRIGGERED)
+    # not_armed_rules still reports it -- only the hand-rearm nudge changes.
+    assert [r.id for r in s.not_armed_rules("a")] == ["r1"]
+    assert s.rearm_warning("a") == ""

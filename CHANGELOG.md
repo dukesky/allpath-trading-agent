@@ -5,30 +5,44 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
 ## Rule re-arming — 2026-09-26
 
 - **Opt-in repeated rule firing**: every rule can now add `rearm: <cooldown>`
-  (minimum 15m, e.g. `rearm: 60m`) and optionally `max_fires_per_day: <limit>`
-  (default 3, 1–20) to fire repeatedly at intervals, subject to daily caps.
-  Rules re-arm only during US market hours (Mon–Fri 09:30–16:00 ET, no
-  holiday exceptions). A re-arming buy rule must cap `position_weight` in
-  its condition or it is rejected; option buys (`buy_call`/`buy_put`) cannot
-  re-arm (stock sells and `close_options` can).
-- **New `rule_fires` log table**: tracks rule firing history — when each
-  rule fired, its trigger price, and position state at fire time. Used for
-  re-arm cooldown enforcement and max-fires-per-day tracking.
-- **Sentinel re-arm logic**: a dedicated `sentinel_rearm` step runs once per
-  market day and re-arms eligible rules when the market opens, writing
-  `sentinel_rearm` observations to support debugging and auditing.
+  (`60m`, `2h`, or a bare integer number of minutes; minimum 15m, maximum
+  10080m/7 days) and optionally `max_fires_per_day: <limit>` (default 3,
+  1–20) to fire repeatedly, subject to the daily cap. The re-arm check runs
+  on **every sentinel pass** during US market hours (Mon–Fri 09:30–16:00 ET,
+  no holiday exceptions), per rule, once that rule's cooldown has elapsed
+  (with a 60-second grace so ordinary tick jitter can't silently double the
+  effective cooldown) — it is not a once-per-day step. A rule re-arms only
+  from state `triggered`, never from `disabled`: setting `state: disabled`
+  in the strategy file is the off switch, and it wins over any stale DB row
+  left over from before the rule was disabled. A re-arming buy rule must cap
+  `position_weight` in its condition — a numeric bound at or below 1, or the
+  name `target_weight`, on every path to true — or it is rejected at
+  authoring time; option buys (`buy_call`/`buy_put`) cannot re-arm (stock
+  sells and `close_options` can).
+- **New `rule_fires` log table**: `(account, strategy_id, rule_id, ts)` only
+  — one row per rule FIRE (re-arming or not), used to enforce the cooldown
+  and the daily cap. Re-arming a rule (the state flip back to armed) writes
+  no `rule_fires` row itself, only a `sentinel_rearm` observation.
 - **Authoring checks** (applied during `parse_strategy_text(...,
-  authoring=True)`): re-arming buys must cap position_weight; option buys
+  authoring=True)`): re-arming buys must cap `position_weight`; option buys
   cannot re-arm.
+- **Isolation**: a re-arm check that raises (e.g. a store failure) is caught
+  per rule, recorded in the sentinel report's errors, and never stops the
+  rest of that strategy's rules from being evaluated — a stop-loss on the
+  same strategy still fires.
 
-## Quote resilience fix — 2026-09-26
+## Quote resilience fix — 2026-09-26 (07d53dd)
 
-- **NaN previous close no longer voids the whole quote**: yfinance's
-  `previous_close` field can be NaN (especially near IPO/delisting), and the
-  prior logic treated a single NaN as a data-retrieval failure, rejecting the
-  entire quote and all its usable fields. Now only the missing previous_close
-  is replaced with a fallback — the rest of the quote (price, bid/ask, date)
-  still serves the agent and order-filling logic.
+- **NaN `regular_market_previous_close` no longer voids the whole quote**:
+  Yahoo served NaN for this field for about six hours on 2026-09-23. NaN is
+  a float, not an exception, so it slipped past the existing lookup and
+  failed `Quote`'s finite-number validation — the live price was lost along
+  with it, and the affected strategies' sentinel checks were skipped for the
+  duration. A non-finite `previous_close` now degrades to `None` instead
+  (the rest of the quote — `price`, `as_of` — still serves the agent and
+  order-filling logic); a non-finite *last price*, which was always fatal,
+  now raises the same "no price available" `ValueError` a missing price
+  already raised, rather than slipping through as a different failure.
 
 ## Option pending queue — 2026-09-14
 

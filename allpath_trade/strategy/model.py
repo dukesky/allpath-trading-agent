@@ -64,6 +64,11 @@ def _to_decimal(raw: object, *, percent: bool) -> Decimal:
 
 
 REARM_MIN_MINUTES = 15
+# Finding 3 (fix pass 2026-09-26): an upper bound on `rearm` -- 7 days. There
+# was previously no ceiling at all, so a typo (minutes vs. some other unit)
+# could silently create a rule that "re-arms" only once a week while reading
+# as if it fires far more often.
+REARM_MAX_MINUTES = 7 * 24 * 60
 DEFAULT_MAX_FIRES_PER_DAY = 3
 MAX_FIRES_PER_DAY_LIMIT = 20
 
@@ -120,6 +125,8 @@ class Rule(BaseModel):
             return self
         if self.rearm < REARM_MIN_MINUTES:
             raise ValueError(f"rearm must be at least {REARM_MIN_MINUTES}m")
+        if self.rearm > REARM_MAX_MINUTES:
+            raise ValueError(f"rearm must be at most {REARM_MAX_MINUTES}m (7 days)")
         if self.max_fires_per_day is None:
             self.max_fires_per_day = DEFAULT_MAX_FIRES_PER_DAY
         if not 1 <= self.max_fires_per_day <= MAX_FIRES_PER_DAY_LIMIT:

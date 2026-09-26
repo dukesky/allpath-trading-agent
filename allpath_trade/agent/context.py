@@ -112,12 +112,18 @@ REARM_NOTE = """\
 ## Re-arming rules
 By default a rule fires once and then stays triggered until a revision re-arms it.
 To let a rule fire repeatedly, add `rearm` (cooldown after each fire: `60m`, `2h`,
-minimum 15m) and optionally `max_fires_per_day` (default 3, maximum 20), e.g.
+or a bare integer number of minutes, minimum 15m, maximum 10080m/7 days) and
+optionally `max_fires_per_day` (default 3, maximum 20), e.g.
   - {id: dip-buy, type: hard, condition: "price < 480 and position_weight < 0.30",
      action: "buy $10000", rearm: 60m, max_fires_per_day: 3}
-Rules re-arm only during US market hours. A re-arming buy rule must cap
-position_weight in its condition (as above) or it is rejected. Option buys
-(buy_call/buy_put) cannot re-arm; close_options and stock sells can.
+Rules re-arm only during US market hours, and only from state `triggered` --
+never from `disabled`. Setting `state: disabled` on a rule in the strategy
+file is the off switch: it stops that rule from firing or re-arming no
+matter what `rearm` says or what it last did. A re-arming buy rule must cap
+position_weight in its condition -- a numeric bound at or below 1 (as above),
+or the name `target_weight`, on every path to true -- or it is rejected.
+Option buys (buy_call/buy_put) cannot re-arm; close_options and stock sells
+can.
 """
 
 

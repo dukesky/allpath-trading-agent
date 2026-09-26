@@ -94,14 +94,50 @@ def _eval(node: ast.AST, ctx: dict[str, Decimal]) -> object:
 
 def caps_position_weight(text: str) -> bool:
     """True when the condition can only be true while position_weight is below
-    some bound. Used to stop a re-arming buy rule from re-buying without limit:
-    an `and` chain needs one capping term, an `or` needs every branch capped,
-    and `not` is never treated as a cap."""
+    some MEANINGFUL bound. Used to stop a re-arming buy rule from re-buying
+    without limit: an `and` chain needs one capping term, an `or` needs every
+    branch capped, and `not` is never treated as a cap.
+
+    Finding 4 (fix pass 2026-09-26): a bound only counts as a cap when it's a
+    numeric literal <= 1 (e.g. `0.3`, `1`, or a negated constant like `-5` --
+    the condition grammar allows a unary minus on constants) or the name
+    `target_weight`. `position_weight < 5`, `< price`, and `< 1.5` must NOT
+    count -- each still lets a re-arming buy rule keep buying past 100% of
+    equity, which is exactly what this check exists to prevent. A negative
+    literal bound is treated as a (trivially satisfied) cap rather than
+    special-cased out: it can never actually let the condition go true in
+    practice (position_weight can't be negative), so which way it's treated
+    doesn't change what the rule can do."""
     return _caps(parse_condition(text).body)
 
 
 def _is_position_weight(node: ast.AST) -> bool:
     return isinstance(node, ast.Name) and node.id == "position_weight"
+
+
+def _is_target_weight(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "target_weight"
+
+
+def _literal_bound(node: ast.AST) -> Decimal | None:
+    """The numeric value of `node` if it's a constant, optionally negated by
+    a unary minus (the only unary operator the condition grammar allows on a
+    constant) -- else None (a variable name, or anything else)."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _literal_bound(node.operand)
+        return None if inner is None else -inner
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return Decimal(str(node.value))
+    return None
+
+
+def _is_meaningful_bound(node: ast.AST) -> bool:
+    """See `caps_position_weight`'s docstring: only `target_weight` or a
+    numeric literal <= 1 counts as an actual cap."""
+    if _is_target_weight(node):
+        return True
+    value = _literal_bound(node)
+    return value is not None and value <= 1
 
 
 def _caps(node: ast.AST) -> bool:
@@ -113,10 +149,10 @@ def _caps(node: ast.AST) -> bool:
         left = node.left
         for op, right in zip(node.ops, node.comparators, strict=True):
             if (_is_position_weight(left) and isinstance(op, (ast.Lt, ast.LtE))
-                    and not _is_position_weight(right)):
+                    and not _is_position_weight(right) and _is_meaningful_bound(right)):
                 return True
             if (_is_position_weight(right) and isinstance(op, (ast.Gt, ast.GtE))
-                    and not _is_position_weight(left)):
+                    and not _is_position_weight(left) and _is_meaningful_bound(left)):
                 return True
             left = right
     return False

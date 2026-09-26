@@ -1706,3 +1706,110 @@ rules:
     clock.now += timedelta(hours=2)
     s.run_once()
     assert len(ex.option_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix pass 2026-09-26: finding 1 -- a rule the author sets `state: disabled`
+# on in the YAML must stay disabled no matter what a stale DB row says.
+# ---------------------------------------------------------------------------
+
+def test_yaml_disabled_rule_stops_rearming_even_with_stale_triggered_row(tmp_path, clock):
+    s, _store, ex, _q, _n = make(tmp_path, REARM_YAML.format(extra=", rearm: 60m"))
+    s.run_once()
+    assert len(ex.calls) == 1  # fires once, rule now TRIGGERED in the DB
+
+    # The author now disables the rule in the strategy file (keeping
+    # `rearm`, exactly as finding 1 describes) -- the stale DB row from
+    # the fire above must not keep it re-arming.
+    disabled_yaml = REARM_YAML.format(extra=", rearm: 60m, state: disabled")
+    (tmp_path / "t.yaml").write_text(disabled_yaml)
+
+    clock.now += timedelta(minutes=61)
+    s.run_once()
+    assert len(ex.calls) == 1  # no second fire
+
+    clock.now += timedelta(hours=3)
+    s.run_once()
+    assert len(ex.calls) == 1  # still no second fire, arbitrarily far out
+
+
+# ---------------------------------------------------------------------------
+# Fix pass 2026-09-26: finding 3 -- a re-arm check that raises must not skip
+# the rest of that strategy's rules (e.g. a stop-loss).
+# ---------------------------------------------------------------------------
+
+REARM_PLUS_STOP_YAML = """
+name: "T"
+status: active
+authorization: auto
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: r1, type: hard, condition: "price < 250 and position_weight < 0.9",
+     action: "buy $500", rearm: 60m}
+  - {id: stop, type: hard, condition: "price > 300", action: "sell all"}
+"""
+
+
+def test_rearm_check_failure_does_not_skip_other_rules(tmp_path, clock, monkeypatch):
+    s, store, ex, _q, _n = make(tmp_path, REARM_PLUS_STOP_YAML)
+    s.run_once()
+    assert len(ex.calls) == 1  # r1 fired (buy); stop's condition is false at price=200
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("db exploded")
+
+    monkeypatch.setattr(store, "last_fire", _boom)
+    s.data.price = Decimal(400)  # flips r1's own condition false too; makes stop's true
+    clock.now += timedelta(minutes=61)
+    report = s.run_once()
+
+    # r1's re-arm check raised and is caught -- it stays triggered, no
+    # second buy -- but "stop" (no rearm at all) still gets evaluated and
+    # fires despite that failure.
+    assert len(ex.calls) == 2
+    assert any("r1" in e and "db exploded" in e for e in report.errors)
+    assert store.load("t").rules[0].state == RuleState.TRIGGERED  # r1 untouched
+
+
+# ---------------------------------------------------------------------------
+# Fix pass 2026-09-26: finding 5 -- a 60s grace on the cooldown comparison so
+# sentinel tick jitter can't silently double the effective cooldown.
+# ---------------------------------------------------------------------------
+
+def test_rearm_jitter_grace_allows_a_tick_landing_early(tmp_path, clock):
+    s, _store, ex, _q, _n = make(tmp_path, REARM_YAML.format(extra=", rearm: 15m"))
+    s.run_once()
+    assert len(ex.calls) == 1
+    clock.now += timedelta(minutes=14, seconds=30)
+    s.run_once()
+    assert len(ex.calls) == 2
+
+
+def test_rearm_jitter_grace_does_not_over_grant(tmp_path, clock):
+    s, _store, ex, _q, _n = make(tmp_path, REARM_YAML.format(extra=", rearm: 15m"))
+    s.run_once()
+    assert len(ex.calls) == 1
+    clock.now += timedelta(minutes=13)
+    s.run_once()
+    assert len(ex.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix pass 2026-09-26: finding 6 -- record_fire must happen before the
+# one-shot TRIGGERED write, so a failed fire-log write leaves the rule
+# armed (and undispatched) instead of burning it silently.
+# ---------------------------------------------------------------------------
+
+def test_record_fire_failure_leaves_rule_armed_not_silently_burnt(tmp_path, clock,
+                                                                   monkeypatch):
+    s, store, ex, _q, _n = make(tmp_path, strategy_yaml())
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("fire log write failed")
+
+    monkeypatch.setattr(store, "record_fire", _boom)
+    report = s.run_once()
+
+    assert ex.calls == []  # never dispatched
+    assert store.load("t").rules[0].state == RuleState.ARMED  # not burnt
+    assert any("fire log write failed" in e for e in report.errors)

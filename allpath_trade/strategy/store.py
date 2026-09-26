@@ -80,6 +80,22 @@ class StrategyStore:
             (doc.id, self._account)).fetchall()
         states = {r["rule_id"]: RuleState(r["state"]) for r in rows}
         for rule in doc.rules:
+            # Finding 1 (fix pass 2026-09-26): a rule the author disabled in
+            # the YAML file stays disabled no matter what the DB row says.
+            # Without this, a re-arming rule that already fired (DB row
+            # TRIGGERED) and was then set to `state: disabled` in the file
+            # loaded as TRIGGERED forever -- disabling it in the file never
+            # actually stopped it re-arming and firing. Safe for every
+            # existing writer of `rule_states`: nothing in this codebase
+            # ever writes DISABLED there -- `set_rule_state` is called with
+            # ARMED (rearm(), the web rearm route) or TRIGGERED (the
+            # sentinel's one-shot write) only. The handful of tests that
+            # call `set_rule_state(..., RuleState.DISABLED)` directly do so
+            # against a YAML rule whose own state is the ARMED default, so
+            # this branch never fires for them and their assertions are
+            # unaffected.
+            if rule.state == RuleState.DISABLED:
+                continue
             if rule.id in states:
                 rule.state = states[rule.id]
         return doc
@@ -177,11 +193,19 @@ class StrategyStore:
         return [r for r in doc.rules if r.state != RuleState.ARMED]
 
     def rearm_warning(self, strategy_id: str) -> str:
-        """Empty string when every rule of `strategy_id` is armed, else a
-        human-readable suffix naming each rule that isn't -- shared wording
-        for the CLI (`allpath-trade reviews approve`) and the web approve
-        flow so a revision's aftermath reads the same on both surfaces."""
-        stuck = self.not_armed_rules(strategy_id)
+        """Empty string when every rule of `strategy_id` is armed (or every
+        not-armed rule re-arms itself), else a human-readable suffix naming
+        each rule that isn't -- shared wording for the CLI (`allpath-trade
+        reviews approve`) and the web approve flow so a revision's aftermath
+        reads the same on both surfaces.
+
+        Finding 7 (fix pass 2026-09-26): a rule with `rearm` set re-arms on
+        its own (sentinel.py's `_should_rearm`), on cooldown and under its
+        daily cap -- telling the user to "re-arm it by hand" is both
+        unnecessary noise and actively wrong advice, since a manual re-arm
+        (via `rearm()`/the web rearm route) bypasses that cooldown and cap
+        entirely."""
+        stuck = [r for r in self.not_armed_rules(strategy_id) if r.rearm is None]
         if not stuck:
             return ""
         parts = ", ".join(f"{r.id} is still {r.state.value}" for r in stuck)

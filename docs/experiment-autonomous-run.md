@@ -243,11 +243,12 @@ protection and expiry hygiene.
 ## 9. Phase 3 — high-activity paper testing (from 2026-09-26)
 
 This phase transitions from human-verified baseline (2026-09-14 to 2026-09-25)
-to autonomous rule re-arming and higher activity. **Do not pool baseline data
-with phase 3 data** — the strategy behavior and risk posture diverge sharply
-once re-arming fires.
+to autonomous rule re-arming and higher activity, **on the same paper account
+the baseline ran on** — there is no fresh-account step for phase 3. **Do not
+pool baseline data with phase 3 data** — the strategy behavior and risk
+posture diverge sharply once re-arming fires.
 
-### New environment settings
+### Environment settings for phase 3
 
 For the duration of phase 3, set these in `.env`:
 
@@ -258,22 +259,45 @@ DRAWDOWN_HALT_PCT=0.15
 MAX_ORDER_VALUE=25000
 MAX_POSITION_WEIGHT=0.50
 MAX_DAILY_TRADES=50
+SHADOW_MAX_ORDER_VALUE=30000
+SHADOW_MAX_POSITION_WEIGHT=0.40
+SHADOW_MAX_DAILY_TRADES=10
 OPTIONS_TRADING=true
 ```
 
-The first three match the earlier baseline run mechanics. The new settings
-raise limits to support high-activity automated trading:
-- `MAX_ORDER_VALUE`: individual order size cap (doubled from default ~12500).
-- `MAX_POSITION_WEIGHT`: position concentration limit (0.50 = 50% of account equity per position).
-- `MAX_DAILY_TRADES`: maximum trades per day (50, up from default ~10).
-- Paper trading is back in `auto` mode for strategies (no `confirm` review queue).
+`EXPERIMENT_AUTO_APPLY_REVISIONS` stays `true`, as it already was for the
+baseline. `SENTINEL_INTERVAL_MINUTES` moves from the baseline's `30` down to
+`15` — a deliberate change, not a return to any prior value; it's part of why
+phase 3 and baseline data must not be pooled. `DRAWDOWN_HALT_PCT` is
+unchanged.
+
+The risk ceilings are raised for paper's high-activity posture, up from the
+code defaults (`MAX_ORDER_VALUE` $5,000, `MAX_POSITION_WEIGHT` 0.25,
+`MAX_DAILY_TRADES` 10):
+- `MAX_ORDER_VALUE=25000`: individual order size cap.
+- `MAX_POSITION_WEIGHT=0.50`: position concentration limit (50% of account
+  equity per position).
+- `MAX_DAILY_TRADES=50`: maximum trades per day.
+- `max_options_weight` (option exposure cap) is **unchanged** at its default
+  10% — nothing in phase 3 raises it.
+- Paper trading is back in `auto` mode for strategies (no `confirm` review
+  queue).
 - `OPTIONS_TRADING=true` for option rule testing.
+
+The `SHADOW_*` lines pin the shadow account (a local ledger mirroring the
+user's real, differently-sized brokerage) to its own, unchanged ceilings.
+Leaving a `SHADOW_*` setting unset falls back to the matching bare paper
+limit above — with paper's limits raised for phase 3, an unset shadow
+override would silently inherit those same raised limits, which is not
+appropriate for a real-brokerage mirror. Pin all three explicitly.
 
 ### Re-arming rules
 
 Rules on strategies can now specify `rearm` (cooldown interval: `60m`, `2h`,
-minimum 15 minutes) and `max_fires_per_day` (default 3, 1–20) to fire
-repeatedly. Re-arming buys must cap `position_weight` in their condition;
+or a bare integer number of minutes; minimum 15 minutes, maximum 10080
+minutes/7 days) and `max_fires_per_day` (default 3, 1–20) to fire repeatedly.
+Re-arming buys must cap `position_weight` in their condition — a numeric
+bound at or below 1, or the name `target_weight`, on every path to true;
 option buys (`buy_call`/`buy_put`) cannot re-arm; stock sells and
 `close_options` can.
 
@@ -283,9 +307,20 @@ Example rule:
      action: "buy $10000", rearm: 60m, max_fires_per_day: 3}
 ```
 
-Re-arming only occurs during US market hours (Mon–Fri 09:30–16:00 ET, no US
-holiday exceptions). The sentinel logs each re-arm event with `rule_fires`
-table entries and `sentinel_rearm` observations.
+The re-arm check runs on **every sentinel pass** during US market hours
+(Mon–Fri 09:30–16:00 ET, no US holiday exceptions) — it is not a once-per-day
+step — for each `triggered` rule whose cooldown has elapsed (a 60-second
+grace keeps ordinary tick jitter from silently doubling the effective
+cooldown) and whose fire count today is still under its daily cap. A rule
+re-arms only from state `triggered`, never from `disabled`: setting
+`state: disabled` on a rule in its strategy file is the off switch, and it
+wins over any stale `triggered` row left in the database from before the
+rule was disabled.
+
+Every rule FIRE (re-arming or not) is logged to the `rule_fires` table —
+`account`, `strategy_id`, `rule_id`, `ts` only, no trigger price or position
+snapshot. Re-arming a rule (the state flip back to armed) writes no
+`rule_fires` row by itself, only a `sentinel_rearm` observation.
 
 ### Key differences from baseline
 
@@ -294,8 +329,18 @@ table entries and `sentinel_rearm` observations.
 2. **Activity level**: with re-arming, each strategy can now fire multiple
    times per day, increasing position turnover and token usage.
 3. **Risk monitoring**: drawdown breaker remains at 15%, but max position
-   weight is higher (0.50 vs baseline ~0.30) to allow for the intended
-   high-activity posture.
-4. **Data segregation**: fund a fresh paper account for phase 3 or explicitly
-   archive the baseline experiment data before starting, to ensure clean
-   phase 3 baseline for future analysis.
+   weight is higher (0.50 vs the code default 0.25) to allow for the
+   intended high-activity posture.
+4. **Sentinel cadence**: 15-minute ticks, down from the baseline's 30
+   minutes.
+5. **Data segregation**: phase 3 runs on the existing paper account, not a
+   fresh one — separate baseline from phase-3 data by timestamp/tag instead
+   (e.g. the `experiment-end`/a new phase-3 tag from section 7).
+
+### Operational notes
+
+- Do not run `allpath-trade check` manually during market hours in phase 3
+  (it can race the scheduler's pass and double-fire a re-arming rule).
+- A rule that fired before this feature and later gets `rearm` added (for
+  example by an auto-applied reflection revision) re-arms on the first
+  market tick, because no fire was recorded for it before then.
