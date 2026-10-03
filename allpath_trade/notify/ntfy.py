@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import urllib.request
 
-from allpath_trade.notify.base import Notifier
+from allpath_trade.notify.base import Notifier, header_safe
 
 _NTFY_TIMEOUT_SECONDS = 10
 
@@ -35,7 +35,7 @@ class NtfyNotifier(Notifier):
             req = urllib.request.Request(
                 self.url,
                 data=body.encode("utf-8"),
-                headers={"Title": subject},
+                headers={"Title": header_safe(subject)},
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=_NTFY_TIMEOUT_SECONDS) as resp:

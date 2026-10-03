@@ -55,8 +55,15 @@ class Settings(BaseSettings):
     # the full topic URL the app POSTs to, e.g. "https://ntfy.sh/my-topic".
     # Blank means the channel is not configured -- see build_notifier.
     ntfy_url: str = ""
+    # Machine-readable event channel for an external executor agent
+    # (notify/agent.py): every notification is POSTed as JSON to this URL
+    # (a webhook, or a separate ntfy topic). Never carries message bodies or
+    # approve links. Optional bearer token. .env-only, not on the settings
+    # page.
+    agent_webhook_url: str = ""
+    agent_webhook_token: str = ""
 
-    @field_validator("ntfy_url")
+    @field_validator("ntfy_url", "agent_webhook_url")
     @classmethod
     def _ntfy_url_needs_a_scheme(cls, v: str) -> str:
         # urllib.request.Request raises ValueError("unknown url type") for a

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from decimal import Decimal
+from typing import Self
 
 from allpath_trade.store.accounts import ACCOUNTS
 
@@ -18,6 +19,33 @@ FOOTER = ("\n\nOpen the AllPath Trade dashboard to act on this. "
           "you've opted into approval links under Settings, an item "
           "waiting for you may also include a one-time link scoped to "
           "just that item, valid for 24 hours and dead as soon as it's used.")
+
+
+class Subject(str):
+    """A notification subject line that also carries a structured,
+    secret-free description of the event (`.event`) for the machine-readable
+    agent channel (notify/agent.py, AGENT_WEBHOOK_URL).
+
+    A `str` subclass so it rides through every existing
+    `notifier.send(subject, body)` call site untouched -- the human channels
+    see an ordinary string, and only `AgentWebhookNotifier` looks for
+    `.event`. Anything that rebuilds the string (an f-string, `+`) drops the
+    attribute, which degrades to a generic "notification" event, never a
+    crash.
+
+    `.event` must never carry the body, an approve URL, or a token: it is
+    posted verbatim to whatever endpoint the operator configured."""
+
+    event: dict
+
+    def __new__(cls, text: str, event: dict) -> Self:
+        obj = super().__new__(cls, text)
+        obj.event = event
+        return obj
+
+
+def _dec(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
 
 
 def _prefix(account: str) -> str:
@@ -61,8 +89,12 @@ def approve_link(base_url: str, review_id: object) -> str:
 
 
 def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
-                   condition: str, disposition: str) -> tuple[str, str]:
-    subject = f"{_prefix(account)}[AllPath] {ticker}: rule {rule_id} triggered"
+                   condition: str, disposition: str) -> tuple[Subject, str]:
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] {ticker}: rule {rule_id} triggered",
+        {"type": "rule_triggered", "account": account, "strategy_id": strategy_id,
+         "rule_id": rule_id, "ticker": ticker, "condition": condition,
+         "disposition": disposition})
     body = (f"Strategy {strategy_id}, rule {rule_id} triggered on {ticker}.\n"
             f"Condition: {condition}\n"
             f"Disposition: {disposition}." + FOOTER)
@@ -71,7 +103,7 @@ def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
 
 def order_result(*, account: str, ticker: str, side: str, submitted: bool,
                  detail: str, filled_qty: Decimal | None = None,
-                 filled_avg_price: Decimal | None = None) -> tuple[str, str]:
+                 filled_avg_price: Decimal | None = None) -> tuple[Subject, str]:
     """`filled_qty`/`filled_avg_price` (from the `Order` the executor
     returned, when there is one) are ONLY used for the shadow wording
     below -- paper's own body is unchanged by this task and never reads
@@ -102,7 +134,11 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
     outcome = "submitted" if submitted else "not submitted"
     shadow_order = account == "shadow" and submitted
     headline = "order recorded — place it yourself" if shadow_order else f"order {outcome}"
-    subject = f"{_prefix(account)}[AllPath] {ticker}: {headline}"
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] {ticker}: {headline}",
+        {"type": "order_result", "account": account, "ticker": ticker,
+         "side": side, "submitted": submitted, "recorded_only": shadow_order,
+         "filled_qty": _dec(filled_qty), "filled_avg_price": _dec(filled_avg_price)})
     if shadow_order:
         fill = ""
         if filled_qty is not None and filled_avg_price is not None:
@@ -116,15 +152,17 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
 
 
 def drawdown_halt(*, account: str, peak: Decimal, equity: Decimal,
-                  drawdown: Decimal, demoted: list[str]) -> tuple[str, str]:
+                  drawdown: Decimal, demoted: list[str]) -> tuple[Subject, str]:
     """The drawdown circuit breaker's own alert (Task 7) -- always sent
     through `self.notifier.send` directly plus `push_telegram_receipt`, NOT
     the per-strategy `_send`/`notify_email` gate every other sentinel event
     goes through: an account-level halt is not a per-strategy notification
     preference, so it must reach the operator even when every strategy on
     file happens to have `notify_email: false`."""
-    subject = (f"{_prefix(account)}[AllPath] TRADING HALTED: "
-               f"{drawdown:.1%} drawdown")
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] TRADING HALTED: {drawdown:.1%} drawdown",
+        {"type": "drawdown_halt", "account": account, "peak": str(peak),
+         "equity": str(equity), "drawdown": str(drawdown), "demoted": list(demoted)})
     names = ", ".join(demoted) if demoted else "none were set to auto"
     body = (f"Equity ${equity:,.2f} is {drawdown:.1%} below its peak "
             f"${peak:,.2f}.\n"
@@ -140,7 +178,7 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   strategy_id: str, recommendation: str = "",
                   trigger_price: str = "", est_shares: str = "",
                   approve_url: str = "", kind: str = "order",
-                  option_preview: str = "") -> tuple[str, str]:
+                  option_preview: str = "") -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -175,7 +213,14 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     `option_preview`, when non-empty, adds a line describing the option order
     context (e.g., "2x NVDA261016C00220000 ≈ $930.00")."""
     subject_noun = ticker or "Ledger"
-    subject = f"{_prefix(account)}[AllPath] {subject_noun}: waiting for your approval"
+    # int(): `review_id` is usually a ReviewHandle, whose `.token` must never
+    # reach the event (see Subject's docstring).
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] {subject_noun}: waiting for your approval",
+        {"type": "review_queued", "account": account, "review_id": int(review_id),
+         "kind": kind, "ticker": ticker, "strategy_id": strategy_id,
+         "action": action,
+         "next": f"allpath-trade reviews --account {account} list --json"})
     proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
     lines = [f"Item #{review_id} is waiting for you.", proposed]
     if strategy_id:
@@ -199,7 +244,7 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
 
 
 def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
-                 llm_cost: str = "") -> tuple[str, str]:
+                 llm_cost: str = "") -> tuple[Subject, str]:
     """`llm_cost`, when non-empty, is one extra line naming today's
     estimated LLM spend (store/llm_usage.py + llm/prices.py) -- the caller
     (scheduler.py's `_send_daily_digest`) only ever passes a non-empty
@@ -213,7 +258,10 @@ def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
     executed" honesty. `account not in ACCOUNTS` (same degrade as
     `_prefix`) falls back to the original unlabeled "Today: ..." wording
     rather than guessing."""
-    subject = f"{_prefix(account)}[AllPath] Daily summary"
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] Daily summary",
+        {"type": "daily_digest", "account": account, "triggers": triggers,
+         "trades": trades, "pending": pending})
     if account == "shadow":
         body = (f"Shadow account today: {triggers} rule trigger(s), "
                 f"{trades} order(s) recorded, "
@@ -237,12 +285,14 @@ def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
     return subject, body + FOOTER
 
 
-def daily_report(*, account: str, date: str, summary: str, body: str) -> tuple[str, str]:
+def daily_report(*, account: str, date: str, summary: str, body: str) -> tuple[Subject, str]:
     """The end-of-day reflection notification (Phase 6). `summary` (the
     short push-friendly text the reflection itself produced) leads the full
     body so an email/console reader gets the punchy version before the full
     report; `send_report` (notify/base.py) is what routes `summary` alone
     to a push channel and this whole `full_body` to email/console."""
-    subject = f"{_prefix(account)}[AllPath] Daily reflection {date}"
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] Daily reflection {date}",
+        {"type": "daily_report", "account": account, "date": date})
     full_body = f"{summary}\n\n{body}" + FOOTER
     return subject, full_body

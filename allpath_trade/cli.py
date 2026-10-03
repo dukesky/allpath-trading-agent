@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Callable
 from functools import partial
@@ -22,6 +23,69 @@ def _default_broker(settings: Settings) -> Broker:
 
     return AlpacaBroker(settings.alpaca_api_key, settings.alpaca_secret_key,
                         paper=settings.alpaca_paper)
+
+
+def _json_default(value: object) -> str:
+    # Decimals (and anything else non-native) become exact strings -- an
+    # agent reading money must never get a float-rounded 0.1 + 0.2.
+    return str(value)
+
+
+def _print_json(data: object) -> None:
+    print(json.dumps(data, default=_json_default, indent=2))
+
+
+def _trade_to_json(row) -> dict:
+    d = dict(row)
+    try:
+        d["risk_reasons"] = json.loads(d.get("risk_reasons") or "[]")
+    except (TypeError, ValueError):
+        pass
+    return d
+
+
+def cmd_status_json(settings: Settings, broker: Broker, account: str = "paper") -> int:
+    """`status --json`: the same facts as `cmd_status`, as one JSON object
+    on stdout (money as exact strings) for an executor agent to parse."""
+    try:
+        acct = broker.get_account()
+        positions = broker.get_positions()
+    except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit, never crash
+        _print_json({"account": account, "error": f"could not reach broker: {exc}"})
+        return 1
+    rows = TradeJournal(connect(settings.db_path), account=account).recent(limit=5)
+    _print_json({
+        "account": account,
+        "broker": broker.name,
+        "is_paper": broker.is_paper,
+        "equity": acct.equity,
+        "cash": acct.cash,
+        "buying_power": acct.buying_power,
+        "positions": [{"ticker": p.ticker, "qty": p.qty,
+                       "avg_entry_price": p.avg_entry_price,
+                       "market_value": p.market_value,
+                       "unrealized_pl": p.unrealized_pl} for p in positions],
+        "recent_trades": [_trade_to_json(r) for r in rows],
+    })
+    return 0
+
+
+# Columns `reviews list --json` never emits: the approval-token hash is an
+# auth artifact, and `snapshot` can hold whole strategy YAML files (fetch a
+# single row's detail from the web UI instead).
+_REVIEW_JSON_EXCLUDED = {"approval_token_hash", "snapshot"}
+_REVIEW_JSON_PARSED = ("agent_analysis", "intent", "risk_preview", "execution_result")
+
+
+def _review_to_json(row) -> dict:
+    d = {k: v for k, v in dict(row).items() if k not in _REVIEW_JSON_EXCLUDED}
+    for key in _REVIEW_JSON_PARSED:
+        if isinstance(d.get(key), str):
+            try:
+                d[key] = json.loads(d[key])
+            except ValueError:
+                pass  # keep the raw text (e.g. an unparseable analysis)
+    return d
 
 
 def cmd_status(settings: Settings, broker: Broker, account: str = "paper") -> int:
@@ -213,6 +277,9 @@ def cmd_reviews(q, args, store=None) -> int:
     try:
         if args.reviews_command == "list":
             rows = q.list()
+            if getattr(args, "json", False):
+                _print_json([_review_to_json(r) for r in rows])
+                return 0
             if not rows:
                 print("no pending reviews")
             for r in rows:
@@ -572,6 +639,8 @@ def main(argv: list[str] | None = None,
                     "positions, and the last 5 journaled trades. "
                     "Requires ALPACA_API_KEY / ALPACA_SECRET_KEY in .env.")
     _add_account_arg(p_status)
+    p_status.add_argument("--json", action="store_true",
+                          help="print one JSON object (money as exact strings)")
     p_check = sub.add_parser(
         "check", help="run one sentinel pass now",
         description="Evaluate every armed rule of every active strategy once, "
@@ -619,7 +688,9 @@ def main(argv: list[str] | None = None,
     _add_account_arg(p_reviews)
     rsub = p_reviews.add_subparsers(dest="reviews_command", required=True,
                                     metavar="<action>")
-    rsub.add_parser("list", help="list pending reviews")
+    p_list = rsub.add_parser("list", help="list pending reviews")
+    p_list.add_argument("--json", action="store_true",
+                        help="print a JSON array of pending review rows")
     p_app = rsub.add_parser("approve", help="execute a pending review (needs keys)")
     p_app.add_argument("review_id", type=int, help="id from 'reviews list'")
     p_rej = rsub.add_parser("reject", help="dismiss a pending review")
@@ -796,6 +867,8 @@ def main(argv: list[str] | None = None,
         # is never None here and `bundle` -- the right broker instance for
         # THIS account (Alpaca for paper, ShadowLedger for shadow) -- is
         # always defined.
+        if args.json:
+            return cmd_status_json(settings, bundle.broker, account=account)
         return cmd_status(settings, bundle.broker, account=account)
 
     if args.command == "check":

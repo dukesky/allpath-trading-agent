@@ -2,6 +2,31 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Agent feed — 2026-10-03
+
+- **`--json` for `status` and `reviews list`**: one JSON document on
+  stdout for an external executor agent. Money is exact strings, never
+  floats. `reviews list --json` never includes the approval-token hash or
+  the (potentially huge) `snapshot`; `agent_analysis`, `intent`,
+  `risk_preview` and `execution_result` are parsed from JSON when they
+  parse, and otherwise kept as raw text. A broker failure in `status
+  --json` prints `{"account", "error"}` and exits 1.
+- **Agent webhook channel** (`AGENT_WEBHOOK_URL`, optional
+  `AGENT_WEBHOOK_TOKEN` sent as `Authorization: Bearer`; `.env`-only):
+  every notification is also POSTed as JSON — `{"v": 1, "ts", "type",
+  "account", "subject", ...}` with per-type fields (`review_queued`
+  carries `review_id`, `kind`, `ticker`, `strategy_id`, `action`, `next`).
+  The human body and approve links are **never** sent: an agent acts
+  through the CLI, which re-prices and re-runs every guard. Works with any
+  JSON webhook or a separate ntfy topic. A per-strategy
+  `notify_email: false` mutes the human channels only, never this feed.
+  See `docs/agent-feed.md`.
+- **Fix: shadow order pushes were silently dropped by ntfy.** The shadow
+  subject "order recorded — place it yourself" contains an em dash, and
+  http.client encodes header values as latin-1, so every such ntfy send
+  raised inside the notifier and returned False. Non-ASCII titles now go
+  out RFC 2047-encoded (ntfy decodes them back to the original text).
+  Email and Telegram were never affected.
 ## Rule re-arming — 2026-09-26
 
 - **Opt-in repeated rule firing**: every rule can now add `rearm: <cooldown>`

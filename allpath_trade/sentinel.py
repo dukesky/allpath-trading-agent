@@ -30,6 +30,7 @@ from allpath_trade.execution import (
 )
 from allpath_trade.market_hours import ET
 from allpath_trade.notify import events
+from allpath_trade.notify.agent import send_agent_only
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
 from allpath_trade.risk.breaker import DrawdownBreaker
@@ -882,5 +883,7 @@ class Sentinel:
         # rejected, recorded) has already happened; skipping the send never
         # skips that.
         if not doc.notify_email:
+            # Muting is about the human inbox; the agent feed still gets it.
+            send_agent_only(self.notifier, subject, body)
             return
         self.notifier.send(subject, body)
