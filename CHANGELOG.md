@@ -2,6 +2,22 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Latest models — 2026-10-03
+
+- **Default models moved to the current generation**: `CHAT_MODEL`
+  `anthropic/claude-sonnet-5.5` (was `claude-sonnet-5`), `MEMORY_MODEL`
+  `anthropic/claude-opus-5.5` (was `claude-opus-5`); `REVIEW_MODEL` stays
+  `anthropic/claude-haiku-4.5` (still the newest Haiku). This changes only
+  the defaults and the fallback dropdown. An existing `.env` keeps its own
+  values until you change them in Settings → Models. Smoke-tested through
+  OpenRouter with a tool call on all three models.
+- **Fix: usage cost estimates were overstated.** The price table had
+  Sonnet 5 at $3/$15 and Opus 5 at $15/$75 per 1M tokens; the real list
+  prices are $2/$10 and $5/$25. Added Sonnet 5.5 ($2/$10), Opus 5.5
+  ($4/$20) and Fable 5.1 ($10/$50), each in both the dot (OpenRouter) and
+  dash (direct API) spellings. The conservative default for unknown models
+  is now $10/$50.
+
 ## Agent feed — 2026-10-03
 
 - **`--json` for `status` and `reviews list`**: one JSON document on
