@@ -86,11 +86,11 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
-    chat_model: str = "anthropic/claude-sonnet-5"
+    chat_model: str = "anthropic/claude-sonnet-5.5"
     review_model: str = "anthropic/claude-haiku-4.5"
     # Consolidation decides what enters long-term memory; a bad call there
     # pollutes every later conversation, so it gets the strongest tier.
-    memory_model: str = "anthropic/claude-opus-5"
+    memory_model: str = "anthropic/claude-opus-5.5"
     memory_dir: Path = Path("memory")
     context_budget_tokens: int = Field(default=60000, ge=MIN_CONTEXT_BUDGET_TOKENS)
     web_host: str = "127.0.0.1"

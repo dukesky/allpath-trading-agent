@@ -593,7 +593,7 @@ def test_build_jobs_daily_digest_mentions_llm_cost_when_usage_recorded(monkeypat
     scheduler.job()
 
     [(_subject, body)] = notifier.sent
-    assert "Estimated LLM cost today (all accounts): $18.00" in body
+    assert "Estimated LLM cost today (all accounts): $12.00" in body
 
 
 def test_build_jobs_daily_digest_omits_cost_line_when_no_usage(monkeypatch, tmp_path):

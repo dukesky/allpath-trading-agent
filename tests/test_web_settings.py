@@ -25,7 +25,9 @@ from tests.test_sentinel import FakeBroker
 FAKE_CATALOG = [
     "anthropic/claude-haiku-4.5",
     "anthropic/claude-opus-5",
+    "anthropic/claude-opus-5.5",
     "anthropic/claude-sonnet-5",
+    "anthropic/claude-sonnet-5.5",
     "openai/gpt-5.2",
 ]
 
@@ -213,9 +215,9 @@ def test_model_fields_render_as_selects_with_the_stored_value_selected(client):
     # Settings() defaults (config.py) are all members of FAKE_CATALOG, so
     # each should come back pre-selected rather than defaulting to the
     # first catalog entry or nothing at all.
-    assert '<option value="anthropic/claude-sonnet-5" selected>' in body  # chat_model
+    assert '<option value="anthropic/claude-sonnet-5.5" selected>' in body  # chat_model
     assert '<option value="anthropic/claude-haiku-4.5" selected>' in body  # review_model
-    assert '<option value="anthropic/claude-opus-5" selected>' in body  # memory_model
+    assert '<option value="anthropic/claude-opus-5.5" selected>' in body  # memory_model
 
 
 def test_a_stored_off_catalog_model_is_prepended_not_silently_swapped(client, tmp_path):
@@ -1140,8 +1142,8 @@ def test_usage_tab_renders_recorded_tokens_and_estimated_cost(client):
 
     assert "claude-sonnet-5" in body
     assert "1,000,000" in body
-    # $3/1M in + $15/1M out = $18.00 for this one call.
-    assert "$18.00" in body
+    # $2/1M in + $10/1M out = $12.00 for this one call.
+    assert "$12.00" in body
 
 
 def test_usage_tab_flags_unknown_model_as_an_estimate(client):

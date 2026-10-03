@@ -18,7 +18,7 @@ from decimal import Decimal
 
 # Bump this whenever the table below is hand-updated -- rendered verbatim
 # in the Usage panel's honest-estimate note (web/templates/settings.html).
-PRICES_UPDATED = "2026-08-18"
+PRICES_UPDATED = "2026-10-03"
 
 # USD per 1,000,000 tokens: (input, output). Keyed by the bare model SLUG
 # (no provider prefix) -- see `price_for` for why lookup strips an
@@ -27,8 +27,22 @@ PRICES_UPDATED = "2026-08-18"
 # model (e.g. "anthropic/claude-sonnet-5" and "claude-sonnet-5" both match
 # "claude-sonnet-5" below).
 _PRICES: dict[str, tuple[Decimal, Decimal]] = {
-    "claude-sonnet-5": (Decimal(3), Decimal(15)),
-    "claude-opus-5": (Decimal(15), Decimal(75)),
+    # Current generation. OpenRouter spells versions with a dot
+    # ("claude-opus-5.5"), the direct Anthropic API with a dash
+    # ("claude-opus-5-5") -- both listed, same as haiku below.
+    "claude-sonnet-5.5": (Decimal(2), Decimal(10)),
+    "claude-sonnet-5-5": (Decimal(2), Decimal(10)),
+    "claude-opus-5.5": (Decimal(4), Decimal(20)),
+    "claude-opus-5-5": (Decimal(4), Decimal(20)),
+    # Previous generation, kept so historical usage rows still price right
+    # (these two were listed at 3/15 and 15/75 until 2026-10-03 -- wrong;
+    # the real list prices are below).
+    "claude-sonnet-5": (Decimal(2), Decimal(10)),
+    "claude-opus-5": (Decimal(5), Decimal(25)),
+    # Not in the catalog, but the priciest Anthropic tier -- listed so
+    # DEFAULT_PRICE (max of this table) stays at or above it.
+    "claude-fable-5.1": (Decimal(10), Decimal(50)),
+    "claude-fable-5-1": (Decimal(10), Decimal(50)),
     # Both spellings this app's own catalog uses for the same model --
     # models_catalog.py's FALLBACK_MODELS lists "claude-haiku-4.5" under
     # openrouter/anthropic's naming and "claude-haiku-4-5" under the direct

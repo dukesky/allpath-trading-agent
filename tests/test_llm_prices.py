@@ -6,8 +6,8 @@ from allpath_trade.llm import prices
 def test_known_model_returns_its_own_price_not_default():
     input_price, output_price, is_default = prices.price_for("claude-sonnet-5")
     assert is_default is False
-    assert input_price == Decimal(3)
-    assert output_price == Decimal(15)
+    assert input_price == Decimal(2)
+    assert output_price == Decimal(10)
 
 
 def test_openrouter_prefixed_slug_matches_the_same_entry():
@@ -28,10 +28,10 @@ def test_empty_model_string_falls_back_to_default():
 
 
 def test_estimate_cost_known_model_math():
-    # claude-sonnet-5: $3/1M in, $15/1M out.
+    # claude-sonnet-5: $2/1M in, $10/1M out.
     cost, is_default = prices.estimate_cost("claude-sonnet-5", 1_000_000, 1_000_000)
     assert is_default is False
-    assert cost == Decimal(3) + Decimal(15)
+    assert cost == Decimal(2) + Decimal(10)
 
 
 def test_estimate_cost_unknown_model_uses_default_and_flags_it():
@@ -55,3 +55,30 @@ def test_both_haiku_spellings_are_priced_identically():
     dash = prices.price_for("claude-haiku-4-5")
     assert dot == dash
     assert dot[2] is False  # both are real lookups, not the default
+
+
+def test_current_generation_prices_in_both_spellings():
+    # OpenRouter uses dots ("claude-opus-5.5"), the direct API dashes.
+    for slug, expected in [
+        ("anthropic/claude-opus-5.5", (Decimal(4), Decimal(20))),
+        ("claude-opus-5-5", (Decimal(4), Decimal(20))),
+        ("anthropic/claude-sonnet-5.5", (Decimal(2), Decimal(10))),
+        ("claude-sonnet-5-5", (Decimal(2), Decimal(10))),
+        ("anthropic/claude-haiku-4.5", (Decimal(1), Decimal(5))),
+        ("claude-opus-5", (Decimal(5), Decimal(25))),
+    ]:
+        input_price, output_price, is_default = prices.price_for(slug)
+        assert is_default is False, slug
+        assert (input_price, output_price) == expected, slug
+
+
+def test_default_price_never_undercuts_the_priciest_anthropic_tier():
+    assert prices.DEFAULT_PRICE >= (Decimal(10), Decimal(50))
+
+
+def test_config_default_models_are_all_priced():
+    from allpath_trade.config import Settings
+
+    s = Settings(_env_file=None)
+    for model in (s.chat_model, s.review_model, s.memory_model):
+        assert prices.price_for(model)[2] is False, model
