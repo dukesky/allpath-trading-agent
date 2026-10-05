@@ -41,6 +41,48 @@ def test_unparseable_answer_defaults_to_skip():
     assert a.recommendation == "skip" and "unparseable" in a.reasoning
 
 
+# Real failure mode (found 2026-09-14): the review model ignores "answer ONLY
+# with JSON" and wraps the fenced JSON in prose. The old parser only stripped
+# a fence around the ENTIRE text, so every such reply became "skip —
+# unparseable" and the approval cards showed the wrong recommendation.
+def _analyze_text(text):
+    return ReviewAgent(ScriptedLLM([LLMResponse(text=text)]), registry()).analyze(REVIEW)
+
+
+def test_fenced_json_inside_prose_is_parsed():
+    a = _analyze_text(
+        "Looking at the setup, the dip is orderly.\n\n```json\n"
+        '{"recommendation": "execute", "reasoning": "orderly dip", "sources": ["s1"]}\n'
+        "```\n\nLet me know if you want more detail.")
+    assert a.recommendation == "execute"
+    assert a.reasoning == "orderly dip" and a.sources == ["s1"]
+
+
+def test_bare_json_after_prose_is_parsed():
+    a = _analyze_text('Here is my answer: {"recommendation": "skip", "reasoning": "gap risk"}')
+    assert a.recommendation == "skip" and a.reasoning == "gap risk"
+
+
+def test_last_fenced_answer_wins():
+    a = _analyze_text(
+        'Format example:\n```json\n{"recommendation": "skip", "reasoning": "example"}\n```\n'
+        'Final:\n```json\n{"recommendation": "execute", "reasoning": "final"}\n```')
+    assert a.recommendation == "execute" and a.reasoning == "final"
+
+
+def test_braces_inside_reasoning_strings_do_not_break_parsing():
+    a = _analyze_text(
+        'Answer below.\n```json\n{"recommendation": "execute", '
+        '"reasoning": "condition {price < 205} held"}\n```')
+    assert a.recommendation == "execute"
+    assert a.reasoning == "condition {price < 205} held"
+
+
+def test_json_with_an_invalid_recommendation_still_reads_unparseable():
+    a = _analyze_text('```json\n{"recommendation": "hold", "reasoning": "x"}\n```')
+    assert a.recommendation == "skip" and "unparseable" in a.reasoning
+
+
 def test_llm_error_propagates():
     with pytest.raises(LLMError):
         ReviewAgent(ScriptedLLM([LLMError("down")]), registry()).analyze(REVIEW)
