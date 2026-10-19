@@ -1859,3 +1859,13 @@ def test_precheck_that_cannot_run_fails_open_and_queues(tmp_path):
     ex.precheck_unavailable = True
     [o] = s.run_once().outcomes
     assert o.disposition == "queued" and len(q.list()) == 1 and ex.rejections == []
+
+
+def test_confirm_sell_is_never_auto_rejected_by_the_precheck(tmp_path):
+    # Review finding 2026-10-19: the stock gate's daily cap applies to sells,
+    # so a prechecked stop-loss on a capped day would have been rejected and
+    # its one-shot rule burned. Exits must always be queued for the human.
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(auth="confirm", action="sell all"))
+    ex.precheck_reasons = ["daily trade limit reached (50/50)"]
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued" and len(q.list()) == 1 and ex.rejections == []
