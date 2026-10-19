@@ -116,6 +116,12 @@ class SpyExecutor:
         self.raise_exc = raise_exc
         self.reject_reasons = reject_reasons
         self.calls = []
+        # precheck (2026-10-19): what the trigger-time gate dry-run returns.
+        # None -> approved; a list -> rejected with those reasons; set
+        # precheck_unavailable to simulate a data error (precheck -> None).
+        self.precheck_reasons = None
+        self.precheck_unavailable = False
+        self.rejections = []
         # Task 6: option calls are recorded separately from `calls` --
         # `OptionIntent` and `OrderIntent` are different shapes, and every
         # pre-existing test asserting on `calls` must keep seeing exactly
@@ -135,6 +141,16 @@ class SpyExecutor:
                 decision=RiskDecision(approved=False, reasons=self.reject_reasons))
         return ExecutionResult(submitted=True, order=None,
                                decision=RiskDecision(approved=True))
+
+    def precheck(self, intent):
+        if self.precheck_unavailable:
+            return None
+        if self.precheck_reasons is not None:
+            return RiskDecision(approved=False, reasons=self.precheck_reasons)
+        return RiskDecision(approved=True)
+
+    def record_rejection(self, intent, decision):
+        self.rejections.append((intent, decision))
 
     def execute_option(self, intent):
         if self.fail:
@@ -1813,3 +1829,33 @@ def test_record_fire_failure_leaves_rule_armed_not_silently_burnt(tmp_path, cloc
     assert ex.calls == []  # never dispatched
     assert store.load("t").rules[0].state == RuleState.ARMED  # not burnt
     assert any("fire log write failed" in e for e in report.errors)
+
+
+# -- trigger-time risk precheck (2026-10-19, user request) --------------------
+# A queued buy the gate would reject at approval time (no cash left, daily cap
+# reached) used to wait for a human approval that could only fail. It is now
+# rejected at trigger time, journaled, and the user is notified.
+
+
+def test_confirm_buy_the_gate_would_reject_is_auto_rejected_not_queued(tmp_path):
+    s, _store, ex, q, n = make(tmp_path, strategy_yaml(auth="confirm", action="buy $500"))
+    ex.precheck_reasons = ["buy would violate cash reserve minimum 0"]
+    [o] = s.run_once().outcomes
+    assert o.disposition == "rejected"
+    assert "auto-rejected at trigger" in o.detail and "cash reserve" in o.detail
+    assert q.list() == [] and ex.calls == []
+    assert len(ex.rejections) == 1
+    assert any("cash reserve" in body for _subject, body in n.sent)
+
+
+def test_confirm_buy_that_passes_the_precheck_is_still_queued(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(auth="confirm", action="buy $500"))
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued" and len(q.list()) == 1 and ex.rejections == []
+
+
+def test_precheck_that_cannot_run_fails_open_and_queues(tmp_path):
+    s, _store, ex, q, _n = make(tmp_path, strategy_yaml(auth="confirm", action="buy $500"))
+    ex.precheck_unavailable = True
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued" and len(q.list()) == 1 and ex.rejections == []

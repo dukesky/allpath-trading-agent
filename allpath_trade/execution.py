@@ -236,23 +236,20 @@ class Executor:
         self.data = data
         self.options_backend = options_backend
 
-    def execute(self, intent: OrderIntent) -> ExecutionResult:
+    def _gate_check(self, intent: OrderIntent) -> RiskDecision:
+        """Gather the gate's inputs and run it. Shared by `execute` and
+        `precheck` so a trigger-time dry run can never judge an order by
+        different rules than the real execution would. Raises whatever the
+        data reads raise; each caller decides what a failure means."""
         # Notional intents don't need a price for the gate's checks (order_value
         # comes straight from intent.notional), so only fetch a quote when qty
         # sizing requires converting shares to dollars.
-        try:
-            price = (self.data.get_quote(intent.ticker).price
-                     if intent.qty is not None else Decimal(0))
-            account = self.broker.get_account()
-            positions = self.broker.get_positions()
-            trades_today = self.journal.trades_today()
-        except Exception as exc:
-            failed = RiskDecision(approved=False,
-                                  reasons=[f"data error: {exc}"])
-            self.journal.record(intent, failed, None, status_override="error")
-            raise ExecutionError(str(exc)) from exc
-
-        decision = self.gate.check(
+        price = (self.data.get_quote(intent.ticker).price
+                 if intent.qty is not None else Decimal(0))
+        account = self.broker.get_account()
+        positions = self.broker.get_positions()
+        trades_today = self.journal.trades_today()
+        return self.gate.check(
             intent,
             account=account,
             positions=positions,
@@ -260,6 +257,36 @@ class Executor:
             is_paper=self.broker.is_paper,
             price=price,
         )
+
+    def precheck(self, intent: OrderIntent) -> RiskDecision | None:
+        """Dry-run the risk gate against current account state: no order, no
+        journal row. Used at trigger time so a buy the gate would reject (no
+        cash left, daily cap reached) is rejected immediately instead of
+        waiting for a human approval that can only fail (user request
+        2026-10-19). Returns None when the inputs cannot be read -- the caller
+        must then fail open and queue as before: the real gate still runs at
+        approval time, and a lost trigger is worse than a doomed approval."""
+        try:
+            return self._gate_check(intent)
+        except Exception:  # noqa: BLE001 — see docstring: None means "could not check"
+            return None
+
+    def record_rejection(self, intent: OrderIntent, decision: RiskDecision) -> None:
+        """Journal a gate rejection decided outside `execute` (the trigger-time
+        precheck) exactly as `execute` journals its own: status `rejected`, no
+        order -- so the journal, the reflection briefing and the public
+        journal page see one consistent record either way."""
+        self.journal.record(intent, decision, None)
+
+    def execute(self, intent: OrderIntent) -> ExecutionResult:
+        try:
+            decision = self._gate_check(intent)
+        except Exception as exc:
+            failed = RiskDecision(approved=False,
+                                  reasons=[f"data error: {exc}"])
+            self.journal.record(intent, failed, None, status_override="error")
+            raise ExecutionError(str(exc)) from exc
+
         if not decision.approved:
             self.journal.record(intent, decision, None)
             return ExecutionResult(submitted=False, order=None, decision=decision)

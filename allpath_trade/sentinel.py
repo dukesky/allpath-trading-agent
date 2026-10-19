@@ -484,7 +484,20 @@ class Sentinel:
             self._notify_order(doc, ticker, intent.side.value, False, detail)
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="rejected", detail=detail)
-        # confirm auth (both types), or auto+soft
+        # confirm auth (both types), or auto+soft.
+        # Trigger-time precheck (user request 2026-10-19): an order the risk
+        # gate would reject at approval time -- e.g. a dip buy with the book
+        # ~96% invested and no cash left -- is rejected now, journaled and
+        # notified, instead of waiting in Pending for an approval that can
+        # only fail. Same gate and inputs as Executor.execute; if the check
+        # cannot run (None) it fails open and queues as before.
+        decision = self.executor.precheck(intent)
+        if decision is not None and not decision.approved:
+            self.executor.record_rejection(intent, decision)
+            detail = "auto-rejected at trigger: " + "; ".join(decision.reasons)
+            self._notify_order(doc, ticker, intent.side.value, False, detail)
+            return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
+                                  disposition="rejected", detail=detail)
         rid = self.queue.add(strategy_id=doc.id, rule_id=rule_id,
                              ticker=ticker, rule_type=rule_type.value,
                              condition=condition, action=action,

@@ -808,3 +808,31 @@ def test_close_underlying_options_filters_by_root_and_handles_a_bad_leg(tmp_path
     assert bad_leg.result is None
     assert bad_leg.error is not None
     assert backend.calls == [(CALL_OCC, "sell", 1, "sell_to_close")]
+
+
+# -- precheck (2026-10-19): dry-run the gate at trigger time -------------------
+
+
+def test_precheck_returns_the_gate_decision_without_submitting_or_journaling(tmp_path):
+    ex, broker, journal = make_executor(
+        tmp_path, limits=RiskLimits(max_order_value=Decimal(20000)))
+    blocked = ex.precheck(buy("9000"))  # FakeBroker has $8,000 cash
+    assert blocked is not None and not blocked.approved
+    assert any("cash" in r for r in blocked.reasons)
+    passed = ex.precheck(buy("500"))
+    assert passed is not None and passed.approved
+    assert broker.submitted == [] and journal.recent(limit=10) == []
+
+
+def test_precheck_returns_none_when_inputs_cannot_be_read(tmp_path):
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    ex = Executor(FailingAccountBroker(), RiskGate(RiskLimits()), journal, FakeData())
+    assert ex.precheck(buy("500")) is None
+    assert journal.recent(limit=10) == []
+
+
+def test_record_rejection_journals_one_rejected_row_and_submits_nothing(tmp_path):
+    ex, broker, journal = make_executor(tmp_path)
+    ex.record_rejection(buy("9000"), RiskDecision(approved=False, reasons=["no cash"]))
+    [row] = journal.recent(limit=10)
+    assert row["status"] == "rejected" and broker.submitted == []
