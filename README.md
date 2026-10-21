@@ -38,6 +38,22 @@ Strategies are human-readable YAML documents — a prose thesis plus determinist
 
 > **🏆 Currently competing in the [Alpaca AI Trading Agents Hackathon](https://lablab.ai/ai-hackathons/alpaca-ai-trading-agents-hackathon) (Aug 28 – Sep 4, 2026).** The screenshots in this README are the *live competition account*: a fresh $100k paper account run with **zero human intervention** — the agent picked the tickers, drafted the strategies (stock + options legs with paired exits), executes autonomously, and revises itself every night. Options data and order routing go through **Alpaca's official MCP server**. See [The Live Autonomous Run](#the-live-autonomous-run).
 
+## Paper
+
+AllPath is described in **AllPath: Layered Verification for a Deployed, Self-Revising LLM Trading Agent under Human-Gated and Autonomous Regimes** (Tian Zhang, Meng Li), accepted to the 3rd Workshop on LLMs and Generative AI in Finance (AI4F) at ACM ICAIF 2026 (non-archival). arXiv: [2610.26662](https://arxiv.org/abs/2610.26662).
+
+```bibtex
+@misc{zhang2026allpath,
+  title         = {AllPath: Layered Verification for a Deployed, Self-Revising LLM Trading Agent under Human-Gated and Autonomous Regimes},
+  author        = {Zhang, Tian and Li, Meng},
+  year          = {2026},
+  eprint        = {2610.26662},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AI},
+  note          = {Accepted to the AI4F Workshop at ACM ICAIF 2026 (non-archival)}
+}
+```
+
 ## Table of Contents
 
 - [Why AllPath](#why-allpath)
