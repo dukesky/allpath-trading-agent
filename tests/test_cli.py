@@ -973,3 +973,117 @@ def test_chat_account_flag_scopes_conversations_search_and_system_prompt(
 
     assert captured["search"].account == "shadow"
     assert "ACCOUNT: shadow" in captured["system_prompt"]
+
+
+# --- regime show|set ---------------------------------------------------
+
+_REGIME_YAML = """\
+name: "{name}"
+status: active
+authorization: {authorization}
+position: {{ticker: AAPL, target_weight: 10%}}
+rules:
+  - {{id: r1, type: hard, condition: "price < 100", action: "sell all"}}
+"""
+
+
+def _regime_cwd(tmp_path, monkeypatch, authorization="auto"):
+    monkeypatch.chdir(tmp_path)
+    for account in ("paper", "shadow"):
+        (tmp_path / "strategies" / account).mkdir(parents=True)
+    (tmp_path / "strategies" / "paper" / "aapl-long.yaml").write_text(
+        _REGIME_YAML.format(name="aapl-long", authorization=authorization))
+
+
+def test_regime_show_with_no_regime_set(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch)
+
+    code = main(["regime", "show"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Regime (paper): not set — falling back to global flag" in out
+    assert "Revision auto-apply: " in out
+    assert "(source: global flag)" in out
+    assert "Paper strategies (active): auto=1" in out
+    assert "Recent switches:" in out
+    assert "  none" in out
+    assert "MISMATCH" not in out
+
+
+def test_regime_set_human_flips_active_auto_strategy(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch, authorization="auto")
+
+    code = main(["regime", "set", "human", "--by", "Tian", "--note", "going away"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Regime set to human by Tian; flipped 1 strategies." in out
+    assert "Regime (paper): human" in out
+    assert "Revision auto-apply: off (source: regime)" in out
+    assert "confirm=1" in out
+    assert "MISMATCH" not in out
+    assert "human by Tian (flipped 1) going away" in out
+    assert "authorization: confirm" in (
+        tmp_path / "strategies" / "paper" / "aapl-long.yaml").read_text()
+
+
+def test_regime_show_after_set_prints_the_recent_switch(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch, authorization="confirm")
+    assert main(["regime", "set", "auto", "--by", "Muse"]) == 0
+    capsys.readouterr()
+
+    code = main(["regime", "show"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Regime (paper): auto" in out
+    assert "Revision auto-apply: on (source: regime)" in out
+    assert "auto by Muse (flipped 1)" in out
+    assert "  none" not in out
+
+
+def test_regime_set_for_shadow_exits_1_with_the_error(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch)
+
+    code = main(["regime", "set", "auto", "--by", "Tian", "--account", "shadow"])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert captured.err.startswith("error: ")
+    assert "paper-only" in captured.err
+
+
+def test_regime_set_without_by_exits_2(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch)
+
+    code = main(["regime", "set", "human"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "error: --by is required for regime set" in captured.err
+
+
+def test_regime_set_without_value_exits_2(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch)
+
+    code = main(["regime", "set", "--by", "Tian"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "error: regime set needs a value (human or auto)" in captured.err
+
+
+def test_regime_show_reports_a_mismatch_after_a_hand_edit(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch, authorization="auto")
+    assert main(["regime", "set", "human", "--by", "Tian"]) == 0
+    capsys.readouterr()
+    path = tmp_path / "strategies" / "paper" / "aapl-long.yaml"
+    path.write_text(path.read_text().replace("authorization: confirm",
+                                             "authorization: auto"))
+
+    code = main(["regime", "show"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "MISMATCH: aapl-long is auto, regime expects confirm" in out

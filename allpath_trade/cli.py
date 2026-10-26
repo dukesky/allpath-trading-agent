@@ -234,6 +234,63 @@ def cmd_breaker(breaker, action: str) -> int:
     return 0
 
 
+def _print_regime_status(status) -> None:
+    if status.regime is None:
+        print(f"Regime ({status.account}): not set — falling back to "
+              f"{status.auto_apply_source}")
+    else:
+        print(f"Regime ({status.account}): {status.regime}")
+    print(f"Revision auto-apply: {'on' if status.auto_apply else 'off'} "
+          f"(source: {status.auto_apply_source})")
+    counts = " ".join(f"{k}={v}" for k, v in sorted(status.authorization_counts.items()))
+    print(f"Paper strategies (active): {counts}".rstrip())
+    if status.regime is not None:
+        from allpath_trade.regime import regime_authorization
+
+        expected = regime_authorization(status.regime).value
+        for sid in status.mismatches:
+            other = "auto" if expected == "confirm" else "confirm"
+            print(f"MISMATCH: {sid} is {other}, regime expects {expected}")
+    print("Recent switches:")
+    if not status.events:
+        print("  none")
+    for ev in status.events:
+        print(f"  {ev['ts']} {ev['regime']} by {ev['by']} "
+              f"(flipped {ev['strategies_flipped']}) {ev['note']}".rstrip())
+
+
+def cmd_regime(*, app_state, conn, strategies, settings: Settings, account: str,
+               action: str, regime: str | None = None, by: str | None = None,
+               note: str = "") -> int:
+    """`allpath-trade regime show|set`: the paper-study regime switch (see
+    regime.py). Needs no broker -- it reads/writes app_state, the
+    regime_events table, and the account's strategy store only."""
+    from allpath_trade.regime import RegimeError, regime_status, set_regime
+
+    if action == "show":
+        _print_regime_status(regime_status(
+            app_state=app_state, conn=conn, strategies=strategies,
+            settings=settings, account=account))
+        return 0
+    if regime is None:
+        print("error: regime set needs a value (human or auto)", file=sys.stderr)
+        return 2
+    if not by or not by.strip():
+        print("error: --by is required for regime set", file=sys.stderr)
+        return 2
+    try:
+        status = set_regime(app_state=app_state, conn=conn, strategies=strategies,
+                            settings=settings, account=account, regime=regime,
+                            by=by, note=note)
+    except RegimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    flipped = status.events[0]["strategies_flipped"] if status.events else 0
+    print(f"Regime set to {regime} by {by.strip()}; flipped {flipped} strategies.")
+    _print_regime_status(status)
+    return 0
+
+
 def _approve_needs_broker(settings: Settings, review_id: int, account: str) -> bool:
     """`reviews approve` on a strategy_revision row is pure file I/O -- no
     broker/executor is ever touched (see ReviewQueue._approve_revision:
@@ -603,12 +660,14 @@ examples:
   allpath-trade rearm aapl-long stop-loss        re-arm a triggered rule
   allpath-trade breaker status                   check the drawdown breaker
   allpath-trade breaker reset                    clear a tripped breaker
+  allpath-trade regime show                      show the paper-study regime
+  allpath-trade regime set human --by Tian       flip the paper study to human
   allpath-trade reviews approve 3                execute pending review #3
   allpath-trade memory show --layer stock --key AAPL
                                              read the agent's AAPL dossier
 
 keys live in .env (see .env.example). Read-only commands (strategies, rearm,
-reviews list/reject, memory show, breaker) work without any keys.
+reviews list/reject, memory show, breaker, regime) work without any keys.
 """
 
 
@@ -680,6 +739,21 @@ def main(argv: list[str] | None = None,
         help="status: show tripped/peak state. reset: clear tripped/peak "
              "state (strategies stay at confirm).")
     _add_account_arg(p_breaker)
+    p_regime = sub.add_parser(
+        "regime", help="paper-study regime: human or auto",
+        description="Show or flip the paper-study regime. 'human': nightly "
+                    "reflection revisions wait for approval and active "
+                    "strategies run at confirm. 'auto': revisions auto-apply "
+                    "and strategies run at auto. Paper account only. "
+                    "Example: allpath-trade regime set human --by Tian")
+    p_regime.add_argument("action", choices=["show", "set"],
+                          help="show: print the regime and its effects. "
+                               "set: switch the regime (needs a value and --by).")
+    p_regime.add_argument("value", nargs="?", choices=["human", "auto"],
+                          help="the regime to set (required for 'set')")
+    p_regime.add_argument("--by", help="who is flipping the regime (required for set)")
+    p_regime.add_argument("--note", default="", help="why (optional, recorded)")
+    _add_account_arg(p_regime)
     p_reviews = sub.add_parser(
         "reviews", help="approve/reject triggers awaiting review",
         description="Soft-rule triggers (and everything on confirm-level "
@@ -911,6 +985,20 @@ def main(argv: list[str] | None = None,
         breaker = DrawdownBreaker(app_state, store, settings.drawdown_halt_pct,
                                   account)
         return cmd_breaker(breaker, args.action)
+    if args.command == "regime":
+        from allpath_trade.store.app_state import AppState
+
+        # Like "breaker": no broker needed; `store` is already the selected
+        # account's StrategyStore. Use whichever conn/app_state is live.
+        if broker is not None:
+            regime_conn, regime_state = components.conn, components.app_state
+        else:
+            regime_conn = conn
+            regime_state = AppState(conn)
+        return cmd_regime(app_state=regime_state, conn=regime_conn,
+                          strategies=store, settings=settings, account=account,
+                          action=args.action, regime=args.value, by=args.by,
+                          note=args.note)
     if args.command == "reviews":
         return cmd_reviews(queue, args, store)
     if args.command == "chat":
