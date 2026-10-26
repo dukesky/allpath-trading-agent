@@ -269,3 +269,20 @@ def test_date_re_matches_only_ascii_digits():
     # `re.ASCII`, which would let a string that merely *looks* like
     # `YYYY-MM-DD` through this gate.
     assert _DATE_RE.match("٢٠٢٦-٠٨-١٧") is None
+
+
+def test_reports_page_shows_regime_mismatch_banner(client):
+    from allpath_trade.regime import regime_key
+    c = client.app.state.holder.get()
+    c.app_state.set(regime_key("paper"), "auto")
+    (c.strategies.directory / "drifted.yaml").write_text(
+        'name: "drifted"\nstatus: active\nauthorization: confirm\n'
+        "position: {ticker: AAPL, target_weight: 10%}\n"
+        'rules:\n  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}\n')
+    body = client.get("/reports").text
+    assert "Regime mismatch: drifted do not match the auto regime." in body
+    assert "Autonomous" in body
+
+
+def test_reports_page_has_no_banner_without_mismatch(client):
+    assert "Regime mismatch" not in client.get("/reports").text

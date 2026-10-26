@@ -2,6 +2,7 @@
 {% block title %}Reports · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Reports {% include "_account_chip.html" %}</h1>
+{% include "_regime_banner.html" %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
 <form method="get" action="/reports" class="row" style="gap:8px; margin-bottom:14px">

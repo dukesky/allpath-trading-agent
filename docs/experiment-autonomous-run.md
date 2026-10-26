@@ -344,3 +344,66 @@ snapshot. Re-arming a rule (the state flip back to armed) writes no
 - A rule that fired before this feature and later gets `rearm` added (for
   example by an auto-applied reflection revision) re-arms on the first
   market tick, because no fire was recorded for it before then.
+
+## 10. Paper-study regimes (from 2026-10-25)
+
+A **regime** is two switches flipped together, for the paper account:
+
+1. whether nightly reflection revisions auto-apply, and
+2. whether the active paper strategies trade on their own authority.
+
+| Regime | Reflection revisions | Strategy authorization |
+|---|---|---|
+| `human` | need approval | `confirm` (orders need approval) |
+| `auto` | auto-apply | `auto` (orders execute automatically) |
+
+The regime lives in the database (`app_state` key `regime:paper`), not in
+`.env`, and is read at the moment it is needed, so changing it needs no
+restart.
+
+**Commands**
+
+```bash
+allpath-trade regime show
+allpath-trade regime set human|auto --by NAME --note "why"
+```
+
+`show` prints the current regime, where the effective revision auto-apply
+value comes from, the authorization counts of active strategies, any
+mismatching strategies, and the last events. `set` is paper-only (shadow is
+refused: its orders are always advisory), requires `--by`, flips every active
+`auto`/`confirm` paper strategy to the regime's authorization, and records one
+event. Strategies whose authorization is `notify`, and paused/draft/archived
+ones, are left alone.
+
+**`regime_events` is the ground truth.** Every `regime set` appends one row
+(timestamp, account, regime, who, note, how many strategies were flipped).
+Rows are never edited or deleted, and the paper reads this table read-only to
+reconstruct which regime was in force at any time. Do not infer the regime
+from `.env` or from git history.
+
+**UI.** The nav shows a chip next to the account switcher (Human-gated /
+Autonomous / Regime not set on paper; Revisions: auto / Revisions: human on
+shadow). Pending and Reports show a warning banner when an active paper
+strategy's authorization does not match the regime, for example after the
+drawdown breaker demoted it. Re-run `regime set` to re-apply, or check the
+breaker first.
+
+**Rollout step.** After deploying, run once on the production host:
+
+```bash
+allpath-trade regime set human --by Tian --note "A' (started 2026-10-25 15:18 via .env flag)"
+```
+
+It flips nothing (every active paper strategy is already `confirm`) and
+records the anchor event. Then rewrite the `.env` comment for the flag to say
+the paper regime lives in the database and is changed only with
+`allpath-trade regime set`.
+
+**Fallback flag.** `EXPERIMENT_AUTO_APPLY_REVISIONS` in `.env` is now only a
+fallback: it applies to an account that has never had a regime set. Once a
+regime exists it wins, and editing the flag changes nothing for that account.
+
+**Shadow.** Shadow has no regime. Its revision auto-apply follows
+`SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS` when that is set, else the global
+flag above. Leave it unset to inherit, or pin it explicitly.

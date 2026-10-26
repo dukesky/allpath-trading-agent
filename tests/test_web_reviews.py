@@ -1312,3 +1312,83 @@ def test_resolved_option_order_failure_renders_error(client, monkeypatch):
     r = client.post(f"/reviews/{rid}/approve", follow_redirects=True)
     assert "execution failed" in r.text and "quote down" in r.text
 
+
+
+# ---- regime chip + mismatch banner (regime-switch T4) ----
+
+def _write_active_strategy(client, sid, authorization):
+    c = client.app.state.holder.get()
+    (c.strategies.directory / f"{sid}.yaml").write_text(
+        f'name: "{sid}"\nstatus: active\nauthorization: {authorization}\n'
+        "position: {ticker: AAPL, target_weight: 10%}\n"
+        'rules:\n  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}\n')
+
+
+def _set_regime_value(client, account, value):
+    from allpath_trade.regime import regime_key
+    client.app.state.holder.get().app_state.set(regime_key(account), value)
+
+
+def test_regime_chip_paper_human(client):
+    _set_regime_value(client, "paper", "human")
+    body = client.get("/reviews").text
+    assert 'chip regime-chip' in body
+    assert "Human-gated" in body
+    assert "Reflection revisions and orders need approval" in body
+
+
+def test_regime_chip_paper_auto(client):
+    _set_regime_value(client, "paper", "auto")
+    body = client.get("/reviews").text
+    assert "Autonomous" in body
+    assert "Reflection revisions auto-apply; orders execute automatically" in body
+
+
+def test_regime_chip_paper_unset(client):
+    body = client.get("/reviews").text
+    assert "Regime not set" in body
+    assert "No paper-study regime set; revisions follow the fallback flag" in body
+
+
+def test_regime_chip_shadow_follows_effective_flag(client):
+    client.cookies.set("account", "shadow")
+    assert "Revisions: human" in client.get("/reviews").text
+    c = client.app.state.holder.get()
+    c.settings.shadow_experiment_auto_apply_revisions = True
+    assert "Revisions: auto" in client.get("/reviews").text
+
+
+def test_regime_chip_absent_when_status_raises(client, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(dashboard_route, "regime_status", boom)
+    r = client.get("/reviews")
+    assert r.status_code == 200
+    assert "regime-chip" not in r.text
+    assert "Regime mismatch" not in r.text
+
+
+def test_mismatch_banner_shown_for_mismatched_active_strategy(client):
+    _set_regime_value(client, "paper", "human")
+    _write_active_strategy(client, "drifted", "auto")
+    body = client.get("/reviews").text
+    assert "Regime mismatch: drifted do not match the human regime." in body
+    assert "allpath-trade regime set" in body
+
+
+def test_mismatch_banner_absent_when_strategies_match(client):
+    _set_regime_value(client, "paper", "human")
+    _write_active_strategy(client, "fine", "confirm")
+    assert "Regime mismatch" not in client.get("/reviews").text
+
+
+def test_mismatch_banner_absent_when_regime_unset(client):
+    _write_active_strategy(client, "any", "auto")
+    assert "Regime mismatch" not in client.get("/reviews").text
+
+
+def test_mismatch_banner_never_on_shadow(client):
+    _set_regime_value(client, "paper", "human")
+    _write_active_strategy(client, "drifted", "auto")
+    client.cookies.set("account", "shadow")
+    assert "Regime mismatch" not in client.get("/reviews").text

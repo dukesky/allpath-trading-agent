@@ -2,6 +2,25 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Paper-study regimes — 2026-10-25
+
+- **A regime is two switches flipped together**: whether nightly reflection
+  revisions auto-apply, and whether the paper strategies trade on their own
+  authority (`auto`) or need approval (`human`, i.e. `confirm`). It lives in
+  the database (`app_state` key `regime:paper`), is read at the moment it is
+  needed (no restart), and every change is appended to the `regime_events`
+  table. New CLI: `allpath-trade regime show` and `allpath-trade regime set
+  human|auto --by NAME --note ...` (paper only; shadow is refused).
+  `EXPERIMENT_AUTO_APPLY_REVISIONS` is now only the fallback for an account
+  that has never had a regime set. The applier also corrects a chat-drafted
+  strategy's authorization to the regime.
+- **Visible in the UI**: a muted chip in the nav next to the account
+  switcher ("Human-gated" / "Autonomous" / "Regime not set" on paper,
+  "Revisions: auto" / "Revisions: human" on shadow, with a tooltip), and a
+  warning banner on Pending and Reports when an active paper strategy's
+  authorization does not match the regime. The chip can never break a page:
+  on any error it is omitted.
+
 ## Latest models — 2026-10-03
 
 - **Default models moved to the current generation**: `CHAT_MODEL`

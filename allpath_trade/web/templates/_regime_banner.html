@@ -1,0 +1,7 @@
+{# regime-switch T4: shown on the pages where authorization matters (Pending,
+   Reports) when an active paper strategy's authorization disagrees with the
+   regime -- e.g. the drawdown breaker demoted it. `regime_mismatches` is
+   empty off paper and whenever nothing mismatches. #}
+{% if regime_mismatches %}
+<p class="regime-banner">Regime mismatch: {{ regime_mismatches | join(', ') }} do not match the {{ regime_name }} regime. Run <code>allpath-trade regime set</code> to re-apply, or check the drawdown breaker.</p>
+{% endif %}

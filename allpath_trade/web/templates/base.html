@@ -26,6 +26,10 @@
       <button type="submit" name="account" value="shadow"
               class="acct-shadow{{ ' on' if current_account == 'shadow' }}">SHADOW{% if other_account == 'shadow' and other_account_pending %}<span class="dot"></span>{% endif %}</button>
     </form>
+    {# regime-switch T4: the paper study's regime (or, on shadow, the
+       revision auto-apply setting) -- muted chip, tooltip carries the
+       definition. Omitted when nav_context could not compute it. #}
+    {% if regime_chip %}<span class="chip regime-chip" title="{{ regime_title }}">{{ regime_chip }}</span>{% endif %}
   </nav>
   {# setup-wizard T2: only ever rendered for someone who chose "skip for
      now" in the wizard -- anyone who hasn't is redirected to /setup before

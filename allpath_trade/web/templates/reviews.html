@@ -2,6 +2,7 @@
 {% block title %}Pending · AllPath Trade{% endblock %}
 {% block content %}
 <h1>Pending {% include "_account_chip.html" %}</h1>
+{% include "_regime_banner.html" %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if notice %}<p class="flash-ok">{{ notice }}</p>{% endif %}
 {% for item in items %}{% include "_review_card.html" %}{% else %}

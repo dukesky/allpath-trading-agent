@@ -105,6 +105,15 @@ main a:not(.card):not(.tab-link):hover { text-decoration:underline; }
 .chip-paper { border-color:var(--accent); color:var(--accent); }
 .chip-shadow { border-color:var(--warn); color:var(--warn-ink); }
 
+/* regime-switch T4: the paper study regime chip in the nav -- the neutral
+   .chip look on purpose (it is a standing fact, not an alert), nudged right
+   of the switcher. The mismatch banner IS an alert -- amber tokens, same
+   family as .badge/.warn -- and sits at the top of Pending and Reports. */
+.regime-chip { margin-left:8px; cursor:help; white-space:nowrap; }
+.regime-banner { margin:0 0 14px; padding:9px 12px; font-size:13px;
+  color:var(--warn-ink); background:var(--warn-soft);
+  border:1px solid var(--warn); border-radius:8px; }
+
 /* The global account switcher, nav-right (spec §⑥: "顶部全局切换器"). A
    single <form> with two submit buttons sharing one name/differing
    `value` -- the browser sends whichever button was clicked, no JS

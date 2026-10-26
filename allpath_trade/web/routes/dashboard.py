@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import re
+import sys
 import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -13,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from allpath_trade.broker.base import Broker, Position
 from allpath_trade.broker.unconfigured import UnconfiguredBroker
 from allpath_trade.data.base import DataSource, Quote
+from allpath_trade.regime import regime_status
 from allpath_trade.scheduler import is_market_hours, today_et_date
 from allpath_trade.store.accounts import ACCOUNTS
 from allpath_trade.store.app_state import (
@@ -81,7 +83,12 @@ def nav_context(request: Request) -> dict:
     # Suppressed on the wizard's own pages, where a banner pointing at the
     # page you are already on is just noise.
     missing = setup_missing(c.settings)
+    chip, title, mismatches, regime_name = _regime_nav(c, current)
     return {
+        "regime_chip": chip,
+        "regime_title": title,
+        "regime_mismatches": mismatches,
+        "regime_name": regime_name,
         "pending_count": pending_count,
         "current_account": current,
         "other_account": other,
@@ -89,6 +96,39 @@ def nav_context(request: Request) -> dict:
         "setup_missing": missing,
         "setup_banner": bool(missing) and not _is_setup_path(request.url.path),
     }
+
+
+_REGIME_CHIPS = {
+    "human": ("Human-gated", "Reflection revisions and orders need approval"),
+    "auto": ("Autonomous",
+             "Reflection revisions auto-apply; orders execute automatically"),
+    None: ("Regime not set",
+           "No paper-study regime set; revisions follow the fallback flag"),
+}
+
+
+def _regime_nav(c, account: str) -> tuple[str | None, str, list[str], str | None]:
+    """The nav's regime chip text, its tooltip, and (paper only) the ids of
+    active strategies whose authorization disagrees with the regime, and the
+    regime's name (for the banner). Every
+    page render goes through nav_context, so this must never raise: on any
+    failure the chip is simply omitted and one stderr line says why."""
+    try:
+        b = bundle_for(c, account)
+        status = regime_status(app_state=c.app_state, conn=b.conn,
+                               strategies=b.strategies, settings=c.settings,
+                               account=account)
+        if account == "paper":
+            chip, title = _REGIME_CHIPS[status.regime]
+            return chip, title, list(status.mismatches), status.regime
+        if status.auto_apply:
+            return ("Revisions: auto",
+                    "Reflection revisions auto-apply to the shadow account", [], None)
+        return ("Revisions: human",
+                "Reflection revisions to the shadow account need approval", [], None)
+    except Exception as exc:  # noqa: BLE001 — a chip failure must never break a page
+        print(f"[nav] regime chip unavailable: {exc}", file=sys.stderr)
+        return None, "", [], None
 
 
 def _is_setup_path(path: str) -> bool:
