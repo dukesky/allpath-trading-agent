@@ -575,7 +575,19 @@ class Reflector:
         # between the report write and this call just leaves the row
         # pending for a human, same as today.
         if auto_apply and proposed_rids:
-            self._auto_apply_revisions(proposed_rids)
+            # I4 (regime-switch final review): re-read the effective flag
+            # right before approving -- the run can take many minutes, and a
+            # `regime set human` issued meanwhile must win. Still auto: apply.
+            # Not any more: leave this run's rows pending and say why.
+            if effective_auto_apply(AppState(c.conn), self.settings, c.account):
+                self._auto_apply_revisions(proposed_rids)
+            else:
+                c.observations.add(
+                    "reflection_auto_apply",
+                    f"revision(s) {', '.join(f'#{rid}' for rid in proposed_rids)} "
+                    "NOT auto-applied: revision auto-apply was switched off "
+                    "during the run (regime changed); left pending for human "
+                    "review")
         if self.notifier is not None:
             # Only a stored "ok" report notifies -- a "failed" one (LLM
             # down, or unparseable output twice, see _fail) does NOT push:

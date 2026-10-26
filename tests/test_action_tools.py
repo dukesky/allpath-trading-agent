@@ -509,3 +509,27 @@ def test_order_sink_takes_precedence_over_confirm(tmp_path):
         "ticker": "AAPL", "side": "buy", "notional": "500", "reason": "test"}))
     assert "#3" in out
     assert calls[0].ticker == "AAPL"
+
+
+# --- regime follow on the terminal (no-queue) path: final review I1 ---------
+
+_AUTO_ACTIVE = GOOD.replace("status: draft", "status: active\nauthorization: auto")
+
+
+def test_draft_strategy_terminal_save_follows_regime_human(tmp_path):
+    from allpath_trade.store.app_state import AppState
+    reg, store, _, _ = make(tmp_path, answers=[True])
+    AppState(store._conn).set("regime:paper", "human")
+    out = call(reg, "draft_strategy", strategy_id="new", yaml_text=_AUTO_ACTIVE,
+               reason="init")
+    assert "saved new v1" in out
+    assert store.load("new").authorization.value == "confirm"
+    reasons = [v["reason"] for v in store.versions("new")]
+    assert reasons == ["follows regime human", "init"]
+
+
+def test_draft_strategy_terminal_save_without_regime_keeps_auto(tmp_path):
+    reg, store, _, _ = make(tmp_path, answers=[True])
+    call(reg, "draft_strategy", strategy_id="new", yaml_text=_AUTO_ACTIVE, reason="init")
+    assert store.load("new").authorization.value == "auto"
+    assert len(store.versions("new")) == 1

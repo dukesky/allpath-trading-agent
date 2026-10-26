@@ -666,3 +666,37 @@ def test_detail_page_pending_proposal_line_is_english_only(client):
         strategy_id="semis", ticker="AAPL", old_yaml=text, new_yaml=text,
         diff="d", rationale="tighten stop", source="chat")
     assert_english_only(client.get("/strategies/semis").text)
+
+
+# --- regime follow on activation (regime-switch final review C2) -------------
+
+@pytest.mark.parametrize("from_status", ["paused", "draft"])
+def test_activating_an_auto_strategy_under_regime_human_lands_confirm(client, from_status):
+    _write_strategy_with_status(client, "sleeper", from_status,
+                                extra="authorization: auto\n")
+    c = client.app.state.holder.get()
+    c.app_state.set("regime:paper", "human")
+    r = client.post("/strategies/sleeper/status", data={"to": "active"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    doc = c.strategies.load("sleeper")
+    assert doc.status.value == "active"
+    assert doc.authorization.value == "confirm"
+    assert c.strategies.versions("sleeper")[0]["reason"] == "follows regime human"
+
+
+def test_activating_an_auto_strategy_without_regime_stays_auto(client):
+    _write_strategy_with_status(client, "sleeper", "paused",
+                                extra="authorization: auto\n")
+    client.post("/strategies/sleeper/status", data={"to": "active"})
+    c = client.app.state.holder.get()
+    assert c.strategies.load("sleeper").authorization.value == "auto"
+
+
+def test_pausing_under_regime_human_does_not_touch_authorization(client):
+    _write_strategy_with_status(client, "awake", "active",
+                                extra="authorization: auto\n")
+    c = client.app.state.holder.get()
+    c.app_state.set("regime:paper", "human")
+    client.post("/strategies/awake/status", data={"to": "paused"})
+    assert c.strategies.load("awake").authorization.value == "auto"

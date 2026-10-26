@@ -6,8 +6,10 @@ from allpath_trade.config import Settings
 from allpath_trade.regime import (
     RegimeError,
     effective_auto_apply,
+    follow_regime,
     get_regime,
     regime_authorization,
+    regime_demands_confirm,
     regime_key,
     regime_status,
     set_regime,
@@ -93,28 +95,42 @@ def test_precedence_regime_wins_over_both(env):
     assert effective_auto_apply(app_state, on, "paper") is False
     app_state.set(regime_key("paper"), "auto")
     assert effective_auto_apply(app_state, _settings(), "paper") is True
-    # a regime stored for shadow (e.g. by hand) still wins for shadow
+
+
+def test_shadow_ignores_a_stored_shadow_regime(env):
+    # M3: `regime set` refuses shadow, so no event could ever back a
+    # `regime:shadow` value -- a hand-written one is ignored; shadow follows
+    # the shadow setting, else the global flag.
+    _, app_state, _ = env
     app_state.set(regime_key("shadow"), "auto")
-    assert effective_auto_apply(app_state, _settings(), "shadow") is True
+    assert effective_auto_apply(app_state, _settings(), "shadow") is False
+    app_state.set(regime_key("shadow"), "human")
+    assert effective_auto_apply(
+        app_state, _settings(shadow_experiment_auto_apply_revisions=True), "shadow") is True
+    assert effective_auto_apply(
+        app_state, _settings(experiment_auto_apply_revisions=True), "shadow") is True
 
 
-def test_set_human_flips_only_active_auto_to_confirm(env):
+def test_set_human_flips_every_non_archived_auto_to_confirm(env):
+    # C2: paused and draft strategies flip too -- one resumed via the web in
+    # a human month must not come back trading at auto. Archived and notify
+    # strategies are never touched.
     _, app_state, strategies = env
     status = _set(env, "human")
     assert get_regime(app_state, "paper") == "human"
-    assert _auth(strategies, "a_auto") == Authorization.CONFIRM
-    assert _auth(strategies, "b_confirm") == Authorization.CONFIRM
+    for sid in ("a_auto", "b_confirm", "d_paused", "e_draft"):
+        assert _auth(strategies, sid) == Authorization.CONFIRM
     assert _auth(strategies, "c_notify") == Authorization.NOTIFY
-    for sid in ("d_paused", "e_draft", "f_archived"):
-        assert _auth(strategies, sid) == Authorization.AUTO
+    assert _auth(strategies, "f_archived") == Authorization.AUTO
     assert status.regime == "human"
+    assert status.invalid_value is None
     assert status.auto_apply is False
     assert status.auto_apply_source == "regime"
     assert status.mismatches == []
-    assert status.authorization_counts == {"confirm": 2, "notify": 1}
+    assert status.authorization_counts == {"confirm": 4, "notify": 1}
     assert len(status.events) == 1
     ev = status.events[0]
-    assert ev["strategies_flipped"] == 1
+    assert ev["strategies_flipped"] == 3
     assert (ev["account"], ev["regime"], ev["by"]) == ("paper", "human", "Tian")
     assert ev["ts"].endswith("+00:00")
     rows = strategies.versions("a_auto")
@@ -136,7 +152,7 @@ def test_second_identical_call_flips_zero_and_still_logs(env):
     assert len(status.events) == 2
     assert status.events[0]["strategies_flipped"] == 0
     assert status.events[0]["note"] == "again"
-    assert status.events[1]["strategies_flipped"] == 1
+    assert status.events[1]["strategies_flipped"] == 3
 
 
 def test_shadow_is_refused(env):
@@ -161,8 +177,8 @@ def test_status_reports_mismatch(env):
     app_state.set(regime_key("paper"), "human")
     status = regime_status(app_state=app_state, conn=conn, strategies=strategies,
                            settings=_settings(), account="paper")
-    assert status.mismatches == ["a_auto"]
-    assert status.authorization_counts == {"auto": 1, "confirm": 1, "notify": 1}
+    assert status.mismatches == ["a_auto", "d_paused", "e_draft"]
+    assert status.authorization_counts == {"auto": 3, "confirm": 1, "notify": 1}
 
 
 def test_status_without_regime_shows_fallback_source(env):
@@ -189,3 +205,134 @@ def test_events_newest_first_capped_at_ten_and_account_filtered(env):
     assert status.events[0]["note"] == "last"
     assert status.events[1]["note"] == "n11"
     assert all(e["account"] == "paper" for e in status.events)
+
+
+# --- C1: promotion only by an explicit `regime set auto`, never while the
+# drawdown breaker is tripped -------------------------------------------------
+
+def _versions_total(conn) -> int:
+    return conn.execute("SELECT COUNT(*) AS n FROM strategy_versions").fetchone()["n"]
+
+
+def test_set_auto_refused_while_breaker_tripped_writes_nothing(env):
+    conn, app_state, strategies = env
+    _set(env, "human")
+    app_state.set("drawdown_tripped:paper", "2026-10-25T14:00:00+00:00")
+    before_versions = _versions_total(conn)
+    with pytest.raises(RegimeError, match="breaker is tripped"):
+        _set(env, "auto")
+    assert get_regime(app_state, "paper") == "human"
+    assert conn.execute("SELECT COUNT(*) AS n FROM regime_events").fetchone()["n"] == 1
+    assert _versions_total(conn) == before_versions
+    assert _auth(strategies, "b_confirm") == Authorization.CONFIRM
+
+
+def test_set_auto_refusal_message_names_the_reset_command(env):
+    _, app_state, _ = env
+    app_state.set("drawdown_tripped:paper", "2026-10-25T14:00:00+00:00")
+    with pytest.raises(RegimeError) as exc:
+        _set(env, "auto")
+    assert str(exc.value) == (
+        "the paper drawdown breaker is tripped — reset it first "
+        "(allpath-trade breaker reset)")
+    assert get_regime(app_state, "paper") is None
+
+
+def test_set_human_allowed_while_breaker_tripped(env):
+    _, app_state, _ = env
+    app_state.set("drawdown_tripped:paper", "2026-10-25T14:00:00+00:00")
+    assert _set(env, "human").regime == "human"
+
+
+# --- I2: the regime value and its event land together -----------------------
+
+def test_event_insert_failure_leaves_regime_value_unchanged(env):
+    conn, app_state, _ = env
+    _set(env, "human")
+    conn.execute("DROP TABLE regime_events")
+    conn.commit()
+    with pytest.raises(RegimeError, match="could not record"):
+        _set(env, "auto")
+    assert app_state.get(regime_key("paper")) == "human"
+
+
+def test_event_insert_failure_on_first_set_leaves_regime_unset(env):
+    conn, app_state, _ = env
+    conn.execute("DROP TABLE regime_events")
+    conn.commit()
+    with pytest.raises(RegimeError):
+        _set(env, "human")
+    assert app_state.get(regime_key("paper")) is None
+
+
+# --- I3: a stored value that is not exactly human/auto fails safe -----------
+
+@pytest.mark.parametrize("bad", ["Human", "AUTO", "", "on", " auto"])
+def test_invalid_stored_value_is_treated_as_human_for_auto_apply(env, bad):
+    conn, app_state, strategies = env
+    app_state.set(regime_key("paper"), bad)
+    on = _settings(experiment_auto_apply_revisions=True)
+    assert effective_auto_apply(app_state, on, "paper") is False
+    assert regime_demands_confirm(app_state, "paper") is True
+    status = regime_status(app_state=app_state, conn=conn, strategies=strategies,
+                           settings=on, account="paper")
+    assert status.regime is None
+    assert status.invalid_value == bad
+    assert status.auto_apply is False
+    assert "invalid" in status.auto_apply_source
+
+
+def test_regime_demands_confirm_only_for_paper_human_or_invalid(env):
+    _, app_state, _ = env
+    assert regime_demands_confirm(app_state, "paper") is False
+    app_state.set(regime_key("paper"), "auto")
+    assert regime_demands_confirm(app_state, "paper") is False
+    app_state.set(regime_key("paper"), "human")
+    assert regime_demands_confirm(app_state, "paper") is True
+    app_state.set(regime_key("shadow"), "human")
+    assert regime_demands_confirm(app_state, "shadow") is False
+
+
+# --- follow_regime: the demote-only correction shared by every writer -------
+
+def test_follow_regime_demotes_auto_under_human(env):
+    _, app_state, strategies = env
+    app_state.set(regime_key("paper"), "human")
+    assert follow_regime(strategies, "a_auto") is True
+    assert _auth(strategies, "a_auto") == Authorization.CONFIRM
+    assert strategies.versions("a_auto")[0]["reason"] == "follows regime human"
+
+
+def test_follow_regime_never_promotes_under_auto(env):
+    _, app_state, strategies = env
+    app_state.set(regime_key("paper"), "auto")
+    assert follow_regime(strategies, "b_confirm") is False
+    assert _auth(strategies, "b_confirm") == Authorization.CONFIRM
+    assert strategies.versions("b_confirm") == []
+
+
+def test_follow_regime_is_a_noop_without_regime_and_for_notify(env):
+    _, app_state, strategies = env
+    assert follow_regime(strategies, "a_auto") is False
+    assert _auth(strategies, "a_auto") == Authorization.AUTO
+    app_state.set(regime_key("paper"), "human")
+    assert follow_regime(strategies, "c_notify") is False
+    assert follow_regime(strategies, "b_confirm") is False
+    assert _auth(strategies, "c_notify") == Authorization.NOTIFY
+
+
+def test_follow_regime_demotes_under_an_invalid_value(env):
+    _, app_state, strategies = env
+    app_state.set(regime_key("paper"), "garbage")
+    assert follow_regime(strategies, "a_auto") is True
+    assert _auth(strategies, "a_auto") == Authorization.CONFIRM
+
+
+def test_follow_regime_never_touches_a_shadow_store(tmp_path):
+    (tmp_path / "s.yaml").write_text(_yaml("s", "active", "auto"))
+    conn = connect(tmp_path / "t.db")
+    store = StrategyStore(tmp_path, conn, account="shadow")
+    AppState(conn).set(regime_key("paper"), "human")
+    AppState(conn).set(regime_key("shadow"), "human")
+    assert follow_regime(store, "s") is False
+    assert store.load("s").authorization == Authorization.AUTO

@@ -392,12 +392,45 @@ def test_regime_never_touches_notify(tmp_path):
     assert len(store.versions("new-one")) == 1
 
 
-def test_regime_auto_corrects_chat_confirm_draft_to_auto(tmp_path):
+def test_regime_auto_never_promotes_a_chat_confirm_draft(tmp_path):
+    # C1: the automatic correction is demote-only. Promotion to auto happens
+    # only through an explicit `regime set auto`.
     store, _ = make(tmp_path)
     AppState(store._conn).set("regime:paper", "auto")
     apply_revision_factory(store)("new-one", _draft("confirm"), "", "chat", is_new=True)
-    assert _authorization_on_disk(store, "new-one") == "auto"
-    assert "regime auto" in store.versions("new-one")[0]["reason"]
+    assert _authorization_on_disk(store, "new-one") == "confirm"
+    assert len(store.versions("new-one")) == 1
+
+
+def test_breaker_demotion_survives_a_reflection_revision_under_regime_auto(tmp_path):
+    # C1: regime auto -> the drawdown breaker trips and demotes the strategy
+    # to confirm -> that night's reflection revision of it is applied. The
+    # kill switch must hold: the strategy stays confirm.
+    from decimal import Decimal
+
+    import yaml
+
+    from allpath_trade.risk.breaker import DrawdownBreaker
+
+    store, _ = make(tmp_path)
+    path = store.directory / "s1.yaml"
+    path.write_text(CURRENT.replace("status: active", "status: active\nauthorization: auto"))
+    app_state = AppState(store._conn)
+    app_state.set("regime:paper", "auto")
+    breaker = DrawdownBreaker(app_state, store, Decimal("0.10"), "paper")
+    assert breaker.check(Decimal(100000)) is None
+    assert breaker.check(Decimal(80000)) is not None
+    assert _authorization_on_disk(store, "s1") == "confirm"
+
+    base = path.read_text()
+    revised = yaml.safe_load(base)
+    revised["version"] += 1
+    revised["position"]["target_weight"] = "10%"
+    new_yaml = yaml.safe_dump(revised, sort_keys=False)
+    apply_revision_factory(store)("s1", new_yaml, base, "reflection")
+
+    assert _authorization_on_disk(store, "s1") == "confirm"
+    assert store.load("s1").position.target_weight == Decimal("0.10")
 
 
 def test_regime_already_matching_writes_no_correction(tmp_path):

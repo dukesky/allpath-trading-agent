@@ -235,7 +235,12 @@ def cmd_breaker(breaker, action: str) -> int:
 
 
 def _print_regime_status(status) -> None:
-    if status.regime is None:
+    if status.invalid_value is not None:
+        print(f"WARNING: invalid stored regime value '{status.invalid_value}' "
+              "— treating as human")
+        print(f"Regime ({status.account}): invalid — treated as human; fix it "
+              "with `allpath-trade regime set`")
+    elif status.regime is None:
         print(f"Regime ({status.account}): not set — falling back to "
               f"{status.auto_apply_source}")
     else:
@@ -243,7 +248,8 @@ def _print_regime_status(status) -> None:
     print(f"Revision auto-apply: {'on' if status.auto_apply else 'off'} "
           f"(source: {status.auto_apply_source})")
     counts = " ".join(f"{k}={v}" for k, v in sorted(status.authorization_counts.items()))
-    print(f"Paper strategies (active): {counts}".rstrip())
+    label = status.account.capitalize()
+    print(f"{label} strategies (non-archived): {counts}".rstrip())
     if status.regime is not None:
         from allpath_trade.regime import regime_authorization
 
@@ -251,6 +257,9 @@ def _print_regime_status(status) -> None:
         for sid in status.mismatches:
             other = "auto" if expected == "confirm" else "confirm"
             print(f"MISMATCH: {sid} is {other}, regime expects {expected}")
+        if status.mismatches:
+            print("Check the drawdown breaker first (allpath-trade breaker "
+                  "status), then re-run `allpath-trade regime set`.")
     print("Recent switches:")
     if not status.events:
         print("  none")
@@ -268,6 +277,9 @@ def cmd_regime(*, app_state, conn, strategies, settings: Settings, account: str,
     from allpath_trade.regime import RegimeError, regime_status, set_regime
 
     if action == "show":
+        if regime is not None:
+            print("error: value is only for set", file=sys.stderr)
+            return 2
         _print_regime_status(regime_status(
             app_state=app_state, conn=conn, strategies=strategies,
             settings=settings, account=account))
@@ -742,9 +754,10 @@ def main(argv: list[str] | None = None,
     p_regime = sub.add_parser(
         "regime", help="paper-study regime: human or auto",
         description="Show or flip the paper-study regime. 'human': nightly "
-                    "reflection revisions wait for approval and active "
+                    "reflection revisions wait for approval and non-archived "
                     "strategies run at confirm. 'auto': revisions auto-apply "
-                    "and strategies run at auto. Paper account only. "
+                    "and strategies run at auto ('set auto' refuses while the "
+                    "drawdown breaker is tripped). Paper account only. "
                     "Example: allpath-trade regime set human --by Tian")
     p_regime.add_argument("action", choices=["show", "set"],
                           help="show: print the regime and its effects. "

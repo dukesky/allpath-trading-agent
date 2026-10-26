@@ -6,6 +6,7 @@ import yaml
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
+from allpath_trade.regime import follow_regime
 from allpath_trade.strategy.loader import (
     atomic_write_text,
     is_valid_strategy_id,
@@ -237,6 +238,12 @@ def change_status(request: Request, strategy_id: str, to: str = Form("")) -> Res
                               allow_unicode=True)
     atomic_write_text(path, new_text)
     c.strategies.snapshot_version(updated, f"status changed to {target.value} via web")
+    if target == StrategyStatus.ACTIVE:
+        # Regime follow (final review C2): activating or resuming an
+        # `authorization: auto` paper strategy in a human month must not
+        # bring it back trading on its own authority. Demote-only; a no-op
+        # with no regime set, on shadow, or for confirm/notify.
+        follow_regime(c.strategies, strategy_id)
     return RedirectResponse(f"/strategies/{strategy_id}", status_code=303)
 
 

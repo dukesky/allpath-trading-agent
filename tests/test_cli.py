@@ -1005,7 +1005,7 @@ def test_regime_show_with_no_regime_set(tmp_path, capsys, monkeypatch):
     assert "Regime (paper): not set — falling back to global flag" in out
     assert "Revision auto-apply: " in out
     assert "(source: global flag)" in out
-    assert "Paper strategies (active): auto=1" in out
+    assert "Paper strategies (non-archived): auto=1" in out
     assert "Recent switches:" in out
     assert "  none" in out
     assert "MISMATCH" not in out
@@ -1087,3 +1087,60 @@ def test_regime_show_reports_a_mismatch_after_a_hand_edit(tmp_path, capsys, monk
 
     assert code == 0
     assert "MISMATCH: aapl-long is auto, regime expects confirm" in out
+
+
+def test_regime_show_with_a_value_exits_2(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch)
+
+    code = main(["regime", "show", "human"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "error: value is only for set" in captured.err
+
+
+def test_regime_show_warns_on_an_invalid_stored_value(tmp_path, capsys, monkeypatch):
+    from allpath_trade.store.app_state import AppState
+    from allpath_trade.store.db import connect
+
+    _regime_cwd(tmp_path, monkeypatch)
+    conn = connect(tmp_path / "allpath-trade.db")
+    AppState(conn).set("regime:paper", "Auto")
+    conn.close()
+
+    code = main(["regime", "show"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "WARNING: invalid stored regime value 'Auto' — treating as human" in out
+    assert "Revision auto-apply: off" in out
+
+
+def test_regime_set_auto_refused_while_breaker_tripped(tmp_path, capsys, monkeypatch):
+    from allpath_trade.store.app_state import AppState
+    from allpath_trade.store.db import connect
+
+    _regime_cwd(tmp_path, monkeypatch, authorization="confirm")
+    conn = connect(tmp_path / "allpath-trade.db")
+    AppState(conn).set("drawdown_tripped:paper", "2026-10-25T14:00:00+00:00")
+    conn.close()
+
+    code = main(["regime", "set", "auto", "--by", "Tian"])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "breaker is tripped" in captured.err
+    assert "allpath-trade breaker reset" in captured.err
+    assert "authorization: confirm" in (
+        tmp_path / "strategies" / "paper" / "aapl-long.yaml").read_text()
+
+
+def test_regime_show_for_shadow_labels_shadow_strategies(tmp_path, capsys, monkeypatch):
+    _regime_cwd(tmp_path, monkeypatch)
+
+    code = main(["regime", "show", "--account", "shadow"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Shadow strategies (non-archived):" in out
+    assert "Paper strategies" not in out

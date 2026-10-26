@@ -1,7 +1,10 @@
-{# regime-switch T4: shown on the pages where authorization matters (Pending,
-   Reports) when an active paper strategy's authorization disagrees with the
-   regime -- e.g. the drawdown breaker demoted it. `regime_mismatches` is
-   empty off paper and whenever nothing mismatches. #}
+{# regime-switch T4: shown on the pages where authorization matters
+   (Dashboard, Pending, Reports) when a non-archived paper strategy's
+   authorization disagrees with the regime -- e.g. the drawdown breaker
+   demoted it, or (regime auto) a confirm strategy that the demote-only
+   correction never promotes. `regime_mismatches` is empty off paper and
+   whenever nothing mismatches. Check the breaker FIRST: `regime set auto`
+   refuses while it is tripped. #}
 {% if regime_mismatches %}
-<p class="regime-banner">Regime mismatch: {{ regime_mismatches | join(', ') }} do not match the {{ regime_name }} regime. Run <code>allpath-trade regime set</code> to re-apply, or check the drawdown breaker.</p>
+<p class="regime-banner">Regime mismatch: {{ regime_mismatches | join(', ') }} do not match the {{ regime_name }} regime. Check the drawdown breaker first (<code>allpath-trade breaker status</code>), then re-run <code>allpath-trade regime set</code>.</p>
 {% endif %}

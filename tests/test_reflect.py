@@ -1050,6 +1050,36 @@ def test_human_regime_blocks_auto_apply_despite_global_flag(tmp_path):
     assert row["status"] == "pending"
 
 
+def test_regime_flipped_to_human_mid_run_blocks_auto_apply(tmp_path):
+    # I4: the run starts under regime auto (so it collects its proposals),
+    # but the regime flips to human before the auto-approve step. The flag
+    # is re-read right before approving: nothing is applied, the row stays
+    # pending, and an observation says why.
+    components = make_components(tmp_path)
+    components.queue.set_revision_applier(apply_revision_factory(components.strategies))
+    app_state = AppState(components.conn)
+    app_state.set("regime:paper", "auto")
+
+    class FlipsMidRun(ScriptedLLM):
+        def complete(self, messages, tools=None):
+            if len(self.responses) == 1:  # the final report turn
+                app_state.set("regime:paper", "human")
+            return super().complete(messages, tools)
+
+    llm = FlipsMidRun(_scripted_propose_then_report().responses)
+    r = Reflector(llm=llm, components=components,
+                  settings=make_settings(experiment_auto_apply_revisions=True),
+                  notifier=None)
+
+    assert r.run_daily(NOW).startswith("ok:")
+
+    (row,) = _revision_rows(components)
+    assert row["status"] == "pending"
+    assert "version: 2" not in (components.strategies.directory / "t.yaml").read_text()
+    texts = [o["text"] for o in components.observations.recent()]
+    assert any("NOT auto-applied" in t and "regime changed" in t for t in texts)
+
+
 def test_auto_apply_off_leaves_row_pending(tmp_path):
     components = make_components(tmp_path)
     settings = make_settings(experiment_auto_apply_revisions=False)

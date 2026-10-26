@@ -1392,3 +1392,38 @@ def test_mismatch_banner_never_on_shadow(client):
     _write_active_strategy(client, "drifted", "auto")
     client.cookies.set("account", "shadow")
     assert "Regime mismatch" not in client.get("/reviews").text
+
+
+def test_regime_chip_paper_invalid_value(client):
+    _set_regime_value(client, "paper", "Human")
+    body = client.get("/reviews").text
+    assert "Regime invalid" in body
+    assert "treated as human" in body
+
+
+def test_mismatch_banner_says_check_the_breaker_first(client):
+    _set_regime_value(client, "paper", "auto")
+    _write_active_strategy(client, "drifted", "confirm")
+    body = client.get("/reviews").text
+    assert "Regime mismatch: drifted do not match the auto regime." in body
+    breaker_at = body.index("drawdown breaker")
+    rerun_at = body.index("then re-run")
+    assert breaker_at < rerun_at
+
+
+def test_mismatch_banner_covers_paused_strategies(client):
+    _set_regime_value(client, "paper", "human")
+    c = client.app.state.holder.get()
+    (c.strategies.directory / "napping.yaml").write_text(
+        'name: "napping"\nstatus: paused\nauthorization: auto\n'
+        "position: {ticker: AAPL, target_weight: 10%}\n"
+        'rules:\n  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}\n')
+    assert "Regime mismatch: napping" in client.get("/reviews").text
+
+
+def test_shadow_chip_does_not_need_regime_status(client, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(dashboard_route, "regime_status", boom)
+    client.cookies.set("account", "shadow")
+    assert "Revisions: human" in client.get("/reviews").text

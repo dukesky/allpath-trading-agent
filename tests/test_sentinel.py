@@ -1869,3 +1869,95 @@ def test_confirm_sell_is_never_auto_rejected_by_the_precheck(tmp_path):
     ex.precheck_reasons = ["daily trade limit reached (50/50)"]
     [o] = s.run_once().outcomes
     assert o.disposition == "queued" and len(q.list()) == 1 and ex.rejections == []
+
+
+# ---------------------------------------------------------------------------
+# Regime choke point (regime-switch final review C2/I5): on paper under regime
+# human, an AUTO strategy is dispatched as CONFIRM -- in memory only -- so no
+# writer (hand edit, web activation, any future path) can make a paper
+# strategy trade unattended in a human month. Never the reverse.
+# ---------------------------------------------------------------------------
+
+def _set_regime(s, store, value):
+    from allpath_trade.store.app_state import AppState
+    app_state = AppState(store._conn)
+    if value is not None:
+        app_state.set("regime:paper", value)
+    s.app_state = app_state
+    return app_state
+
+
+def test_regime_human_queues_an_active_auto_paper_strategy(tmp_path):
+    s, store, ex, q, _n = make(tmp_path, strategy_yaml(auth="auto"))
+    _set_regime(s, store, "human")
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued"
+    assert ex.calls == [] and len(q.list()) == 1
+    # in memory only: the file still says auto
+    assert "authorization: auto" in (tmp_path / "t.yaml").read_text()
+
+
+def test_no_regime_executes_an_auto_paper_strategy_as_before(tmp_path):
+    s, store, ex, _q, _n = make(tmp_path, strategy_yaml(auth="auto"))
+    _set_regime(s, store, None)
+    [o] = s.run_once().outcomes
+    assert o.disposition == "executed" and len(ex.calls) == 1
+
+
+def test_regime_auto_executes_an_auto_paper_strategy(tmp_path):
+    s, store, ex, _q, _n = make(tmp_path, strategy_yaml(auth="auto"))
+    _set_regime(s, store, "auto")
+    [o] = s.run_once().outcomes
+    assert o.disposition == "executed" and len(ex.calls) == 1
+
+
+def test_regime_auto_never_upgrades_a_confirm_paper_strategy(tmp_path):
+    s, store, ex, q, _n = make(tmp_path, strategy_yaml(auth="confirm"))
+    _set_regime(s, store, "auto")
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued" and ex.calls == [] and len(q.list()) == 1
+
+
+def test_invalid_regime_value_gates_like_human(tmp_path):
+    s, store, ex, _q, _n = make(tmp_path, strategy_yaml(auth="auto"))
+    _set_regime(s, store, "Auto")
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued" and ex.calls == []
+
+
+def test_regime_human_does_not_affect_shadow(tmp_path):
+    s, store, ex, _q, _n = make(tmp_path, strategy_yaml(auth="auto"), account="shadow")
+    app_state = _set_regime(s, store, "human")
+    app_state.set("regime:shadow", "human")
+    [o] = s.run_once().outcomes
+    assert o.disposition == "executed" and len(ex.calls) == 1
+
+
+def test_regime_human_queues_an_auto_option_buy(tmp_path):
+    backend = FakeOptionsBackend(pick=_PICK)
+    s, store, ex, q, _n = make_option(
+        tmp_path, strategy_yaml(auth="auto", action="buy_call $500"), backend=backend)
+    _set_regime(s, store, "human")
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued"
+    assert ex.option_calls == []
+    [row] = q.list()
+    assert row["kind"] == "option_order"
+
+
+def test_regime_is_read_once_per_pass(tmp_path, monkeypatch):
+    (tmp_path / "u.yaml").write_text(strategy_yaml(auth="auto"))
+    s, store, _ex, _q, _n = make(tmp_path, strategy_yaml(auth="auto"))
+    app_state = _set_regime(s, store, "human")
+    reads = []
+    real_get = app_state.get
+
+    def counting_get(key):
+        if key.startswith("regime:"):
+            reads.append(key)
+        return real_get(key)
+
+    monkeypatch.setattr(app_state, "get", counting_get)
+    report = s.run_once()
+    assert report.strategies_checked == 2
+    assert reads == ["regime:paper"]

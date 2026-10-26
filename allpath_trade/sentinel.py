@@ -33,6 +33,7 @@ from allpath_trade.notify import events
 from allpath_trade.notify.agent import send_agent_only
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued, push_telegram_receipt
+from allpath_trade.regime import regime_demands_confirm
 from allpath_trade.risk.breaker import DrawdownBreaker
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
@@ -243,8 +244,21 @@ class Sentinel:
         # A single invalid strategy YAML must not stop monitoring for every
         # other strategy — collect its error and keep going.
         docs = self.strategies.load_all(errors=report.errors)
+        # Regime choke point (regime-switch final review C2/I5): read once
+        # per pass. While the paper regime demands confirm (human, or an
+        # invalid stored value), an AUTO strategy is dispatched as CONFIRM
+        # -- an in-memory copy only, the file is untouched -- so no writer
+        # (hand edit, web activation, anything that bypasses follow_regime)
+        # can make a paper strategy trade unattended in a human month. Covers
+        # the stock and option paths alike: both branch on the doc handed to
+        # _check_strategy. Never upgrades CONFIRM to AUTO; shadow and a
+        # Sentinel without app_state are unaffected.
+        confirm_only = (self.app_state is not None
+                        and regime_demands_confirm(self.app_state, self.account))
 
         for doc in docs:
+            if confirm_only and doc.authorization == Authorization.AUTO:
+                doc = doc.model_copy(update={"authorization": Authorization.CONFIRM})
             try:
                 self._check_strategy(doc, account.equity, positions, report)
                 report.strategies_checked += 1

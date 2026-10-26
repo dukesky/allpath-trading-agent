@@ -15,6 +15,7 @@ from allpath_trade.execution import ExecutionError, Executor
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.dispatch import notify_review_queued
+from allpath_trade.regime import follow_regime
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewQueue
@@ -172,6 +173,14 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             return "user declined"
         atomic_write_text(path, new_text)
         strategies.snapshot_version(doc, reason)
+        # Regime follow (final review I1): this terminal path writes the
+        # YAML directly instead of going through the review applier, so it
+        # applies the same demote-only correction itself -- an
+        # `authorization: auto` paper draft saved in a human month lands as
+        # confirm. No-op with no regime set, on shadow, or for notify.
+        if follow_regime(strategies, strategy_id):
+            return (f"saved {strategy_id} v{doc.version} (authorization set to "
+                    "confirm: the paper regime is human)")
         return f"saved {strategy_id} v{doc.version}"
 
     def propose_order(ticker: str, side: str, reason: str,

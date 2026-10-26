@@ -1397,3 +1397,19 @@ def test_dashboard_unconfigured_broker_shows_guidance_card_with_step2_link(
     assert "Connect your Alpaca paper account" in body
     assert 'href="/setup?step=2"' in body
     assert_english_only(body)
+
+
+def test_dashboard_shows_regime_mismatch_banner(client):
+    # final review I5: the dashboard is where the operator looks first.
+    c = client.app.state.holder.get()
+    c.app_state.set("regime:paper", "human")
+    (c.strategies.directory / "drifted.yaml").write_text(
+        'name: "drifted"\nstatus: active\nauthorization: auto\n'
+        "position: {ticker: AAPL, target_weight: 10%}\n"
+        'rules:\n  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}\n')
+    body = client.get("/").text
+    assert "Regime mismatch: drifted do not match the human regime." in body
+
+
+def test_dashboard_has_no_regime_banner_without_mismatch(client):
+    assert "Regime mismatch" not in client.get("/").text
