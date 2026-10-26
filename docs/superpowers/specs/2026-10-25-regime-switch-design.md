@@ -1,7 +1,7 @@
 # Regime Switch — Design
 
 **Date:** 2026-10-25
-**Status:** Approved (Tian, 2026-10-25, in chat)
+**Status:** Approved (Tian, 2026-10-25, in chat) — **amended 2026-10-25 after the whole-branch review; see "Amendments" at the end, which supersede decisions 6–9 and the rollout line where they differ.**
 **Context:** Paper 2 (`allpath-paper/OUTLINE-v3.md`) alternates monthly regimes on the
 paper account. Tian's definition: a regime is **two switches flipped together** —
 *human-gated* = nightly reflection revisions need approval AND paper orders need
@@ -75,3 +75,32 @@ active auto/confirm paper strategies and logs one event; shadow refused; status
 mismatch detection; reflection auto-apply follows the regime with no restart;
 applier corrects a chat draft's authorization to the regime; nav chip and mismatch
 banner render.
+
+## Amendments (2026-10-25, after the whole-branch review)
+
+These supersede the decisions above where they differ. Cite this section, not decisions 6–9, when describing the system.
+
+1. **Scope is every non-archived paper strategy** (active, paused, draft), not only active ones — for `regime set`, for
+   mismatch detection and for the counts `regime show` prints. A paused or draft `auto` strategy resumed in a human month
+   would otherwise trade unattended.
+2. **Automatic correction is demote-only** (supersedes decision 8). When a paper strategy is written (applier, web
+   activation, the terminal `draft_strategy` path) under the `human` regime, `authorization: auto` is corrected to
+   `confirm`. Nothing is ever promoted automatically: promotion to `auto` happens only through an explicit
+   `regime set auto`. Reason: a symmetric correction re-promoted strategies the drawdown breaker had just demoted.
+   Cost: in an autonomous month a newly drafted `confirm` strategy stays `confirm` (shown as a mismatch) until
+   `regime set auto` is re-run.
+3. **`regime set auto` refuses while the paper drawdown breaker is tripped** and writes nothing; reset the breaker first.
+4. **Sentinel gate.** On the paper account under the `human` regime, every `auto` strategy is dispatched as `confirm`
+   (in memory; files untouched; stock and option paths). It never upgrades `confirm` to `auto`. This covers hand edits
+   and any writer that skips the correction.
+5. **Invalid stored value fails safe.** A present `regime:{account}` value other than exactly `human`/`auto` is treated
+   as `human` (no revision auto-apply; sentinel gate on) and is surfaced as a warning (CLI) and a "Regime invalid" chip.
+6. **Atomic log.** Strategy files are flipped first; the regime value and its `regime_events` row are then written in
+   one transaction, so the log can never disagree with the effective regime.
+7. **Reflection re-checks** the effective auto-apply right before auto-approving its proposals; a switch to `human`
+   during a run leaves them pending.
+8. **Shadow ignores any `regime:shadow` key** for revision auto-apply (shadow uses `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS`,
+   else the global flag).
+9. **Mismatch banner** also appears on the dashboard. Rollout wording: the anchor `regime set human` *should* flip
+   nothing if every non-archived paper strategy is already `confirm` — check `allpath-trade strategies` first. The
+   anchor event's timestamp is the time the command runs (UTC); the earlier start belongs in `--note`.
