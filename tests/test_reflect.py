@@ -22,6 +22,7 @@ from allpath_trade.memory.observations import ObservationLog
 from allpath_trade.memory.search import SessionSearch
 from allpath_trade.memory.store import MemoryStore
 from allpath_trade.reflect import Reflector, _parse_report, build_briefing
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
@@ -1016,6 +1017,37 @@ def test_auto_apply_applies_this_runs_revision(tmp_path):
     assert row["status"] == "approved"
     texts = [o["text"] for o in components.observations.recent()]
     assert any("auto-applied" in t for t in texts)
+
+
+def test_auto_apply_follows_regime_over_global_flag(tmp_path):
+    # The regime lives in app_state and is read at run time: `regime:paper=auto`
+    # auto-applies even though the global setting is False, and `human` blocks
+    # it even though the global setting is True.
+    components = make_components(tmp_path)
+    components.queue.set_revision_applier(apply_revision_factory(components.strategies))
+    AppState(components.conn).set("regime:paper", "auto")
+    r = Reflector(llm=_scripted_propose_then_report(), components=components,
+                  settings=make_settings(experiment_auto_apply_revisions=False),
+                  notifier=None)
+
+    assert r.run_daily(NOW).startswith("ok:")
+
+    (row,) = _revision_rows(components)
+    assert row["status"] == "approved"
+
+
+def test_human_regime_blocks_auto_apply_despite_global_flag(tmp_path):
+    components = make_components(tmp_path)
+    components.queue.set_revision_applier(apply_revision_factory(components.strategies))
+    AppState(components.conn).set("regime:paper", "human")
+    r = Reflector(llm=_scripted_propose_then_report(), components=components,
+                  settings=make_settings(experiment_auto_apply_revisions=True),
+                  notifier=None)
+
+    assert r.run_daily(NOW).startswith("ok:")
+
+    (row,) = _revision_rows(components)
+    assert row["status"] == "pending"
 
 
 def test_auto_apply_off_leaves_row_pending(tmp_path):

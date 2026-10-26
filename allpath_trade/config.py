@@ -174,8 +174,15 @@ class Settings(BaseSettings):
     # Two-week-autonomous-run experiment (spec 2026-08-26): reflection's own
     # revision proposals auto-apply through the normal applier when this is
     # on. .env-only by design -- flipping it is an experiment decision, not
-    # a settings-page toggle a user should reach for casually.
+    # a settings-page toggle a user should reach for casually. Since the
+    # regime switch (spec 2026-10-25) this is only the FALLBACK for an account
+    # with no regime set; the paper regime lives in the database.
     experiment_auto_apply_revisions: bool = False
+    # Shadow override for the flag above; `None` means "no override" -- shadow
+    # inherits experiment_auto_apply_revisions (same pattern as shadow_max_*).
+    # Only consulted when no regime is stored for the account (allpath_trade/
+    # regime.py): a paper regime in the database always wins.
+    shadow_experiment_auto_apply_revisions: bool | None = None
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.

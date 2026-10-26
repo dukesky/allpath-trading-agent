@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS rule_fires (
 CREATE INDEX IF NOT EXISTS idx_rule_fires_rule
     ON rule_fires (account, strategy_id, rule_id, ts);
 
+-- Paper-study regime switches (spec 2026-10-25-regime-switch-design.md).
+CREATE TABLE IF NOT EXISTS regime_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    account TEXT NOT NULL,
+    regime TEXT NOT NULL,
+    by TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    strategies_flipped INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS pending_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account TEXT NOT NULL DEFAULT 'paper',  -- shadow-dual-active T1

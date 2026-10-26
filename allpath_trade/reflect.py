@@ -17,8 +17,10 @@ from allpath_trade.config import Settings
 from allpath_trade.llm.base import LLMClient, LLMResponse
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
+from allpath_trade.regime import effective_auto_apply
 from allpath_trade.scheduler import ET, ts_to_et_date
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
@@ -470,15 +472,20 @@ class Reflector:
         # first call the model makes to it burns an iteration on
         # "error: unknown tool" out of the 12-call session budget.
         register_memory_tools(registry, memory=c.memory, search=c.search)
-        # Experiment mode (spec 2026-08-26, Settings.experiment_auto_apply_
-        # revisions): collect the plain-int review ids THIS run's own
-        # session proposes, so the success path below can auto-approve
-        # exactly those rows -- never a stale row queued by an earlier run
-        # or by a chat proposal. `on_proposed` stays None (the default) when
-        # the flag is off, so a non-experiment run allocates nothing extra
-        # and behaves exactly as before this change.
+        # Experiment mode (spec 2026-08-26): collect the plain-int review ids
+        # THIS run's own session proposes, so the success path below can
+        # auto-approve exactly those rows -- never a stale row queued by an
+        # earlier run or by a chat proposal. Whether to auto-apply is the
+        # account's EFFECTIVE flag (regime.effective_auto_apply: its regime
+        # from app_state if set, else the shadow override, else
+        # Settings.experiment_auto_apply_revisions), read now so a regime
+        # switch needs no restart. AccountComponents carries no app_state, so
+        # wrap its connection (AppState is only a view over it). `on_proposed`
+        # stays None (the default) when the flag is off, so a non-experiment
+        # run allocates nothing extra and behaves exactly as before.
         proposed_rids: list[int] = []
-        auto_apply = self.settings.experiment_auto_apply_revisions
+        auto_apply = effective_auto_apply(
+            AppState(c.conn), self.settings, c.account)
         register_reflection_tools(
             registry, strategies=c.strategies, queue=c.queue,
             on_proposed=proposed_rids.append if auto_apply else None)
