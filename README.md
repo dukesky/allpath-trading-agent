@@ -430,7 +430,8 @@ uv run allpath-trade chat      # talk to the agent in a REPL
 | `SENTINEL_INTERVAL_MINUTES` | 60 | Sentinel cadence during market hours |
 | `OPTIONS_TRADING` | false | Enable the options backend (spawns the Alpaca MCP server) |
 | `DRAWDOWN_HALT_PCT` | 0.15 | Circuit-breaker threshold; 0 disables |
-| `EXPERIMENT_AUTO_APPLY_REVISIONS` | false | Reflection's own revisions auto-apply (bounded-experiment use) |
+| `EXPERIMENT_AUTO_APPLY_REVISIONS` | false | Reflection's own revisions auto-apply (bounded-experiment use); only a fallback once a paper regime is set with `allpath-trade regime set` |
+| `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS` | — (inherit) | Shadow-only override of the flag above; unset means shadow follows `EXPERIMENT_AUTO_APPLY_REVISIONS` |
 | `DAILY_REFLECTION` | true | Nightly reflection pass |
 | `CHAT_MODEL` / `REVIEW_MODEL` / `MEMORY_MODEL` | — | Per-tier model choice, any OpenAI-compatible or Anthropic provider |
 

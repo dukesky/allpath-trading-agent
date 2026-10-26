@@ -9,17 +9,31 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
   authority (`auto`) or need approval (`human`, i.e. `confirm`). It lives in
   the database (`app_state` key `regime:paper`), is read at the moment it is
   needed (no restart), and every change is appended to the `regime_events`
-  table. New CLI: `allpath-trade regime show` and `allpath-trade regime set
-  human|auto --by NAME --note ...` (paper only; shadow is refused).
+  table (append-only by the code, not enforced by the database). New CLI:
+  `allpath-trade regime show` and `allpath-trade regime set human|auto --by
+  NAME --note ...` (paper only; shadow is refused). `set` flips every
+  non-archived (active, paused, draft) `auto`/`confirm` paper strategy, then
+  writes the regime value and its event in one transaction.
   `EXPERIMENT_AUTO_APPLY_REVISIONS` is now only the fallback for an account
-  that has never had a regime set. The applier also corrects a chat-drafted
-  strategy's authorization to the regime.
+  that has never had a regime set; shadow follows the new
+  `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS`, else that flag, and ignores any
+  stored `regime:shadow`.
+- **Safety**: `regime set auto` refuses while the paper drawdown breaker is
+  tripped (reset it first). The automatic correction only ever demotes: in a
+  `human` month, an `auto` paper strategy written by the review applier, by
+  web activation/resume, or by a terminal chat save lands as `confirm`;
+  nothing ever promotes `confirm` to `auto` except `regime set auto`. The
+  sentinel also treats every `auto` paper strategy as `confirm` (in memory,
+  stock and option rules) while the regime is `human`. A stored regime value
+  that is not exactly `human`/`auto` is treated as `human` and flagged
+  (CLI warning, "Regime invalid" chip). Reflection re-checks the effective
+  auto-apply right before approving its own revisions.
 - **Visible in the UI**: a muted chip in the nav next to the account
-  switcher ("Human-gated" / "Autonomous" / "Regime not set" on paper,
-  "Revisions: auto" / "Revisions: human" on shadow, with a tooltip), and a
-  warning banner on Pending and Reports when an active paper strategy's
-  authorization does not match the regime. The chip can never break a page:
-  on any error it is omitted.
+  switcher ("Human-gated" / "Autonomous" / "Regime not set" / "Regime
+  invalid" on paper, "Revisions: auto" / "Revisions: human" on shadow, with a
+  tooltip), and a warning banner on Dashboard, Pending and Reports when a
+  non-archived paper strategy's authorization does not match the regime. The
+  chip can never break a page: on any error it is omitted.
 
 ## Latest models — 2026-10-03
 

@@ -350,7 +350,7 @@ snapshot. Re-arming a rule (the state flip back to armed) writes no
 A **regime** is two switches flipped together, for the paper account:
 
 1. whether nightly reflection revisions auto-apply, and
-2. whether the active paper strategies trade on their own authority.
+2. whether the paper strategies trade on their own authority.
 
 | Regime | Reflection revisions | Strategy authorization |
 |---|---|---|
@@ -369,36 +369,71 @@ allpath-trade regime set human|auto --by NAME --note "why"
 ```
 
 `show` prints the current regime, where the effective revision auto-apply
-value comes from, the authorization counts of active strategies, any
+value comes from, the authorization counts of non-archived strategies, any
 mismatching strategies, and the last events. `set` is paper-only (shadow is
-refused: its orders are always advisory), requires `--by`, flips every active
-`auto`/`confirm` paper strategy to the regime's authorization, and records one
-event. Strategies whose authorization is `notify`, and paused/draft/archived
-ones, are left alone.
+refused: its orders are always advisory) and requires `--by`. It flips every
+**non-archived** (active, paused or draft) `auto`/`confirm` paper strategy to
+the regime's authorization, then writes the regime value and its event in one
+database transaction. If that write fails the regime is unchanged; re-run the
+command (the file flips are idempotent). Strategies whose authorization is
+`notify`, and archived ones, are never touched.
+
+**`regime set auto` refuses while the drawdown breaker is tripped.** The
+error says: reset it first (`allpath-trade breaker reset`). Review the
+account, reset the breaker, then set `auto` again. `regime set human` is
+always allowed.
+
+**Automatic correction only demotes.** Other code paths can put a paper
+strategy on disk: approving a chat or reflection revision, activating or
+resuming a strategy on the web, and saving a draft from terminal chat. In a
+`human` month each of these turns an `auto` strategy into `confirm`. None of
+them ever promotes `confirm` to `auto`, in either regime. Only an explicit
+`regime set auto` promotes. This keeps a drawdown-breaker demotion in place
+through later revisions. The cost: in an `auto` month, a new strategy drafted
+as `confirm` stays `confirm` and shows as a mismatch until `regime set auto`
+is re-run.
+
+**Sentinel gate.** As a second line of defence, the sentinel reads the regime
+once per pass. While the paper regime is `human`, it treats every `auto` paper
+strategy as `confirm` for that pass, in memory only (the file is untouched).
+This covers stock and option rules. So even a hand-edited `authorization: auto`
+queues for approval instead of trading. It never upgrades `confirm` to `auto`,
+and shadow is unaffected.
+
+**Invalid stored value fails safe.** If `regime:paper` holds anything other
+than exactly `human` or `auto` (a typo, a hand edit), it is treated as `human`:
+revisions do not auto-apply and the sentinel gate is on. `regime show` prints
+`WARNING: invalid stored regime value '<v>' — treating as human`, and the nav
+chip reads "Regime invalid". Fix it with `regime set`.
 
 **`regime_events` is the ground truth.** Every `regime set` appends one row
 (timestamp, account, regime, who, note, how many strategies were flipped).
-Rows are never edited or deleted, and the paper reads this table read-only to
+The code only ever appends rows; the database does not enforce this, so do
+not edit or delete rows by hand. The paper reads this table read-only to
 reconstruct which regime was in force at any time. Do not infer the regime
 from `.env` or from git history.
 
 **UI.** The nav shows a chip next to the account switcher (Human-gated /
-Autonomous / Regime not set on paper; Revisions: auto / Revisions: human on
-shadow). Pending and Reports show a warning banner when an active paper
-strategy's authorization does not match the regime, for example after the
-drawdown breaker demoted it. Re-run `regime set` to re-apply, or check the
-breaker first.
+Autonomous / Regime not set / Regime invalid on paper; Revisions: auto /
+Revisions: human on shadow). Dashboard, Pending and Reports show a warning
+banner when a non-archived paper strategy's authorization does not match the
+regime, for example after the drawdown breaker demoted it. Check the
+drawdown breaker first (`allpath-trade breaker status`), then re-run
+`regime set`.
 
-**Rollout step.** After deploying, run once on the production host:
+**Rollout step.** After deploying, check `allpath-trade strategies` first,
+then run once on the production host:
 
 ```bash
 allpath-trade regime set human --by Tian --note "A' (started 2026-10-25 15:18 via .env flag)"
 ```
 
-It flips nothing (every active paper strategy is already `confirm`) and
-records the anchor event. Then rewrite the `.env` comment for the flag to say
-the paper regime lives in the database and is changed only with
-`allpath-trade regime set`.
+It should flip nothing if every non-archived paper strategy is already
+`confirm` — check `allpath-trade strategies` first. It records the anchor
+event. The event's timestamp is the time the command runs (UTC); the
+regime's earlier real start belongs in `--note`, as above. Then rewrite the
+`.env` comment for the flag to say the paper regime lives in the database
+and is changed only with `allpath-trade regime set`.
 
 **Fallback flag.** `EXPERIMENT_AUTO_APPLY_REVISIONS` in `.env` is now only a
 fallback: it applies to an account that has never had a regime set. Once a
@@ -406,4 +441,5 @@ regime exists it wins, and editing the flag changes nothing for that account.
 
 **Shadow.** Shadow has no regime. Its revision auto-apply follows
 `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS` when that is set, else the global
-flag above. Leave it unset to inherit, or pin it explicitly.
+flag above. A `regime:shadow` value in the database is ignored. Leave the
+setting unset to inherit, or pin it explicitly.
