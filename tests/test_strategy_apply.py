@@ -9,6 +9,7 @@ sources."""
 
 import pytest
 
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.db import connect
 from allpath_trade.store.reviews import ReviewQueue, RevisionValidationError
 from allpath_trade.strategy.apply import apply_revision_factory
@@ -349,3 +350,70 @@ def test_chat_snapshot_reason(tmp_path):
     apply_fn = apply_revision_factory(store)
     apply_fn("s1", PROPOSED, CURRENT, "chat")
     assert store.versions("s1")[0]["reason"] == "chat proposal approved via web"
+
+
+# --- applied paper strategies follow the regime ---------------------------
+# (spec 2026-10-25-regime-switch-design.md decision 8): a chat-drafted
+# strategy must not trade unattended in a human-gated month, and vice versa.
+
+def _draft(authorization: str) -> str:
+    return NEW_STRATEGY.replace("status: draft", f"status: active\nauthorization: {authorization}")
+
+
+def _authorization_on_disk(store, strategy_id: str) -> str:
+    return store.load(strategy_id).authorization.value
+
+
+def test_regime_human_corrects_chat_auto_draft_to_confirm(tmp_path):
+    store, _ = make(tmp_path)
+    AppState(store._conn).set("regime:paper", "human")
+    apply_revision_factory(store)("new-one", _draft("auto"), "", "chat", is_new=True)
+    assert _authorization_on_disk(store, "new-one") == "confirm"
+    versions = store.versions("new-one")
+    assert "regime human" in versions[0]["reason"]
+    # history shows both the verbatim proposal and the correction
+    assert versions[1]["reason"] == "chat proposal approved via web"
+
+
+def test_no_regime_leaves_chat_auto_draft_auto(tmp_path):
+    store, _ = make(tmp_path)
+    draft = _draft("auto")
+    apply_revision_factory(store)("new-one", draft, "", "chat", is_new=True)
+    assert (store.directory / "new-one.yaml").read_text() == draft
+    assert _authorization_on_disk(store, "new-one") == "auto"
+    assert len(store.versions("new-one")) == 1
+
+
+def test_regime_never_touches_notify(tmp_path):
+    store, _ = make(tmp_path)
+    AppState(store._conn).set("regime:paper", "human")
+    apply_revision_factory(store)("new-one", _draft("notify"), "", "chat", is_new=True)
+    assert _authorization_on_disk(store, "new-one") == "notify"
+    assert len(store.versions("new-one")) == 1
+
+
+def test_regime_auto_corrects_chat_confirm_draft_to_auto(tmp_path):
+    store, _ = make(tmp_path)
+    AppState(store._conn).set("regime:paper", "auto")
+    apply_revision_factory(store)("new-one", _draft("confirm"), "", "chat", is_new=True)
+    assert _authorization_on_disk(store, "new-one") == "auto"
+    assert "regime auto" in store.versions("new-one")[0]["reason"]
+
+
+def test_regime_already_matching_writes_no_correction(tmp_path):
+    store, _ = make(tmp_path)
+    AppState(store._conn).set("regime:paper", "human")
+    apply_revision_factory(store)("new-one", _draft("confirm"), "", "chat", is_new=True)
+    assert len(store.versions("new-one")) == 1
+
+
+def test_shadow_store_is_unaffected_even_with_shadow_regime_set(tmp_path):
+    shadow_dir = tmp_path / "shadow"
+    shadow_dir.mkdir()
+    conn = connect(tmp_path / "db.sqlite")
+    store = StrategyStore(shadow_dir, conn, account="shadow")
+    AppState(conn).set("regime:shadow", "human")
+    AppState(conn).set("regime:paper", "human")
+    apply_revision_factory(store)("new-one", _draft("auto"), "", "chat", is_new=True)
+    assert _authorization_on_disk(store, "new-one") == "auto"
+    assert len(store.versions("new-one")) == 1

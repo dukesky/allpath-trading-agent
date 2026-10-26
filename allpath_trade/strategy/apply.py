@@ -4,6 +4,8 @@ from collections.abc import Callable
 
 import yaml
 
+from allpath_trade.regime import get_regime, regime_authorization
+from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import RevisionValidationError
 from allpath_trade.strategy.loader import (
     StrategyValidationError,
@@ -214,5 +216,21 @@ def apply_revision_factory(store: StrategyStore) -> Callable[[str, str, str, str
         reason = ("chat proposal approved via web" if source == "chat"
                    else "reflection revision approved via web")
         store.snapshot_version(doc, reason=reason)
+
+        # Regime follow (spec 2026-10-25-regime-switch-design.md decision 8):
+        # AFTER the verbatim write and its version snapshot, so history shows
+        # both the proposal and the correction. A paper strategy that lands
+        # as auto/confirm while the regime says otherwise (e.g. a chat draft
+        # with `authorization: auto` in a human-gated month) must not trade
+        # against the regime. NOTIFY is never touched, shadow is never
+        # affected, and with no regime set this is a no-op.
+        if store._account == "paper":
+            regime = get_regime(AppState(store._conn), "paper")
+            if regime is not None:
+                target = regime_authorization(regime)
+                if (doc.authorization in (Authorization.AUTO, Authorization.CONFIRM)
+                        and doc.authorization != target):
+                    store.set_authorization(
+                        strategy_id, target, reason=f"follows regime {regime}")
 
     return apply
