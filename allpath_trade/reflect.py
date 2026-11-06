@@ -22,6 +22,7 @@ from allpath_trade.scheduler import ET, ts_to_et_date
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
+from allpath_trade.store.views import ViewStore
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
@@ -138,6 +139,21 @@ CORRECTIVE_PROMPT = (
     "notification text begins. Both sections are required and must be "
     "non-empty."
 )
+
+# Shadow check-in pilot (spec 2026-11-06-shadow-checkin-design.md): appended
+# to the reflection system prompt only for shadow with SHADOW_DAILY_CHECKIN on.
+VIEWS_REFLECTION_NOTE = """\
+
+## OWNER'S VIEWS
+The briefing lists the owner's active views, gathered from his evening
+check-ins. They are his positions, not orders. Weigh them as strong input:
+a revision may still go against one when the evidence says so, but it must
+say so. For every propose_strategy_revision on a ticker he has a view on (or
+when he has a MARKET view), set view_alignment to "agree: ...", "extend: ..."
+or "contradict: ..." with one line of why; the tool refuses the proposal
+otherwise. In the report, name any view the day's evidence now argues
+against, so tomorrow's check-in can ask him about it.
+"""
 
 REFLECTION_INSTRUCTIONS = """\
 ## Daily reflection
@@ -348,7 +364,8 @@ def _format_target(position: Any) -> str:
 def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict],
                    positions: list[dict], pending_counts: dict[str, int],
                    strategies: list[dict] | None = None,
-                   account: str = DEFAULT_ACCOUNT) -> str:
+                   account: str = DEFAULT_ACCOUNT,
+                   views: list[dict] | None = None) -> str:
     """Pure, deterministic seed briefing -- no LLM, no I/O. `trades` /
     `observations` / `positions` / `strategies` are already-fetched plain
     dicts (the Reflector does the DB/broker/data-source/YAML reads); this
@@ -381,7 +398,7 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
         f"{kind}: {count}" for kind, count in sorted(pending_counts.items()))
     pending_block = pending_block or "no pending items"
 
-    return "\n".join([
+    sections = [
         f"# Daily reflection seed briefing -- {et_date}",
         f"Account: {account}",
         "\n## Strategies (thesis & rules)",
@@ -394,7 +411,16 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
         fence_external(_cap_chars(pos_block)),
         "\n## Pending queue (by kind)",
         fence_external(_cap_chars(pending_block)),
-    ])
+    ]
+    if views is not None:
+        # Shadow check-in pilot: only when the caller passes views at all, so
+        # every other briefing stays byte-identical.
+        from allpath_trade.agent.view_tools import format_view
+
+        views_block = "\n".join(format_view(v) for v in views)
+        sections += ["\n## Owner's active views (from check-ins)",
+                     fence_external(_cap_chars(views_block or "none on file yet"))]
+    return "\n".join(sections)
 
 
 @dataclass(kw_only=True)
@@ -486,9 +512,11 @@ class Reflector:
         proposed_rids: list[int] = []
         auto_apply = effective_auto_apply(
             AppState(c.conn), self.settings, c.account)
+        views = self._views()
         register_reflection_tools(
             registry, strategies=c.strategies, queue=c.queue,
-            on_proposed=proposed_rids.append if auto_apply else None)
+            on_proposed=proposed_rids.append if auto_apply else None,
+            views_for=views.relevant if views is not None else None)
 
         identity = load_identity()
         base_prompt = build_system_prompt(
@@ -501,6 +529,8 @@ class Reflector:
             # might leave it.
             account=c.account)
         system_prompt = f"{base_prompt}\n{REFLECTION_INSTRUCTIONS}"
+        if views is not None:
+            system_prompt = f"{system_prompt}\n{VIEWS_REFLECTION_NOTE}"
 
         compactor = Compactor(self.llm, conversations,
                               budget_tokens=self.settings.context_budget_tokens)
@@ -645,7 +675,22 @@ class Reflector:
                 f"(experiment mode).{warning}",
                 subject=row["ticker"])
 
+    def briefing(self, et_date: str) -> str:
+        """Tonight's deterministic seed briefing, for other after-close
+        steps that want the same fact sheet (the shadow daily check-in)."""
+        return self._build_briefing(et_date)
+
+    def _views(self) -> ViewStore | None:
+        """The owner's views ledger when the shadow check-in pilot applies
+        to this account (spec 2026-11-06-shadow-checkin-design.md), else
+        None -- paper never, and shadow only with SHADOW_DAILY_CHECKIN on."""
+        c = self.components
+        if c.account != "shadow" or not self.settings.shadow_daily_checkin:
+            return None
+        return ViewStore(c.conn, c.account)
+
     def _build_briefing(self, et_date: str) -> str:
+        views = self._views()
         return build_briefing(
             et_date=et_date,
             strategies=self._strategies_today(),
@@ -653,7 +698,8 @@ class Reflector:
             observations=self._observations_today(et_date),
             positions=self._positions_with_change(),
             pending_counts=self._pending_counts(),
-            account=self.components.account)
+            account=self.components.account,
+            views=views.active() if views is not None else None)
 
     def _strategies_today(self) -> list[dict]:
         try:

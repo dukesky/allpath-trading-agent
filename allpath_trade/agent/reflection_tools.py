@@ -31,14 +31,25 @@ _MAX_RATIONALE_CHARS = 2000
 
 def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                               queue: ReviewQueue,
-                              on_proposed: Optional[Callable[[int], None]] = None) -> None:
+                              on_proposed: Optional[Callable[[int], None]] = None,
+                              views_for: Callable[[str], list[dict]] | None = None,
+                              ) -> None:
     """Registers the one tool a reflection session gets for changing a
     strategy: `propose_strategy_revision`. There is deliberately no
     apply/confirm tool here -- every revision goes through the same human
     Pending-page approval as everything else (spec §④: "无下单、无确认类
-    工具")."""
+    工具").
 
-    def propose_strategy_revision(strategy_id: str, new_yaml: str, rationale: str) -> str:
+    `views_for(ticker)` (shadow check-in pilot, spec
+    2026-11-06-shadow-checkin-design.md) returns the owner's active views a
+    revision of that ticker's strategy must answer to. When given, the tool
+    takes a `view_alignment` and refuses a proposal that leaves it out while
+    such a view exists; the alignment is prefixed to the rationale so the
+    Pending card shows it. None (paper, or the pilot off) leaves the tool and
+    its schema exactly as before."""
+
+    def propose_strategy_revision(strategy_id: str, new_yaml: str, rationale: str,
+                                  view_alignment: str | None = None) -> str:
         rationale = rationale.strip()[:_MAX_RATIONALE_CHARS]
         if not rationale:
             return "error: rationale is required"
@@ -151,6 +162,14 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
                         "file must set status: explicitly -- no base to "
                         "compare, failing conservative")
 
+        if views_for is not None:
+            alignment, error = _check_alignment(views_for(doc.position.ticker),
+                                                view_alignment)
+            if error:
+                return f"error: invalid strategy revision for '{strategy_id}': {error}"
+            if alignment:
+                rationale = f"View alignment: {alignment}\n\n{rationale}"[:_MAX_RATIONALE_CHARS]
+
         diff = "\n".join(difflib.unified_diff(
             old_yaml.splitlines(), new_yaml.splitlines(),
             fromfile=f"{strategy_id} (current)", tofile=f"{strategy_id} (proposed)",
@@ -173,14 +192,41 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
                 "take effect unless approved.")
 
     t = "string"
+    properties: dict = {"strategy_id": {"type": t}, "new_yaml": {"type": t},
+                        "rationale": {"type": t}}
+    if views_for is not None:
+        properties["view_alignment"] = {
+            "type": t,
+            "description": "Required when the owner has an active view on this "
+                           "ticker or on MARKET: 'agree: ...', 'extend: ...' or "
+                           "'contradict: ...' with one line of why."}
     registry.register(
         "propose_strategy_revision",
         "Propose a revision to an existing strategy's YAML, based on "
         "reflection over recent performance. This queues the change for "
         "the user's approval on the Pending page -- it is never applied "
         "automatically.",
-        {"type": "object", "properties": {
-            "strategy_id": {"type": t}, "new_yaml": {"type": t},
-            "rationale": {"type": t}},
+        {"type": "object", "properties": properties,
          "required": ["strategy_id", "new_yaml", "rationale"]},
         propose_strategy_revision)
+
+
+_ALIGNMENT_LABELS = ("agree", "extend", "contradict")
+
+
+def _check_alignment(views: list[dict], alignment: str | None) -> tuple[str, str]:
+    """(cleaned alignment, error). A proposal with no relevant view may
+    still carry an alignment; one with a relevant view must, and it has to
+    lead with one of the three labels so the owner can scan the cards."""
+    alignment = (alignment or "").strip()[:500]
+    if not alignment:
+        if not views:
+            return "", ""
+        ids = ", ".join(f"#{v['id']} {v['subject']}" for v in views)
+        return "", (f"the owner has active views on this ({ids}); set "
+                    "view_alignment to 'agree: ...', 'extend: ...' or "
+                    "'contradict: ...' with one line of why")
+    if not alignment.lower().startswith(_ALIGNMENT_LABELS):
+        return "", ("view_alignment must start with agree, extend or "
+                    "contradict")
+    return alignment, ""

@@ -157,10 +157,24 @@ class ChatService:
                 app_state=c.app_state,
                 telegram_bot_token=c.settings.telegram_bot_token)
 
+        checkin = self.account == "shadow" and c.settings.shadow_daily_checkin
+        if checkin:
+            # Shadow check-in pilot (spec 2026-11-06-shadow-checkin-design.md):
+            # shadow-only and flag-gated, so with the flag off -- and on paper
+            # always -- the registry and prompt are exactly what they were.
+            from allpath_trade.agent.view_tools import register_view_tools
+            from allpath_trade.store.views import ViewStore
+
+            register_view_tools(registry, views=ViewStore(c.conn, self.account))
+
         prompt = build_system_prompt(
             identity=load_identity(), broker=b.broker, journal=b.journal,
             strategies=b.strategies, queue=b.queue, memory=b.memory,
             account=self.account)
+        if checkin:
+            from allpath_trade.agent.context import CHECKIN_CHAT_NOTE
+
+            prompt = f"{prompt}\n{CHECKIN_CHAT_NOTE}"
         # Finding 8: flush durable preferences to curated memory before the
         # older half of the conversation is dropped from context (see
         # Compactor's docstring on on_before_compact). Under Phase 5's
