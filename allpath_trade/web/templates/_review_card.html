@@ -102,6 +102,10 @@
     {{ item['intent']['ticker'] }}
   </p>
   {% endif %}
+  {% if item['stop_warning'] %}
+  {# Ops 2026-11-06 item 6: the strategy's one-shot stop is already spent. #}
+  <p class="warn" style="font-size:13px;margin:8px 0 0;font-weight:600">⚠ {{ item['stop_warning'] }}</p>
+  {% endif %}
   {% if item['price_context'] %}
   {% set pc = item['price_context'] %}
   <div class="review-price-context">

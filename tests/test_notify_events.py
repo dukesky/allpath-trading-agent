@@ -401,3 +401,27 @@ def test_drawdown_deepening_names_the_new_low_and_the_reset_command():
     assert "20.5%" in body and "$104,376.84" in body and "$83,000.00" in body
     assert "2026-11-05" in body
     assert "allpath-trade breaker reset --account paper" in body
+
+
+# -- ops 2026-11-06 item 6: spent one-shot stops ----------------------------
+
+def test_review_queued_carries_the_stop_warning():
+    _subject, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA", action="buy $3000",
+        strategy_id="nvda", recommendation="execute — ok",
+        stop_warning="No armed stop: nvda/stop-loss (price < 205), spent 2026-10-30.")
+    assert body.splitlines()[0].startswith("⚠ No armed stop: nvda/stop-loss")
+
+
+def test_order_result_carries_the_stop_warning():
+    _subject, body = events.order_result(
+        account="paper", ticker="NVDA", side="buy", submitted=True,
+        detail="submitted", stop_warning="No armed stop: x.")
+    assert body.startswith("⚠ No armed stop: x.")
+
+
+def test_daily_digest_appends_the_no_armed_stop_line():
+    _subject, body = events.daily_digest(
+        account="paper", triggers=0, trades=0, pending=0,
+        no_stop="⚠ No armed stop on 1 held position(s): NVDA.")
+    assert "\n⚠ No armed stop on 1 held position(s): NVDA." in body

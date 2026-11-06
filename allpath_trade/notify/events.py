@@ -103,7 +103,8 @@ def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
 
 def order_result(*, account: str, ticker: str, side: str, submitted: bool,
                  detail: str, filled_qty: Decimal | None = None,
-                 filled_avg_price: Decimal | None = None) -> tuple[Subject, str]:
+                 filled_avg_price: Decimal | None = None,
+                 stop_warning: str = "") -> tuple[Subject, str]:
     """`filled_qty`/`filled_avg_price` (from the `Order` the executor
     returned, when there is one) are ONLY used for the shadow wording
     below -- paper's own body is unchanged by this task and never reads
@@ -148,6 +149,10 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
                 f"{detail}") + FOOTER
     else:
         body = f"A {side} order for {ticker} was {outcome}.\n{detail}" + FOOTER
+    if stop_warning:
+        # Ops 2026-11-06 item 6 (strategy/stops.py): a buy on a strategy
+        # whose one-shot stop is already spent.
+        body = f"⚠ {stop_warning}\n{body}"
     return subject, body
 
 
@@ -206,7 +211,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   trigger_price: str = "", est_shares: str = "",
                   approve_url: str = "", kind: str = "order",
                   option_preview: str = "",
-                  no_analysis_reason: str = "") -> tuple[Subject, str]:
+                  no_analysis_reason: str = "",
+                  stop_warning: str = "") -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -257,6 +263,9 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     lines = [f"Item #{review_id} is waiting for you.", proposed]
     if no_analysis_reason:
         lines.insert(0, f"⚠ No agent analysis: {no_analysis_reason}")
+    if stop_warning:
+        # Ops 2026-11-06 item 6 (strategy/stops.py): spent one-shot stop.
+        lines.insert(1 if no_analysis_reason else 0, f"⚠ {stop_warning}")
     if strategy_id:
         lines.append(f"Strategy: {strategy_id}")
     if trigger_price:
@@ -278,7 +287,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
 
 
 def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
-                 llm_cost: str = "", llm_health: str = "") -> tuple[Subject, str]:
+                 llm_cost: str = "", llm_health: str = "",
+                 no_stop: str = "") -> tuple[Subject, str]:
     """`llm_cost`, when non-empty, is one extra line naming today's
     estimated LLM spend (store/llm_usage.py + llm/prices.py) -- the caller
     (scheduler.py's `_send_daily_digest`) only ever passes a non-empty
@@ -320,6 +330,10 @@ def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
         # Ops 2026-11-06: llm/health.py's per-tier "last OK / failed today"
         # line -- process-wide, like the cost line above.
         body += f"\n{llm_health}"
+    if no_stop:
+        # Ops 2026-11-06 item 6: held positions whose one-shot stop is spent
+        # (strategy/stops.py's no_armed_stop_line), per account.
+        body += f"\n{no_stop}"
     return subject, body + FOOTER
 
 

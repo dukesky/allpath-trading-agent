@@ -1447,3 +1447,38 @@ def test_card_has_no_warning_when_analysis_exists(client):
 def test_chat_proposal_card_has_no_missing_analysis_warning(client):
     queue_one(client, source="chat")
     assert "No agent analysis" not in client.get("/reviews").text
+
+
+# -- ops 2026-11-06 item 6: spent one-shot stops ----------------------------
+
+SPENT_STOP_STRATEGY = """
+name: "S"
+status: active
+authorization: confirm
+position: {ticker: AAPL, target_weight: 15%}
+rules:
+  - {id: dip-buy, type: hard, condition: "price < 250", action: "buy $1000"}
+  - {id: stop-loss, type: hard, condition: "price < 150", action: "sell all"}
+"""
+
+
+def _buy_row_for_spent_stop(client, spent=True):
+    from allpath_trade.strategy.model import RuleState
+
+    store = client.app.state.holder.get().strategies
+    (store.directory / "s1.yaml").write_text(SPENT_STOP_STRATEGY)
+    if spent:
+        store.set_rule_state("s1", "stop-loss", RuleState.TRIGGERED)
+    queue_one(client, action="buy $1000",
+              intent=OrderIntent(ticker="AAPL", side=OrderSide.BUY,
+                                 notional="1000", reason="dip-buy"))
+
+
+def test_pending_buy_card_says_the_strategy_has_no_armed_stop(client):
+    _buy_row_for_spent_stop(client)
+    assert "No armed stop: s1/stop-loss (price &lt; 150)" in client.get("/reviews").text
+
+
+def test_pending_buy_card_is_quiet_when_the_stop_is_armed(client):
+    _buy_row_for_spent_stop(client, spent=False)
+    assert "No armed stop" not in client.get("/reviews").text

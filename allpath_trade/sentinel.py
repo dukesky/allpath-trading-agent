@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -54,6 +55,7 @@ from allpath_trade.strategy.model import (
     RuleType,
     StrategyDoc,
 )
+from allpath_trade.strategy.stops import stop_warning
 from allpath_trade.strategy.store import StrategyStore
 
 # Incident 2026-08-28: a manual `allpath-trade check` run (cli.py's
@@ -874,6 +876,16 @@ class Sentinel:
             ticker=doc.position.ticker, condition=condition, disposition=disposition)
         self._send(doc, subject, body)
 
+    def _stop_warning(self, doc: StrategyDoc) -> str:
+        """Ops 2026-11-06 item 6: a stock buy on a strategy whose one-shot
+        stop already fired (strategy/stops.py). Visibility only -- nothing
+        here re-arms the stop. Never raises."""
+        try:
+            return stop_warning(doc, self.strategies)
+        except Exception as exc:  # noqa: BLE001 — a warning must never block a notification
+            print(f"[sentinel] stop check failed for {doc.id}: {exc}", file=sys.stderr)
+            return ""
+
     def _notify_order(self, doc: StrategyDoc, ticker: str, side: str, submitted: bool,
                       detail: str, *, order: Order | None = None) -> None:
         # `order` (the executor's own `Order`, when there is one -- see the
@@ -887,7 +899,10 @@ class Sentinel:
         subject, body = events.order_result(
             account=self.account, ticker=ticker, side=side, submitted=submitted,
             detail=detail, filled_qty=order.filled_qty if order else None,
-            filled_avg_price=order.filled_avg_price if order else None)
+            filled_avg_price=order.filled_avg_price if order else None,
+            stop_warning=(self._stop_warning(doc)
+                          if submitted and side == OrderSide.BUY.value
+                          and ticker == doc.position.ticker else ""))
         self._send(doc, subject, body)
         # "自动执行了也要通知我" -- the order_result receipt (auto-executed hard
         # rule, and every other order outcome that flows through this same
@@ -934,7 +949,10 @@ class Sentinel:
             strategy_id=doc.id, recommendation=recommendation,
             trigger_price=trigger_price, est_shares=est_shares,
             approve_url=approve_url, kind=kind, option_preview=option_preview,
-            no_analysis_reason=no_analysis_reason)
+            no_analysis_reason=no_analysis_reason,
+            stop_warning=(self._stop_warning(doc)
+                          if kind == "order" and intent is not None
+                          and intent.side == OrderSide.BUY else ""))
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's

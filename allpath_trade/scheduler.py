@@ -477,6 +477,21 @@ def _llm_health_line(components) -> str:
         return ""
 
 
+def _no_stop_line(acc) -> str:
+    """Ops 2026-11-06 item 6: held positions whose strategies' one-shot
+    stops are all spent (strategy/stops.py), from this account's LIVE
+    broker/ledger positions. Best-effort: a broker or store failure drops
+    the line, never the digest."""
+    try:
+        from allpath_trade.strategy.stops import no_armed_stop_line
+
+        equity = acc.broker.get_account().equity
+        return no_armed_stop_line(acc.strategies, acc.broker.get_positions(), equity)
+    except Exception as exc:  # noqa: BLE001 — one optional line must never cancel the digest
+        print(f"[digest] no-armed-stop line skipped: {exc}", file=sys.stderr)
+        return ""
+
+
 def _send_one_digest(components, account: str, acc, today: str,
                      llm_cost: str, llm_health: str = "") -> bool:
     """One account's digest -- `trades` comes from `TradeJournal.
@@ -502,7 +517,8 @@ def _send_one_digest(components, account: str, acc, today: str,
         since_iso=since_iso, limit=10_000) if row["source"] == "sentinel")
     subject, body = events.daily_digest(
         account=account, triggers=triggers, trades=acc.journal.trades_today(),
-        pending=len(acc.queue.list()), llm_cost=llm_cost, llm_health=llm_health)
+        pending=len(acc.queue.list()), llm_cost=llm_cost, llm_health=llm_health,
+        no_stop=_no_stop_line(acc))
     # I4: `Notifier.send` is non-raising by contract (notify/base.py) and
     # reports failure by RETURNING False -- a dead SMTP server, an ntfy
     # topic that 404s. Stamping the watermark regardless made that failure

@@ -449,6 +449,59 @@ def test_agent_success_notification_has_no_missing_analysis_warning(tmp_path):
     assert "No agent analysis" not in body
 
 
+SPENT_STOP_YAML = """
+name: "T"
+status: active
+authorization: {auth}
+position: {{ticker: AAPL, target_weight: 15%}}
+rules:
+  - {{id: dip-buy, type: hard, condition: "price < 250", action: "buy $1000"}}
+  - {{id: stop-loss, type: hard, condition: "price < 150", action: "sell all"}}
+"""
+
+
+def _spent_stop_make(tmp_path, auth="confirm", spent=True):
+    from allpath_trade.strategy.model import RuleState
+
+    s, store, ex, q, n = make(tmp_path, SPENT_STOP_YAML.format(auth=auth))
+    if spent:
+        store.set_rule_state("t", "stop-loss", RuleState.TRIGGERED)
+    return s, store, ex, q, n
+
+
+def test_queued_buy_with_a_spent_stop_warns_in_the_notification(tmp_path):
+    # Ops 2026-11-06 item 6: dip buys rebuilt NVDA after its one-shot stop
+    # had fired, and nothing said the new position had no stop.
+    s, _store, _ex, _q, n = _spent_stop_make(tmp_path)
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No armed stop: t/stop-loss (price < 150)" in body
+
+
+def test_queued_buy_with_an_armed_stop_has_no_stop_warning(tmp_path):
+    s, _store, _ex, _q, n = _spent_stop_make(tmp_path, spent=False)
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "No armed stop" not in body
+
+
+def test_auto_executed_buy_with_a_spent_stop_warns_in_the_receipt(tmp_path):
+    s, _store, ex, _q, n = _spent_stop_make(tmp_path, auth="auto")
+    s.run_once()
+    assert len(ex.calls) == 1
+    [(_subject, body)] = n.sent
+    assert body.startswith("⚠ No armed stop: t/stop-loss")
+
+
+def test_spent_stop_warning_never_rearms_the_stop(tmp_path):
+    from allpath_trade.strategy.model import RuleState
+
+    s, store, _ex, _q, _n = _spent_stop_make(tmp_path)
+    s.run_once()
+    stop = next(r for r in store.load("t").rules if r.id == "stop-loss")
+    assert stop.state == RuleState.TRIGGERED
+
+
 def test_auto_soft_agent_execute_but_executor_fails_reports_error(tmp_path):
     s, _store, _ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"), fail=True)
     s.review_agent = StubReviewAgent("execute")

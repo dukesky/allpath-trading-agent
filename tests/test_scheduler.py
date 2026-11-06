@@ -1997,3 +1997,45 @@ def test_build_jobs_daily_digest_survives_a_broken_health_read(monkeypatch):
 
     [(_subject, body)] = notifier.sent
     assert "LLM health" not in body
+
+
+def test_build_jobs_daily_digest_lists_positions_with_no_armed_stop(monkeypatch, tmp_path):
+    # Ops 2026-11-06 item 6: four paper positions had spent one-shot stops.
+    from decimal import Decimal
+
+    import allpath_trade.scheduler as sched
+    from allpath_trade.broker.base import Account, Position
+    from allpath_trade.strategy.model import RuleState
+    from allpath_trade.strategy.store import StrategyStore
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    (tmp_path / "s").mkdir()
+    (tmp_path / "s" / "nvda.yaml").write_text(
+        'name: "N"\nstatus: active\nauthorization: confirm\n'
+        "position: {ticker: NVDA, target_weight: 15%}\nrules:\n"
+        '  - {id: stop-loss, type: hard, condition: "price < 205", action: "sell all"}\n')
+    store = StrategyStore(tmp_path / "s", connect(tmp_path / "t.db"))
+    store.set_rule_state("nvda", "stop-loss", RuleState.TRIGGERED)
+
+    class HoldingBroker(FakeSchedulerBroker):
+        def get_account(self):
+            return Account(equity=Decimal(90000), cash=Decimal(0),
+                           buying_power=Decimal(0))
+
+        def get_positions(self):
+            return [Position(ticker="NVDA", qty=Decimal("88.93"),
+                             avg_entry_price=Decimal(202),
+                             market_value=Decimal(16738),
+                             unrealized_pl=Decimal(0))]
+
+    notifier = DigestNotifier()
+    components = _components(sentinel=FakeSentinel(), notifier=notifier,
+                             strategies=store, broker=HoldingBroker())
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    [(_subject, body)] = notifier.sent
+    assert "⚠ No armed stop on 1 held position(s): NVDA 88.93 sh (18.6%)" in body
