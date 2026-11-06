@@ -63,6 +63,31 @@ CREATE TABLE IF NOT EXISTS rule_fires (
 CREATE INDEX IF NOT EXISTS idx_rule_fires_rule
     ON rule_fires (account, strategy_id, rule_id, ts);
 
+-- Shadow daily check-in pilot (spec 2026-11-06-shadow-checkin-design.md):
+-- the owner's dated views, and the questions each night's check-in asked.
+CREATE TABLE IF NOT EXISTS views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    stance TEXT NOT NULL,
+    horizon TEXT NOT NULL,
+    conviction TEXT NOT NULL,
+    invalidation TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'checkin',
+    expires_ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_views_account_expiry ON views (account, expires_ts);
+CREATE TABLE IF NOT EXISTS checkins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL,
+    et_date TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    questions TEXT NOT NULL,
+    telegram_message_id INTEGER,
+    UNIQUE (account, et_date)
+);
+
 -- Paper-study regime switches (spec 2026-10-25-regime-switch-design.md).
 CREATE TABLE IF NOT EXISTS regime_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

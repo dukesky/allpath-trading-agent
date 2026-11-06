@@ -432,6 +432,7 @@ uv run allpath-trade chat      # talk to the agent in a REPL
 | `DRAWDOWN_HALT_PCT` | 0.15 | Circuit-breaker threshold; 0 disables |
 | `EXPERIMENT_AUTO_APPLY_REVISIONS` | false | Reflection's own revisions auto-apply (bounded-experiment use); only a fallback once a paper regime is set with `allpath-trade regime set` |
 | `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS` | — (inherit) | Shadow-only override of the flag above; unset means shadow follows `EXPERIMENT_AUTO_APPLY_REVISIONS` |
+| `SHADOW_DAILY_CHECKIN` | false | Shadow-only pilot: after the nightly chain, ask the owner 1–3 questions on Telegram; replies become dated views that shadow's reflection must answer to (no paper equivalent) |
 | `DAILY_REFLECTION` | true | Nightly reflection pass |
 | `CHAT_MODEL` / `REVIEW_MODEL` / `MEMORY_MODEL` | — | Per-tier model choice, any OpenAI-compatible or Anthropic provider |
 

@@ -2,6 +2,23 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Shadow daily check-in (pilot, unreleased)
+
+- **`SHADOW_DAILY_CHECKIN`** (off by default, shadow only): after the nightly
+  chain, the chat-tier model turns the day's facts into one to three
+  questions and sends them to the paired Telegram chat as one message
+  (`force_reply`), at most once per ET day (`checkins` table). A Telegram
+  reply to that message goes to the shadow chat agent whatever `/account`
+  says, framed with the questions; the agent checks his claims, pushes back
+  where they look weak, and files his view with the new `record_view` tool
+  (`views` table: subject, stance, horizon, conviction, invalidation, expiry
+  30 days by default). Shadow's reflection sees the active views in its
+  briefing, and `propose_strategy_revision` refuses a proposal on a ticker
+  with an active view (or with a `MARKET` view) unless it states
+  `view_alignment` (agree / extend / contradict); the alignment leads the
+  rationale on the Pending card. With the flag off, and on paper always,
+  nothing changes. Spec: `docs/superpowers/specs/2026-11-06-shadow-checkin-design.md`.
+
 ## Paper-study regimes — 2026-10-25
 
 - **A regime is two switches flipped together**: whether nightly reflection

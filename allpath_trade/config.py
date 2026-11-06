@@ -183,6 +183,13 @@ class Settings(BaseSettings):
     # Only consulted when no regime is stored for the account (allpath_trade/
     # regime.py): a paper regime in the database always wins.
     shadow_experiment_auto_apply_revisions: bool | None = None
+    # Shadow daily check-in pilot (spec 2026-11-06-shadow-checkin-design.md):
+    # after the nightly chain, ask the owner 1-3 questions on Telegram and keep
+    # his answers as dated views that shadow's reflection must answer to.
+    # Shadow-only by design -- there is no paper flag, because paper runs the
+    # paper-2 study and a new human input channel would change what it
+    # measures. .env-only, off by default.
+    shadow_daily_checkin: bool = False
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.

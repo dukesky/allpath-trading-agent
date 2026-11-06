@@ -193,3 +193,10 @@ def test_options_trading_loads_from_env(tmp_path: Path):
     store = SettingsStore(tmp_path / ".env")
     store.set("OPTIONS_TRADING", "true")
     assert store.load().options_trading is True
+
+
+def test_shadow_daily_checkin_off_by_default_and_loads_from_env(tmp_path: Path):
+    assert Settings(_env_file=tmp_path / "nope.env").shadow_daily_checkin is False
+    env = tmp_path / ".env"
+    env.write_text("SHADOW_DAILY_CHECKIN=true\n")
+    assert Settings(_env_file=env).shadow_daily_checkin is True

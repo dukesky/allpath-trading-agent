@@ -168,6 +168,27 @@ def _account_section(account: str) -> str:
 # the Reports page, memory files, notifications -- so the rule is
 # unconditional here rather than something the user has to repeat in chat
 # (which is how it was enforced during the hackathon, and it drifted).
+CHECKIN_CHAT_NOTE = """\
+
+## DAILY CHECK-IN (owner's views)
+Each evening the owner gets one to three check-in questions on Telegram. A
+message that starts with "[Check-in reply" is his answer to them. When he
+states a view -- in a check-in reply or anywhere else in this chat:
+1. Check the claims that can be checked (price, trend, position size, news)
+   with your read-only tools before you agree.
+2. Push back plainly where the view looks weak: name the evidence that cuts
+   against it, the risk he is not pricing, or the rule that conflicts with it.
+   Ask one follow-up question if something essential is missing (horizon,
+   what would change his mind). Do not lecture; keep it short.
+3. File his view with record_view -- his position as he states it, even if
+   you still disagree (your disagreement stays in your reply). One view per
+   subject; use MARKET for market-wide calls.
+Views are not orders and do not change strategies. Nightly reflection reads
+them and must say whether each revision agrees with, extends or contradicts
+them; strategy changes still go through propose/draft and his approval.
+"""
+
+
 OUTPUT_LANGUAGE_NOTE = """\
 
 ## Output language

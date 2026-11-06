@@ -620,3 +620,43 @@ def test_download_file_rejects_a_traversing_file_path(capsys):
     api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
     assert api.download_file("../../bot/getUpdates", 1000) is None
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# send_message_id (shadow check-in pilot)
+# ---------------------------------------------------------------------------
+
+def test_send_message_id_returns_the_sent_message_id_and_passes_markup():
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data)
+        return _FakeResponse(_ok_body({"message_id": 777, "text": "hi"}))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    markup = {"force_reply": True}
+    assert api.send_message_id("42", "<b>hi</b>", reply_markup=markup) == 777
+    assert captured["body"]["reply_markup"] == markup
+    assert captured["body"]["parse_mode"] == "HTML"
+
+
+def test_send_message_id_falls_back_to_plain_text_on_400():
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        body = json.loads(req.data)
+        calls.append(body)
+        if body.get("parse_mode") == "HTML":
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
+        return _FakeResponse(_ok_body({"message_id": 9}))
+
+    api = TelegramAPI(TOKEN, urlopen=fake_urlopen)
+    assert api.send_message_id("42", "<b>broken") == 9
+    assert len(calls) == 2 and "parse_mode" not in calls[1]
+
+
+def test_send_message_id_returns_none_on_failure():
+    def fake_urlopen(req, timeout=None):
+        return _FakeResponse(_fail_body())
+
+    assert TelegramAPI(TOKEN, urlopen=fake_urlopen).send_message_id("42", "x") is None
