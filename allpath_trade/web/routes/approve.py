@@ -117,7 +117,20 @@ def _confirm_context(c, row) -> dict:
         "day_change_pct": None, "deviation_pct": None, "est_shares": None,
         "market_open": False, "rationale": "", "diff_rows": [],
         "stale": False, "shadow_before": None, "shadow_after": None,
+        "agent_recommendation": "", "no_analysis": False,
     }
+    if kind in ("order", "option_order") and row["source"] != "chat":
+        # Ops 2026-11-06: show the review agent's verdict, or say loudly that
+        # there is none (the LLM was down and reviews went out blind).
+        try:
+            analysis = json.loads(row["agent_analysis"]) if row["agent_analysis"] else None
+        except (TypeError, ValueError):
+            analysis = None
+        recommendation = analysis.get("recommendation") if isinstance(analysis, dict) else None
+        if recommendation:
+            ctx["agent_recommendation"] = str(recommendation)
+        else:
+            ctx["no_analysis"] = True
     if kind == "shadow_edit":
         # shadow-dual-active T6: no order to price and no strategy diff --
         # just the before/after ledger snapshot the tool recorded, rendered

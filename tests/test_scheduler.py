@@ -1959,3 +1959,41 @@ def test_run_daily_jobs_publish_watermark_not_set_on_failed_post(monkeypatch):
 
     assert components.app_state.get("publish_last_date") is None
     assert len(calls) == 1
+
+
+def test_build_jobs_daily_digest_has_an_llm_health_line(monkeypatch, tmp_path):
+    # Ops 2026-11-06: credits ran out for a week and the digest said nothing.
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    llm_usage = LLMUsage(connect(tmp_path / "t.db"))
+    llm_usage.record_failure(tier="review", model="m", error_class="credits",
+                             detail="402")
+    components = _components(sentinel=FakeSentinel(), notifier=notifier,
+                             llm_usage=llm_usage)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()
+
+    [(_subject, body)] = notifier.sent
+    assert "⚠ LLM health:" in body
+    assert "review never succeeded, 1 failed today (credits)" in body
+
+
+def test_build_jobs_daily_digest_survives_a_broken_health_read(monkeypatch):
+    import allpath_trade.scheduler as sched
+
+    monkeypatch.setattr(sched, "is_market_hours", lambda: False)
+    monkeypatch.setattr(sched, "_is_after_close", lambda now=None: True)
+    notifier = DigestNotifier()
+    components = _components(sentinel=FakeSentinel(), notifier=notifier)
+    scheduler = FakeScheduler()
+    build_jobs(scheduler, FakeHolder(components))
+
+    scheduler.job()  # the fake usage store has no failure methods at all
+
+    [(_subject, body)] = notifier.sent
+    assert "LLM health" not in body

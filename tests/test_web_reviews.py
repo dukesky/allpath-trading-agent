@@ -1427,3 +1427,23 @@ def test_shadow_chip_does_not_need_regime_status(client, monkeypatch):
     monkeypatch.setattr(dashboard_route, "regime_status", boom)
     client.cookies.set("account", "shadow")
     assert "Revisions: human" in client.get("/reviews").text
+
+
+# -- ops 2026-11-06: a missing agent analysis is said out loud ----------------
+
+def test_card_warns_when_a_sentinel_order_has_no_agent_analysis(client):
+    queue_one(client)
+    body = client.get("/reviews").text
+    assert "No agent analysis: LLM unavailable" in body
+
+
+def test_card_has_no_warning_when_analysis_exists(client):
+    rid = queue_one(client)
+    analysis = ReviewAnalysis(recommendation="execute", reasoning="ok")
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
+    assert "No agent analysis" not in client.get("/reviews").text
+
+
+def test_chat_proposal_card_has_no_missing_analysis_warning(client):
+    queue_one(client, source="chat")
+    assert "No agent analysis" not in client.get("/reviews").text

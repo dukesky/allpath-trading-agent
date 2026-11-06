@@ -786,7 +786,8 @@ class Sentinel:
             # this is not a genuine "skip" decision, so don't act on it.
             # Leave the trigger pending for human review.
             self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent,
-                                kind=kind, option_preview=option_preview)
+                                kind=kind, option_preview=option_preview,
+                                no_analysis_reason="the agent's reply could not be parsed")
             return TriggerOutcome(
                 **base, disposition="queued",
                 detail="analysis unparseable — left for human review")
@@ -875,7 +876,16 @@ class Sentinel:
     def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
                        recommendation: str, *, price: Decimal | None = None,
                        intent: OrderIntent | None = None, kind: str = "order",
-                       option_preview: str = "") -> None:
+                       option_preview: str = "", no_analysis_reason: str = "") -> None:
+        # Ops 2026-11-06: an order review with no recommendation went out
+        # looking like any other card, and 21 were approved blind while the
+        # LLM was out of credits. Every order kind is meant to carry the
+        # review agent's analysis, so its absence is always said out loud:
+        # the agent failed, is not configured, or its reply was unusable.
+        if not recommendation and kind in ("order", "option_order"):
+            no_analysis_reason = no_analysis_reason or "LLM unavailable"
+        else:
+            no_analysis_reason = ""
         # Part B: the price context available at the instant this item was
         # queued -- the exact sample the rule triggered on, not a second,
         # separately re-fetched "live" quote (see review_queued's
@@ -896,7 +906,8 @@ class Sentinel:
             account=self.account, review_id=review_id, ticker=ticker, action=action,
             strategy_id=doc.id, recommendation=recommendation,
             trigger_price=trigger_price, est_shares=est_shares,
-            approve_url=approve_url, kind=kind, option_preview=option_preview)
+            approve_url=approve_url, kind=kind, option_preview=option_preview,
+            no_analysis_reason=no_analysis_reason)
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's

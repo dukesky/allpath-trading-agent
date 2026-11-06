@@ -236,3 +236,16 @@ def test_options_backend_is_none_when_flag_on_but_no_alpaca_keys(tmp_path):
 
     assert paper.executor.options_backend is None
     assert paper.sentinel.options_backend is None
+
+
+def test_llm_usage_store_carries_an_outage_alerter(tmp_path):
+    # Ops 2026-11-06: every build_llm(..., usage_store=components.llm_usage)
+    # caller (review, memory, reflection, chat) must reach the alerter.
+    from allpath_trade.llm.health import LLMOutageAlerter
+
+    settings = _settings(tmp_path)
+    components = build_components(settings, broker=FakeBroker())
+    alerter = components.llm_usage.alerter
+    assert isinstance(alerter, LLMOutageAlerter)
+    assert alerter.notifier is components.notifier
+    assert alerter.app_state is components.app_state

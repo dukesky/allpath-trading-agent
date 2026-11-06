@@ -348,3 +348,34 @@ def test_review_queued_without_option_preview_unchanged():
         account="paper", review_id=7, ticker="NVDA", action="buy $3500",
         strategy_id="s", trigger_price="$209.36", est_shares="16.72")
     assert "Option order at trigger" not in body
+
+
+# -- ops 2026-11-06: a blind approval must never look normal ---------------
+
+def test_review_queued_warns_loudly_when_the_agent_analysis_is_missing():
+    from allpath_trade.notify import events
+
+    _subject, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA", action="buy $3000",
+        strategy_id="nvda", no_analysis_reason="LLM unavailable")
+    lines = body.splitlines()
+    assert lines[0] == "⚠ No agent analysis: LLM unavailable"
+    assert "The agent recommends" not in body
+
+
+def test_review_queued_has_no_warning_by_default():
+    from allpath_trade.notify import events
+
+    _subject, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA", action="buy $3000",
+        strategy_id="nvda", recommendation="execute — fine")
+    assert "No agent analysis" not in body
+
+
+def test_daily_digest_appends_the_llm_health_line():
+    from allpath_trade.notify import events
+
+    _subject, body = events.daily_digest(
+        account="paper", triggers=1, trades=0, pending=0,
+        llm_health="⚠ LLM health: review never succeeded, 3 failed today (credits).")
+    assert "\n⚠ LLM health: review never succeeded" in body

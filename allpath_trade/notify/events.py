@@ -178,7 +178,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   strategy_id: str, recommendation: str = "",
                   trigger_price: str = "", est_shares: str = "",
                   approve_url: str = "", kind: str = "order",
-                  option_preview: str = "") -> tuple[Subject, str]:
+                  option_preview: str = "",
+                  no_analysis_reason: str = "") -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -211,7 +212,11 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     queued-review case as "if approved, you'll place it yourself".
 
     `option_preview`, when non-empty, adds a line describing the option order
-    context (e.g., "2x NVDA261016C00220000 ≈ $930.00")."""
+    context (e.g., "2x NVDA261016C00220000 ≈ $930.00").
+
+    `no_analysis_reason`, when non-empty, puts a "⚠ No agent analysis: ..."
+    warning on the FIRST line (ops 2026-11-06: reviews with an empty
+    analysis read like normal cards and were approved blind for a week)."""
     subject_noun = ticker or "Ledger"
     # int(): `review_id` is usually a ReviewHandle, whose `.token` must never
     # reach the event (see Subject's docstring).
@@ -223,6 +228,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
          "next": f"allpath-trade reviews --account {account} list --json"})
     proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
     lines = [f"Item #{review_id} is waiting for you.", proposed]
+    if no_analysis_reason:
+        lines.insert(0, f"⚠ No agent analysis: {no_analysis_reason}")
     if strategy_id:
         lines.append(f"Strategy: {strategy_id}")
     if trigger_price:
@@ -244,7 +251,7 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
 
 
 def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
-                 llm_cost: str = "") -> tuple[Subject, str]:
+                 llm_cost: str = "", llm_health: str = "") -> tuple[Subject, str]:
     """`llm_cost`, when non-empty, is one extra line naming today's
     estimated LLM spend (store/llm_usage.py + llm/prices.py) -- the caller
     (scheduler.py's `_send_daily_digest`) only ever passes a non-empty
@@ -282,6 +289,10 @@ def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
         # so explicitly rather than reading as if this one account alone
         # spent that much.
         body += f"\nEstimated LLM cost today (all accounts): {llm_cost} (see Settings -> Usage)."
+    if llm_health:
+        # Ops 2026-11-06: llm/health.py's per-tier "last OK / failed today"
+        # line -- process-wide, like the cost line above.
+        body += f"\n{llm_health}"
     return subject, body + FOOTER
 
 

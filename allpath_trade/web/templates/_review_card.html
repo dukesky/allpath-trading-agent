@@ -157,6 +157,12 @@
     </p>
     {% endfor %}
   </div>
+  {% elif item['kind'] in ('order', 'option_order') and item['source'] != 'chat' %}
+  {# Ops 2026-11-06: a rule-triggered order always goes through the review
+     agent, so an empty analysis means the LLM failed (credits ran out for a
+     week and 21 such cards were approved blind). Say so, loudly. A chat
+     proposal never had an agent review, so it gets no warning. #}
+  <p class="warn" style="font-size:13px;margin:10px 0 0;font-weight:600">⚠ No agent analysis: LLM unavailable. Check this order yourself before approving.</p>
   {% endif %}
   {% if item['status'] == 'pending' %}
   <div class="row" style="margin-top:12px">

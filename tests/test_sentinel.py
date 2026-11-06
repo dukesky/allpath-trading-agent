@@ -408,6 +408,47 @@ def test_agent_failure_leaves_trigger_queued(tmp_path):
     assert q.get(1)["status"] == "pending"
 
 
+def test_agent_failure_notification_says_there_is_no_analysis(tmp_path):
+    # Ops 2026-11-06: 21 reviews reached Telegram with an empty analysis
+    # that looked like any other card.
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent(fail=True)
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No agent analysis: LLM unavailable" in body
+
+
+def test_no_review_agent_notification_says_there_is_no_analysis(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = None
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No agent analysis: LLM unavailable" in body
+
+
+def test_unparseable_analysis_notification_says_so(tmp_path):
+    from allpath_trade.agent.review import ReviewAnalysis
+
+    class UnparseableStub:
+        def analyze(self, review):
+            return ReviewAnalysis(recommendation="skip",
+                                  reasoning="unparseable analysis: garbage")
+
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = UnparseableStub()
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No agent analysis: the agent's reply could not be parsed" in body
+
+
+def test_agent_success_notification_has_no_missing_analysis_warning(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent("execute")
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "No agent analysis" not in body
+
+
 def test_auto_soft_agent_execute_but_executor_fails_reports_error(tmp_path):
     s, _store, _ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"), fail=True)
     s.review_agent = StubReviewAgent("execute")

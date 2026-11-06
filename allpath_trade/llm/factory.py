@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from allpath_trade.config import Settings, normalize_llm_provider
 from allpath_trade.llm.anthropic_client import AnthropicClient
-from allpath_trade.llm.base import LLMClient, LLMResponse, ToolSpec
+from allpath_trade.llm.base import LLMClient, LLMError, LLMResponse, ToolSpec
+from allpath_trade.llm.health import classify_llm_error
 from allpath_trade.llm.openai_compat import OpenAICompatClient
 from allpath_trade.store.llm_usage import LLMUsage
 
@@ -43,7 +44,11 @@ class _RecordingClient(LLMClient):
 
     def complete(self, messages: list[dict],
                  tools: list[ToolSpec] | None = None) -> LLMResponse:
-        response = self._inner.complete(messages, tools)
+        try:
+            response = self._inner.complete(messages, tools)
+        except LLMError as exc:
+            self._record_failure(exc)
+            raise
         try:
             self._usage_store.record(
                 tier=self._tier, model=self._inner.model,
@@ -52,6 +57,27 @@ class _RecordingClient(LLMClient):
         except Exception:  # noqa: BLE001, S110 — recording must never break a call
             pass
         return response
+
+    def _record_failure(self, exc: LLMError) -> None:
+        """Ops 2026-11-06: a week of 402s went unnoticed because failures
+        left no trace at all. Record the failure and hand it to the store's
+        outage alerter, if any. Both best-effort: the caller must still see
+        the original LLMError, never a recording error."""
+        error_class = classify_llm_error(exc)
+        detail = str(exc)
+        try:
+            self._usage_store.record_failure(
+                tier=self._tier, model=self._inner.model,
+                error_class=error_class, detail=detail)
+        except Exception:  # noqa: BLE001, S110 — recording must never break a call
+            pass
+        alerter = getattr(self._usage_store, "alerter", None)
+        if alerter is None:
+            return
+        try:
+            alerter.on_failure(error_class, self._tier, self._inner.model, detail)
+        except Exception:  # noqa: BLE001, S110 — alerting must never break a call
+            pass
 
 
 def build_llm(settings: Settings, tier: str = "chat",

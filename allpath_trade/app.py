@@ -11,6 +11,7 @@ from allpath_trade.config import Settings
 from allpath_trade.data.base import DataSource
 from allpath_trade.data.yf import YFinanceSource
 from allpath_trade.execution import Executor
+from allpath_trade.llm.health import LLMOutageAlerter
 from allpath_trade.memory.consolidate import Consolidator
 from allpath_trade.memory.observations import ObservationLog
 from allpath_trade.memory.search import SessionSearch
@@ -316,6 +317,12 @@ def build_components(settings: Settings, broker: Broker | None = None,
     notifier = build_notifier(settings)
     app_state = AppState(conn)
     llm_usage = LLMUsage(conn)
+    # Ops 2026-11-06: every failed LLM call through a `usage_store`-wrapped
+    # client reaches this alerter (llm/factory.py's _RecordingClient), so a
+    # credits/auth/rate-limit outage alerts at once instead of going unseen.
+    llm_usage.alerter = LLMOutageAlerter(
+        app_state=app_state, notifier=notifier,
+        telegram_bot_token=settings.telegram_bot_token)
 
     # shadow-dual-active T4: both accounts always active -- own broker,
     # journal, queue, strategies, memory, sentinel, and (LLM permitting)
