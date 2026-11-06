@@ -172,7 +172,7 @@ class ChatService:
             strategies=b.strategies, queue=b.queue, memory=b.memory,
             account=self.account)
         if checkin:
-            from allpath_trade.agent.context import CHECKIN_CHAT_NOTE
+            from allpath_trade.checkin import CHECKIN_CHAT_NOTE
 
             prompt = f"{prompt}\n{CHECKIN_CHAT_NOTE}"
         # Finding 8: flush durable preferences to curated memory before the
