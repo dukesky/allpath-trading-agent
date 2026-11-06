@@ -18,7 +18,7 @@ from decimal import Decimal
 
 # Bump this whenever the table below is hand-updated -- rendered verbatim
 # in the Usage panel's honest-estimate note (web/templates/settings.html).
-PRICES_UPDATED = "2026-10-03"
+PRICES_UPDATED = "2026-11-06"
 
 # USD per 1,000,000 tokens: (input, output). Keyed by the bare model SLUG
 # (no provider prefix) -- see `price_for` for why lookup strips an
@@ -50,6 +50,11 @@ _PRICES: dict[str, tuple[Decimal, Decimal]] = {
     "claude-haiku-4.5": (Decimal(1), Decimal(5)),
     "claude-haiku-4-5": (Decimal(1), Decimal(5)),
     "gpt-5.2": (Decimal(5), Decimal(15)),
+    # Production CHAT_MODEL / MEMORY_MODEL on the Air as of 2026-11-06
+    # (added then; before, both priced at DEFAULT_PRICE and every cost line
+    # read "(some rates estimated)").
+    "deepseek-v4.1-flash-1017": (Decimal("0.15"), Decimal("0.60")),
+    "gpt-6.1-sol": (Decimal(2), Decimal(10)),
 }
 
 # Conservative (deliberately on the HIGH side, so an estimate never
