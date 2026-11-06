@@ -140,21 +140,6 @@ CORRECTIVE_PROMPT = (
     "non-empty."
 )
 
-# Shadow check-in pilot (spec 2026-11-06-shadow-checkin-design.md): appended
-# to the reflection system prompt only for shadow with SHADOW_DAILY_CHECKIN on.
-VIEWS_REFLECTION_NOTE = """\
-
-## OWNER'S VIEWS
-The briefing lists the owner's active views, gathered from his evening
-check-ins. They are his positions, not orders. Weigh them as strong input:
-a revision may still go against one when the evidence says so, but it must
-say so. For every propose_strategy_revision on a ticker he has a view on (or
-when he has a MARKET view), set view_alignment to "agree: ...", "extend: ..."
-or "contradict: ..." with one line of why; the tool refuses the proposal
-otherwise. In the report, name any view the day's evidence now argues
-against, so tomorrow's check-in can ask him about it.
-"""
-
 REFLECTION_INSTRUCTIONS = """\
 ## Daily reflection
 
@@ -412,14 +397,10 @@ def build_briefing(*, et_date: str, trades: list[dict], observations: list[dict]
         "\n## Pending queue (by kind)",
         fence_external(_cap_chars(pending_block)),
     ]
-    if views is not None:
-        # Shadow check-in pilot: only when the caller passes views at all, so
-        # every other briefing stays byte-identical.
-        from allpath_trade.agent.view_tools import format_view
+    if views is not None:  # shadow check-in pilot; absent means byte-identical
+        from allpath_trade.checkin import views_briefing_section
 
-        views_block = "\n".join(format_view(v) for v in views)
-        sections += ["\n## Owner's active views (from check-ins)",
-                     fence_external(_cap_chars(views_block or "none on file yet"))]
+        sections += views_briefing_section(views)
     return "\n".join(sections)
 
 
@@ -530,6 +511,8 @@ class Reflector:
             account=c.account)
         system_prompt = f"{base_prompt}\n{REFLECTION_INSTRUCTIONS}"
         if views is not None:
+            from allpath_trade.checkin import VIEWS_REFLECTION_NOTE
+
             system_prompt = f"{system_prompt}\n{VIEWS_REFLECTION_NOTE}"
 
         compactor = Compactor(self.llm, conversations,

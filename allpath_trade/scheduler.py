@@ -18,7 +18,6 @@ from allpath_trade.store.app_state import (
     SENTINEL_HEARTBEAT_KEY,
     SENTINEL_LAST_OK_KEY,
     SENTINEL_MARKET_OPEN_KEY,
-    TELEGRAM_CHAT_ID_KEY,
     AppState,
 )
 
@@ -693,42 +692,6 @@ def _run_publish_step(components, *, verbose: bool) -> bool:
     return ok
 
 
-def _run_checkin_step(components, *, verbose: bool) -> bool:
-    """Shadow daily check-in (pilot; spec 2026-11-06-shadow-checkin-design.md):
-    after every account's reflection/consolidation, ask the owner tonight's
-    questions on Telegram. Off unless SHADOW_DAILY_CHECKIN is set; skipped
-    with success (not retried) when shadow has no LLM-backed reflector, its
-    broker is unconfigured, or Telegram has no bot token or paired chat.
-    `DailyCheckin` keeps its own per-ET-day marker, so a retried night never
-    asks twice. Returns False only when the check-in itself failed (LLM down,
-    unparseable output, undelivered message), so the chain retries it."""
-    settings = components.settings
-    if not getattr(settings, "shadow_daily_checkin", False):
-        return True
-    acc = components.accounts.get("shadow")
-    chat_id = components.app_state.get(TELEGRAM_CHAT_ID_KEY)
-    token = getattr(settings, "telegram_bot_token", "")
-    reason = ("no shadow account" if acc is None
-              else "broker not configured" if _is_unconfigured(acc)
-              else "no LLM" if getattr(acc, "reflector", None) is None
-              else "Telegram not paired" if not (token and chat_id) else "")
-    if reason:
-        if verbose:
-            print(f"[checkin:shadow] skipped ({reason})")
-        return True
-    from allpath_trade.checkin import DailyCheckin
-    from allpath_trade.llm.factory import build_llm
-    from allpath_trade.telegram import TelegramAPI
-
-    checkin = DailyCheckin(
-        llm=build_llm(settings, tier="chat", usage_store=components.llm_usage),
-        acc=acc, api=TelegramAPI(token), chat_id=chat_id)
-    status = checkin.run_daily()
-    if verbose:
-        print(f"[checkin:shadow] {status}")
-    return True
-
-
 def run_daily_jobs(components, verbose: bool = False) -> bool:
     """The after-close daily sequence, shared by `build_jobs` (`serve`) and
     `cli.py`'s `run` daemon so the two entry points can't drift out of sync
@@ -796,8 +759,10 @@ def run_daily_jobs(components, verbose: bool = False) -> bool:
             print(f"[daily:{account}] failed: {exc}", file=sys.stderr)
             ok = False
 
-    try:
-        ok = _run_checkin_step(components, verbose=verbose) and ok
+    try:  # shadow daily check-in pilot (off unless SHADOW_DAILY_CHECKIN)
+        from allpath_trade.checkin import run_checkin_step
+
+        ok = run_checkin_step(components, verbose=verbose) and ok
     except Exception as exc:  # noqa: BLE001 — a failed check-in must not stop the rest
         print(f"[checkin:shadow] failed: {exc}", file=sys.stderr)
         ok = False

@@ -223,13 +223,6 @@ class TelegramAPI:
         can retry as plain text -- a 400 from Telegram's sendMessage is how
         an entity-parse failure surfaces), or "fail" for anything else.
         Always prints at most one scrubbed stderr line on failure."""
-        return self._send_once_with_id(chat_id, text, parse_mode, reply_markup)[0]
-
-    def _send_once_with_id(self, chat_id: str, text: str, parse_mode: str | None,
-                           reply_markup: dict[str, Any] | None = None,
-                           ) -> tuple[str, int | None]:
-        """`_send_once` plus the sent message's id (None unless "ok" and the
-        response carries one)."""
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
@@ -242,16 +235,14 @@ class TelegramAPI:
             data = json.loads(body)
         except urllib.error.HTTPError as exc:
             print(f"[telegram] sendMessage failed: {self._scrub(str(exc))}", file=sys.stderr)
-            return ("http400" if exc.code == 400 else "fail"), None
+            return "http400" if exc.code == 400 else "fail"
         except Exception as exc:  # noqa: BLE001 — transport must never raise
             print(f"[telegram] sendMessage failed: {self._scrub(str(exc))}", file=sys.stderr)
-            return "fail", None
+            return "fail"
         if not isinstance(data, dict) or not data.get("ok"):
             print(f"[telegram] sendMessage failed: {self._scrub(str(data))}", file=sys.stderr)
-            return "fail", None
-        result = data.get("result")
-        message_id = result.get("message_id") if isinstance(result, dict) else None
-        return "ok", message_id if isinstance(message_id, int) else None
+            return "fail"
+        return "ok"
 
     def send_message(self, chat_id: str, html: str,
                      reply_markup: dict[str, Any] | None = None) -> bool:
@@ -276,15 +267,34 @@ class TelegramAPI:
 
     def send_message_id(self, chat_id: str, html: str,
                         reply_markup: dict[str, Any] | None = None) -> int | None:
-        """`send_message` for a caller that needs to recognise replies to
-        this message later (the shadow daily check-in): same HTML-then-plain
-        fallback, but returns the sent message's id, or None if it was not
-        delivered."""
-        status, message_id = self._send_once_with_id(chat_id, html, "HTML", reply_markup)
-        if status == "http400":
-            plain = strip_telegram_html_to_plain(html)
-            status, message_id = self._send_once_with_id(chat_id, plain, None, reply_markup)
-        return message_id if status == "ok" else None
+        """Shadow check-in pilot: like `send_message` (HTML, then one plain
+        retry on a 400), but returns the sent message's id -- so a later
+        reply to it can be recognised -- or None if it was not delivered."""
+        for text, parse_mode in ((html, "HTML"), (strip_telegram_html_to_plain(html), None)):
+            payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            if reply_markup is not None:
+                payload["reply_markup"] = reply_markup
+            try:
+                with self._urlopen(self._request("sendMessage", payload),
+                                   timeout=_SEND_TIMEOUT_SECONDS) as resp:
+                    data = json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                print(f"[telegram] sendMessage failed: {self._scrub(str(exc))}", file=sys.stderr)
+                if exc.code == 400 and parse_mode:
+                    continue
+                return None
+            except Exception as exc:  # noqa: BLE001 — transport must never raise
+                print(f"[telegram] sendMessage failed: {self._scrub(str(exc))}", file=sys.stderr)
+                return None
+            result = data.get("result") if isinstance(data, dict) and data.get("ok") else None
+            message_id = result.get("message_id") if isinstance(result, dict) else None
+            if not isinstance(message_id, int):
+                print(f"[telegram] sendMessage failed: {self._scrub(str(data))}", file=sys.stderr)
+                return None
+            return message_id
+        return None
 
     def send_typing(self, chat_id: str) -> None:
         """Best-effort `sendChatAction(typing)`. Swallows everything --
@@ -581,19 +591,6 @@ def _index_albums(updates: list[dict[str, Any]]) -> dict[tuple[str, str, str],
     return groups
 
 
-# Shadow check-in pilot (spec 2026-11-06-shadow-checkin-design.md).
-CHECKIN_ACCOUNT = "shadow"
-
-
-def frame_checkin_reply(checkin: dict[str, Any], text: str) -> str:
-    """The chat turn a check-in reply becomes: the questions it answers,
-    then the owner's words verbatim -- so the agent knows what is being
-    answered without the check-in ever having been a turn of its own."""
-    questions = "\n".join(f"{i}. {q}" for i, q in enumerate(checkin["questions"], 1))
-    return (f"[Check-in reply ({checkin['et_date']})]\n"
-            f"Questions asked:\n{questions}\n\nMy answer:\n{text}")
-
-
 class TelegramPoller:
     """Long-polls Telegram's `getUpdates`, pairs a single chat via `/start
     <web_token>`, and forwards paired-chat text into `chat_service` --
@@ -880,38 +877,15 @@ class TelegramPoller:
                 self._handle_image_message(chat_id, group)
             return None
 
-        checkin = self._checkin_replied_to(message)
-        if checkin is not None:
-            self._handle_chat_text(chat_id, frame_checkin_reply(checkin, text),
-                                   account=CHECKIN_ACCOUNT)
+        from allpath_trade.checkin import CHECKIN_ACCOUNT, checkin_reply_text
+
+        framed = checkin_reply_text(self.holder.get(), message, text, self._log_error)
+        if framed is not None:  # shadow check-in pilot: a reply to the check-in
+            self._handle_chat_text(chat_id, framed, account=CHECKIN_ACCOUNT)
             return None
 
         self._handle_chat_text(chat_id, text)
         return None
-
-    def _checkin_replied_to(self, message: dict[str, Any]) -> dict[str, Any] | None:
-        """The shadow check-in this message replies to, or None. Shadow
-        check-in pilot (spec 2026-11-06-shadow-checkin-design.md): only
-        while SHADOW_DAILY_CHECKIN is on, and only for a reply to the exact
-        message the check-in sent (matched by Telegram message id) -- any
-        other text keeps the chat's normal `/account` routing. Never
-        raises: a lookup failure just means ordinary routing."""
-        reply_to = message.get("reply_to_message")
-        if not isinstance(reply_to, dict) or not isinstance(reply_to.get("message_id"), int):
-            return None
-        try:
-            components = self.holder.get()
-            if not getattr(components.settings, "shadow_daily_checkin", False):
-                return None
-            conn = getattr(components, "conn", None)
-            if conn is None:
-                return None
-            from allpath_trade.store.views import CheckinStore
-
-            return CheckinStore(conn, CHECKIN_ACCOUNT).by_message_id(reply_to["message_id"])
-        except Exception as exc:  # noqa: BLE001 — routing must never break the poller
-            self._log_error(f"check-in lookup failed: {exc}")
-            return None
 
     def _handle_image_message(self, chat_id: str, messages: list[dict[str, Any]]) -> None:
         """One image message, or one album, becoming one chat turn.
@@ -1348,9 +1322,7 @@ class TelegramPoller:
         # carries -- reading it twice (once here, once implicitly inside
         # the property) could theoretically disagree if `/account` raced
         # this turn, which prefixing off this one captured value rules out.
-        # `account` overrides it for a turn that belongs to one account
-        # regardless of the switcher (a shadow check-in reply).
-        account = account or self._telegram_account()
+        account = account or self._telegram_account()  # override: check-in reply
         stop_typing = threading.Event()
 
         def _keep_typing() -> None:
