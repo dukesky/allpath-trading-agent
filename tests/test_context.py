@@ -290,3 +290,65 @@ def test_rearm_guidance_documents_bare_minutes_and_the_disable_switch(tmp_path):
     assert "bare integer number of minutes" in prompt
     assert "state: disabled" in prompt
     assert "off switch" in prompt
+
+
+# -- ops 2026-11-06: live positions win over stale memory dossiers ------------
+# Memory still said NVDA ~66 sh / 15% a week after a stop sold all of it, and
+# agents repeated that as fact. Each dossier now carries the live position,
+# and the prompt says live data wins.
+
+NVDA_STRAT = """
+name: "N"
+status: active
+authorization: confirm
+position: {ticker: NVDA, target_weight: 15%}
+rules:
+  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}
+"""
+
+
+def _prompt_with_dossiers(tmp_path, broker):
+    from allpath_trade.memory.store import MemoryStore
+
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / "t.yaml").write_text(STRAT)
+    (tmp_path / "strategies" / "n.yaml").write_text(NVDA_STRAT)
+    conn = connect(tmp_path / "db.sqlite")
+    memory = MemoryStore(tmp_path / "memory", conn)
+    memory.apply("stock", "AAPL", "add", text="AAPL dossier text")
+    memory.apply("stock", "NVDA", "add", text="Now 66.30 sh, ~14.8% weight")
+    return build_system_prompt(
+        identity="IDENT", broker=broker, journal=TradeJournal(conn),
+        strategies=StrategyStore(tmp_path / "strategies", conn),
+        queue=ReviewQueue(conn, executor=None), memory=memory)
+
+
+def test_dossier_of_an_unheld_ticker_carries_a_live_zero_position(tmp_path):
+    prompt = _prompt_with_dossiers(tmp_path, FakeBroker())
+    nvda = prompt.split("## Memory — NVDA", 1)[1]
+    live = "LIVE position NVDA (broker, authoritative): none, 0 shares held."
+    assert live in nvda
+    assert nvda.index(live) < nvda.index("66.30 sh")
+
+
+def test_dossier_of_a_held_ticker_carries_live_size_and_weight(tmp_path):
+    # FakeBroker: 10 AAPL, market value $2,000, equity $10,000 -> 20.0%
+    prompt = _prompt_with_dossiers(tmp_path, FakeBroker())
+    aapl = prompt.split("## Memory — AAPL", 1)[1]
+    assert "LIVE position AAPL (broker, authoritative): 10 sh" in aapl
+    assert "20.0% of equity" in aapl
+
+
+def test_prompt_says_live_positions_win_over_memory(tmp_path):
+    prompt = _prompt_with_dossiers(tmp_path, FakeBroker())
+    assert "live data wins" in prompt.lower()
+
+
+def test_dossiers_warn_when_the_live_position_is_unavailable(tmp_path):
+    class DownBroker(FakeBroker):
+        def get_positions(self):
+            raise RuntimeError("alpaca 503")
+
+    prompt = _prompt_with_dossiers(tmp_path, DownBroker())
+    nvda = prompt.split("## Memory — NVDA", 1)[1]
+    assert "LIVE position NVDA: unavailable" in nvda

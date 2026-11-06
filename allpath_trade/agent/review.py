@@ -6,7 +6,13 @@ from collections.abc import Iterator
 
 from pydantic import BaseModel, ValidationError
 
+from allpath_trade.agent.context import (
+    LIVE_POSITIONS_NOTE,
+    live_position_line,
+    read_live_positions,
+)
 from allpath_trade.agent.tools import ToolRegistry
+from allpath_trade.broker.base import Broker
 from allpath_trade.llm.base import LLMClient
 from allpath_trade.memory.store import MemoryStore
 
@@ -64,14 +70,23 @@ class ReviewAnalysis(BaseModel):
 
 class ReviewAgent:
     def __init__(self, llm: LLMClient, registry: ToolRegistry,
-                 max_iters: int = 8, memory: MemoryStore | None = None) -> None:
+                 max_iters: int = 8, memory: MemoryStore | None = None,
+                 broker: Broker | None = None) -> None:
         self.llm = llm
         self.registry = registry
         self.max_iters = max_iters
         self.memory = memory
+        # Ops 2026-11-06: this account's broker/shadow ledger, read at
+        # analyze time so the prompt states the live position (and that it
+        # beats the memory dossier). None keeps the old prompt exactly.
+        self.broker = broker
 
     def analyze(self, review: dict) -> ReviewAnalysis:
         extras = ""
+        if self.broker is not None:
+            live, equity, error = read_live_positions(self.broker)
+            line = live_position_line(review["ticker"], live, equity, error)
+            extras += f"\n{line}\n{LIVE_POSITIONS_NOTE}\n"
         if self.memory is not None:
             dossier = self.memory.render_for_context("stock", review["ticker"])
             if dossier.strip():

@@ -117,3 +117,45 @@ def test_analyze_prompt_includes_dossier_and_lessons(tmp_path):
     agent.analyze(REVIEW)
     prompt = llm.seen[0][0]["content"]
     assert "Earnings vol" in prompt and "earnings week" in prompt.lower()
+
+
+# -- ops 2026-11-06: live positions win over stale memory dossiers ------------
+
+def _analyze_with(tmp_path, broker, ticker="AAPL"):
+    from allpath_trade.memory.store import MemoryStore
+    from allpath_trade.store.db import connect
+
+    memory = MemoryStore(tmp_path / "memory", connect(tmp_path / "db.sqlite"))
+    memory.apply("stock", ticker, "add", text="Now 66.30 sh, ~14.8% weight")
+    llm = ScriptedLLM([LLMResponse(text='{"recommendation": "skip", "reasoning": "x"}')])
+    ReviewAgent(llm, registry(), memory=memory, broker=broker).analyze(
+        {**REVIEW, "ticker": ticker})
+    return llm.seen[0][0]["content"]
+
+
+def test_analyze_prompt_states_the_live_position_before_the_dossier(tmp_path):
+    from tests.test_sentinel import FakeBroker
+
+    prompt = _analyze_with(tmp_path, FakeBroker())
+    live = "LIVE position AAPL (broker, authoritative): 10 sh"
+    assert live in prompt and "20.0% of equity" in prompt
+    assert prompt.index(live) < prompt.index("66.30 sh")
+    assert "live data wins" in prompt.lower()
+
+
+def test_analyze_prompt_states_a_live_zero_position(tmp_path):
+    from tests.test_sentinel import FakeBroker
+
+    prompt = _analyze_with(tmp_path, FakeBroker(), ticker="NVDA")
+    assert "LIVE position NVDA (broker, authoritative): none, 0 shares held." in prompt
+
+
+def test_analyze_survives_a_broker_failure(tmp_path):
+    from tests.test_sentinel import FakeBroker
+
+    class DownBroker(FakeBroker):
+        def get_account(self):
+            raise RuntimeError("alpaca 503")
+
+    prompt = _analyze_with(tmp_path, DownBroker())
+    assert "LIVE position AAPL: unavailable" in prompt

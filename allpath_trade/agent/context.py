@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 # Reused rather than duplicated (I1): this is the same formatter get_portfolio
@@ -11,7 +12,7 @@ from pathlib import Path
 # dependency back on context.py, so there's no cycle, and cli.py already
 # imports a sibling agent/* module (reflection_tools) the same way.
 from allpath_trade.agent.readonly_tools import _format_recent_trade
-from allpath_trade.broker.base import Broker
+from allpath_trade.broker.base import Broker, Position
 from allpath_trade.memory.store import MemoryStore
 from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.reviews import ReviewQueue
@@ -177,6 +178,50 @@ Do this even when the user writes to you in another language.
 """
 
 
+# Ops 2026-11-06: memory still said NVDA ~66 sh / 15% a week after a stop
+# had sold the whole position (consolidation was down with the LLM), and
+# agents repeated it as fact. Position size/weight must come from the live
+# broker/shadow ledger; dossiers are context, not the record.
+LIVE_POSITIONS_NOTE = (
+    "Position sizes and weights written in memory dossiers can be out of "
+    "date. The LIVE position lines come from the broker (or shadow ledger) "
+    "right now and are authoritative: where memory disagrees, live data wins. "
+    "Say that memory is stale instead of repeating its numbers.")
+
+
+def _plain_qty(qty: Decimal) -> str:
+    return format(qty.normalize(), "f")
+
+
+def live_position_line(ticker: str, positions: dict[str, Position] | None,
+                       equity: Decimal | None, error: str = "") -> str:
+    """One authoritative line about `ticker`'s live position. `positions`
+    is None when the broker could not be read (`error` says why)."""
+    if positions is None:
+        return (f"LIVE position {ticker}: unavailable ({error or 'broker error'}); "
+                "do not take a position size from memory.")
+    p = positions.get(ticker)
+    if p is None or p.qty == 0:
+        return f"LIVE position {ticker} (broker, authoritative): none, 0 shares held."
+    weight = (f", {p.market_value / equity:.1%} of equity"
+              if equity is not None and equity > 0 else "")
+    return (f"LIVE position {ticker} (broker, authoritative): {_plain_qty(p.qty)} sh, "
+            f"avg ${p.avg_entry_price:,.2f}, market value ${p.market_value:,.2f}"
+            f"{weight}.")
+
+
+def read_live_positions(broker: Broker) -> tuple[dict[str, Position] | None,
+                                                 Decimal | None, str]:
+    """`(positions by ticker, equity, error)`. Never raises: on a broker
+    failure, positions is None and `error` carries the reason."""
+    try:
+        equity = broker.get_account().equity
+        positions = {p.ticker: p for p in broker.get_positions()}
+    except Exception as exc:  # noqa: BLE001 — a degraded prompt beats no prompt
+        return None, None, str(exc)
+    return positions, equity, ""
+
+
 def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
                         strategies: StrategyStore, queue: ReviewQueue,
                         memory: MemoryStore | None = None,
@@ -222,16 +267,18 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
         profile = memory.render_for_context("profile")
         if profile.strip():
             parts.append("\n## Memory — user profile\n" + profile)
-        tickers: set[str] = set()
-        try:
-            tickers.update(p.ticker for p in broker.get_positions())
-        except Exception:  # noqa: BLE001, S110 — degraded broker already noted above
-            pass
+        live, equity, live_error = read_live_positions(broker)
+        tickers: set[str] = set(live or ())
         tickers.update(d.position.ticker
                        for d in strategies.load_all(status=None, errors=[]))
+        noted = False
         for ticker in sorted(tickers):
             dossier = memory.render_for_context("stock", ticker)
             if dossier.strip():
-                parts.append(f"\n## Memory — {ticker}\n" + dossier)
+                if not noted:
+                    parts.append(f"\n{LIVE_POSITIONS_NOTE}")
+                    noted = True
+                line = live_position_line(ticker, live, equity, live_error)
+                parts.append(f"\n## Memory — {ticker}\n{line}\n" + dossier)
 
     return "\n".join(parts)

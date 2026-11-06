@@ -267,7 +267,8 @@ def _build_account_components(account: str, *, settings: Settings,
         register_readonly_tools(review_registry, data=data, broker=broker,
                                 journal=journal, strategies=strategies,
                                 queue=queue)
-        sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory)
+        sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory,
+                                            broker=broker)
         bundle.consolidator = Consolidator(
             build_llm(settings, tier="memory", usage_store=llm_usage), memory,
             observations, journal, conn,

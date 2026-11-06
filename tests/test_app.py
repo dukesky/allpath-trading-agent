@@ -249,3 +249,17 @@ def test_llm_usage_store_carries_an_outage_alerter(tmp_path):
     assert isinstance(alerter, LLMOutageAlerter)
     assert alerter.notifier is components.notifier
     assert alerter.app_state is components.app_state
+
+
+def test_review_agent_gets_the_accounts_own_broker(tmp_path):
+    # Ops 2026-11-06: the review agent reads live positions from its own
+    # account's broker/ledger, not from memory.
+    settings = Settings(_env_file=None, db_path=tmp_path / "t.db",
+                        strategies_dir=tmp_path / "strategies",
+                        memory_dir=tmp_path / "memory",
+                        llm_provider="openrouter", openrouter_api_key="k")
+    components = build_components(settings, broker=FakeBroker())
+    for account, bundle in components.accounts.items():
+        agent = bundle.sentinel.review_agent
+        assert agent is not None, account
+        assert agent.broker is bundle.broker
