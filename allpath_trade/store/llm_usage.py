@@ -18,6 +18,11 @@ class LLMUsage:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        # Ops 2026-11-06: optional outage alerter (llm/health.py's
+        # LLMOutageAlerter), set by app.py. `_RecordingClient` hands every
+        # failed call to it, so every caller that already passes this store
+        # to `build_llm` gets outage alerts without a new parameter.
+        self.alerter = None
 
     def record(self, *, tier: str, model: str, input_tokens: int,
               output_tokens: int, purpose: str) -> None:
@@ -80,3 +85,35 @@ class LLMUsage:
             " SUM(output_tokens) AS output_tokens FROM llm_usage WHERE ts >= ?"
             " GROUP BY day ORDER BY day DESC", (self._since(days),)))
 
+
+    def record_failure(self, *, tier: str, model: str, error_class: str,
+                       detail: str) -> None:
+        """One failed LLM call (see the `llm_failures` table). Best-effort
+        like `record`: `_RecordingClient` swallows anything this raises."""
+        self._conn.execute(
+            "INSERT INTO llm_failures (ts, tier, model, error_class, detail)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (datetime.now(UTC).isoformat(), tier, model, error_class,
+             detail[:500]))
+        self._conn.commit()
+
+    def last_success_by_tier(self) -> dict[str, str]:
+        """`{tier: ISO ts}` of the newest successful call per tier. Every
+        `llm_usage` row is a call that returned a response."""
+        return {r["tier"]: r["ts"] for r in self._conn.execute(
+            "SELECT tier, MAX(ts) AS ts FROM llm_usage GROUP BY tier")}
+
+    def failures_for_day(self, date_utc: str | None = None) -> dict[str, dict]:
+        """`{tier: {"count": n, "classes": [sorted distinct error classes]}}`
+        for the UTC calendar day `date_utc` (default today) -- the same day
+        cut as `summary_for_day`."""
+        day = date_utc or datetime.now(UTC).date().isoformat()
+        out: dict[str, dict] = {}
+        for r in self._conn.execute(
+                "SELECT tier, error_class, COUNT(*) AS n FROM llm_failures"
+                " WHERE substr(ts, 1, 10) = ? GROUP BY tier, error_class"
+                " ORDER BY tier, error_class", (day,)):
+            entry = out.setdefault(r["tier"], {"count": 0, "classes": []})
+            entry["count"] += r["n"]
+            entry["classes"].append(r["error_class"])
+        return out

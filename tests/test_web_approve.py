@@ -8,6 +8,7 @@ import difflib
 import pytest
 from fastapi.testclient import TestClient
 
+from allpath_trade.agent.review import ReviewAnalysis
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.config import Settings
 from allpath_trade.execution import ExecutionError, ExecutionResult
@@ -871,3 +872,27 @@ def test_option_link_confirm_page_shows_preview(client):
     _q, rid, token = _queue_option_link(client)
     r = client.get(f"/a/{rid}?k={token}")
     assert "NVDA261016C00220000" in r.text and "re-priced at approval" in r.text
+
+
+# --- ops 2026-11-06: a missing agent analysis is said out loud ---------------
+
+def test_order_confirm_page_warns_when_there_is_no_agent_analysis(client):
+    rid = queue_one(client)
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "No agent analysis: LLM unavailable" in body
+
+
+def test_order_confirm_page_has_no_warning_when_analysis_exists(client):
+    rid = queue_one(client)
+    analysis = ReviewAnalysis(recommendation="skip", reasoning="weak tape")
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "No agent analysis" not in body
+    assert "Agent recommends" in body and "skip" in body
+
+
+def test_chat_proposal_confirm_page_has_no_missing_analysis_warning(client):
+    # A chat order proposal never goes through the review agent.
+    rid = queue_one(client, source="chat")
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "No agent analysis" not in body

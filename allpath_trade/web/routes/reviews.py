@@ -65,6 +65,26 @@ def _attach_price_context(c, items: list[dict]) -> None:
             item["price_context"] = None
 
 
+def _attach_stop_warnings(b, items: list[dict]) -> None:
+    """Ops 2026-11-06 item 6: a pending stock BUY whose strategy's one-shot
+    stop already fired says so on its card (strategy/stops.py). Read live
+    from the strategy store, so a re-armed stop clears the warning. Never
+    raises: an unreadable strategy file just shows no warning."""
+    from allpath_trade.strategy.stops import stop_warning
+
+    for item in items:
+        item["stop_warning"] = ""
+        intent = item.get("intent") or {}
+        if (item["kind"] != "order" or item["status"] != "pending"
+                or not isinstance(intent, dict) or intent.get("side") != "buy"):
+            continue
+        try:
+            doc = b.strategies.load(item["strategy_id"])
+            item["stop_warning"] = stop_warning(doc, b.strategies)
+        except Exception:  # noqa: BLE001, S112 — visibility only, never break the page
+            continue
+
+
 _DIFF_CONTEXT = 2  # lines of unchanged context kept on each side of a change
 
 
@@ -350,6 +370,7 @@ def reviews(request: Request) -> HTMLResponse:
     _attach_revision_diffs(b, items)
     _attach_revision_diffs(b, recent)
     _attach_price_context(c, items)
+    _attach_stop_warnings(b, items)
     return templates.TemplateResponse(request, "reviews.html", {
         "page": "reviews", "items": items, "recent": recent,
         "error": request.query_params.get("error"),

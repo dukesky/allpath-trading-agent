@@ -222,6 +222,19 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     purpose TEXT NOT NULL DEFAULT ''
 );
 
+-- Ops 2026-11-06: one row per FAILED LLM call through the same recording
+-- choke point (llm/factory.py's _RecordingClient). `error_class` is
+-- llm/health.py's classify_llm_error: credits | auth | rate_limit | other.
+-- `detail` is the provider's error text, truncated; it never carries a key.
+CREATE TABLE IF NOT EXISTS llm_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    model TEXT NOT NULL,
+    error_class TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+
 -- shadow-dual-active T3: ShadowLedger's own tables (broker/shadow.py).
 -- Deliberately have NO `account` column, unlike every table above --
 -- these tables ARE the shadow account's ledger (there is one shadow

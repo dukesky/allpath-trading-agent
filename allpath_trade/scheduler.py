@@ -464,8 +464,36 @@ def _llm_cost_line(components) -> str:
         return ""
 
 
+def _llm_health_line(components) -> str:
+    """Ops 2026-11-06: the digest's per-tier LLM health line (llm/health.py).
+    Best-effort like `_llm_cost_line`: a broken read drops the line, never
+    the digest."""
+    try:
+        from allpath_trade.llm.health import llm_health_line
+
+        return llm_health_line(components.llm_usage)
+    except Exception as exc:  # noqa: BLE001 — one optional line must never cancel the digest
+        print(f"[digest] LLM health line skipped: {exc}", file=sys.stderr)
+        return ""
+
+
+def _no_stop_line(acc) -> str:
+    """Ops 2026-11-06 item 6: held positions whose strategies' one-shot
+    stops are all spent (strategy/stops.py), from this account's LIVE
+    broker/ledger positions. Best-effort: a broker or store failure drops
+    the line, never the digest."""
+    try:
+        from allpath_trade.strategy.stops import no_armed_stop_line
+
+        equity = acc.broker.get_account().equity
+        return no_armed_stop_line(acc.strategies, acc.broker.get_positions(), equity)
+    except Exception as exc:  # noqa: BLE001 — one optional line must never cancel the digest
+        print(f"[digest] no-armed-stop line skipped: {exc}", file=sys.stderr)
+        return ""
+
+
 def _send_one_digest(components, account: str, acc, today: str,
-                     llm_cost: str) -> bool:
+                     llm_cost: str, llm_health: str = "") -> bool:
     """One account's digest -- `trades` comes from `TradeJournal.
     trades_today()` — the journal's real accessor (there is no `journal.
     today()`). `triggers` counts today's "sentinel"-sourced rows in THIS
@@ -489,7 +517,8 @@ def _send_one_digest(components, account: str, acc, today: str,
         since_iso=since_iso, limit=10_000) if row["source"] == "sentinel")
     subject, body = events.daily_digest(
         account=account, triggers=triggers, trades=acc.journal.trades_today(),
-        pending=len(acc.queue.list()), llm_cost=llm_cost)
+        pending=len(acc.queue.list()), llm_cost=llm_cost, llm_health=llm_health,
+        no_stop=_no_stop_line(acc))
     # I4: `Notifier.send` is non-raising by contract (notify/base.py) and
     # reports failure by RETURNING False -- a dead SMTP server, an ntfy
     # topic that 404s. Stamping the watermark regardless made that failure
@@ -540,6 +569,7 @@ def _send_daily_digest(components) -> bool:
     instead of marking the day done."""
     today = datetime.now(UTC).astimezone(ET).date().isoformat()
     llm_cost = _llm_cost_line(components)
+    llm_health = _llm_health_line(components)
     all_ok = True
     for account, acc in components.accounts.items():
         # setup-wizard T1: nothing to report for an account whose keys
@@ -554,7 +584,7 @@ def _send_daily_digest(components) -> bool:
             continue
         try:
             all_ok = _send_one_digest(components, account, acc, today,
-                                      llm_cost) and all_ok
+                                      llm_cost, llm_health) and all_ok
         except Exception as exc:  # noqa: BLE001 — one account's digest must
             # never take the other account's down.
             print(f"[digest:{account}] failed: {exc}", file=sys.stderr)

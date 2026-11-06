@@ -348,3 +348,80 @@ def test_review_queued_without_option_preview_unchanged():
         account="paper", review_id=7, ticker="NVDA", action="buy $3500",
         strategy_id="s", trigger_price="$209.36", est_shares="16.72")
     assert "Option order at trigger" not in body
+
+
+# -- ops 2026-11-06: a blind approval must never look normal ---------------
+
+def test_review_queued_warns_loudly_when_the_agent_analysis_is_missing():
+    from allpath_trade.notify import events
+
+    _subject, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA", action="buy $3000",
+        strategy_id="nvda", no_analysis_reason="LLM unavailable")
+    lines = body.splitlines()
+    assert lines[0] == "⚠ No agent analysis: LLM unavailable"
+    assert "The agent recommends" not in body
+
+
+def test_review_queued_has_no_warning_by_default():
+    from allpath_trade.notify import events
+
+    _subject, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA", action="buy $3000",
+        strategy_id="nvda", recommendation="execute — fine")
+    assert "No agent analysis" not in body
+
+
+def test_daily_digest_appends_the_llm_health_line():
+    from allpath_trade.notify import events
+
+    _subject, body = events.daily_digest(
+        account="paper", triggers=1, trades=0, pending=0,
+        llm_health="⚠ LLM health: review never succeeded, 3 failed today (credits).")
+    assert "\n⚠ LLM health: review never succeeded" in body
+
+
+def test_drawdown_halt_gives_the_exact_reset_command_for_the_account():
+    from decimal import Decimal
+
+    _subject, body = events.drawdown_halt(
+        account="shadow", peak=Decimal("100000"), equity=Decimal("82000"),
+        drawdown=Decimal("0.18"), demoted=[])
+    assert "allpath-trade breaker reset --account shadow" in body
+
+
+def test_drawdown_deepening_names_the_new_low_and_the_reset_command():
+    from decimal import Decimal
+
+    subject, body = events.drawdown_deepening(
+        account="paper", peak=Decimal("104376.84"), equity=Decimal("83000"),
+        drawdown=Decimal("0.2048"), level=Decimal("0.20"),
+        tripped_at="2026-11-05T15:46:00+00:00")
+    assert "[Paper]" in subject and "20" in subject
+    assert "20.5%" in body and "$104,376.84" in body and "$83,000.00" in body
+    assert "2026-11-05" in body
+    assert "allpath-trade breaker reset --account paper" in body
+
+
+# -- ops 2026-11-06 item 6: spent one-shot stops ----------------------------
+
+def test_review_queued_carries_the_stop_warning():
+    _subject, body = events.review_queued(
+        account="paper", review_id=7, ticker="NVDA", action="buy $3000",
+        strategy_id="nvda", recommendation="execute — ok",
+        stop_warning="No armed stop: nvda/stop-loss (price < 205), spent 2026-10-30.")
+    assert body.splitlines()[0].startswith("⚠ No armed stop: nvda/stop-loss")
+
+
+def test_order_result_carries_the_stop_warning():
+    _subject, body = events.order_result(
+        account="paper", ticker="NVDA", side="buy", submitted=True,
+        detail="submitted", stop_warning="No armed stop: x.")
+    assert body.startswith("⚠ No armed stop: x.")
+
+
+def test_daily_digest_appends_the_no_armed_stop_line():
+    _subject, body = events.daily_digest(
+        account="paper", triggers=0, trades=0, pending=0,
+        no_stop="⚠ No armed stop on 1 held position(s): NVDA.")
+    assert "\n⚠ No armed stop on 1 held position(s): NVDA." in body

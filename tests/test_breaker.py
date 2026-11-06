@@ -139,3 +139,65 @@ def test_accounts_are_isolated(tmp_path):
     # Paper's keys must be set
     assert state.get("drawdown_peak:paper") == "100000"
     assert state.get("drawdown_tripped:paper") is not None
+
+
+# -- ops 2026-11-06: a tripped breaker must not go silent ----------------------
+# While tripped, check() returns early and the peak freezes. If equity keeps
+# falling, `deepening()` reports each further 5% step below the frozen peak
+# (20%, 25%, ... for a 15% halt) once.
+
+def test_deepening_is_none_while_not_tripped(tmp_path):
+    b, _state, _ = _breaker(tmp_path)
+    b.check(Decimal("100000"))
+    assert b.deepening(Decimal("70000")) is None
+
+
+def test_deepening_alerts_once_per_additional_five_percent(tmp_path):
+    b, state, _ = _breaker(tmp_path)
+    b.check(Decimal("100000"))
+    assert b.check(Decimal("84000")) is not None    # trips at 16%
+    assert b.deepening(Decimal("82000")) is None    # 18%: same step
+    step = b.deepening(Decimal("79500"))            # 20.5%: next step
+    assert step is not None
+    assert step.level == Decimal("0.20")
+    assert step.peak == Decimal("100000")
+    assert step.drawdown == Decimal("0.205")
+    assert b.deepening(Decimal("78000")) is None    # still the 20% step
+    assert b.deepening(Decimal("81000")) is None    # recovering: silent
+    assert b.deepening(Decimal("74000")).level == Decimal("0.25")
+    assert state.get("drawdown_peak:paper") == "100000"   # peak stays frozen
+
+
+def test_deepening_skips_to_the_deepest_step_crossed(tmp_path):
+    b, _state, _ = _breaker(tmp_path)
+    b.check(Decimal("100000"))
+    b.check(Decimal("84000"))
+    step = b.deepening(Decimal("68000"))            # 32%: one alert, not three
+    assert step.level == Decimal("0.30")
+    assert b.deepening(Decimal("67000")) is None
+
+
+def test_a_gap_down_trip_starts_counting_from_its_own_step(tmp_path):
+    b, _state, _ = _breaker(tmp_path)
+    b.check(Decimal("100000"))
+    b.check(Decimal("78000"))                       # trips at 22%: past 20%
+    assert b.deepening(Decimal("77000")) is None    # 23%: no extra alert
+    assert b.deepening(Decimal("75000")).level == Decimal("0.25")
+
+
+def test_deepening_never_demotes_anything_more(tmp_path):
+    b, _state, store = _breaker(tmp_path, strategies_yaml={"a": AUTO_STRAT})
+    b.check(Decimal("100000"))
+    b.check(Decimal("80000"))
+    (store.directory / "late.yaml").write_text(AUTO_STRAT.replace('"A"', '"L"'))
+    b.deepening(Decimal("70000"))
+    assert store.load("late").authorization == Authorization.AUTO
+
+
+def test_reset_clears_the_deepening_step(tmp_path):
+    b, state, _ = _breaker(tmp_path)
+    b.check(Decimal("100000"))
+    b.check(Decimal("84000"))
+    b.deepening(Decimal("79000"))
+    b.reset()
+    assert state.get("drawdown_alert_level:paper") is None

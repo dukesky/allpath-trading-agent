@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -54,6 +55,7 @@ from allpath_trade.strategy.model import (
     RuleType,
     StrategyDoc,
 )
+from allpath_trade.strategy.stops import stop_warning
 from allpath_trade.strategy.store import StrategyStore
 
 # Incident 2026-08-28: a manual `allpath-trade check` run (cli.py's
@@ -221,6 +223,8 @@ class Sentinel:
                 report.errors.append(
                     f"drawdown breaker tripped ({trip.drawdown:.1%}); "
                     "auto strategies demoted to confirm")
+            else:
+                self._alert_if_drawdown_deepened(account.equity, report)
 
         # Task 6: expiry safety sweep -- account-level, not tied to any one
         # strategy's rules, so it runs here rather than inside
@@ -585,6 +589,31 @@ class Sentinel:
         return self._queue_option_buy(doc, rule_id, rule_type, condition, action,
                                       spec, price, reason)
 
+    def _alert_if_drawdown_deepened(self, equity: Decimal,
+                                    report: SentinelReport) -> None:
+        """Ops 2026-11-06: a tripped breaker freezes its peak and used to go
+        silent. Alert (notifier + Telegram, like the trip itself) at each
+        further 5% step below the frozen peak. Alert-only."""
+        deeper = self.breaker.deepening(equity)
+        if deeper is None:
+            return
+        subject, body = events.drawdown_deepening(
+            account=self.account, peak=deeper.peak, equity=deeper.equity,
+            drawdown=deeper.drawdown, level=deeper.level,
+            tripped_at=deeper.tripped_at)
+        if self.notifier is not None:
+            self.notifier.send(subject, body)
+        push_telegram_receipt(
+            app_state=self.app_state, telegram_bot_token=self.telegram_bot_token,
+            body=body, account=self.account)
+        if self.observations is not None:
+            self.observations.add(
+                "breaker",
+                f"drawdown deepened while tripped: {deeper.drawdown:.1%} below "
+                f"frozen peak {deeper.peak} (past {deeper.level:.0%})")
+        report.errors.append(
+            f"drawdown breaker still tripped and deeper ({deeper.drawdown:.1%})")
+
     def _breaker_tripped(self) -> bool:
         return self.breaker is not None and self.breaker.tripped_at() is not None
 
@@ -786,7 +815,8 @@ class Sentinel:
             # this is not a genuine "skip" decision, so don't act on it.
             # Leave the trigger pending for human review.
             self._notify_queued(doc, rid, ticker, action, "", price=price, intent=intent,
-                                kind=kind, option_preview=option_preview)
+                                kind=kind, option_preview=option_preview,
+                                no_analysis_reason="the agent's reply could not be parsed")
             return TriggerOutcome(
                 **base, disposition="queued",
                 detail="analysis unparseable — left for human review")
@@ -846,6 +876,16 @@ class Sentinel:
             ticker=doc.position.ticker, condition=condition, disposition=disposition)
         self._send(doc, subject, body)
 
+    def _stop_warning(self, doc: StrategyDoc) -> str:
+        """Ops 2026-11-06 item 6: a stock buy on a strategy whose one-shot
+        stop already fired (strategy/stops.py). Visibility only -- nothing
+        here re-arms the stop. Never raises."""
+        try:
+            return stop_warning(doc, self.strategies)
+        except Exception as exc:  # noqa: BLE001 — a warning must never block a notification
+            print(f"[sentinel] stop check failed for {doc.id}: {exc}", file=sys.stderr)
+            return ""
+
     def _notify_order(self, doc: StrategyDoc, ticker: str, side: str, submitted: bool,
                       detail: str, *, order: Order | None = None) -> None:
         # `order` (the executor's own `Order`, when there is one -- see the
@@ -859,7 +899,10 @@ class Sentinel:
         subject, body = events.order_result(
             account=self.account, ticker=ticker, side=side, submitted=submitted,
             detail=detail, filled_qty=order.filled_qty if order else None,
-            filled_avg_price=order.filled_avg_price if order else None)
+            filled_avg_price=order.filled_avg_price if order else None,
+            stop_warning=(self._stop_warning(doc)
+                          if submitted and side == OrderSide.BUY.value
+                          and ticker == doc.position.ticker else ""))
         self._send(doc, subject, body)
         # "自动执行了也要通知我" -- the order_result receipt (auto-executed hard
         # rule, and every other order outcome that flows through this same
@@ -875,7 +918,16 @@ class Sentinel:
     def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
                        recommendation: str, *, price: Decimal | None = None,
                        intent: OrderIntent | None = None, kind: str = "order",
-                       option_preview: str = "") -> None:
+                       option_preview: str = "", no_analysis_reason: str = "") -> None:
+        # Ops 2026-11-06: an order review with no recommendation went out
+        # looking like any other card, and 21 were approved blind while the
+        # LLM was out of credits. Every order kind is meant to carry the
+        # review agent's analysis, so its absence is always said out loud:
+        # the agent failed, is not configured, or its reply was unusable.
+        if not recommendation and kind in ("order", "option_order"):
+            no_analysis_reason = no_analysis_reason or "LLM unavailable"
+        else:
+            no_analysis_reason = ""
         # Part B: the price context available at the instant this item was
         # queued -- the exact sample the rule triggered on, not a second,
         # separately re-fetched "live" quote (see review_queued's
@@ -896,7 +948,11 @@ class Sentinel:
             account=self.account, review_id=review_id, ticker=ticker, action=action,
             strategy_id=doc.id, recommendation=recommendation,
             trigger_price=trigger_price, est_shares=est_shares,
-            approve_url=approve_url, kind=kind, option_preview=option_preview)
+            approve_url=approve_url, kind=kind, option_preview=option_preview,
+            no_analysis_reason=no_analysis_reason,
+            stop_warning=(self._stop_warning(doc)
+                          if kind == "order" and intent is not None
+                          and intent.side == OrderSide.BUY else ""))
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's

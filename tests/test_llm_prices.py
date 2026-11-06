@@ -82,3 +82,15 @@ def test_config_default_models_are_all_priced():
     s = Settings(_env_file=None)
     for model in (s.chat_model, s.review_model, s.memory_model):
         assert prices.price_for(model)[2] is False, model
+
+
+def test_production_chat_and_memory_models_are_priced():
+    # Ops 2026-11-06: the Air's CHAT/MEMORY models were missing, so every
+    # cost line said "(some rates estimated)".
+    assert prices.price_for("deepseek/deepseek-v4.1-flash-1017") == (
+        Decimal("0.15"), Decimal("0.60"), False)
+    assert prices.price_for("openai/gpt-6.1-sol") == (Decimal(2), Decimal(10), False)
+
+
+def test_prices_updated_date_was_bumped():
+    assert prices.PRICES_UPDATED >= "2026-11-06"

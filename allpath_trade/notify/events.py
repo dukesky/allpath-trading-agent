@@ -103,7 +103,8 @@ def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
 
 def order_result(*, account: str, ticker: str, side: str, submitted: bool,
                  detail: str, filled_qty: Decimal | None = None,
-                 filled_avg_price: Decimal | None = None) -> tuple[Subject, str]:
+                 filled_avg_price: Decimal | None = None,
+                 stop_warning: str = "") -> tuple[Subject, str]:
     """`filled_qty`/`filled_avg_price` (from the `Order` the executor
     returned, when there is one) are ONLY used for the shadow wording
     below -- paper's own body is unchanged by this task and never reads
@@ -148,6 +149,10 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
                 f"{detail}") + FOOTER
     else:
         body = f"A {side} order for {ticker} was {outcome}.\n{detail}" + FOOTER
+    if stop_warning:
+        # Ops 2026-11-06 item 6 (strategy/stops.py): a buy on a strategy
+        # whose one-shot stop is already spent.
+        body = f"⚠ {stop_warning}\n{body}"
     return subject, body
 
 
@@ -170,7 +175,34 @@ def drawdown_halt(*, account: str, peak: Decimal, equity: Decimal,
             f"to confirm: {names}.\n"
             "No further orders will execute without your approval.\n"
             "To resume: review the account, restore strategies to auto "
-            "deliberately, then run `allpath-trade breaker reset`." + FOOTER)
+            "deliberately, then reset the breaker from the repo directory:\n"
+            f"{_reset_command(account)}\n"
+            "You will get another alert at each further 5% below the peak "
+            "while it stays tripped." + FOOTER)
+    return subject, body
+
+
+def _reset_command(account: str) -> str:
+    return f"uv run allpath-trade breaker reset --account {account}"
+
+
+def drawdown_deepening(*, account: str, peak: Decimal, equity: Decimal,
+                       drawdown: Decimal, level: Decimal,
+                       tripped_at: str) -> tuple[Subject, str]:
+    """Ops 2026-11-06: the breaker freezes its peak once tripped and used to
+    say nothing more however far equity fell. Sent (like `drawdown_halt`,
+    straight to the notifier + Telegram) at each further 5% step below the
+    frozen peak. Nothing new is demoted or blocked."""
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] DRAWDOWN STILL FALLING: {drawdown:.1%} below peak",
+        {"type": "drawdown_deepening", "account": account, "peak": str(peak),
+         "equity": str(equity), "drawdown": str(drawdown), "level": str(level)})
+    body = (f"Equity ${equity:,.2f} is now {drawdown:.1%} below the frozen "
+            f"peak ${peak:,.2f}, past the {level:.0%} mark.\n"
+            f"The drawdown breaker has been tripped since {tripped_at[:16]} UTC "
+            "and is still tripped; nothing new was demoted.\n"
+            "Review the account. To reset the breaker, from the repo directory:\n"
+            f"{_reset_command(account)}" + FOOTER)
     return subject, body
 
 
@@ -178,7 +210,9 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   strategy_id: str, recommendation: str = "",
                   trigger_price: str = "", est_shares: str = "",
                   approve_url: str = "", kind: str = "order",
-                  option_preview: str = "") -> tuple[Subject, str]:
+                  option_preview: str = "",
+                  no_analysis_reason: str = "",
+                  stop_warning: str = "") -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -211,7 +245,11 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     queued-review case as "if approved, you'll place it yourself".
 
     `option_preview`, when non-empty, adds a line describing the option order
-    context (e.g., "2x NVDA261016C00220000 ≈ $930.00")."""
+    context (e.g., "2x NVDA261016C00220000 ≈ $930.00").
+
+    `no_analysis_reason`, when non-empty, puts a "⚠ No agent analysis: ..."
+    warning on the FIRST line (ops 2026-11-06: reviews with an empty
+    analysis read like normal cards and were approved blind for a week)."""
     subject_noun = ticker or "Ledger"
     # int(): `review_id` is usually a ReviewHandle, whose `.token` must never
     # reach the event (see Subject's docstring).
@@ -223,6 +261,11 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
          "next": f"allpath-trade reviews --account {account} list --json"})
     proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
     lines = [f"Item #{review_id} is waiting for you.", proposed]
+    if no_analysis_reason:
+        lines.insert(0, f"⚠ No agent analysis: {no_analysis_reason}")
+    if stop_warning:
+        # Ops 2026-11-06 item 6 (strategy/stops.py): spent one-shot stop.
+        lines.insert(1 if no_analysis_reason else 0, f"⚠ {stop_warning}")
     if strategy_id:
         lines.append(f"Strategy: {strategy_id}")
     if trigger_price:
@@ -244,7 +287,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
 
 
 def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
-                 llm_cost: str = "") -> tuple[Subject, str]:
+                 llm_cost: str = "", llm_health: str = "",
+                 no_stop: str = "") -> tuple[Subject, str]:
     """`llm_cost`, when non-empty, is one extra line naming today's
     estimated LLM spend (store/llm_usage.py + llm/prices.py) -- the caller
     (scheduler.py's `_send_daily_digest`) only ever passes a non-empty
@@ -282,6 +326,14 @@ def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
         # so explicitly rather than reading as if this one account alone
         # spent that much.
         body += f"\nEstimated LLM cost today (all accounts): {llm_cost} (see Settings -> Usage)."
+    if llm_health:
+        # Ops 2026-11-06: llm/health.py's per-tier "last OK / failed today"
+        # line -- process-wide, like the cost line above.
+        body += f"\n{llm_health}"
+    if no_stop:
+        # Ops 2026-11-06 item 6: held positions whose one-shot stop is spent
+        # (strategy/stops.py's no_armed_stop_line), per account.
+        body += f"\n{no_stop}"
     return subject, body + FOOTER
 
 

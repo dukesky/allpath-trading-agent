@@ -138,6 +138,21 @@ def push_telegram_receipt(*, app_state: AppState | None, telegram_bot_token: str
         pass
 
 
+def push_telegram_alert(*, app_state: AppState | None, telegram_bot_token: str,
+                        body: str) -> None:
+    """A process-wide operator alert (e.g. llm/health.py's LLM outage) to
+    the paired chat: no buttons and no `[Paper]`/`[Shadow]` prefix, since it
+    concerns neither account in particular. Same best-effort contract."""
+    try:
+        target = _telegram_target(app_state, telegram_bot_token)
+        if target is None:
+            return
+        api, chat_id = target
+        api.send_message(chat_id, to_telegram_html(body))
+    except Exception:  # noqa: BLE001, S110 — best-effort, never break the caller
+        pass
+
+
 def notify_review_queued(*, queue: ReviewQueue, notifier: Notifier | None,
                          app_state: AppState | None, telegram_bot_token: str,
                          review_id: int, subject: str, body: str, account: str,

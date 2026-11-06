@@ -16,6 +16,9 @@
     </p>
     <p><strong>{{ side }} {{ ticker }}</strong>{% if amount_label %} · {{ amount_label }}{% endif %}</p>
     {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}
+    {# Ops 2026-11-06: the review agent's verdict, or a loud note that there is none. #}
+    {% if no_analysis %}<p class="warn" style="font-size:13px;font-weight:600">⚠ No agent analysis: LLM unavailable. Check this order yourself before approving.</p>{% endif %}
+    {% if agent_recommendation %}<p class="muted" style="font-size:13px">Agent recommends: <strong>{{ agent_recommendation }}</strong></p>{% endif %}
 
     {% if kind == "shadow_edit" %}
     <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">

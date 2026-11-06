@@ -413,6 +413,42 @@ def cmd_reviews(q, args, store=None) -> int:
         return 1
 
 
+def cmd_reviews_reanalyze(q, review_agent, review_id: int) -> int:
+    """Ops 2026-11-06: re-run the review agent on a pending order review --
+    the same `ReviewAgent.analyze` + `ReviewQueue.attach_analysis` pair
+    `Sentinel._agent_review` runs at trigger time. For reviews queued while
+    the LLM was down (empty analysis). Only pending `kind='order'` rows;
+    the row's status is never touched (no approve, no reject)."""
+    from allpath_trade.store.reviews import ReviewError
+
+    try:
+        row = q.get(review_id)
+    except ReviewError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if row["status"] != "pending":
+        print(f"error: review {review_id} is {row['status']}, not pending",
+              file=sys.stderr)
+        return 1
+    if (row["kind"] or "order") != "order":
+        print(f"error: review {review_id} is a {row['kind']} row; only order "
+              "reviews can be reanalyzed", file=sys.stderr)
+        return 1
+    if review_agent is None:
+        print("LLM not configured: set OPENROUTER_API_KEY (or provider key) "
+              "in .env", file=sys.stderr)
+        return 2
+    try:
+        analysis = review_agent.analyze(dict(row))
+    except Exception as exc:  # noqa: BLE001 — report any agent/LLM failure cleanly
+        print(f"error: review agent failed, nothing attached: {exc}", file=sys.stderr)
+        return 1
+    q.attach_analysis(review_id, analysis.model_dump_json())
+    print(f"review {review_id}: agent recommends {analysis.recommendation}")
+    print(analysis.reasoning)
+    return 0
+
+
 def cmd_memory_show(memory, layer: str | None, key: str | None) -> int:
     if layer:
         from allpath_trade.memory.store import MemoryStoreError
@@ -675,6 +711,7 @@ examples:
   allpath-trade regime show                      show the paper-study regime
   allpath-trade regime set human --by Tian       flip the paper study to human
   allpath-trade reviews approve 3                execute pending review #3
+  allpath-trade reviews reanalyze 3              re-run the agent on pending order #3
   allpath-trade memory show --layer stock --key AAPL
                                              read the agent's AAPL dossier
 
@@ -780,6 +817,10 @@ def main(argv: list[str] | None = None,
                         help="print a JSON array of pending review rows")
     p_app = rsub.add_parser("approve", help="execute a pending review (needs keys)")
     p_app.add_argument("review_id", type=int, help="id from 'reviews list'")
+    p_rean = rsub.add_parser(
+        "reanalyze", help="re-run the review agent on a pending order review "
+                          "(needs keys and an LLM)")
+    p_rean.add_argument("review_id", type=int, help="id from 'reviews list'")
     p_rej = rsub.add_parser("reject", help="dismiss a pending review")
     p_rej.add_argument("review_id", type=int, help="id from 'reviews list'")
     p_rej.add_argument("--note", default="", help="reason, stored for the record")
@@ -900,6 +941,10 @@ def main(argv: list[str] | None = None,
     needs_broker = args.command in {"status", "check", "run", "chat"} or (
         args.command == "reviews" and getattr(args, "reviews_command", None) == "approve"
         and _approve_needs_broker(settings, args.review_id, account)) or (
+        # reanalyze builds that account's ReviewAgent exactly as serve does
+        # (build_components), and its read-only tools reach the broker.
+        args.command == "reviews"
+        and getattr(args, "reviews_command", None) == "reanalyze") or (
         args.command == "memory" and getattr(args, "memory_command", None) == "consolidate")
 
     broker: Broker | None = None
@@ -1013,6 +1058,9 @@ def main(argv: list[str] | None = None,
                           action=args.action, regime=args.value, by=args.by,
                           note=args.note)
     if args.command == "reviews":
+        if args.reviews_command == "reanalyze":
+            return cmd_reviews_reanalyze(queue, sentinel.review_agent,
+                                         args.review_id)
         return cmd_reviews(queue, args, store)
     if args.command == "chat":
         from allpath_trade.llm.factory import LLMConfigError, build_llm

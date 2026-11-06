@@ -408,6 +408,100 @@ def test_agent_failure_leaves_trigger_queued(tmp_path):
     assert q.get(1)["status"] == "pending"
 
 
+def test_agent_failure_notification_says_there_is_no_analysis(tmp_path):
+    # Ops 2026-11-06: 21 reviews reached Telegram with an empty analysis
+    # that looked like any other card.
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent(fail=True)
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No agent analysis: LLM unavailable" in body
+
+
+def test_no_review_agent_notification_says_there_is_no_analysis(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = None
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No agent analysis: LLM unavailable" in body
+
+
+def test_unparseable_analysis_notification_says_so(tmp_path):
+    from allpath_trade.agent.review import ReviewAnalysis
+
+    class UnparseableStub:
+        def analyze(self, review):
+            return ReviewAnalysis(recommendation="skip",
+                                  reasoning="unparseable analysis: garbage")
+
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = UnparseableStub()
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No agent analysis: the agent's reply could not be parsed" in body
+
+
+def test_agent_success_notification_has_no_missing_analysis_warning(tmp_path):
+    s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
+    s.review_agent = StubReviewAgent("execute")
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "No agent analysis" not in body
+
+
+SPENT_STOP_YAML = """
+name: "T"
+status: active
+authorization: {auth}
+position: {{ticker: AAPL, target_weight: 15%}}
+rules:
+  - {{id: dip-buy, type: hard, condition: "price < 250", action: "buy $1000"}}
+  - {{id: stop-loss, type: hard, condition: "price < 150", action: "sell all"}}
+"""
+
+
+def _spent_stop_make(tmp_path, auth="confirm", spent=True):
+    from allpath_trade.strategy.model import RuleState
+
+    s, store, ex, q, n = make(tmp_path, SPENT_STOP_YAML.format(auth=auth))
+    if spent:
+        store.set_rule_state("t", "stop-loss", RuleState.TRIGGERED)
+    return s, store, ex, q, n
+
+
+def test_queued_buy_with_a_spent_stop_warns_in_the_notification(tmp_path):
+    # Ops 2026-11-06 item 6: dip buys rebuilt NVDA after its one-shot stop
+    # had fired, and nothing said the new position had no stop.
+    s, _store, _ex, _q, n = _spent_stop_make(tmp_path)
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "⚠ No armed stop: t/stop-loss (price < 150)" in body
+
+
+def test_queued_buy_with_an_armed_stop_has_no_stop_warning(tmp_path):
+    s, _store, _ex, _q, n = _spent_stop_make(tmp_path, spent=False)
+    s.run_once()
+    [(_subject, body)] = n.sent
+    assert "No armed stop" not in body
+
+
+def test_auto_executed_buy_with_a_spent_stop_warns_in_the_receipt(tmp_path):
+    s, _store, ex, _q, n = _spent_stop_make(tmp_path, auth="auto")
+    s.run_once()
+    assert len(ex.calls) == 1
+    [(_subject, body)] = n.sent
+    assert body.startswith("⚠ No armed stop: t/stop-loss")
+
+
+def test_spent_stop_warning_never_rearms_the_stop(tmp_path):
+    from allpath_trade.strategy.model import RuleState
+
+    s, store, _ex, _q, _n = _spent_stop_make(tmp_path)
+    s.run_once()
+    stop = next(r for r in store.load("t").rules if r.id == "stop-loss")
+    assert stop.state == RuleState.TRIGGERED
+
+
 def test_auto_soft_agent_execute_but_executor_fails_reports_error(tmp_path):
     s, _store, _ex, q, n = make(tmp_path, strategy_yaml(rule_type="soft"), fail=True)
     s.review_agent = StubReviewAgent("execute")
@@ -921,6 +1015,31 @@ def test_tripped_breaker_does_not_realert(tmp_path):
 
     assert not any("drawdown breaker" in e for e in second.errors)
     assert not any("TRADING HALTED" in subject for subject, _body in n.sent[first_sent:])
+
+
+def test_tripped_breaker_alerts_again_when_equity_falls_another_five_percent(tmp_path):
+    # Ops 2026-11-06: both breakers tripped 11-05 and then went silent.
+    from allpath_trade.memory.observations import ObservationLog
+
+    s, _store, _ex, _q, n, _breaker, app_state = _breaker_make(
+        tmp_path, strategy_yaml(auth="auto"), equity="84000")
+    s.observations = ObservationLog(app_state._conn, account="paper")
+    s.run_once()                                    # trips at 16%
+    first_sent = len(n.sent)
+    s.broker._equity = Decimal("79000")             # 21% below the frozen peak
+
+    report = s.run_once()
+
+    deeper = [(subj, body) for subj, body in n.sent[first_sent:]
+              if "STILL FALLING" in subj]
+    assert len(deeper) == 1
+    assert "allpath-trade breaker reset --account paper" in deeper[0][1]
+    assert any("deeper" in e for e in report.errors)
+    texts = [row["text"] for row in s.observations.recent(limit=20)
+             if row["source"] == "breaker"]
+    assert any("21.0%" in t for t in texts)
+    s.run_once()                                    # same step: no repeat
+    assert sum("STILL FALLING" in subj for subj, _ in n.sent) == 1
 
 
 def _breaker_make_option(tmp_path, yaml_text, *, backend, price="200", equity="80000",
