@@ -379,3 +379,25 @@ def test_daily_digest_appends_the_llm_health_line():
         account="paper", triggers=1, trades=0, pending=0,
         llm_health="⚠ LLM health: review never succeeded, 3 failed today (credits).")
     assert "\n⚠ LLM health: review never succeeded" in body
+
+
+def test_drawdown_halt_gives_the_exact_reset_command_for_the_account():
+    from decimal import Decimal
+
+    _subject, body = events.drawdown_halt(
+        account="shadow", peak=Decimal("100000"), equity=Decimal("82000"),
+        drawdown=Decimal("0.18"), demoted=[])
+    assert "allpath-trade breaker reset --account shadow" in body
+
+
+def test_drawdown_deepening_names_the_new_low_and_the_reset_command():
+    from decimal import Decimal
+
+    subject, body = events.drawdown_deepening(
+        account="paper", peak=Decimal("104376.84"), equity=Decimal("83000"),
+        drawdown=Decimal("0.2048"), level=Decimal("0.20"),
+        tripped_at="2026-11-05T15:46:00+00:00")
+    assert "[Paper]" in subject and "20" in subject
+    assert "20.5%" in body and "$104,376.84" in body and "$83,000.00" in body
+    assert "2026-11-05" in body
+    assert "allpath-trade breaker reset --account paper" in body

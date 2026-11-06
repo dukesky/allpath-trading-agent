@@ -170,7 +170,34 @@ def drawdown_halt(*, account: str, peak: Decimal, equity: Decimal,
             f"to confirm: {names}.\n"
             "No further orders will execute without your approval.\n"
             "To resume: review the account, restore strategies to auto "
-            "deliberately, then run `allpath-trade breaker reset`." + FOOTER)
+            "deliberately, then reset the breaker from the repo directory:\n"
+            f"{_reset_command(account)}\n"
+            "You will get another alert at each further 5% below the peak "
+            "while it stays tripped." + FOOTER)
+    return subject, body
+
+
+def _reset_command(account: str) -> str:
+    return f"uv run allpath-trade breaker reset --account {account}"
+
+
+def drawdown_deepening(*, account: str, peak: Decimal, equity: Decimal,
+                       drawdown: Decimal, level: Decimal,
+                       tripped_at: str) -> tuple[Subject, str]:
+    """Ops 2026-11-06: the breaker freezes its peak once tripped and used to
+    say nothing more however far equity fell. Sent (like `drawdown_halt`,
+    straight to the notifier + Telegram) at each further 5% step below the
+    frozen peak. Nothing new is demoted or blocked."""
+    subject = Subject(
+        f"{_prefix(account)}[AllPath] DRAWDOWN STILL FALLING: {drawdown:.1%} below peak",
+        {"type": "drawdown_deepening", "account": account, "peak": str(peak),
+         "equity": str(equity), "drawdown": str(drawdown), "level": str(level)})
+    body = (f"Equity ${equity:,.2f} is now {drawdown:.1%} below the frozen "
+            f"peak ${peak:,.2f}, past the {level:.0%} mark.\n"
+            f"The drawdown breaker has been tripped since {tripped_at[:16]} UTC "
+            "and is still tripped; nothing new was demoted.\n"
+            "Review the account. To reset the breaker, from the repo directory:\n"
+            f"{_reset_command(account)}" + FOOTER)
     return subject, body
 
 

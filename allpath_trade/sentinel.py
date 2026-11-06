@@ -221,6 +221,8 @@ class Sentinel:
                 report.errors.append(
                     f"drawdown breaker tripped ({trip.drawdown:.1%}); "
                     "auto strategies demoted to confirm")
+            else:
+                self._alert_if_drawdown_deepened(account.equity, report)
 
         # Task 6: expiry safety sweep -- account-level, not tied to any one
         # strategy's rules, so it runs here rather than inside
@@ -584,6 +586,31 @@ class Sentinel:
             return self._dispatch_option_buy(doc, rule_id, condition, spec, price, reason)
         return self._queue_option_buy(doc, rule_id, rule_type, condition, action,
                                       spec, price, reason)
+
+    def _alert_if_drawdown_deepened(self, equity: Decimal,
+                                    report: SentinelReport) -> None:
+        """Ops 2026-11-06: a tripped breaker freezes its peak and used to go
+        silent. Alert (notifier + Telegram, like the trip itself) at each
+        further 5% step below the frozen peak. Alert-only."""
+        deeper = self.breaker.deepening(equity)
+        if deeper is None:
+            return
+        subject, body = events.drawdown_deepening(
+            account=self.account, peak=deeper.peak, equity=deeper.equity,
+            drawdown=deeper.drawdown, level=deeper.level,
+            tripped_at=deeper.tripped_at)
+        if self.notifier is not None:
+            self.notifier.send(subject, body)
+        push_telegram_receipt(
+            app_state=self.app_state, telegram_bot_token=self.telegram_bot_token,
+            body=body, account=self.account)
+        if self.observations is not None:
+            self.observations.add(
+                "breaker",
+                f"drawdown deepened while tripped: {deeper.drawdown:.1%} below "
+                f"frozen peak {deeper.peak} (past {deeper.level:.0%})")
+        report.errors.append(
+            f"drawdown breaker still tripped and deeper ({deeper.drawdown:.1%})")
 
     def _breaker_tripped(self) -> bool:
         return self.breaker is not None and self.breaker.tripped_at() is not None

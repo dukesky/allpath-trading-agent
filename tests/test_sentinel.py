@@ -964,6 +964,31 @@ def test_tripped_breaker_does_not_realert(tmp_path):
     assert not any("TRADING HALTED" in subject for subject, _body in n.sent[first_sent:])
 
 
+def test_tripped_breaker_alerts_again_when_equity_falls_another_five_percent(tmp_path):
+    # Ops 2026-11-06: both breakers tripped 11-05 and then went silent.
+    from allpath_trade.memory.observations import ObservationLog
+
+    s, _store, _ex, _q, n, _breaker, app_state = _breaker_make(
+        tmp_path, strategy_yaml(auth="auto"), equity="84000")
+    s.observations = ObservationLog(app_state._conn, account="paper")
+    s.run_once()                                    # trips at 16%
+    first_sent = len(n.sent)
+    s.broker._equity = Decimal("79000")             # 21% below the frozen peak
+
+    report = s.run_once()
+
+    deeper = [(subj, body) for subj, body in n.sent[first_sent:]
+              if "STILL FALLING" in subj]
+    assert len(deeper) == 1
+    assert "allpath-trade breaker reset --account paper" in deeper[0][1]
+    assert any("deeper" in e for e in report.errors)
+    texts = [row["text"] for row in s.observations.recent(limit=20)
+             if row["source"] == "breaker"]
+    assert any("21.0%" in t for t in texts)
+    s.run_once()                                    # same step: no repeat
+    assert sum("STILL FALLING" in subj for subj, _ in n.sent) == 1
+
+
 def _breaker_make_option(tmp_path, yaml_text, *, backend, price="200", equity="80000",
                          qty="10", halt_pct="0.15", peak="100000", account="paper",
                          extra_positions=None):
