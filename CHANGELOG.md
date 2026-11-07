@@ -4,6 +4,18 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
 
 ## Shadow daily check-in (pilot, unreleased)
 
+- **Live facts for check-in questions** (fix after the first real round,
+  2026-11-06): questions are now built on a live account snapshot read at
+  question time -- equity and cash, every position's current price, value
+  and weight, cost basis labelled as cost basis, option contracts with share
+  exposure and moneyness against the underlying's last price, and the
+  drawdown breaker's current state. The snapshot leads the facts and wins
+  over the evening reflection briefing, which is marked possibly stale. A
+  broker outage now fails the check-in, so the nightly chain retries it,
+  instead of asking questions on stale numbers.
+- **Stance-less replies get pinned down**: when a check-in reply takes no
+  clear position ("sounds good"), the shadow agent files no view and ends
+  with one short yes/no question; check-in replies stay phone-length.
 - **`SHADOW_DAILY_CHECKIN`** (off by default, shadow only): after the nightly
   chain, the chat-tier model turns the day's facts into one to three
   questions and sends them to the paired Telegram chat as one message

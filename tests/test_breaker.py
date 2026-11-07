@@ -201,3 +201,13 @@ def test_reset_clears_the_deepening_step(tmp_path):
     b.deepening(Decimal("79000"))
     b.reset()
     assert state.get("drawdown_alert_level:paper") is None
+
+
+def test_peak_reads_the_recorded_peak(tmp_path):
+    # check-in live facts (2026-11-07) report the breaker's peak/drawdown
+    b, _, _ = _breaker(tmp_path)
+    assert b.peak() is None
+    b.check(Decimal(100000)); b.check(Decimal(90000))
+    assert b.peak() == Decimal(100000)
+    b.reset()
+    assert b.peak() is None
