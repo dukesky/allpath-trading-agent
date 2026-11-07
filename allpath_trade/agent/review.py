@@ -142,7 +142,21 @@ class ReviewAgent:
         # JSON block in prose (found 2026-09-14: every such reply used to
         # read "skip -- unparseable"). Take the most likely answer object
         # anywhere in the reply instead of requiring the whole text to be JSON.
-        for data in _json_candidates(text):
+        candidates = list(_json_candidates(text))
+        # TDSC red-team F3 (X3): the reply can quote external content (a news
+        # article, a web page) that itself contains a verdict-shaped object.
+        # Candidate order alone cannot tell the model's own verdict from a
+        # quoted one, so any disagreement between candidates means the reply
+        # is not a usable answer: it reads as unparseable and the order goes
+        # to the human with the "no agent analysis" warning.
+        verdicts = {str(d["recommendation"]).strip().lower()
+                    for d in candidates if "recommendation" in d}
+        if len(verdicts) > 1:
+            return ReviewAnalysis(
+                recommendation="skip",
+                reasoning=f"unparseable analysis: conflicting recommendations "
+                          f"({', '.join(sorted(verdicts))}) in one reply: {text}")
+        for data in candidates:
             try:
                 analysis = ReviewAnalysis.model_validate(data)
             except ValidationError:
