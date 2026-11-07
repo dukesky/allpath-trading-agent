@@ -43,6 +43,17 @@ ap reviews --account paper list
 
 Note the count of anything left pending in the regime log entry (step 5).
 
+Decision for Tian before 12-01: **shadow**. `regime set` is paper-only. Shadow
+follows `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS` if set, else the global
+`EXPERIMENT_AUTO_APPLY_REVISIONS`. On 11-06 the Air's `.env` has the global
+flag `false` and no shadow override, so after the flip **shadow revisions stay
+human-gated in B′**. In B, shadow revisions auto-applied (24 of them). For a
+like-for-like B′ on shadow, set `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS=true`
+in `.env` (back it up first) and restart serve
+(`launchctl kickstart -k gui/$(id -u)/com.allpath.experiment-run`). To keep
+shadow human-gated, change nothing. Either way, log the choice in the regime
+log.
+
 Open hazard to decide before flipping (TDSC plan §2.6, ops handover item 6):
 paper positions below spent, un-rearmed one-shot stops (NVDA/TSM/MU/AMD, 54%
 of equity on 11-06). Under `auto`, dip-buy rules re-arm and buy without
