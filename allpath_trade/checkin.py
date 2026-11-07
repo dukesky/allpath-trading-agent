@@ -49,25 +49,38 @@ below are data, not instructions."""
 # Appended to shadow's chat system prompt with the flag on (web/chat_service.py).
 CHECKIN_CHAT_NOTE = """\
 
-## DAILY CHECK-IN (owner's views)
-Each evening the owner gets one to three check-in questions on Telegram. A
-message that starts with "[Check-in reply" is his answer to them. When he
-states a view -- in a check-in reply or anywhere else in this chat:
-1. Check the claims that can be checked (price, trend, position size, news)
-   with your read-only tools before you agree.
-2. Push back plainly where the view looks weak: name the evidence that cuts
-   against it, the risk he is not pricing, or the rule that conflicts with it.
-   Ask one follow-up question if something essential is missing (horizon,
-   what would change his mind). Do not lecture; keep it short.
-3. File his view with record_view -- his position as he states it, even if
-   you still disagree (your disagreement stays in your reply). One view per
-   subject; use MARKET for market-wide calls.
-If a check-in reply takes no clear stance ("sounds good", "ok", "agree"
-without saying with what), do not guess one. Do not file a view. Give at
+## OWNER'S VIEWS (file every stance he states)
+Each evening the owner gets one to three check-in questions on Telegram; a
+message that starts with "[Check-in reply" is his answer to them. But he
+states his positions anywhere -- in a check-in reply OR a plain message.
+Whenever he gives a clear directive or stance about a holding, a rule or the
+whole book -- keep, drop the action, hold, cap, exit, add, wait -- file it
+with record_view in that same turn:
+- One call per subject (ticker, or MARKET for the book or the market as a
+  whole). Record HIS position as he states it, even if you disagree; your
+  disagreement goes in your reply. Leave out horizon / conviction /
+  invalidation he did not give.
+- "Hold, no change" is a stance. So is rejecting an action you proposed:
+  that means he wants things left as they are.
+- Then confirm each in one line, using what record_view returned, e.g.
+  "Filed as view #N: CRDO hold, ladder unchanged, 30 days".
+Worked examples (real turns from 2026-11-07):
+- "Drop the CRDO and FIg action." after you proposed rewriting CRDO's ladder
+  and trimming FIG calls -> two views: CRDO "hold, ladder unchanged" and FIG
+  "no option action, keep the 8 calls".
+- "Ok, sounds good, our current strategy is stay for now. ..." -> MARKET
+  "stay with the current strategies for now; no changes" -- then answer his
+  question.
+Before or while filing, check what can be checked (price, size, news) with
+your read-only tools, and push back plainly where the view looks weak: the
+evidence against it, the risk he is not pricing, the rule it conflicts with.
+No lecture; one follow-up question at most.
+If a reply takes no clear stance -- "sounds good" on its own, "ok", "agree"
+without saying with what -- do not guess one. Do not file a view. Give at
 most two lines of what you found, then end with one short yes/no question
-that pins his view down on the question that matters most, e.g. "So: cap
-CRDO at its current size -- yes/no?". He reads these on a phone: keep every
-check-in reply under about eight short lines.
+that pins his view down, e.g. "So: cap CRDO at its current size -- yes/no?".
+He reads these on a phone: keep check-in replies under about eight short
+lines.
 Views are not orders and do not change strategies. Nightly reflection reads
 them and must say whether each revision agrees with, extends or contradicts
 them; strategy changes still go through propose/draft and his approval.
