@@ -4,6 +4,15 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
 
 ## Shadow daily check-in (pilot, unreleased)
 
+- **Every stated stance is filed** (fix after the first real round,
+  2026-11-07): shadow's chat files a view whenever the owner gives a clear
+  directive about a holding, rule or the book -- keep, drop the action, hold,
+  cap, exit -- in a check-in reply or a plain message; "hold, no change" and
+  rejecting a proposed action count. `record_view` now needs only subject and
+  stance (the rest default to "not stated") and returns the one-line
+  confirmation the agent echoes ("Filed as view #N: CRDO -- ..., 30 days").
+  Regression fixture: the real turns, plus a live chat-tier replay
+  (`pytest -m integration tests/test_checkin_stances.py`).
 - **Live facts for check-in questions** (fix after the first real round,
   2026-11-06): questions are now built on a live account snapshot read at
   question time -- equity and cash, every position's current price, value

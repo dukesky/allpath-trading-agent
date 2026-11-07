@@ -21,7 +21,7 @@ def test_record_view_files_a_row(tmp_path):
     out = call(reg, "record_view", subject="nvda", stance="Bullish; add under $180",
                horizon="6-12 months", conviction="high",
                invalidation="Hyperscaler capex guide cut")
-    assert out.startswith("View #")
+    assert out.startswith("Filed as view #")
     [row] = views.active()
     assert row["subject"] == "NVDA" and row["conviction"] == "high"
 
@@ -48,3 +48,27 @@ def test_list_views(tmp_path):
               conviction="medium", invalidation="SPX new high")
     out = call(reg, "list_views")
     assert "MARKET" in out and "risk-off into year end" in out and "expires" in out
+
+
+def test_record_view_needs_only_subject_and_stance(tmp_path):
+    # a bare directive ("Drop the CRDO action") states no horizon/conviction/
+    # invalidation; requiring them kept the agent from filing (2026-11-07)
+    reg, views = make(tmp_path)
+    out = call(reg, "record_view", subject="crdo", stance="Hold; ladder unchanged")
+    assert out.startswith("Filed as view #1: CRDO -- Hold; ladder unchanged, 30 days")
+    [row] = views.active()
+    assert (row["horizon"], row["conviction"], row["invalidation"]) == (
+        "not stated", "not stated", "not stated")
+
+
+def test_record_view_confirmation_reports_clamped_days(tmp_path):
+    reg, _ = make(tmp_path)
+    out = call(reg, "record_view", subject="FIG", stance="no option action",
+               expires_days=999)
+    assert "180 days" in out
+
+
+def test_record_view_schema_requires_only_subject_and_stance(tmp_path):
+    reg, _ = make(tmp_path)
+    [spec] = [s for s in reg.specs() if s.name == "record_view"]
+    assert spec.parameters["required"] == ["subject", "stance"]

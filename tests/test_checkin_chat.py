@@ -32,18 +32,18 @@ def test_flag_on_gives_shadow_chat_view_tools_and_note(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch, checkin=True)
     shadow = client.app.state.chat_services["shadow"].session()
     assert {"record_view", "list_views"} <= _tools(shadow)
-    assert "DAILY CHECK-IN" in shadow.system_prompt
+    assert "file every stance he states" in shadow.system_prompt
 
 
 def test_flag_on_leaves_paper_chat_untouched(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch, checkin=True)
     paper = client.app.state.chat_services["paper"].session()
     assert not {"record_view", "list_views"} & _tools(paper)
-    assert "DAILY CHECK-IN" not in paper.system_prompt
+    assert "file every stance he states" not in paper.system_prompt
 
 
 def test_flag_off_adds_nothing_to_shadow(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch, checkin=False)
     shadow = client.app.state.chat_services["shadow"].session()
     assert not {"record_view", "list_views"} & _tools(shadow)
-    assert "DAILY CHECK-IN" not in shadow.system_prompt
+    assert "file every stance he states" not in shadow.system_prompt
