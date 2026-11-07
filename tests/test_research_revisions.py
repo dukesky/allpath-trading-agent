@@ -98,3 +98,87 @@ def test_modified_rule_reverted_counts(tmp_path):
     revs = {r.review_id: r for r in load_revisions(open_readonly(b.close()))}
     assert revs[r1].reversed_by == r2
     assert revs[r1].fields_reverted == ["rule:stop"]
+
+
+HELD_TEXT = ("revision #{rid} for s1 held for human: changes position.ticker (NVDA -> "
+             "AMD); removes sell rule stop; loosens buy rule dip beyond 5% (price < 12 "
+             "-> price < 13). Not auto-applied (auto-apply allow-list); left pending")
+
+
+def test_held_revision_is_classified_with_reasons(tmp_path):
+    b = DBBuilder(tmp_path / "t.db")
+    v1 = strategy_yaml("s1", [rule("stop", "price < 10", "sell all")])
+    held = b.review(ts="2026-12-02T21:00:00+00:00", status="pending",
+                    old_yaml=v1, new_yaml=v1)
+    held_then_ok = b.review(ts="2026-12-03T21:00:00+00:00",
+                            resolved_ts="2026-12-04T15:00:00+00:00",
+                            old_yaml=v1, new_yaml=v1)
+    auto = b.review(ts="2026-12-03T21:00:00+00:00",
+                    resolved_ts="2026-12-03T21:01:00+00:00", old_yaml=v1, new_yaml=v1)
+    b.observation(ts="2026-12-02T21:01:00+00:00", source="reflection_auto_apply",
+                  text=HELD_TEXT.format(rid=held))
+    b.observation(ts="2026-12-03T21:01:00+00:00", source="reflection_auto_apply",
+                  text=f"revision #{held_then_ok} for s1 held for human: proposes a new "
+                       "strategy. Not auto-applied (auto-apply allow-list); left pending")
+    b.observation(ts="2026-12-03T21:01:00+00:00", source="reflection_auto_apply",
+                  text=f"revision #{auto} for s1 auto-applied (experiment mode).")
+    revs = {r.review_id: r for r in load_revisions(open_readonly(b.close()))}
+    h = revs[held]
+    assert h.held is True and h.resolver == "none" and h.gate_rejected is False
+    assert h.hold_reasons == ["changes position.ticker (NVDA -> AMD)",
+                              "removes sell rule stop",
+                              "loosens buy rule dip beyond 5% (price < 12 -> price < 13)"]
+    assert h.hold_categories == ["retarget_ticker", "removes_exit", "loosens_entry"]
+    # held, then a human approved it: held AND human-decided, never auto
+    assert revs[held_then_ok].held is True
+    assert revs[held_then_ok].resolver == "human"
+    assert revs[held_then_ok].hold_categories == ["new_strategy"]
+    assert revs[auto].held is False and revs[auto].resolver == "auto"
+
+
+def test_hold_reason_column_is_a_fallback(tmp_path):
+    b = DBBuilder(tmp_path / "t.db")
+    v1 = strategy_yaml("s1", [rule("stop", "price < 10", "sell all")])
+    rid = b.review(ts="2026-12-02T21:00:00+00:00", status="pending",
+                   old_yaml=v1, new_yaml=v1)
+    b.conn.execute("UPDATE pending_reviews SET hold_reason = ? WHERE id = ?",
+                   ("adds rule extra; raises position.max_weight (0.1 -> 0.2)", rid))
+    b.conn.commit()
+    rev = load_revisions(open_readonly(b.close()))[0]
+    assert rev.held is True
+    assert rev.hold_categories == ["adds_rule", "size_increase"]
+
+
+@pytest.mark.parametrize(("reason", "category"), [
+    ("proposes a new strategy", "new_strategy"),
+    ("proposal does not parse (bad yaml)", "unparseable"),
+    ("could not classify the revision (boom)", "unparseable"),
+    ("changes position.ticker (A -> B)", "retarget_ticker"),
+    ("sets position.max_value", "size_increase"),
+    ("removes position.max_weight", "size_increase"),
+    ("raises position.target_weight (0.05 -> 0.08)", "size_increase"),
+    ("removes sell rule stop", "removes_exit"),
+    ("adds rule r9", "adds_rule"),
+    ("changes authorization", "frozen_field"),
+    ("changes status", "frozen_field"),
+    ("turns off notify_email", "notify_off"),
+    ("changes stop from sell to buy", "flips_side"),
+    ("changes sell rule stop type hard -> soft", "rule_type"),
+    ("makes buy rule dip fire more often (rearm)", "rearm"),
+    ("makes sell rule stop fire less often (rearm)", "rearm"),
+    ("sells less on sell rule stop", "loosens_exit"),
+    ("loosens sell rule stop (price < 10 -> price < 8)", "loosens_exit"),
+    ("loosens buy rule dip beyond 5% (price < 12 -> price < 13)", "loosens_entry"),
+    ("buys more on buy rule dip ($1000 -> $3000)", "buys_more"),
+    ("changes the condition structure of sell rule stop", "condition_rewrite"),
+    ("moves an equality in buy rule dip", "condition_rewrite"),
+    ("could not read the condition of buy rule dip (x)", "unparseable"),
+    ("changes the action of buy rule dip", "changes_action"),
+    ("disables sell rule stop", "disables_rule"),
+    ("re-arms buy rule dip", "rearms_rule"),
+    ("changes options", "other_field"),
+    ("something new", "other"),
+])
+def test_hold_category(reason, category):
+    from allpath_trade.research.revisions import hold_category
+    assert hold_category(reason) == category

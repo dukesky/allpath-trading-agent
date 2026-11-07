@@ -42,8 +42,11 @@ def cmd_regime_metrics(args: argparse.Namespace) -> int:
     usage, failures = rm.llm_rows(conn, args.start, args.end)
     write_csv(out / "llm_daily.csv", rm.LLM_COLUMNS, usage)
     write_csv(out / "llm_failures_daily.csv", rm.LLM_FAILURE_COLUMNS, failures)
+    holds = rm.hold_rows(conn, args.start, args.end)
+    write_csv(out / "holds.csv", rm.HOLD_COLUMNS, holds)
     (out / "summary.md").write_text(rm.summary_markdown(
-        daily, db_label=Path(args.db).name, start=args.start, end=args.end))
+        daily, db_label=Path(args.db).name, start=args.start, end=args.end,
+        holds=holds))
     conn.close()
     print(f"wrote {len(daily)} account-days to {out}")
     return 0

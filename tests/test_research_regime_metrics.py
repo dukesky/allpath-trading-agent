@@ -157,6 +157,44 @@ def test_cli_writes_csvs_and_leaves_db_untouched(db, tmp_path):
     assert (out / "llm_failures_daily.csv").exists()
 
 
+def test_held_revisions_counted_per_day_and_in_holds_csv(tmp_path):
+    b = DBBuilder(tmp_path / "prod.db")
+    v1 = strategy_yaml("s1", [rule("stop", "price < 10", "sell all")])
+    b.report(date="2026-12-02")
+    h1 = b.review(ts="2026-12-02T21:00:00+00:00", status="pending", old_yaml=v1, new_yaml=v1)
+    h2 = b.review(ts="2026-12-02T21:00:10+00:00", status="rejected",
+                  resolved_ts="2026-12-03T15:00:00+00:00", old_yaml=v1, new_yaml=v1)
+    a1 = b.review(ts="2026-12-02T21:00:20+00:00", resolved_ts="2026-12-02T21:01:00+00:00",
+                  old_yaml=v1, new_yaml=v1)
+    for rid, why in ((h1, "removes sell rule stop; adds rule x"), (h2, "adds rule y")):
+        b.observation(ts="2026-12-02T21:01:00+00:00", source="reflection_auto_apply",
+                      text=f"revision #{rid} for s1 held for human: {why}. Not "
+                           "auto-applied (auto-apply allow-list); left pending")
+    b.observation(ts="2026-12-02T21:01:00+00:00", source="reflection_auto_apply",
+                  text=f"revision #{a1} for s1 auto-applied (experiment mode).")
+    path = b.close()
+    r = _row(daily_rows(open_readonly(path), "2026-12-02", "2026-12-02"), "2026-12-02")
+    assert r["window"] == "B'"
+    assert r["refl_rev_auto_applied"] == 1
+    assert r["refl_rev_held"] == 2
+    assert r["refl_rev_held_pending"] == 1
+    assert r["refl_rev_held_vetoed"] == 1
+    assert r["refl_rev_held_approved"] == 0
+    assert r["refl_rev_gate_rejections"] == 0
+    out = tmp_path / "out"
+    assert main(["regime-metrics", "--db", str(path), "--from", "2026-12-01",
+                 "--to", "2026-12-03", "--out", str(out)]) == 0
+    holds = _read(out / "holds.csv")
+    assert sorted((h["review_id"], h["category"]) for h in holds) == sorted(
+        [(str(h1), "removes_exit"), (str(h1), "adds_rule"), (str(h2), "adds_rule")])
+    revs = {x["review_id"]: x for x in _read(out / "revisions.csv")}
+    assert revs[str(h1)]["held"] == "1"
+    assert revs[str(h1)]["hold_categories"] == "removes_exit;adds_rule"
+    summary = (out / "summary.md").read_text()
+    assert "Holds by reason" in summary
+    assert "| B' | paper | adds_rule | 2 |" in summary
+
+
 def test_cli_rejects_missing_db(tmp_path, capsys):
     rc = main(["regime-metrics", "--db", str(tmp_path / "x.db"), "--out", str(tmp_path)])
     assert rc == 2

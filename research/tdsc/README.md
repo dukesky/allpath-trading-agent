@@ -38,6 +38,7 @@ Re-runnable for any ET date range. Writes:
 |---|---|---|
 | `regime_metrics_daily.csv` | account × ET day (weekdays + any active day) | report status/model/tokens; proposals by source × kind; reflection revisions auto / human-approved / vetoed / superseded / pending; latency median/max; gate rejections; regime-skip notices; chat revision outcomes; later reversals of that day's applied revisions; order reviews and latency; auto-executed orders; filled/rejected/error trades; breaker trips and end-of-day state; active strategies by authorization; model per tier; reflection tokens (after R5) |
 | `revisions.csv` | one row per `strategy_revision` review | source, status, resolver (auto/human/none), latency, rules added/removed/modified, fields changed, `reversed_by` and what was reversed |
+| `holds.csv` | one row per (held revision, reason) | F1 allow-list holds under auto: reason text and `category` |
 | `orders.csv` | one row per trade, plus order reviews with no trade | path: `auto` (no review), `review_approved`, `review_rejected`, `review_pending`, `gate_rejected`, `error` |
 | `llm_daily.csv` | ET day × tier × model × purpose | calls and tokens (system-wide) |
 | `llm_failures_daily.csv` | ET day × tier × model × error class | failed calls |
@@ -51,6 +52,19 @@ Definitions:
 - `auto` revision = an `observations` row `reflection_auto_apply` naming the
   review id as auto-applied; `gate_rejections` = the same source saying
   `NOT auto-applied (<guard error>)`.
+- `held` revision (F1, from main 8c7a5d7) = a `reflection_auto_apply`
+  observation "revision #N for X held for human: <reasons>. Not auto-applied
+  (auto-apply allow-list)", else a non-empty `pending_reviews.hold_reason`.
+  A held row is pending until a human decides it, so it can also be
+  human-approved or vetoed (daily columns `refl_rev_held`,
+  `refl_rev_held_pending`, `refl_rev_held_approved`, `refl_rev_held_vetoed`);
+  it is never `auto` and never a gate rejection. Each reason maps to a stable
+  `category` (`revisions.hold_category`: retarget_ticker, removes_exit,
+  adds_rule, size_increase, loosens_exit, loosens_entry, buys_more, rearm,
+  rule_type, flips_side, condition_rewrite, changes_action, disables_rule,
+  rearms_rule, frozen_field, notify_off, new_strategy, unparseable,
+  other_field, other). New reason strings in `strategy/auto_gate.py` land in
+  `other` until a pattern is added.
 - Reversal = a later applied revision of the same strategy (any source)
   removes a rule this one added, or restores a rule spec (type, condition,
   action, rearm) or a top-level field this one changed. `state` (armed /

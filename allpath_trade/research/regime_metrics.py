@@ -66,6 +66,8 @@ DAILY_COLUMNS = [
     "refl_rev_superseded", "refl_rev_pending",
     "refl_rev_latency_min_median", "refl_rev_latency_min_max",
     "refl_rev_gate_rejections", "refl_rev_regime_skips",
+    "refl_rev_held", "refl_rev_held_pending", "refl_rev_held_approved",
+    "refl_rev_held_vetoed",
     "chat_rev_approved", "chat_rev_rejected", "chat_rev_superseded", "chat_rev_pending",
     "rev_applied_later_reversed", "rev_rules_added_then_removed", "rev_fields_reverted",
     "order_reviews_proposed", "order_reviews_approved", "order_reviews_rejected",
@@ -301,6 +303,11 @@ def _account_day(day: str, account: str, eod: str, *, revisions: list[Revision],
     row["refl_rev_latency_min_median"] = _median(lat)
     row["refl_rev_latency_min_max"] = max(lat) if lat else ""
     row["refl_rev_gate_rejections"] = sum(r.gate_rejected for r in refl)
+    held = [r for r in refl if r.held]
+    row["refl_rev_held"] = len(held)
+    row["refl_rev_held_pending"] = sum(r.status == "pending" for r in held)
+    row["refl_rev_held_approved"] = sum(r.status == "approved" for r in held)
+    row["refl_rev_held_vetoed"] = sum(r.status == "rejected" for r in held)
     row["refl_rev_regime_skips"] = sum(1 for a, ts in skips
                                        if a == account and et_date(ts) == day)
     for status, col in (("approved", "chat_rev_approved"), ("rejected", "chat_rev_rejected"),
@@ -341,7 +348,7 @@ def _account_day(day: str, account: str, eod: str, *, revisions: list[Revision],
 REVISION_COLUMNS = [
     "review_id", "account", "source", "strategy_id", "ticker", "proposed_ts",
     "proposed_date_et", "window", "status", "resolver", "resolved_ts", "latency_min",
-    "gate_rejected", "is_new", "rules_added", "rules_removed", "rules_modified",
+    "gate_rejected", "held", "hold_reasons", "hold_categories", "is_new", "rules_added", "rules_removed", "rules_modified",
     "fields_changed", "reversed_by", "rules_added_then_removed", "fields_reverted",
 ]
 
@@ -358,7 +365,9 @@ def revision_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[s
             "proposed_date_et": d, "window": window_for(d), "status": r.status,
             "resolver": r.resolver, "resolved_ts": r.resolved_ts or "",
             "latency_min": "" if r.latency_min is None else r.latency_min,
-            "gate_rejected": int(r.gate_rejected), "is_new": int(r.is_new),
+            "gate_rejected": int(r.gate_rejected), "held": int(r.held),
+            "hold_reasons": "; ".join(r.hold_reasons),
+            "hold_categories": ";".join(r.hold_categories), "is_new": int(r.is_new),
             "rules_added": ";".join(r.diff.rules_added),
             "rules_removed": ";".join(r.diff.rules_removed),
             "rules_modified": ";".join(r.diff.rules_modified),
@@ -367,6 +376,26 @@ def revision_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[s
             "rules_added_then_removed": ";".join(r.rules_added_then_removed),
             "fields_reverted": ";".join(r.fields_reverted),
         })
+    return out
+
+
+HOLD_COLUMNS = ["review_id", "account", "source", "strategy_id", "proposed_date_et",
+                "window", "status", "reason", "category"]
+
+
+def hold_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per (held revision, reason): the F1 allow-list's reasons for
+    holding a revision for a human under auto."""
+    out = []
+    for r in load_revisions(conn):
+        d = r.proposed_date_et
+        if not r.held or not (start <= d <= end):
+            continue
+        for reason, category in zip(r.hold_reasons, r.hold_categories, strict=True):
+            out.append({"review_id": r.review_id, "account": r.account,
+                        "source": r.source, "strategy_id": r.strategy_id,
+                        "proposed_date_et": d, "window": window_for(d),
+                        "status": r.status, "reason": reason, "category": category})
     return out
 
 
@@ -417,7 +446,7 @@ def llm_rows(conn: sqlite3.Connection, start: str, end: str) -> tuple[list[dict]
 
 
 def summary_markdown(daily: list[dict[str, Any]], *, db_label: str, start: str,
-                     end: str) -> str:
+                     end: str, holds: list[dict[str, Any]] | None = None) -> str:
     lines = [
         "# Regime metrics summary",
         "",
@@ -429,9 +458,9 @@ def summary_markdown(daily: list[dict[str, Any]], *, db_label: str, start: str,
          "row; `vetoed` = rejected by a human."),
         "",
         ("| window | account | refl-days | failed | refl props | auto | human ok | "
-         "vetoed | superseded | pending | gate rej | reversed later | props/refl-day | "
+         "vetoed | superseded | pending | gate rej | held | reversed later | props/refl-day | "
          "median latency (min) | order reviews | ord ok/rej | auto fills | gate-rejected trades |"),
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, _, _ in WINDOWS:
         for account in ACCOUNTS:
@@ -452,12 +481,32 @@ def summary_markdown(daily: list[dict[str, Any]], *, db_label: str, start: str,
                 f"{sum(r['refl_rev_superseded'] for r in rs)} | "
                 f"{sum(r['refl_rev_pending'] for r in rs)} | "
                 f"{sum(r['refl_rev_gate_rejections'] for r in rs)} | "
+                f"{sum(r['refl_rev_held'] for r in rs)} | "
                 f"{sum(r['rev_applied_later_reversed'] for r in rs)} | {rate} | "
                 f"{_median(lat)} | {sum(r['order_reviews_proposed'] for r in rs)} | "
                 f"{sum(r['order_reviews_approved'] for r in rs)}/"
                 f"{sum(r['order_reviews_rejected'] for r in rs)} | "
                 f"{sum(r['orders_auto_executed'] for r in rs)} | "
                 f"{sum(r['trades_rejected'] for r in rs)} |")
+    lines += [
+        "",
+        "## Holds by reason",
+        "",
+        ("Under auto, a reflection revision outside the F1 auto-apply allow-list is "
+         "held for a human (`held`). One revision can carry several reasons; `held` "
+         "in the table above counts revisions, this table counts reasons."),
+        "",
+        "| window | account | category | reasons | revisions |",
+        "|---|---|---|---|---|",
+    ]
+    by_cat: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for h in holds or []:
+        by_cat.setdefault((h["window"] or "-", h["account"], h["category"]), []).append(h)
+    for (w, a, c), hs in sorted(by_cat.items()):
+        lines.append(f"| {w} | {a} | {c} | {len(hs)} | "
+                     f"{len({h['review_id'] for h in hs})} |")
+    if not by_cat:
+        lines.append("| - | - | (no holds in range) | 0 | 0 |")
     lines += [
         "",
         ("`median latency` is the median of daily medians. `reversed later` counts "

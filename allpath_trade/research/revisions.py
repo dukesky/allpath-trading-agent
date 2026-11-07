@@ -13,6 +13,16 @@ Who resolved a row:
 - `none`: still pending.
 `gate_rejected` marks a "revision #N ... NOT auto-applied (<guard error>)"
 observation: the applier's guards refused an auto-apply and left it pending.
+
+`held` (TDSC F1, live from main 8c7a5d7): under auto, a revision whose diff
+leaves the auto-apply allow-list (`strategy/auto_gate.py`) is held for a
+human, observed as "revision #N for X held for human: <r1>; <r2>. Not
+auto-applied (auto-apply allow-list); left pending" and stored in
+`pending_reviews.hold_reason` (the fallback when no observation matches). A
+held row stays pending until a human decides it, so it can be held AND
+human-decided (`resolver=human`), never `auto`. `hold_reasons` are the
+allow-list's reason strings; `hold_categories` map each to a stable label
+(`hold_category`) for counting.
 """
 from __future__ import annotations
 
@@ -30,7 +40,47 @@ RULE_SPEC_KEYS = ("type", "condition", "action", "rearm")
 _SKIP_FIELDS = {"rules", "thesis", "version", "name", "id"}
 _AUTO_RE = re.compile(r"revision #(\d+) for \S+ auto-applied")
 _GATE_RE = re.compile(r"revision #(\d+) for \S+ NOT auto-applied \(")
+_HELD_RE = re.compile(r"revision #(\d+) for \S+ held for human: (.*)\. Not auto-applied "
+                      r"\(auto-apply allow-list\)", re.DOTALL)
 _REGIME_SKIP_RE = re.compile(r"NOT auto-applied: revision auto-apply was switched off")
+
+
+# Ordered: the first match wins. Mirrors the reason strings auto_gate.py and
+# Reflector._auto_apply_holds write; anything new lands in "other".
+_HOLD_CATEGORIES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (name, re.compile(rx)) for name, rx in (
+        ("new_strategy", r"^proposes a new strategy"),
+        ("unparseable", (r"^(could not read|could not classify|proposal does not parse"
+                         r"|no parseable base)")),
+        ("retarget_ticker", r"^changes position\.ticker"),
+        ("size_increase", r"^(raises|sets|removes) position\."),
+        ("removes_exit", r"^removes sell rule "),
+        ("adds_rule", r"^adds rule "),
+        ("frozen_field", r"^changes (authorization|status)$"),
+        ("notify_off", r"^turns off notify_email"),
+        ("flips_side", r"^changes \S+ from (buy|sell) to (buy|sell)"),
+        ("rule_type", r" type (hard|soft) -> (hard|soft)"),
+        ("rearm", r"fire (more|less) often \(rearm\)"),
+        ("loosens_exit", r"^(sells less on |loosens sell rule )"),
+        ("loosens_entry", r"^loosens buy rule "),
+        ("buys_more", r"^buys more on "),
+        ("condition_rewrite", r"^(changes the condition structure of|moves an equality in) "),
+        ("changes_action", r"^changes the action of "),
+        ("disables_rule", r"^disables "),
+        ("rearms_rule", r"^re-arms "),
+        ("other_field", r"^changes \S+$"),
+    ))
+
+
+def hold_category(reason: str) -> str:
+    for name, rx in _HOLD_CATEGORIES:
+        if rx.search(reason):
+            return name
+    return "other"
+
+
+def _split_reasons(text: str) -> list[str]:
+    return [r.strip() for r in text.split("; ") if r.strip()]
 
 
 def _load(text: str) -> dict:
@@ -110,6 +160,8 @@ class Revision:
     diff: YamlDiff
     resolver: str = "none"
     gate_rejected: bool = False
+    held: bool = False
+    hold_reasons: list[str] = field(default_factory=list)
     reversed_by: int | None = None
     rules_added_then_removed: list[str] = field(default_factory=list)
     fields_reverted: list[str] = field(default_factory=list)
@@ -117,6 +169,10 @@ class Revision:
     @property
     def proposed_date_et(self) -> str:
         return et_date(self.proposed_ts) or ""
+
+    @property
+    def hold_categories(self) -> list[str]:
+        return [hold_category(r) for r in self.hold_reasons]
 
     @property
     def latency_min(self) -> float | None:
@@ -127,20 +183,34 @@ class Revision:
         return self.status == "approved"
 
 
-def _observation_ids(conn: sqlite3.Connection) -> tuple[set[int], set[int]]:
+def _observation_ids(conn: sqlite3.Connection) -> tuple[set[int], set[int], dict[int, str]]:
     auto: set[int] = set()
     gate: set[int] = set()
+    held: dict[int, str] = {}
     for (text,) in conn.execute(
             "SELECT text FROM observations WHERE source = 'reflection_auto_apply'"):
-        if m := _AUTO_RE.search(text):
+        if m := _HELD_RE.search(text):
+            held[int(m.group(1))] = m.group(2)
+        elif m := _AUTO_RE.search(text):
             auto.add(int(m.group(1)))
         elif m := _GATE_RE.search(text):
             gate.add(int(m.group(1)))
-    return auto, gate
+    return auto, gate, held
+
+
+def _hold_column(conn: sqlite3.Connection) -> dict[int, str]:
+    """`pending_reviews.hold_reason` where the column exists (added with F1)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(pending_reviews)")}
+    if "hold_reason" not in cols:
+        return {}
+    return {r[0]: r[1] for r in conn.execute(
+        "SELECT id, hold_reason FROM pending_reviews WHERE hold_reason IS NOT NULL"
+        " AND hold_reason != ''")}
 
 
 def load_revisions(conn: sqlite3.Connection) -> list[Revision]:
-    auto_ids, gate_ids = _observation_ids(conn)
+    auto_ids, gate_ids, held_obs = _observation_ids(conn)
+    held_col = _hold_column(conn)
     revs: list[Revision] = []
     for r in conn.execute(
             "SELECT id, account, source, strategy_id, ticker, status, ts, resolved_ts,"
@@ -163,6 +233,10 @@ def load_revisions(conn: sqlite3.Connection) -> list[Revision]:
         else:
             rev.resolver = "human"
         rev.gate_rejected = r["id"] in gate_ids
+        hold_text = held_obs.get(r["id"]) or held_col.get(r["id"])
+        if hold_text:
+            rev.held = True
+            rev.hold_reasons = _split_reasons(hold_text)
         revs.append(rev)
     _mark_reversals(revs)
     return revs
