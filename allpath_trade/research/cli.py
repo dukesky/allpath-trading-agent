@@ -49,18 +49,43 @@ def cmd_regime_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rule_outcomes(args: argparse.Namespace) -> int:
+    from allpath_trade.research import rule_outcomes as ro
+
+    conn = open_readonly(args.db)
+    out = Path(args.out)
+    sources = None if args.sources == "all" else tuple(args.sources.split(","))
+    rows = ro.rule_outcome_rows(conn, sources=sources, start=args.start, end=args.end)
+    write_csv(out / "rule_outcomes.csv", ro.COLUMNS, rows)
+    (out / "rule_outcomes_summary.md").write_text(ro.summary_markdown(
+        rows, db_label=Path(args.db).name, sources=args.sources))
+    conn.close()
+    print(f"wrote {len(rows)} rule-outcome rows to {out}")
+    return 0
+
+
+def _common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--db", required=True, help="SQLite file (opened read-only)")
+    p.add_argument("--from", dest="start", type=_date, default="2026-08-11",
+                   help="first ET date (default 2026-08-11)")
+    p.add_argument("--to", dest="end", type=_date,
+                   default=datetime.now(ET).date().isoformat(),
+                   help="last ET date (default today)")
+    p.add_argument("--out", required=True, help="output directory")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="allpath-research", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
     rm = sub.add_parser("regime-metrics", help="TDSC R4: per account per day CSV")
-    rm.add_argument("--db", required=True, help="SQLite file (opened read-only)")
-    rm.add_argument("--from", dest="start", type=_date, default="2026-08-11",
-                    help="first ET date (default 2026-08-11)")
-    rm.add_argument("--to", dest="end", type=_date, default=datetime.now(ET).date().isoformat(),
-                    help="last ET date (default today)")
-    rm.add_argument("--out", required=True, help="output directory")
+    _common(rm)
     rm.set_defaults(func=cmd_regime_metrics)
+    ro = sub.add_parser("rule-outcomes", help="TDSC R3: did revised rules fire")
+    _common(ro)
+    ro.add_argument("--sources", default="reflection",
+                    help="revision sources, comma-separated, or 'all' (default reflection)")
+    ro.set_defaults(func=cmd_rule_outcomes)
     return p
 
 
