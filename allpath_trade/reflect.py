@@ -117,6 +117,24 @@ class _DeadlineGuard:
         return self._inner.complete(messages, tools=tools)
 
 
+class _TokenTally:
+    """Counts input + output tokens over every call of one reflection run --
+    session turns, the corrective turn and compactions alike -- for
+    `reports.tokens_used` (TDSC R5). Forwards everything else to the client."""
+
+    def __init__(self, inner: LLMClient) -> None:
+        self._inner = inner
+        self.total = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def complete(self, messages: list[dict], tools: Any = None):
+        response = self._inner.complete(messages, tools=tools)
+        self.total += int(response.input_tokens or 0) + int(response.output_tokens or 0)
+        return response
+
+
 _TRUNCATION_NOTE = "\n... (truncated)"
 _FRONT_TRUNCATION_NOTE = "... (older observations truncated)\n"
 
@@ -515,14 +533,15 @@ class Reflector:
 
             system_prompt = f"{system_prompt}\n{VIEWS_REFLECTION_NOTE}"
 
-        compactor = Compactor(self.llm, conversations,
+        tally = _TokenTally(self.llm)
+        compactor = Compactor(tally, conversations,
                               budget_tokens=self.settings.context_budget_tokens)
         # I8: the session talks to the provider THROUGH the deadline guard;
         # the compactor deliberately does not (a compaction is bookkeeping
         # the pass needs to keep its own history coherent, and handing it a
         # DEADLINE_NOTICE in place of a summary would corrupt the stored
         # conversation, not shorten the night).
-        guard = _DeadlineGuard(self.llm, self.settings.reflection_deadline_seconds)
+        guard = _DeadlineGuard(tally, self.settings.reflection_deadline_seconds)
         session = AgentSession(
             guard, registry, system_prompt, store=conversations,
             conversation_id=conversation_id,
@@ -535,7 +554,7 @@ class Reflector:
             # The LLM is down -- a corrective retry would just be a second
             # doomed call. Fail immediately, one call spent.
             return self._fail(et_date, conversation_id,
-                              f"reflection failed: {text}")
+                              f"reflection failed: {text}", tally.total)
 
         parsed = _parse_report(text)
         if parsed is None:
@@ -564,11 +583,12 @@ class Reflector:
             if text.startswith("(llm error:"):
                 return self._fail(
                     et_date, conversation_id,
-                    f"reflection failed: llm error on corrective turn: {text}")
+                    f"reflection failed: llm error on corrective turn: {text}",
+                    tally.total)
             parsed = _parse_report(text)
         if parsed is None:
             return self._fail(et_date, conversation_id,
-                              "reflection failed: unparseable report")
+                              "reflection failed: unparseable report", tally.total)
 
         body, summary = parsed
         # ntfy payload insurance: reports.add's summary becomes the push
@@ -578,10 +598,9 @@ class Reflector:
         report_id = c.reports.add(
             date=et_date, body=body, summary=summary,
             conversation_id=conversation_id, model=getattr(self.llm, "model", ""),
-            # LLMClient exposes no token-usage accounting today (see
-            # llm/base.py) -- recording 0 rather than fabricating a number.
-            # TODO(Task 7): wire real usage once a client surfaces it.
-            tokens_used=0, status="ok")
+            # TDSC R5: input + output tokens of every call this run made, as
+            # the provider reported them (0 for a client that reports none).
+            tokens_used=tally.total, status="ok")
         # Experiment mode: only on the success path, and only AFTER the
         # report row is durably stored above -- a `_fail` run returns before
         # reaching this line, so it never auto-applies anything, and a crash
@@ -620,11 +639,12 @@ class Reflector:
                      file=sys.stderr)
         return f"ok: report #{report_id} ({et_date})"
 
-    def _fail(self, et_date: str, conversation_id: int, reason: str) -> str:
+    def _fail(self, et_date: str, conversation_id: int, reason: str,
+              tokens_used: int = 0) -> str:
         self.components.reports.add(
             date=et_date, body=reason, summary="",
             conversation_id=conversation_id, model=getattr(self.llm, "model", ""),
-            tokens_used=0, status="failed")
+            tokens_used=tokens_used, status="failed")
         return reason
 
     def _auto_apply_revisions(self, rids: list[int]) -> None:

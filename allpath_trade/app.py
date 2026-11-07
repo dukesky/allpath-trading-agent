@@ -260,7 +260,7 @@ def _build_account_components(account: str, *, settings: Settings,
         from allpath_trade.agent.readonly_tools import register_readonly_tools
         from allpath_trade.agent.review import ReviewAgent
         from allpath_trade.agent.tools import ToolRegistry
-        from allpath_trade.llm.factory import LLMConfigError, build_llm
+        from allpath_trade.llm.factory import LLMConfigError, build_llm, tag_purpose
 
         review_llm = build_llm(settings, tier="review", usage_store=llm_usage)
         review_registry = ToolRegistry()
@@ -269,8 +269,11 @@ def _build_account_components(account: str, *, settings: Settings,
                                 queue=queue)
         sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory,
                                             broker=broker)
+        # TDSC R5: label memory-tier usage by role and account, so reflection
+        # cost per regime is separable from consolidation and per account.
         bundle.consolidator = Consolidator(
-            build_llm(settings, tier="memory", usage_store=llm_usage), memory,
+            tag_purpose(build_llm(settings, tier="memory", usage_store=llm_usage),
+                        f"consolidation:{account}"), memory,
             observations, journal, conn,
             conversations=conversations, app_state=app_state, account=account)
     except LLMConfigError:
@@ -288,10 +291,11 @@ def _build_account_components(account: str, *, settings: Settings,
         # few lines up already proved this exact (settings, tier) pair
         # doesn't raise LLMConfigError, so a second try/except here would be
         # dead code.
-        from allpath_trade.llm.factory import build_llm
+        from allpath_trade.llm.factory import build_llm, tag_purpose
 
         bundle.reflector = Reflector(
-            llm=build_llm(settings, tier="memory", usage_store=llm_usage),
+            llm=tag_purpose(build_llm(settings, tier="memory", usage_store=llm_usage),
+                            f"reflection:{account}"),
             components=bundle, settings=settings, notifier=notifier)
     return bundle
 
