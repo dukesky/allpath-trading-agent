@@ -885,3 +885,14 @@ def test_precheck_applies_the_allowlist(tmp_path):
     ex, _broker = make_allowlisted_executor(tmp_path)
     assert not ex.precheck(_notional_buy("TQQQ")).approved
     assert ex.precheck(_notional_buy("TQQQ"), human_approved=True).approved
+
+
+def test_human_approved_order_survives_an_unreadable_universe(tmp_path):
+    # The allowlist read failing must not block a human-approved order: it
+    # falls back to proving the symbol with a quote.
+    def boom():
+        raise RuntimeError("disk gone")
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    broker = FakeBroker()
+    ex = Executor(broker, RiskGate(RiskLimits(), allowed_tickers=boom), journal, FakeData())
+    assert ex.execute(_notional_buy("AAPL"), human_approved=True).submitted

@@ -252,7 +252,7 @@ class Executor:
         # quote proves the symbol exists before anything reaches the broker.
         # A failed read here raises like any other data error (fails closed).
         needs_quote = intent.qty is not None or (
-            human_approved and not self.gate.in_universe(intent.ticker))
+            human_approved and not self._in_universe(intent.ticker))
         price = (self.data.get_quote(intent.ticker).price
                  if needs_quote else Decimal(0))
         account = self.broker.get_account()
@@ -267,6 +267,15 @@ class Executor:
             price=price,
             human_approved=human_approved,
         )
+
+    def _in_universe(self, ticker: str) -> bool:
+        """The gate's allowlist test, read as "not known to be in it" when the
+        read itself fails -- the caller then proves the symbol with a quote
+        instead of failing a human-approved order outright."""
+        try:
+            return self.gate.in_universe(ticker)
+        except Exception:  # noqa: BLE001 — fall back to the quote check
+            return False
 
     def precheck(self, intent: OrderIntent, *,
                  human_approved: bool = False) -> RiskDecision | None:
