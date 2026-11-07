@@ -23,3 +23,7 @@ dist/
 # repo root, one `git add -A` away from being committed.
 /memory.bak-*/
 /strategies.bak-*/
+
+# TDSC research exports contain production trading data; this repo is public.
+# Outputs go to the private paper repo (allpath-paper/data/tdsc/), never here.
+/research/tdsc/out/
