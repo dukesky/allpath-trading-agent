@@ -22,21 +22,23 @@ class _RecordingClient(LLMClient):
     through -- chat, review, memory (and reflection, which uses the memory
     tier) -- rather than each call site recording its own.
 
-    `purpose` is the tier name: the design intentionally doesn't distinguish
-    "memory" (consolidation) from "reflection" (also memory-tier) usage --
-    both are labelled by the tier they ran under, which is enough to
-    attribute cost without adding a second dimension nothing downstream
-    reads yet.
+    `purpose` defaults to the tier name. TDSC R5 (2026-11): callers that need
+    cost per role and account -- reflection vs consolidation, paper vs shadow,
+    both on the memory tier -- relabel it with `tag_purpose` (e.g.
+    "reflection:paper"). `tier` stays the tier, so the Usage panel's
+    per-tier grouping is unchanged.
 
     Recording is best-effort: a broken usage table must never break the LLM
     call that triggered it, so any exception `LLMUsage.record` raises is
     swallowed here rather than propagated -- the caller already got (or is
     about to get) a perfectly good `LLMResponse` either way."""
 
-    def __init__(self, inner: LLMClient, tier: str, usage_store: LLMUsage) -> None:
+    def __init__(self, inner: LLMClient, tier: str, usage_store: LLMUsage,
+                 purpose: str | None = None) -> None:
         self._inner = inner
         self._tier = tier
         self._usage_store = usage_store
+        self.purpose = purpose or tier
 
     @property
     def model(self) -> str:
@@ -53,7 +55,7 @@ class _RecordingClient(LLMClient):
             self._usage_store.record(
                 tier=self._tier, model=self._inner.model,
                 input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens, purpose=self._tier)
+                output_tokens=response.output_tokens, purpose=self.purpose)
         except Exception:  # noqa: BLE001, S110 — recording must never break a call
             pass
         return response
@@ -78,6 +80,15 @@ class _RecordingClient(LLMClient):
             alerter.on_failure(error_class, self._tier, self._inner.model, detail)
         except Exception:  # noqa: BLE001, S110 — alerting must never break a call
             pass
+
+
+def tag_purpose(client: LLMClient, purpose: str) -> LLMClient:
+    """Label the `llm_usage` rows a recording client writes (TDSC R5), e.g.
+    "reflection:paper". A no-op on any other client (no usage_store, or a
+    test double), so call sites never need to know which one they got."""
+    if isinstance(client, _RecordingClient):
+        client.purpose = purpose
+    return client
 
 
 def build_llm(settings: Settings, tier: str = "chat",
