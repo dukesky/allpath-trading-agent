@@ -29,6 +29,7 @@ dev = ["pytest>=8", "ruff>=0.6", "httpx>=0.27", "httpx2>=2.0"]
 
 [project.scripts]
 allpath-trade = "allpath_trade.cli:main"
+allpath-research = "allpath_trade.research.cli:main"
 
 [project.urls]
 Repository = "https://github.com/dukesky/allpath-trading-agent"
