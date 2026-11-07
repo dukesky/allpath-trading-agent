@@ -158,6 +158,12 @@ Run after ~14:00 PT on the first trading day in B′.
    `NOT auto-applied (…)` observation is a gate rejection: the row stays
    pending, which is correct behaviour; record it, do not approve it by hand
    unless Tian decides to (that would be a human intervention in B′).
+   A `revision #N for X held for human: <reasons>` observation is a TDSC F1
+   allow-list demotion (`strategy/auto_gate.py`): the diff retargeted the
+   ticker, removed or loosened an exit, added a rule, raised size, etc. The
+   row stays pending with `pending_reviews.hold_reason` set, exactly as under
+   the human regime. Count these for the paper
+   (`text LIKE '%held for human:%'`); resolving one is a human decision.
    If the reflection proposed nothing, the check carries over to the next
    day with a revision.
 

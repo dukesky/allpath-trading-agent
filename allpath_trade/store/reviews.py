@@ -917,6 +917,14 @@ class ReviewQueue:
             (analysis_json, review_id, self._account))
         self._conn.commit()
 
+    def set_hold_reason(self, review_id: int, reason: str) -> None:
+        """TDSC red-team F1: record why the auto regime left this revision
+        for a human. Display only; the row stays pending and approvable."""
+        self._conn.execute(
+            "UPDATE pending_reviews SET hold_reason = ? WHERE id = ? AND account = ?",
+            (reason, review_id, self._account))
+        self._conn.commit()
+
     def reject(self, review_id: int, note: str = "") -> None:
         # Fetch row first to check existence
         row = self.get(review_id)

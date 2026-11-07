@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import time as time_module
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from allpath_trade.store.accounts import DEFAULT_ACCOUNT
 from allpath_trade.store.app_state import AppState
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.store.views import ViewStore
+from allpath_trade.strategy.auto_gate import auto_apply_holds
+from allpath_trade.strategy.loader import StrategyValidationError, parse_strategy_text
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
@@ -612,7 +615,13 @@ class Reflector:
             # `regime set human` issued meanwhile must win. Still auto: apply.
             # Not any more: leave this run's rows pending and say why.
             if effective_auto_apply(AppState(c.conn), self.settings, c.account):
-                self._auto_apply_revisions(proposed_rids)
+                held = self._auto_apply_revisions(proposed_rids)
+                if held:
+                    # TDSC F1: the notification names what waits for a human
+                    # and why. The stored report itself is left as written.
+                    note = ("Held for human review: " + "; ".join(held))[:600]
+                    summary = f"{summary}\n{note}"
+                    body = f"{body}\n\n{note}"
             else:
                 c.observations.add(
                     "reflection_auto_apply",
@@ -647,13 +656,23 @@ class Reflector:
             tokens_used=tokens_used, status="failed")
         return reason
 
-    def _auto_apply_revisions(self, rids: list[int]) -> None:
+    def _auto_apply_revisions(self, rids: list[int]) -> list[str]:
         """Experiment mode (spec 2026-08-26): approve the revision rows THIS
         run just queued, through the exact applier chain a human approval
         uses -- every guard (freeze, byte-exact base, version monotonicity)
         still decides. A guard rejection leaves the row pending, same as
-        today, and the paper trail lands in observations either way."""
+        today, and the paper trail lands in observations either way.
+
+        TDSC red-team F1: before approving, the diff must stay on the
+        auto-apply allow-list (strategy/auto_gate.py). A revision that
+        retargets the ticker, removes or loosens an exit, adds a rule or
+        raises size is held: it stays pending exactly as under the human
+        regime, its card shows the reason (`hold_reason`), and an observation
+        records it ("revision #N for X held for human: ..."), so the B'
+        phase can count demotions. Returns one "#N strategy: reasons" line
+        per held row, for the report notification."""
         c = self.components
+        held: list[str] = []
         for rid in rids:
             try:
                 row = dict(c.queue.get(rid))
@@ -662,6 +681,17 @@ class Reflector:
             if row["status"] != "pending" or row["kind"] != "strategy_revision":
                 continue
             strategy_id = row["strategy_id"]
+            reasons = self._auto_apply_holds(row)
+            if reasons:
+                reason = "; ".join(reasons)
+                c.queue.set_hold_reason(rid, reason)
+                c.observations.add(
+                    "reflection_auto_apply",
+                    f"revision #{rid} for {strategy_id} held for human: {reason}. "
+                    "Not auto-applied (auto-apply allow-list); left pending",
+                    subject=row["ticker"])
+                held.append(f"#{rid} {strategy_id}: {reason}")
+                continue
             try:
                 c.queue.approve(rid)
             except (RevisionValidationError, ReviewError) as exc:
@@ -677,6 +707,29 @@ class Reflector:
                 f"revision #{rid} for {strategy_id} auto-applied "
                 f"(experiment mode).{warning}",
                 subject=row["ticker"])
+        return held
+
+    @staticmethod
+    def _auto_apply_holds(row: dict) -> list[str]:
+        """TDSC F1: why this revision row may not apply unattended (empty =
+        it may). A base or proposal that does not parse is held."""
+        try:
+            snapshot = json.loads(row["snapshot"] or "{}")
+            old_yaml, new_yaml = snapshot.get("old_yaml", ""), snapshot["new_yaml"]
+        except (ValueError, KeyError, TypeError) as exc:
+            return [f"could not read the revision ({exc})"]
+        if snapshot.get("is_new"):
+            return ["proposes a new strategy"]
+        sid = row["strategy_id"]
+        try:
+            old_doc = parse_strategy_text(sid, old_yaml)
+        except StrategyValidationError:
+            return ["no parseable base strategy to compare against"]
+        try:
+            new_doc = parse_strategy_text(sid, new_yaml)
+        except StrategyValidationError as exc:
+            return [f"proposal does not parse ({exc})"]
+        return auto_apply_holds(old_doc, new_doc)
 
     def briefing(self, et_date: str) -> str:
         """Tonight's deterministic seed briefing, for other after-close

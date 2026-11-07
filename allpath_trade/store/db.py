@@ -346,6 +346,10 @@ _MIGRATIONS = [
     # backfill, and the Changes tab stops showing one account the other's
     # note text.
     "ALTER TABLE memory_log ADD COLUMN account TEXT NOT NULL DEFAULT 'paper'",
+    # TDSC red-team F1: why the auto regime left a reflection revision for a
+    # human (strategy/auto_gate.py), shown on its Pending card. NULL = not
+    # held (every pre-existing row, and every human-regime row).
+    "ALTER TABLE pending_reviews ADD COLUMN hold_reason TEXT",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

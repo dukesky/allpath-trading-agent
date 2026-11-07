@@ -127,6 +127,12 @@
     {% if item['status'] == 'pending' and item['status_regresses'] %}
     <p class="warn" style="font-size:13px;margin:0 0 8px">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
     {% endif %}
+    {% if item['status'] == 'pending' and item.get('hold_reason') %}
+    {# TDSC red-team F1: the auto regime would have applied this revision
+       unattended, but its diff left the auto-apply allow-list
+       (strategy/auto_gate.py), so it waits here like a human-regime one. #}
+    <p class="warn" style="font-size:13px;margin:0 0 8px">Held for human: {{ item['hold_reason'] }}</p>
+    {% endif %}
     {% if item['revision_diff']['stale'] %}
     <p class="warn" style="font-size:13px;margin:0 0 8px">The strategy file has changed since this proposal — approving will fail safely; re-propose or reject.</p>
     {% endif %}

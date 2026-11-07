@@ -1506,3 +1506,14 @@ def test_pending_buy_card_says_the_strategy_has_no_armed_stop(client):
 def test_pending_buy_card_is_quiet_when_the_stop_is_armed(client):
     _buy_row_for_spent_stop(client, spent=False)
     assert "No armed stop" not in client.get("/reviews").text
+
+
+# TDSC red-team F1: a revision the auto regime held says why on its card.
+def test_revision_card_shows_the_auto_regime_hold_reason(client):
+    c = client.app.state.holder.get()
+    rid = c.queue.add_strategy_revision(
+        strategy_id="s1", ticker="AAPL", old_yaml="", new_yaml="name: x\n",
+        diff="", rationale="r", is_new=True)
+    c.queue.set_hold_reason(int(rid), "removes sell rule stop-loss")
+    body = client.get("/reviews").text
+    assert "Held for human: removes sell rule stop-loss" in body

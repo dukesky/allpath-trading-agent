@@ -979,8 +979,10 @@ def test_run_daily_deadline_zero_disables_the_deadline(tmp_path, monkeypatch):
 # through the exact ReviewQueue.approve applier chain a human approval uses.
 # ---------------------------------------------------------------------------
 
+# A genuine tightening (a long stop raised), so it stays on the TDSC F1
+# auto-apply allow-list; lowering a stop is held (see the F1 tests below).
 STRAT_V2 = STRAT.replace("version: 1", "version: 2").replace("price < 100",
-                                                             "price < 95")
+                                                             "price < 105")
 
 
 def _scripted_propose_then_report(strategy_id="t"):
@@ -1048,6 +1050,7 @@ def test_human_regime_blocks_auto_apply_despite_global_flag(tmp_path):
 
     (row,) = _revision_rows(components)
     assert row["status"] == "pending"
+    assert row["hold_reason"] is None  # the F1 classifier never runs here
 
 
 def test_regime_flipped_to_human_mid_run_blocks_auto_apply(tmp_path):
@@ -1144,3 +1147,112 @@ def test_reflection_instructions_require_an_english_report():
     # verbatim rather than relying on the system prompt alone.
     from allpath_trade.reflect import REFLECTION_INSTRUCTIONS
     assert "in English" in REFLECTION_INSTRUCTIONS
+
+
+# ---------------------------------------------------------------------------
+# TDSC red-team F1: under auto, a revision whose diff leaves the allow-list
+# (strategy/auto_gate.py) is held for a human, exactly as under the human
+# regime, with a reason the card and the notification show.
+# ---------------------------------------------------------------------------
+
+STRAT_GME = STRAT.replace("version: 1", "version: 2").replace("ticker: AAPL",
+                                                              "ticker: GME")
+STRAT_NO_STOP = STRAT.replace("version: 1", "version: 2").replace(
+    'rules:\n  - {id: r1, type: hard, condition: "price < 100", action: "sell all"}\n',
+    "rules: []\n")
+STRAT_ALWAYS_BUY = STRAT.replace("version: 1", "version: 2") + (
+    '  - {id: always-buy, type: hard, condition: "price > 0", action: "buy $4900"}\n')
+
+
+def _auto_reflector(components, llm=None, notifier=None):
+    components.queue.set_revision_applier(apply_revision_factory(components.strategies))
+    AppState(components.conn).set("regime:paper", "auto")
+    return Reflector(llm=llm or ScriptedLLM([]), components=components,
+                     settings=make_settings(experiment_auto_apply_revisions=False),
+                     notifier=notifier)
+
+
+def _queue_revision(components, new_yaml):
+    return int(components.queue.add_strategy_revision(
+        strategy_id="t", ticker="AAPL", old_yaml=STRAT, new_yaml=new_yaml,
+        diff="", rationale="r", is_new=False))
+
+
+def _assert_held(components, rid, reason_part):
+    row = dict(components.queue.get(rid))
+    assert row["status"] == "pending"
+    assert reason_part in row["hold_reason"]
+    assert (components.strategies.directory / "t.yaml").read_text() == STRAT
+    texts = [o["text"] for o in components.observations.recent()
+             if o["source"] == "reflection_auto_apply"]
+    assert any(f"revision #{rid} for t held for human: " in t and reason_part in t
+               for t in texts)
+    assert not any("auto-applied (experiment mode)" in t for t in texts)
+
+
+def test_auto_apply_holds_a_ticker_change(tmp_path):
+    components = make_components(tmp_path)
+    r = _auto_reflector(components)
+    rid = _queue_revision(components, STRAT_GME)
+    r._auto_apply_revisions([rid])
+    _assert_held(components, rid, "changes position.ticker (AAPL -> GME)")
+
+
+def test_auto_apply_holds_a_stop_removal(tmp_path):
+    components = make_components(tmp_path)
+    r = _auto_reflector(components)
+    rid = _queue_revision(components, STRAT_NO_STOP)
+    r._auto_apply_revisions([rid])
+    _assert_held(components, rid, "removes sell rule r1")
+
+
+def test_auto_apply_holds_a_new_hard_buy_rule(tmp_path):
+    components = make_components(tmp_path)
+    r = _auto_reflector(components)
+    rid = _queue_revision(components, STRAT_ALWAYS_BUY)
+    r._auto_apply_revisions([rid])
+    _assert_held(components, rid, "adds rule always-buy")
+
+
+def test_auto_apply_holds_a_revision_with_an_unparseable_base(tmp_path):
+    components = make_components(tmp_path)
+    r = _auto_reflector(components)
+    (components.strategies.directory / "t.yaml").write_text("")
+    rid = int(components.queue.add_strategy_revision(
+        strategy_id="t", ticker="AAPL", old_yaml="", new_yaml=STRAT_V2,
+        diff="", rationale="repair", is_new=False))
+    r._auto_apply_revisions([rid])
+    row = dict(components.queue.get(rid))
+    assert row["status"] == "pending" and "no parseable base" in row["hold_reason"]
+
+
+def test_auto_apply_still_applies_an_allowed_revision_alongside_a_held_one(tmp_path):
+    components = make_components(tmp_path)
+    (components.strategies.directory / "u.yaml").write_text(STRAT)
+    r = _auto_reflector(components)
+    held = _queue_revision(components, STRAT_GME)
+    ok = int(components.queue.add_strategy_revision(
+        strategy_id="u", ticker="AAPL", old_yaml=STRAT, new_yaml=STRAT_V2,
+        diff="", rationale="tighten", is_new=False))
+    out = r._auto_apply_revisions([held, ok])
+    assert dict(components.queue.get(ok))["status"] == "approved"
+    assert dict(components.queue.get(held))["status"] == "pending"
+    assert out == [f"#{held} t: changes position.ticker (AAPL -> GME)"]
+
+
+def test_held_revisions_are_named_in_the_report_notification(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("allpath_trade.reflect.send_report",
+                        lambda n, subject, summary, full: calls.append((summary, full)))
+    components = make_components(tmp_path)
+    llm = ScriptedLLM([
+        tool_response("propose_strategy_revision", {
+            "strategy_id": "t", "new_yaml": STRAT_NO_STOP, "rationale": "whipsaw"}),
+        LLMResponse(text=REPORT_TEXT),
+    ])
+    r = _auto_reflector(components, llm=llm, notifier=_SpyNotifier())
+    assert r.run_daily(NOW).startswith("ok:")
+    [(summary, full)] = calls
+    for body in (summary, full):
+        assert "Held for human review:" in body
+        assert "removes sell rule r1" in body
