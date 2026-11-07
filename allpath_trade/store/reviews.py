@@ -511,7 +511,8 @@ class ReviewQueue:
             return None
         return row
 
-    def approve(self, review_id: int) -> ExecutionResult | OptionApprovalResult | None:
+    def approve(self, review_id: int, *,
+                by_agent: bool = False) -> ExecutionResult | OptionApprovalResult | None:
         # kind decides which of two claim-then-act paths runs; route reads
         # kind first (Phase 6) rather than duplicating the branch into every
         # caller (routes/reviews.py, sentinel.py, the review-agent tool).
@@ -522,14 +523,18 @@ class ReviewQueue:
         if row["kind"] == "strategy_revision":
             return self._approve_revision(review_id)
         if row["kind"] == "order":
-            return self._approve_order(review_id)
+            # TDSC red-team F2: `by_agent` is the review agent approving its
+            # own order (auto regime, auto+soft rule). Such an order must stay
+            # inside the ticker allowlist; a human approval may leave it.
+            return self._approve_order(review_id, human_approved=not by_agent)
         if row["kind"] == "shadow_edit":
             return self._approve_shadow_edit(review_id)
         if row["kind"] == "option_order":
             return self._approve_option_order(review_id)
         raise ReviewError(f"unknown review kind: {row['kind']!r}")
 
-    def _approve_order(self, review_id: int) -> ExecutionResult:
+    def _approve_order(self, review_id: int, *,
+                       human_approved: bool = True) -> ExecutionResult:
         if self._executor is None:
             raise ReviewError("approve requires broker credentials (no executor)")
         # Fetch row first to check existence and intent before claiming
@@ -568,7 +573,7 @@ class ReviewQueue:
 
         # Now execute and set execution_result
         try:
-            result = self._executor.execute(intent)
+            result = self._executor.execute(intent, human_approved=human_approved)
         except ExecutionError as exc:
             self._conn.execute(
                 "UPDATE pending_reviews SET execution_result=? WHERE id=? AND account=?",

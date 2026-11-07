@@ -28,8 +28,9 @@ class SpyExecutor:
         self.approve = approve
         self.calls = []
 
-    def execute(self, intent):
+    def execute(self, intent, *, human_approved=False):
         self.calls.append(intent)
+        self.human_approved = human_approved
         return ExecutionResult(
             submitted=self.approve, order=None,
             decision=RiskDecision(approved=self.approve,
@@ -107,6 +108,8 @@ def test_propose_order_confirmed_and_executed(tmp_path):
     assert "submitted" in out
     assert executor.calls[0].notional == Decimal(500)
     assert "Submit order" in prompts[0]
+    # TDSC red-team F2: the user confirmed it inline, so it is human-approved.
+    assert executor.human_approved is True
 
 
 def test_propose_order_declined_never_executes(tmp_path):

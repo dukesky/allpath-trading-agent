@@ -263,3 +263,31 @@ def test_review_agent_gets_the_accounts_own_broker(tmp_path):
         agent = bundle.sentinel.review_agent
         assert agent is not None, account
         assert agent.broker is bundle.broker
+
+
+def test_risk_gate_allowlist_is_active_strategy_tickers_plus_universe(tmp_path):
+    # TDSC red-team F2.
+    from allpath_trade.broker.base import OrderIntent, OrderSide
+
+    settings = _settings(tmp_path)
+    settings.trading_universe = "msft, Spy"
+    components = build_components(settings, broker=FakeBroker())
+    paper = components.accounts["paper"]
+    paper.strategies.directory.mkdir(parents=True, exist_ok=True)
+    (paper.strategies.directory / "a.yaml").write_text(
+        'name: "A"\nstatus: active\nposition: {ticker: AAPL, target_weight: 10%}\n')
+    (paper.strategies.directory / "d.yaml").write_text(
+        'name: "D"\nstatus: draft\nposition: {ticker: GME, target_weight: 10%}\n')
+
+    def decide(ticker):
+        intent = OrderIntent(ticker=ticker, side=OrderSide.BUY, notional=Decimal(100),
+                             reason="t")
+        return paper.executor.gate.check(
+            intent, account=Account(equity=Decimal(10000), cash=Decimal(5000),
+                                    buying_power=Decimal(10000)),
+            positions=[], trades_today=0, is_paper=True, price=Decimal(0))
+
+    assert decide("AAPL").approved
+    assert decide("MSFT").approved and decide("SPY").approved
+    assert not decide("GME").approved      # draft strategies do not count
+    assert not decide("TQQQ").approved

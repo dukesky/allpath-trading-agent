@@ -236,16 +236,25 @@ class Executor:
         self.data = data
         self.options_backend = options_backend
 
-    def _gate_check(self, intent: OrderIntent) -> RiskDecision:
+    def _gate_check(self, intent: OrderIntent, *,
+                    human_approved: bool = False) -> RiskDecision:
         """Gather the gate's inputs and run it. Shared by `execute` and
         `precheck` so a trigger-time dry run can never judge an order by
         different rules than the real execution would. Raises whatever the
-        data reads raise; each caller decides what a failure means."""
+        data reads raise; each caller decides what a failure means.
+
+        `human_approved` (TDSC red-team F2): a human approved this exact
+        order, so it may trade outside the gate's ticker allowlist."""
         # Notional intents don't need a price for the gate's checks (order_value
         # comes straight from intent.notional), so only fetch a quote when qty
-        # sizing requires converting shares to dollars.
+        # sizing requires converting shares to dollars -- or (F2) when a
+        # human-approved order names a symbol outside the allowlist: the
+        # quote proves the symbol exists before anything reaches the broker.
+        # A failed read here raises like any other data error (fails closed).
+        needs_quote = intent.qty is not None or (
+            human_approved and not self.gate.in_universe(intent.ticker))
         price = (self.data.get_quote(intent.ticker).price
-                 if intent.qty is not None else Decimal(0))
+                 if needs_quote else Decimal(0))
         account = self.broker.get_account()
         positions = self.broker.get_positions()
         trades_today = self.journal.trades_today()
@@ -256,9 +265,11 @@ class Executor:
             trades_today=trades_today,
             is_paper=self.broker.is_paper,
             price=price,
+            human_approved=human_approved,
         )
 
-    def precheck(self, intent: OrderIntent) -> RiskDecision | None:
+    def precheck(self, intent: OrderIntent, *,
+                 human_approved: bool = False) -> RiskDecision | None:
         """Dry-run the risk gate against current account state: no order, no
         journal row. Used at trigger time so a buy the gate would reject (no
         cash left, daily cap reached) is rejected immediately instead of
@@ -267,7 +278,7 @@ class Executor:
         must then fail open and queue as before: the real gate still runs at
         approval time, and a lost trigger is worse than a doomed approval."""
         try:
-            return self._gate_check(intent)
+            return self._gate_check(intent, human_approved=human_approved)
         except Exception:  # noqa: BLE001 — see docstring: None means "could not check"
             return None
 
@@ -278,9 +289,14 @@ class Executor:
         journal page see one consistent record either way."""
         self.journal.record(intent, decision, None)
 
-    def execute(self, intent: OrderIntent) -> ExecutionResult:
+    def execute(self, intent: OrderIntent, *,
+                human_approved: bool = False) -> ExecutionResult:
+        """`human_approved=True` only when a human approved this exact order
+        (the Pending page, an approve link, Telegram, the CLI, an inline
+        terminal confirm). Rule- and agent-approved orders keep the default
+        and stay inside the ticker allowlist (TDSC red-team F2)."""
         try:
-            decision = self._gate_check(intent)
+            decision = self._gate_check(intent, human_approved=human_approved)
         except Exception as exc:
             failed = RiskDecision(approved=False,
                                   reasons=[f"data error: {exc}"])

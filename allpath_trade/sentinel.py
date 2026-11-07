@@ -839,7 +839,7 @@ class Sentinel:
         # be papered over by a broad except.
         if analysis.recommendation == "execute":
             try:
-                result = self.queue.approve(rid)
+                result = self.queue.approve(rid, by_agent=True)
             except ExecutionError as exc:
                 detail = f"agent-approved but execution failed: {exc}"
                 self._notify_order(doc, ticker, intent.side.value, False, detail)

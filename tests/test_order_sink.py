@@ -172,3 +172,17 @@ def test_notional_preview_needs_no_quote(tmp_path):
     row = queue.list("pending")[0]
     assert "could not be checked" not in row["risk_preview"]
     assert "max_order_value" in row["risk_preview"]
+
+
+def test_chat_proposal_for_a_new_ticker_previews_as_passing(tmp_path):
+    # TDSC red-team F2: a chat order goes to a human, and a human-approved
+    # order may trade outside the allowlist, so the advisory preview must not
+    # say it would be rejected for its symbol.
+    conn = connect(tmp_path / "t.db")
+    queue = ReviewQueue(conn, None)
+    gate = RiskGate(RiskLimits(), allowed_tickers=lambda: {"AAPL"})
+    s = QueueingOrderSink(queue, gate, FakeBroker(), FakeData(), TradeJournal(conn),
+                          conversation_id=7)
+    s.propose(OrderIntent(ticker="NVDA", side=OrderSide.BUY, notional="1000",
+                          reason="new idea"))
+    assert queue.list("pending")[0]["risk_preview"] == "passes"

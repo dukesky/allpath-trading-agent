@@ -31,6 +31,7 @@ from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.llm_usage import LLMUsage
 from allpath_trade.store.reports import ReportStore
 from allpath_trade.store.reviews import ReviewQueue
+from allpath_trade.strategy.model import StrategyStatus
 from allpath_trade.strategy.store import StrategyStore
 
 
@@ -173,7 +174,8 @@ def _build_account_components(account: str, *, settings: Settings,
                               broker_override: Broker | None) -> AccountComponents:
     broker = _build_broker(account, settings, conn, data, broker_override)
     journal = TradeJournal(conn, account=account)
-    gate = RiskGate(limits_for_account(settings, account))
+    gate = RiskGate(limits_for_account(settings, account),
+                    universe=settings.trading_universe_tickers())
     # Task 7: options trading is paper-only (spec §7) -- shadow's ledger
     # never touches a real brokerage, so it always gets `options_backend=
     # None` (the parameter's own default; nothing to pass for shadow). One
@@ -210,6 +212,11 @@ def _build_account_components(account: str, *, settings: Settings,
     # but the account parameter itself was never validated).
     strategies = StrategyStore.for_account(settings.strategies_dir, conn,
                                            account=account)
+    # TDSC red-team F2: the gate's ticker allowlist is this account's ACTIVE
+    # strategy tickers (read at every check, so a newly activated strategy
+    # counts at once) plus TRADING_UNIVERSE. load_all skips broken files.
+    gate.allowed_tickers = lambda: {
+        d.position.ticker for d in strategies.load_all(status=StrategyStatus.ACTIVE)}
     # Unconditional (unlike the LLM-backed wiring below): applying an
     # already-approved revision is plain file I/O, no LLM involved, so a
     # review approved via the web/CLI must work even when no LLM is

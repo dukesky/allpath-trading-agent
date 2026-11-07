@@ -200,3 +200,11 @@ def test_shadow_daily_checkin_off_by_default_and_loads_from_env(tmp_path: Path):
     env = tmp_path / ".env"
     env.write_text("SHADOW_DAILY_CHECKIN=true\n")
     assert Settings(_env_file=env).shadow_daily_checkin is True
+
+
+def test_trading_universe_defaults_to_empty_and_parses_a_comma_list():
+    # TDSC red-team F2: empty means "active strategy tickers only".
+    from allpath_trade.config import Settings
+    assert Settings(_env_file=None).trading_universe_tickers() == frozenset()
+    s = Settings(_env_file=None, trading_universe=" spy, QQQ ,,msft ")
+    assert s.trading_universe_tickers() == frozenset({"SPY", "QQQ", "MSFT"})

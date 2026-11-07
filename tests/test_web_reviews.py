@@ -164,7 +164,7 @@ def test_approval_goes_through_the_queue_not_the_executor(client):
 def test_a_failing_queue_approve_means_nothing_is_executed(client, monkeypatch):
     executed: list = []
     monkeypatch.setattr(client.app.state.holder.get().executor, "execute",
-                        lambda intent: executed.append(intent))
+                        lambda intent, **_kw: executed.append(intent))
     rid = queue_one(client)
     client.app.state.holder.get().queue.reject(rid, "already handled")
     r = client.post(f"/reviews/{rid}/approve")
@@ -1194,7 +1194,7 @@ def _stub_executor(monkeypatch, bundle):
     from allpath_trade.risk import RiskDecision
     monkeypatch.setattr(
         bundle.executor, "execute",
-        lambda intent: ExecutionResult(submitted=True, order=None,
+        lambda intent, **_kw: ExecutionResult(submitted=True, order=None,
                                        decision=RiskDecision(approved=True)))
 
 

@@ -128,7 +128,8 @@ class SpyExecutor:
         # the stock-path intents it always did.
         self.option_calls = []
 
-    def execute(self, intent):
+    def execute(self, intent, *, human_approved=False):
+        self.human_approved = human_approved
         if self.fail:
             raise ExecutionError("boom")
         if self.raise_exc is not None:
@@ -378,6 +379,15 @@ def test_auto_soft_with_agent_execute_recommendation(tmp_path):
     assert len(ex.calls) == 1
     row = q.get(1)
     assert row["status"] == "approved" and "because" in row["agent_analysis"]
+
+
+def test_agent_approved_order_is_not_human_approved(tmp_path):
+    # TDSC red-team F2: the review agent's own approval must not bypass the
+    # ticker allowlist the way a human approval may.
+    s, _store, ex, _q, _n = make(tmp_path, strategy_yaml(rule_type="soft"))
+    s.review_agent = StubReviewAgent("execute")
+    s.run_once()
+    assert ex.calls and ex.human_approved is False
 
 
 def test_auto_soft_with_agent_skip_recommendation(tmp_path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -65,12 +66,33 @@ class RiskGate:
     """Deterministic pre-trade checks. Every order intent passes through here;
     there is no code path from the LLM to a broker that skips this gate."""
 
-    def __init__(self, limits: RiskLimits) -> None:
+    def __init__(self, limits: RiskLimits, *,
+                 allowed_tickers: Callable[[], Iterable[str]] | None = None,
+                 universe: Iterable[str] = ()) -> None:
         self.limits = limits
+        # TDSC red-team F2: the symbols an order may trade without a human.
+        # `allowed_tickers()` returns the account's active strategy tickers
+        # (read at check time, so a new strategy counts at once); `universe`
+        # is the configured TRADING_UNIVERSE on top of that. A gate built
+        # with no provider (unit tests, tools) does no symbol check;
+        # build_components always wires one.
+        self.allowed_tickers = allowed_tickers
+        self.universe = frozenset(t.strip().upper() for t in universe if t.strip())
+
+    def in_universe(self, ticker: str) -> bool:
+        """True when `ticker` may be traded without a human approval. Raises
+        whatever the strategy read raises; True when no allowlist is wired."""
+        if self.allowed_tickers is None:
+            return True
+        symbol = ticker.strip().upper()
+        if symbol in self.universe:
+            return True
+        return symbol in {t.strip().upper() for t in self.allowed_tickers()}
 
     def check(self, intent: OrderIntent, *, account: Account,
               positions: list[Position], trades_today: int,
-              is_paper: bool, price: Decimal) -> RiskDecision:
+              is_paper: bool, price: Decimal,
+              human_approved: bool = False) -> RiskDecision:
         reasons: list[str] = []
         lim = self.limits
         order_value = intent.notional if intent.notional is not None else intent.qty * price
@@ -78,6 +100,25 @@ class RiskGate:
 
         if not is_paper and not lim.allow_live:
             reasons.append("live trading is disabled (allow_live=false)")
+
+        # TDSC red-team F2: a ticker allowlist. Only an order a human approved
+        # may trade outside it (a chat order for a new idea); an agent- or
+        # rule-approved order may not. Selling a held position is always
+        # allowed: it can only shrink exposure, and an exit must never be
+        # blocked by scope.
+        held_sell = intent.side == OrderSide.SELL and pos is not None and pos.qty > 0
+        if not human_approved and not held_sell:
+            try:
+                allowed = self.in_universe(intent.ticker)
+            except Exception as exc:  # noqa: BLE001 — fail closed, with the cause
+                reasons.append(f"could not read the trading universe ({exc}); "
+                               "only a human-approved order may proceed")
+            else:
+                if not allowed:
+                    reasons.append(
+                        f"{intent.ticker} is not in this account's trading universe "
+                        "(active strategy tickers + TRADING_UNIVERSE); only a "
+                        "human-approved order may trade it")
 
         if order_value > lim.max_order_value:
             reasons.append(

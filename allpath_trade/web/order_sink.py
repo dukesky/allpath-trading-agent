@@ -111,7 +111,10 @@ class QueueingOrderSink:
                 intent, account=self.broker.get_account(),
                 positions=self.broker.get_positions(),
                 trades_today=self.journal.trades_today(),
-                is_paper=self.broker.is_paper, price=price)
+                is_paper=self.broker.is_paper, price=price,
+                # A chat order only ever executes on a human approval, which
+                # may trade outside the ticker allowlist (TDSC F2).
+                human_approved=True)
         except Exception as exc:  # noqa: BLE001 — a failed preview must not block the proposal
             # Log so a persistent programming error (wrong attribute, bad
             # signature) is diagnosable from process output rather than by

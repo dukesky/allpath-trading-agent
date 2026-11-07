@@ -219,6 +219,12 @@ class Settings(BaseSettings):
     max_options_weight: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
     max_daily_trades: int = Field(default=10, ge=1)
     min_cash_reserve: Decimal = Field(default=Decimal(0), ge=0)
+    # TDSC red-team F2: extra tickers (comma list, e.g. "SPY,QQQ") that rule-
+    # and agent-approved orders may trade on top of each account's active
+    # strategy tickers. Empty (the default) = strategy tickers only. A
+    # human-approved order (Pending page, approve link, Telegram, CLI) may
+    # trade any symbol regardless. .env-only.
+    trading_universe: str = ""
     # Shadow overrides. `None` (the default) means "no override" -- fall back
     # to the matching bare setting above; it is NOT the same as 0.
     shadow_max_order_value: Decimal | None = Field(default=None, gt=0)
@@ -239,6 +245,11 @@ class Settings(BaseSettings):
     # the web UI.
     publish_url: str = ""
     publish_token: str = ""
+
+    def trading_universe_tickers(self) -> frozenset[str]:
+        """`trading_universe` parsed: upper-cased, blanks dropped (TDSC F2)."""
+        return frozenset(t.strip().upper() for t in self.trading_universe.split(",")
+                         if t.strip())
 
     @field_validator("publish_url")
     @classmethod

@@ -203,7 +203,8 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                        f"{intent.ticker}? Reason: {reason}"):
             return "user declined"
         try:
-            result = executor.execute(intent)
+            # The user confirmed this exact order just above (TDSC F2).
+            result = executor.execute(intent, human_approved=True)
         except ExecutionError as exc:
             return f"execution error: {exc}"
         if result.submitted:

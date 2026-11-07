@@ -339,3 +339,62 @@ def test_zero_cash_reserve_override_is_honoured_not_treated_as_unset():
                       shadow_min_cash_reserve=Decimal(0))
     assert limits_for_account(s, "shadow").min_cash_reserve == Decimal(0)
     assert limits_for_account(s, "paper").min_cash_reserve == Decimal(1000)
+
+
+# -- TDSC red-team F2: ticker allowlist ------------------------------------
+# Allowed = the account's active strategy tickers + the configured universe.
+# Only a human-approved order may trade anything else; a sell of a held
+# position is always allowed (it can only shrink exposure).
+
+def gate_with(tickers=("AAPL",), universe=()):
+    return RiskGate(RiskLimits(), allowed_tickers=lambda: set(tickers), universe=universe)
+
+
+def run(gate, intent, *, human_approved=False, positions=None):
+    return gate.check(intent, account=ACCT,
+                      positions=positions if positions is not None else [AAPL_POS],
+                      trades_today=0, is_paper=True, price=Decimal(200),
+                      human_approved=human_approved)
+
+
+def test_allowlist_rejects_a_buy_outside_the_universe():
+    d = run(gate_with(), buy("100", ticker="TQQQ"))
+    assert not d.approved
+    assert any("TQQQ is not in this account's trading universe" in r for r in d.reasons)
+
+
+def test_allowlist_approves_a_strategy_ticker():
+    assert run(gate_with(), buy("100")).approved
+
+
+def test_allowlist_matches_case_insensitively():
+    assert run(gate_with(tickers=("aapl",)), buy("100", ticker="AAPL")).approved
+
+
+def test_configured_universe_extends_the_allowlist():
+    assert run(gate_with(universe=("MSFT",)), buy("100", ticker="msft")).approved
+
+
+def test_human_approved_order_may_trade_outside_the_universe():
+    assert run(gate_with(), buy("100", ticker="TQQQ"), human_approved=True).approved
+
+
+def test_sell_of_a_held_position_outside_the_universe_is_allowed():
+    d = run(gate_with(tickers=()), sell("5"))
+    assert d.approved
+
+
+def test_unreadable_universe_fails_closed_for_agent_orders():
+    def boom():
+        raise RuntimeError("disk gone")
+    gate = RiskGate(RiskLimits(), allowed_tickers=boom)
+    d = run(gate, buy("100"))
+    assert not d.approved
+    assert any("could not read the trading universe" in r for r in d.reasons)
+    assert run(gate, buy("100"), human_approved=True).approved
+
+
+def test_gate_without_an_allowlist_provider_skips_the_symbol_check():
+    # Unwired gates (unit tests, tools) keep the old behaviour; build_components
+    # always wires one (see test_app).
+    assert check(buy("100", ticker="TQQQ"), positions=[]).approved

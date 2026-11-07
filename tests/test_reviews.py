@@ -30,9 +30,11 @@ from allpath_trade.store.reviews import (
 class StubExecutor:
     def __init__(self):
         self.calls = []
+        self.human_approved = []
 
-    def execute(self, intent):
+    def execute(self, intent, *, human_approved=False):
         self.calls.append(intent)
+        self.human_approved.append(human_approved)
         from allpath_trade.execution import ExecutionResult
         from allpath_trade.risk.gate import RiskDecision
         return ExecutionResult(submitted=True, order=None,
@@ -1416,3 +1418,17 @@ def test_approve_option_quote_failure_after_claim_raises_execution_error(tmp_pat
     row = q.get(rid)
     assert row["status"] == "approved"
     assert "quote down" in json.loads(row["execution_result"])["error"]
+
+
+# -- TDSC red-team F2: only a human approval may bypass the ticker allowlist --
+
+def test_approve_order_is_human_approved_by_default(queue):
+    rid = add(queue)
+    queue.approve(rid)
+    assert queue._executor.human_approved == [True]
+
+
+def test_agent_approval_is_not_human_approved(queue):
+    rid = add(queue)
+    queue.approve(rid, by_agent=True)
+    assert queue._executor.human_approved == [False]

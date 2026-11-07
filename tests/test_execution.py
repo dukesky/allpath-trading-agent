@@ -836,3 +836,52 @@ def test_record_rejection_journals_one_rejected_row_and_submits_nothing(tmp_path
     ex.record_rejection(buy("9000"), RiskDecision(approved=False, reasons=["no cash"]))
     [row] = journal.recent(limit=10)
     assert row["status"] == "rejected" and broker.submitted == []
+
+
+# -- TDSC red-team F2: no unknown symbol reaches the broker unchecked --------
+
+def make_allowlisted_executor(tmp_path, data=None, tickers=("AAPL",)):
+    journal = TradeJournal(connect(tmp_path / "t.db"))
+    broker = FakeBroker()
+    gate = RiskGate(RiskLimits(), allowed_tickers=lambda: set(tickers))
+    return Executor(broker, gate, journal, data or FakeData()), broker
+
+
+def _notional_buy(ticker):
+    return OrderIntent(ticker=ticker, side=OrderSide.BUY, notional=Decimal(500),
+                       reason="t")
+
+
+def test_agent_notional_order_for_an_unknown_symbol_never_reaches_the_broker(tmp_path):
+    # O9b: notional intents skip the quote fetch, so the gate is the check.
+    ex, broker = make_allowlisted_executor(tmp_path)
+    result = ex.execute(_notional_buy("ZZZZ"))
+    assert not result.submitted and broker.submitted == []
+    assert any("ZZZZ is not in this account's trading universe" in r
+               for r in result.decision.reasons)
+
+
+def test_human_approved_order_outside_the_universe_is_submitted(tmp_path):
+    ex, broker = make_allowlisted_executor(tmp_path)
+    result = ex.execute(_notional_buy("TQQQ"), human_approved=True)
+    assert result.submitted and [i.ticker for i in broker.submitted] == ["TQQQ"]
+
+
+def test_human_approved_off_universe_notional_order_needs_a_quote(tmp_path):
+    # A symbol nobody can quote (a typo, a made-up ticker) fails closed even
+    # when a human approved it, instead of reaching the broker.
+    ex, broker = make_allowlisted_executor(tmp_path, data=FailingData())
+    with pytest.raises(ExecutionError):
+        ex.execute(_notional_buy("ZZZZ"), human_approved=True)
+    assert broker.submitted == []
+
+
+def test_in_universe_notional_order_still_skips_the_quote(tmp_path):
+    ex, broker = make_allowlisted_executor(tmp_path, data=FailingData())
+    assert ex.execute(_notional_buy("AAPL")).submitted
+
+
+def test_precheck_applies_the_allowlist(tmp_path):
+    ex, _broker = make_allowlisted_executor(tmp_path)
+    assert not ex.precheck(_notional_buy("TQQQ")).approved
+    assert ex.precheck(_notional_buy("TQQQ"), human_approved=True).approved

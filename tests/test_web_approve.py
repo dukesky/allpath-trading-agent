@@ -184,7 +184,7 @@ def test_non_numeric_review_id_hits_the_same_uniform_invalid_page(client):
 def test_post_approve_with_token_in_body_executes_and_burns_the_token(client, monkeypatch):
     executed = []
 
-    def spy_execute(intent):
+    def spy_execute(intent, **_kw):
         executed.append(intent)
         return ExecutionResult(submitted=True, order=None,
                                decision=RiskDecision(approved=True))
@@ -213,7 +213,7 @@ def test_post_approve_with_token_in_body_executes_and_burns_the_token(client, mo
 
 def test_token_only_in_query_string_is_rejected_and_the_real_token_still_works(client, monkeypatch):
     monkeypatch.setattr(client.app.state.holder.get().executor, "execute",
-                        lambda intent: ExecutionResult(
+                        lambda intent, **_kw: ExecutionResult(
                             submitted=True, order=None,
                             decision=RiskDecision(approved=True)))
     rid = queue_one(client)
@@ -277,7 +277,7 @@ def test_reject_path_burns_the_token(client):
 # --- a failed execution is reported honestly, and still burns the token ----
 
 def test_failed_execution_shows_an_honest_result_and_still_burns_the_token(client, monkeypatch):
-    def boom(intent):
+    def boom(intent, **_kw):
         raise ExecutionError("broker unreachable")
 
     monkeypatch.setattr(client.app.state.holder.get().executor, "execute", boom)
@@ -374,7 +374,7 @@ def test_cross_origin_post_with_a_valid_token_succeeds_by_design(client, monkeyp
     # token is the only thing standing between a visitor and this action,
     # by design, not by omission.
     monkeypatch.setattr(client.app.state.holder.get().executor, "execute",
-                        lambda intent: ExecutionResult(
+                        lambda intent, **_kw: ExecutionResult(
                             submitted=True, order=None,
                             decision=RiskDecision(approved=True)))
     rid = queue_one(client)
@@ -406,7 +406,7 @@ def test_security_headers_present_on_all_three_a_responses(client):
 
 def test_in_app_approve_kills_the_approval_link(client, monkeypatch):
     monkeypatch.setattr(client.app.state.holder.get().executor, "execute",
-                        lambda intent: ExecutionResult(
+                        lambda intent, **_kw: ExecutionResult(
                             submitted=True, order=None,
                             decision=RiskDecision(approved=True)))
     rid = queue_one(client)
