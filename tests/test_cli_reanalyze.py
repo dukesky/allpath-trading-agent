@@ -56,6 +56,20 @@ def test_reanalyze_attaches_a_fresh_analysis_to_a_pending_order(queue, capsys):
     assert "skip" in out and "REANALYZEDMARK" in out
 
 
+def test_reanalyze_does_not_call_an_unparseable_reply_a_skip(queue, capsys):
+    # TDSC red-team F6: same rule as the web card.
+    class Garbled:
+        def analyze(self, review):
+            return ReviewAnalysis(recommendation="skip", unparseable=True,
+                                  reasoning="unparseable analysis: ???")
+
+    rid = add_order(queue)
+    assert cmd_reviews_reanalyze(queue, Garbled(), rid) == 0
+    out = capsys.readouterr().out
+    assert "agent recommends" not in out
+    assert "could not be parsed" in out
+
+
 def test_reanalyze_refuses_a_resolved_row(queue, capsys):
     rid = add_order(queue)
     queue.reject(rid, note="no")

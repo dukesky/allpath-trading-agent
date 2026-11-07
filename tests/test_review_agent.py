@@ -41,6 +41,20 @@ def test_unparseable_answer_defaults_to_skip():
     assert a.recommendation == "skip" and "unparseable" in a.reasoning
 
 
+# TDSC red-team F6: a structural flag, so surfaces need not string-match the
+# reasoning to tell a non-answer from a deliberate skip.
+def test_unparseable_answer_sets_the_unparseable_flag():
+    llm = ScriptedLLM([LLMResponse(text="I think maybe buy?")])
+    a = ReviewAgent(llm, registry()).analyze(REVIEW)
+    assert a.unparseable is True
+    assert '"unparseable":true' in a.model_dump_json()
+
+
+def test_parsed_answer_is_not_flagged_unparseable():
+    a = _analyze_text('{"recommendation": "skip", "reasoning": "gap risk"}')
+    assert a.unparseable is False
+
+
 # Real failure mode (found 2026-09-14): the review model ignores "answer ONLY
 # with JSON" and wraps the fenced JSON in prose. The old parser only stripped
 # a fence around the ENTIRE text, so every such reply became "skip —
@@ -86,7 +100,7 @@ def test_conflicting_fenced_verdicts_read_unparseable():
     a = _analyze_text(
         'Format example:\n```json\n{"recommendation": "skip", "reasoning": "example"}\n```\n'
         'Final:\n```json\n{"recommendation": "execute", "reasoning": "final"}\n```')
-    assert a.reasoning.startswith("unparseable analysis:")
+    assert a.reasoning.startswith("unparseable analysis:") and a.unparseable
 
 
 def test_quoted_object_with_an_off_list_recommendation_still_conflicts():

@@ -62,10 +62,30 @@ def _json_candidates(text: str) -> Iterator[dict]:
     yield from reversed(found)
 
 
+UNPARSEABLE_PREFIX = "unparseable analysis:"
+
+
 class ReviewAnalysis(BaseModel):
     recommendation: str  # execute | skip
     reasoning: str
     sources: list[str] = []
+    # TDSC red-team F6: True when the reply held no usable verdict. Its
+    # `recommendation` is then a placeholder, never the agent's decision, and
+    # every surface must show "no agent analysis" instead of "skip".
+    unparseable: bool = False
+
+    def is_unparseable(self) -> bool:
+        """The flag, or the reasoning prefix that rows attached before the
+        flag existed still carry."""
+        return self.unparseable or self.reasoning.startswith(UNPARSEABLE_PREFIX)
+
+
+def analysis_is_unparseable(analysis: object) -> bool:
+    """Same test over a stored `agent_analysis` dict (web surfaces)."""
+    if not isinstance(analysis, dict):
+        return False
+    return bool(analysis.get("unparseable")) or str(
+        analysis.get("reasoning") or "").startswith(UNPARSEABLE_PREFIX)
 
 
 class ReviewAgent:
@@ -153,8 +173,8 @@ class ReviewAgent:
                     for d in candidates if "recommendation" in d}
         if len(verdicts) > 1:
             return ReviewAnalysis(
-                recommendation="skip",
-                reasoning=f"unparseable analysis: conflicting recommendations "
+                recommendation="skip", unparseable=True,
+                reasoning=f"{UNPARSEABLE_PREFIX} conflicting recommendations "
                           f"({', '.join(sorted(verdicts))}) in one reply: {text}")
         for data in candidates:
             try:
@@ -167,5 +187,5 @@ class ReviewAgent:
         # card renders it inside a <details> disclosure through the `|md`
         # filter, not inline plain text -- see web/templates/_review_card.html)
         # rather than being truncated here where it could never be recovered.
-        return ReviewAnalysis(recommendation="skip",
-                              reasoning=f"unparseable analysis: {text}")
+        return ReviewAnalysis(recommendation="skip", unparseable=True,
+                              reasoning=f"{UNPARSEABLE_PREFIX} {text}")

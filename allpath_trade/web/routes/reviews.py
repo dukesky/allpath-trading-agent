@@ -10,6 +10,7 @@ import yaml
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
+from allpath_trade.agent.review import analysis_is_unparseable
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.web.account_ctx import bundle, bundle_for
@@ -37,6 +38,8 @@ def _decorate(row) -> dict:  # row: sqlite3.Row
     # matching Part A's "no token ever echoed back into HTML" constraint.
     item.pop("approval_token_hash", None)
     item.pop("token_expires_ts", None)
+    # TDSC red-team F6: the card must not present a non-answer as "skip".
+    item["analysis_unparseable"] = analysis_is_unparseable(item.get("agent_analysis"))
     return item
 
 

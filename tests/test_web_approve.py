@@ -891,6 +891,17 @@ def test_order_confirm_page_has_no_warning_when_analysis_exists(client):
     assert "Agent recommends" in body and "skip" in body
 
 
+def test_order_confirm_page_warns_when_the_agent_reply_was_unparseable(client):
+    # TDSC red-team F6: same surface rule as the in-app card.
+    rid = queue_one(client)
+    analysis = ReviewAnalysis(recommendation="skip", unparseable=True,
+                              reasoning="unparseable analysis: rambling")
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
+    body = client.get(approve_url(rid), params={"k": rid.token}).text
+    assert "No agent analysis: the agent&#39;s reply could not be parsed" in body
+    assert "Agent recommends" not in body
+
+
 def test_chat_proposal_confirm_page_has_no_missing_analysis_warning(client):
     # A chat order proposal never goes through the review agent.
     rid = queue_one(client, source="chat")

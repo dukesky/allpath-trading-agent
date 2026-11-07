@@ -444,7 +444,12 @@ def cmd_reviews_reanalyze(q, review_agent, review_id: int) -> int:
         print(f"error: review agent failed, nothing attached: {exc}", file=sys.stderr)
         return 1
     q.attach_analysis(review_id, analysis.model_dump_json())
-    print(f"review {review_id}: agent recommends {analysis.recommendation}")
+    if analysis.is_unparseable():
+        # TDSC red-team F6: a non-answer is not the agent's "skip".
+        print(f"review {review_id}: no agent analysis, the agent's reply "
+              "could not be parsed")
+    else:
+        print(f"review {review_id}: agent recommends {analysis.recommendation}")
     print(analysis.reasoning)
     return 0
 

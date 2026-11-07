@@ -810,7 +810,7 @@ class Sentinel:
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
 
-        if analysis.reasoning.startswith("unparseable analysis:"):
+        if analysis.is_unparseable():
             # The LLM's output couldn't be parsed as a recommendation at all —
             # this is not a genuine "skip" decision, so don't act on it.
             # Leave the trigger pending for human review.

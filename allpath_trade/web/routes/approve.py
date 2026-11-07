@@ -8,6 +8,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
 from allpath_trade import market_hours
+from allpath_trade.agent.review import analysis_is_unparseable
 from allpath_trade.agent.shadow_tools import current_shadow_state
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import (
@@ -118,6 +119,7 @@ def _confirm_context(c, row) -> dict:
         "market_open": False, "rationale": "", "diff_rows": [],
         "stale": False, "shadow_before": None, "shadow_after": None,
         "agent_recommendation": "", "no_analysis": False,
+        "no_analysis_reason": "LLM unavailable",
     }
     if kind in ("order", "option_order") and row["source"] != "chat":
         # Ops 2026-11-06: show the review agent's verdict, or say loudly that
@@ -127,7 +129,11 @@ def _confirm_context(c, row) -> dict:
         except (TypeError, ValueError):
             analysis = None
         recommendation = analysis.get("recommendation") if isinstance(analysis, dict) else None
-        if recommendation:
+        if analysis_is_unparseable(analysis):
+            # TDSC red-team F6: a non-answer is not the agent's "skip".
+            ctx["no_analysis"] = True
+            ctx["no_analysis_reason"] = "the agent's reply could not be parsed"
+        elif recommendation:
             ctx["agent_recommendation"] = str(recommendation)
         else:
             ctx["no_analysis"] = True

@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 
@@ -1447,6 +1448,29 @@ def test_card_has_no_warning_when_analysis_exists(client):
 def test_chat_proposal_card_has_no_missing_analysis_warning(client):
     queue_one(client, source="chat")
     assert "No agent analysis" not in client.get("/reviews").text
+
+
+# TDSC red-team F6 (A4b): an unparseable reply is not a deliberate "skip".
+def test_card_warns_when_the_agent_reply_was_unparseable(client):
+    rid = queue_one(client)
+    analysis = ReviewAnalysis(recommendation="skip", unparseable=True,
+                              reasoning="unparseable analysis: rambling text")
+    client.app.state.holder.get().queue.attach_analysis(rid, analysis.model_dump_json())
+    body = client.get("/reviews").text
+    assert "No agent analysis: the agent's reply could not be parsed" in body
+    assert "Agent recommends:</strong> skip" not in body
+    assert "rambling text" in body  # raw reply still behind the disclosure
+
+
+def test_card_treats_a_legacy_unparseable_row_the_same(client):
+    # Rows attached before the flag existed carry only the reasoning prefix.
+    rid = queue_one(client)
+    client.app.state.holder.get().queue.attach_analysis(rid, json.dumps(
+        {"recommendation": "skip", "reasoning": "unparseable analysis: old",
+         "sources": []}))
+    body = client.get("/reviews").text
+    assert "No agent analysis: the agent's reply could not be parsed" in body
+    assert "Agent recommends:</strong> skip" not in body
 
 
 # -- ops 2026-11-06 item 6: spent one-shot stops ----------------------------

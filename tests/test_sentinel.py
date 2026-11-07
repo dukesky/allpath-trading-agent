@@ -441,6 +441,25 @@ def test_unparseable_analysis_notification_says_so(tmp_path):
     assert "⚠ No agent analysis: the agent's reply could not be parsed" in body
 
 
+def test_flagged_unparseable_analysis_is_not_acted_on(tmp_path):
+    # TDSC red-team F6: the structural flag alone (no reasoning prefix) keeps
+    # an auto+soft trigger pending for the human.
+    from allpath_trade.agent.review import ReviewAnalysis
+
+    class FlaggedStub:
+        def analyze(self, review):
+            return ReviewAnalysis(recommendation="execute", reasoning="garbage",
+                                  unparseable=True)
+
+    s, _store, ex, _q, n = make(tmp_path, strategy_yaml(auth="auto", rule_type="soft"))
+    s.review_agent = FlaggedStub()
+    [o] = s.run_once().outcomes
+    assert o.disposition == "queued" and "unparseable" in o.detail
+    assert not ex.calls
+    [(_subject, body)] = n.sent
+    assert "⚠ No agent analysis: the agent's reply could not be parsed" in body
+
+
 def test_agent_success_notification_has_no_missing_analysis_warning(tmp_path):
     s, _store, _ex, _q, n = make(tmp_path, strategy_yaml(auth="confirm"))
     s.review_agent = StubReviewAgent("execute")
@@ -1026,7 +1045,7 @@ def test_tripped_breaker_alerts_again_when_equity_falls_another_five_percent(tmp
     s.observations = ObservationLog(app_state._conn, account="paper")
     s.run_once()                                    # trips at 16%
     first_sent = len(n.sent)
-    s.broker._equity = Decimal("79000")             # 21% below the frozen peak
+    s.broker._equity = Decimal(79000)             # 21% below the frozen peak
 
     report = s.run_once()
 
@@ -1135,7 +1154,7 @@ rules:
 
 _PICK = OptionPick(
     occ_symbol="AAPL260101C00204000", expiry=date(2026, 1, 1),
-    strike=Decimal("204"), ask=Decimal("2.50"), qty=2, est_premium=Decimal("500"))
+    strike=Decimal(204), ask=Decimal("2.50"), qty=2, est_premium=Decimal(500))
 
 
 def test_confirm_buy_call_queues_option_order_with_preview(tmp_path):
@@ -1234,22 +1253,22 @@ def test_buy_call_executes_with_defaults_applied_when_action_omits_them(tmp_path
     # Defaults (dte 7, otm 2%) are applied by the sentinel, not the parser --
     # spec.min_dte/otm_pct are None on the parsed action here.
     assert backend.pick_calls == [
-        ("AAPL", "call", 7, Decimal("0.02"), Decimal("500"), Decimal("200"))]
+        ("AAPL", "call", 7, Decimal("0.02"), Decimal(500), Decimal(200))]
     [intent] = ex.option_calls
     assert intent.underlying == "AAPL"
     assert intent.right == "call"
     assert intent.occ_symbol == "AAPL260101C00204000"
     assert intent.side.value == "buy"
     assert intent.qty == 2
-    assert intent.est_premium == Decimal("500")
+    assert intent.est_premium == Decimal(500)
     assert store.load("t").rules[0].state == RuleState.TRIGGERED
     assert len(n.sent) == 1
 
 
 def test_buy_put_explicit_dte_and_otm_are_passed_through_not_defaulted(tmp_path):
     put_pick = OptionPick(occ_symbol="AAPL260101P00196000", expiry=date(2026, 1, 1),
-                          strike=Decimal("196"), ask=Decimal("2.10"), qty=1,
-                          est_premium=Decimal("210"))
+                          strike=Decimal(196), ask=Decimal("2.10"), qty=1,
+                          est_premium=Decimal(210))
     backend = FakeOptionsBackend(pick=put_pick)
     s, *_ = make_option(
         tmp_path, strategy_yaml(action="buy_put $500 dte>=10 otm=3%"), backend=backend)
@@ -1257,7 +1276,7 @@ def test_buy_put_explicit_dte_and_otm_are_passed_through_not_defaulted(tmp_path)
     s.run_once()
 
     assert backend.pick_calls == [
-        ("AAPL", "put", 10, Decimal("0.03"), Decimal("500"), Decimal("200"))]
+        ("AAPL", "put", 10, Decimal("0.03"), Decimal(500), Decimal(200))]
 
 
 def test_buy_call_no_affordable_contract_is_skipped(tmp_path):

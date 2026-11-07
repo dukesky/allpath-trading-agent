@@ -139,7 +139,19 @@
     {{ split_diff(item['revision_diff']['rows'], item['revision_diff']['left_label'], item['revision_diff']['right_label']) }}
   </div>
   {% endif %}
-  {% if item['agent_analysis'] %}
+  {% if item['agent_analysis'] and item['analysis_unparseable'] %}
+  {# TDSC red-team F6 (A4b): the agent replied, but with no usable verdict.
+     Its stored "skip" is a placeholder, not a decision, so this gets the
+     same loud warning as the empty case; the raw reply stays available
+     behind the disclosure (LLM output, so through |md as below). #}
+  <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+    <p class="warn" style="font-size:13px;margin:0 0 6px;font-weight:600">⚠ No agent analysis: the agent's reply could not be parsed. Check this order yourself before approving.</p>
+    <details class="agent-analysis">
+      <summary style="font-size:13px">Raw agent reply</summary>
+      <div class="muted" style="font-size:13px;margin-top:8px">{{ item['agent_analysis'].get('reasoning', '') | md }}</div>
+    </details>
+  </div>
+  {% elif item['agent_analysis'] %}
   <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
     {# Full reasoning, never hard-truncated (agent/review.py no longer cuts
        an unparseable LLM response at 300 chars) -- collapsed by default
