@@ -362,9 +362,9 @@ def test_approval_is_echoed_into_the_conversation(tmp_path, monkeypatch):
 
 
 def test_gate_blocked_approval_echo_names_the_gate_reason(tmp_path, monkeypatch):
-    # Sell notional (10000) exceeds both max_order_value (5000, the
-    # RiskLimits default in allpath_trade/app.py) and the FakeBroker AAPL
-    # position value (qty=10 * $200 = $2000) -- a deterministic gate
+    # Sell notional (10000) exceeds the FakeBroker AAPL position value
+    # (qty=10 * $200 = $2000). Held sells skip max_order_value since TDSC
+    # F7, so the position-value check is the reason -- a deterministic gate
     # rejection with no dependency on live quote data (see
     # tests/test_web_reviews.py's test_gate_rejection_is_visible_...).
     client = make_client(tmp_path, monkeypatch, [
@@ -378,7 +378,7 @@ def test_gate_blocked_approval_echo_names_the_gate_reason(tmp_path, monkeypatch)
     notes = _echoed_notes(client)
     assert len(notes) == 1
     assert "blocked by the risk gate" in notes[0]["display"]
-    assert "exceeds max_order_value" in notes[0]["display"]
+    assert "exceeds position value" in notes[0]["display"]
     assert "order submitted" not in notes[0]["display"]
 
 

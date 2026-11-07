@@ -398,3 +398,48 @@ def test_gate_without_an_allowlist_provider_skips_the_symbol_check():
     # Unwired gates (unit tests, tools) keep the old behaviour; build_components
     # always wires one (see test_app).
     assert check(buy("100", ticker="TQQQ"), positions=[]).approved
+
+
+# --- TDSC red-team F7: held sells are exempt from the per-order and daily caps
+
+BIG_POS = Position(ticker="AAPL", qty=Decimal(100), avg_entry_price=Decimal(190),
+                   market_value=Decimal(20000), unrealized_pl=Decimal(1000))
+
+
+def test_sell_all_of_a_position_above_max_order_value_is_approved():
+    # 100 * 200 = 20000 > max_order_value 5000: a sell-all stop must still fill.
+    d = check(sell("100"), positions=[BIG_POS])
+    assert d.approved, d.reasons
+
+
+def test_sell_notional_above_max_order_value_is_approved_within_holding():
+    intent = OrderIntent(ticker="AAPL", side=OrderSide.SELL,
+                         notional=Decimal(15000), reason="t")
+    d = check(intent, positions=[BIG_POS])
+    assert d.approved, d.reasons
+
+
+def test_held_sell_is_exempt_from_daily_trade_limit():
+    d = check(sell("5"), trades_today=10)
+    assert d.approved, d.reasons
+
+
+def test_held_sell_still_bounded_by_position_size():
+    d = check(sell("101"), positions=[BIG_POS])
+    assert not d.approved
+    assert any("exceeds position" in r for r in d.reasons)
+
+
+def test_sell_of_unowned_ticker_still_hits_caps():
+    # Not a held sell: the caps (and the no-position check) still apply.
+    d = check(sell("100", ticker="MSFT"), trades_today=10)
+    assert not d.approved
+    assert any("daily trade" in r.lower() for r in d.reasons)
+    assert any("order value" in r.lower() for r in d.reasons)
+
+
+def test_buy_still_hits_caps():
+    d = check(buy("6000"), trades_today=10)
+    assert not d.approved
+    assert any("order value" in r.lower() for r in d.reasons)
+    assert any("daily trade" in r.lower() for r in d.reasons)

@@ -509,11 +509,10 @@ class Sentinel:
         # notified, instead of waiting in Pending for an approval that can
         # only fail. Same gate and inputs as Executor.execute; if the check
         # cannot run (None) it fails open and queues as before.
-        # BUYS ONLY: the stock gate applies max_daily_trades (and
-        # max_order_value) to sells too, so prechecking a sell would turn a
-        # queued stop-loss exit into a permanent auto-rejection on a capped
-        # day -- worst on a crash day when the breaker has demoted strategies
-        # to confirm. An exit must always reach the human.
+        # BUYS ONLY: an exit must always reach the human. (Held sells have
+        # been exempt from max_daily_trades / max_order_value since TDSC F7,
+        # but a precheck could still reject a sell on a stale position read,
+        # turning a queued stop-loss into a permanent auto-rejection.)
         decision = (self.executor.precheck(intent)
                     if intent.side == OrderSide.BUY else None)
         if decision is not None and not decision.approved:

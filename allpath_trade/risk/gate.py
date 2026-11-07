@@ -120,13 +120,21 @@ class RiskGate:
                         "(active strategy tickers + TRADING_UNIVERSE); only a "
                         "human-approved order may trade it")
 
-        if order_value > lim.max_order_value:
-            reasons.append(
-                f"order value {order_value} exceeds max_order_value {lim.max_order_value}")
+        # TDSC red-team F7: selling a held position is exempt from the
+        # per-order and daily-trade caps, as option closes already are in
+        # `check_option`. A sell can only shrink exposure, and the SELL branch
+        # below still bounds it by the held qty/value. Before this, a one-shot
+        # "sell all" stop on a position worth more than max_order_value was
+        # rejected on every path (a human approval included) and the rule was
+        # then spent, leaving the position with no exit.
+        if not held_sell:
+            if order_value > lim.max_order_value:
+                reasons.append(
+                    f"order value {order_value} exceeds max_order_value {lim.max_order_value}")
 
-        if trades_today >= lim.max_daily_trades:
-            reasons.append(
-                f"daily trade limit reached ({trades_today}/{lim.max_daily_trades})")
+            if trades_today >= lim.max_daily_trades:
+                reasons.append(
+                    f"daily trade limit reached ({trades_today}/{lim.max_daily_trades})")
 
         if intent.side == OrderSide.BUY:
             current = pos.market_value if pos else Decimal(0)
