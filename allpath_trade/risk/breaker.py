@@ -54,6 +54,12 @@ class DrawdownBreaker:
     def tripped_at(self) -> str | None:
         return self.app_state.get(self._tripped_key)
 
+    def peak(self) -> Decimal | None:
+        """The recorded equity peak, None before the first check or after
+        a reset (read by the shadow check-in's live facts)."""
+        raw = self.app_state.get(self._peak_key)
+        return Decimal(raw) if raw else None
+
     def check(self, equity: Decimal) -> BreakerTrip | None:
         if self.halt_pct <= 0 or equity <= 0:
             return None
