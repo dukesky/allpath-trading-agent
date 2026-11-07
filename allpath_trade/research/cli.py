@@ -64,6 +64,25 @@ def cmd_rule_outcomes(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_replay_rules(args: argparse.Namespace) -> int:
+    from allpath_trade.research import replay as rp
+    from allpath_trade.research.bars import BarCache, yfinance_fetch
+
+    conn = open_readonly(args.db)
+    out = Path(args.out)
+    cache = BarCache(args.bars or out / "bars",
+                     fetch=None if args.offline else yfinance_fetch)
+    sources = None if args.sources == "all" else tuple(args.sources.split(","))
+    rows = rp.replay_rows(conn, cache, asof=args.asof, sources=sources,
+                          start=args.start, end=args.end)
+    write_csv(out / "rule_replay.csv", rp.COLUMNS, rows)
+    (out / "rule_replay_summary.md").write_text(rp.summary_markdown(
+        rows, db_label=Path(args.db).name, asof=args.asof))
+    conn.close()
+    print(f"wrote {len(rows)} replay rows to {out} (bars cache: {cache.directory})")
+    return 0
+
+
 def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--db", required=True, help="SQLite file (opened read-only)")
     p.add_argument("--from", dest="start", type=_date, default="2026-08-11",
@@ -86,6 +105,17 @@ def build_parser() -> argparse.ArgumentParser:
     ro.add_argument("--sources", default="reflection",
                     help="revision sources, comma-separated, or 'all' (default reflection)")
     ro.set_defaults(func=cmd_rule_outcomes)
+    rp = sub.add_parser("replay-rules",
+                        help="TDSC R2: vetoed and removed rules replayed on daily bars")
+    _common(rp)
+    rp.add_argument("--sources", default="all",
+                    help="revision sources, comma-separated, or 'all' (default all)")
+    rp.add_argument("--asof", type=_date, default=datetime.now(ET).date().isoformat(),
+                    help="last bar date used (default today); fix it for reproducible reruns")
+    rp.add_argument("--bars", help="bar cache directory (default <out>/bars)")
+    rp.add_argument("--offline", action="store_true",
+                    help="never fetch; fail rows whose bars are not cached")
+    rp.set_defaults(func=cmd_replay_rules)
     return p
 
 

@@ -61,3 +61,57 @@ Definitions:
 - `llm_usage` has no account column, so token and model columns are
   system-wide, except `reflection_tokens_*` (purpose `reflection:<account>`,
   recorded from R5 on).
+
+## R3: rule outcomes (`rule-outcomes`)
+
+```bash
+uv run allpath-research rule-outcomes --db <copy.db> --to 2026-12-19 \
+  --sources reflection --out ~/Projects/allpath-paper/data/tdsc/r3-<date>/reflection
+```
+
+`--sources` is `reflection` (default), a comma list, or `all`. One row per
+(revision, rule, change) in `rule_outcomes.csv`, plus `rule_outcomes_summary.md`.
+Outcome window per row (`window_kind`):
+
+- `live_after`: applied add/modify, from apply until the rule's next applied
+  change (any source) or the data end;
+- `before_removal`: applied removal, from when the rule took its last spec to
+  the removal;
+- `kept_after_veto`: vetoed modify/remove, from the veto until the kept rule's
+  next applied change;
+- `none`: vetoed add or pending (see R2).
+
+Columns: `fired`, `n_fires`, first/last fire time, first fire's disposition
+(executed / queued / skipped / notified / rejected / error), the trade that
+followed the first fire (before the rule's next fire, within 5 days), and for
+an applied add the review that later removed it (`later_removed_by[_source]`).
+Fires merge `sentinel` observations (from 08-11), `rule_fires` (from 09-28)
+and trades naming the rule; records within 30 min of a known fire of the same
+rule are one fire (2 min lead allowed: the observation is written after
+dispatch).
+
+## R2: counterfactual replay (`replay-rules`)
+
+```bash
+uv run allpath-research replay-rules --db <copy.db> --asof 2026-12-22 \
+  --bars ~/Projects/allpath-paper/data/tdsc/bars \
+  --out ~/Projects/allpath-paper/data/tdsc/r2-<date>
+```
+
+Targets: every vetoed proposal's added/modified rules as proposed
+(`variant=proposed`), the original rule a veto kept (`kept`), and every
+applied removal's rule as it was (`removed`); `--sources all` by default.
+Each condition runs through `strategy.conditions` on raw daily bars from the
+first trading day after the decision's ET date to `--asof`:
+`fire_basis=close` when the close satisfies it, `intraday` when only a price
+inside [low, high] does. Position terms are dropped from AND conditions
+(`position_terms_relaxed=1`); OR/NOT with position terms is `unevaluable`.
+Fill = fire-day close; `px/ret/pnl` at +5 and +20 trading days and at `asof`;
+`pnl` signs the return by the action (buy +, sell/close −; options proxied by
+the underlying). Directional marks only, not agent P&L.
+
+Determinism: bars come from yfinance (raw, `auto_adjust=False`) once and are
+cached per ticker as CSV with the covered range; reruns with the same cache,
+`--asof` and DB give identical output. `--offline` forbids fetching. Pick an
+`--asof` that is a completed trading day (yfinance returned a NaN close for
+the fetch day once; non-finite bars are dropped and never cached).
