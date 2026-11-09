@@ -13,11 +13,16 @@ from allpath_trade.agent.attachments import (
     display_for,
 )
 from allpath_trade.agent.compact import Compactor
-from allpath_trade.agent.context import build_system_prompt, load_identity
+from allpath_trade.agent.context import (
+    CONCISE_REPLY_NOTE,
+    build_system_prompt,
+    load_identity,
+)
 from allpath_trade.agent.loop import AgentSession
 from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
+from allpath_trade.config import account_flag
 from allpath_trade.llm.base import LLMImageUnsupported
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 from allpath_trade.web.order_sink import QueueingOrderSink
@@ -175,6 +180,15 @@ class ChatService:
             from allpath_trade.checkin import CHECKIN_CHAT_NOTE
 
             prompt = f"{prompt}\n{CHECKIN_CHAT_NOTE}"
+        # Per-account flags (config.account_flag), off by default: with both
+        # off the prompt is byte-for-byte what it was -- paper's live
+        # experiment depends on that.
+        if account_flag(c.settings, "telegram_order_threads", self.account):
+            from allpath_trade.order_threads import ORDER_THREAD_CHAT_NOTE
+
+            prompt = f"{prompt}\n{ORDER_THREAD_CHAT_NOTE}"
+        if account_flag(c.settings, "concise_replies", self.account):
+            prompt = f"{prompt}\n{CONCISE_REPLY_NOTE}"
         # Finding 8: flush durable preferences to curated memory before the
         # older half of the conversation is dropped from context (see
         # Compactor's docstring on on_before_compact). Under Phase 5's

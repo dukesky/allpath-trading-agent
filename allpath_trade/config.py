@@ -190,6 +190,19 @@ class Settings(BaseSettings):
     # paper-2 study and a new human input channel would change what it
     # measures. .env-only, off by default.
     shadow_daily_checkin: bool = False
+    # Concise chat replies: the chat agent leads with a one- or two-line
+    # answer, then a short "why", details only on request (a system-prompt
+    # note, agent/context.py CONCISE_REPLY_NOTE; nothing is truncated).
+    # Telegram order threads: replying to a review card on Telegram talks to
+    # the agent about that review (allpath_trade/order_threads.py); a reply
+    # never approves or changes it. Both follow the shadow_* pattern: the
+    # bare flag applies to every account, the shadow_ one (None = inherit)
+    # overrides it for shadow -- read through `account_flag`. Off by
+    # default; paper must stay off while its experiment runs. .env-only.
+    concise_replies: bool = False
+    shadow_concise_replies: bool | None = None
+    telegram_order_threads: bool = False
+    shadow_telegram_order_threads: bool | None = None
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.
@@ -265,6 +278,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "must be empty or a URL with http:// or https:// and a host")
         return stripped
+
+
+def account_flag(settings: object, name: str, account: str) -> bool:
+    """A per-account boolean feature flag: `shadow_<name>` when the account
+    is shadow and that override is set, else the bare `<name>`. Read with
+    getattr so a partial settings double (tests, older callers) counts as
+    off."""
+    if account == "shadow":
+        override = getattr(settings, f"shadow_{name}", None)
+        if override is not None:
+            return bool(override)
+    return bool(getattr(settings, name, False))
 
 
 def describe_validation_error(exc: ValidationError) -> str:
