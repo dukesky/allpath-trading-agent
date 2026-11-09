@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from allpath_trade.agent.reflection_tools import apply_revision_factory
 from allpath_trade.broker.base import Broker
 from allpath_trade.broker.options_mcp import McpOptionsBackend
-from allpath_trade.config import Settings
+from allpath_trade.config import Settings, account_flag
 from allpath_trade.data.base import DataSource
 from allpath_trade.data.yf import YFinanceSource
 from allpath_trade.execution import Executor
@@ -29,6 +29,7 @@ from allpath_trade.store.conversations import ConversationStore
 from allpath_trade.store.db import connect
 from allpath_trade.store.journal import TradeJournal
 from allpath_trade.store.llm_usage import LLMUsage
+from allpath_trade.store.order_threads import OrderThreadStore
 from allpath_trade.store.reports import ReportStore
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.model import StrategyStatus
@@ -222,6 +223,10 @@ def _build_account_components(account: str, *, settings: Settings,
     # review approved via the web/CLI must work even when no LLM is
     # configured, for either account.
     queue.set_revision_applier(apply_revision_factory(strategies))
+    if account_flag(settings, "telegram_order_threads", account):
+        # Telegram order threads: remember each card's message id so a reply
+        # to it reaches this account's agent. Off = cards sent as before.
+        queue.set_telegram_card_recorder(OrderThreadStore(conn, account).add_card)
     if account == "shadow":
         # shadow-dual-active T6: the ledger-edit applier is only ever
         # meaningful on the shadow account (there is no ledger to edit on

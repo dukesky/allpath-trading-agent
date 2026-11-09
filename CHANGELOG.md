@@ -2,6 +2,28 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Concise replies and Telegram order threads (unreleased)
+
+Both per-account, off by default; the bare flag applies to every account and
+the `SHADOW_` one overrides it for shadow. Intended: shadow on, paper off
+until its experiment ends.
+
+- **`CONCISE_REPLIES` / `SHADOW_CONCISE_REPLIES`**: a chat system-prompt rule
+  (web and Telegram): the answer or recommendation first, then a short "why",
+  details only when asked; warnings (risk-gate blocks, failed orders, items
+  awaiting approval) stay in the first lines. Nothing is truncated.
+- **`TELEGRAM_ORDER_THREADS` / `SHADOW_TELEGRAM_ORDER_THREADS`**: a review card
+  pushed to Telegram is remembered by message id; replying to it (Telegram
+  reply-to) runs a chat turn on the card's account with the review's stored
+  details injected, fenced. A reply never approves, rejects or edits the
+  review: the chat agent has no such tool, and a change it proposes is a new
+  pending review with its own card. Only the paired chat and user can
+  converse. Forwarded or quoted text is fenced as untrusted data (TDSC
+  red-team X6), on threads and on that account's plain Telegram messages.
+  Every human message on a thread is recorded in `order_thread_messages` and
+  exported by `allpath-research regime-metrics` (`order_threads.csv`, daily
+  `order_thread_msgs`).
+
 ## Shadow daily check-in (pilot, unreleased)
 
 - **Every stated stance is filed** (fix after the first real round,

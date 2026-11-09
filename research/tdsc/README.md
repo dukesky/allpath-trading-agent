@@ -36,9 +36,10 @@ Re-runnable for any ET date range. Writes:
 
 | file | grain | content |
 |---|---|---|
-| `regime_metrics_daily.csv` | account × ET day (weekdays + any active day) | report status/model/tokens; proposals by source × kind; reflection revisions auto / human-approved / vetoed / superseded / pending; latency median/max; gate rejections; regime-skip notices; chat revision outcomes; later reversals of that day's applied revisions; order reviews and latency; auto-executed orders; filled/rejected/error trades; breaker trips and end-of-day state; active strategies by authorization; model per tier; reflection tokens (after R5) |
+| `regime_metrics_daily.csv` | account × ET day (weekdays + any active day) | report status/model/tokens; proposals by source × kind; reflection revisions auto / human-approved / vetoed / superseded / pending; latency median/max; gate rejections; regime-skip notices; chat revision outcomes; later reversals of that day's applied revisions; order reviews and latency; auto-executed orders; filled/rejected/error trades; breaker trips and end-of-day state; active strategies by authorization; model per tier; reflection tokens (after R5); `order_thread_msgs` (human messages on Telegram order threads) |
 | `revisions.csv` | one row per `strategy_revision` review | source, status, resolver (auto/human/none), latency, rules added/removed/modified, fields changed, `reversed_by` and what was reversed |
 | `holds.csv` | one row per (held revision, reason) | F1 allow-list holds under auto: reason text and `category` |
+| `order_threads.csv` | one row per human message on a Telegram order thread | account, ts, review id, card/message ids, user id, `forwarded`, text (the owner's own words: keep out of the public repo). Empty unless `TELEGRAM_ORDER_THREADS` / `SHADOW_TELEGRAM_ORDER_THREADS` was on |
 | `orders.csv` | one row per trade, plus order reviews with no trade | path: `auto` (no review), `review_approved`, `review_rejected`, `review_pending`, `gate_rejected`, `error` |
 | `llm_daily.csv` | ET day × tier × model × purpose | calls and tokens (system-wide) |
 | `llm_failures_daily.csv` | ET day × tier × model × error class | failed calls |

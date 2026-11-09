@@ -118,6 +118,19 @@ class ReviewQueue:
         # `_approve_shadow_edit`) rather than silently no-op-ing, same as an
         # unwired revision applier.
         self._shadow_edit_applier: Callable[[str, dict, object], None] | None = None
+        # Telegram order threads: `fn(review_id, chat_id, message_id)` called
+        # by notify/dispatch.py after a card is sent, so a reply to it can be
+        # matched. Wired in app.py only for an account whose
+        # TELEGRAM_ORDER_THREADS flag is on; None means cards are pushed
+        # exactly as before.
+        self._telegram_card_recorder: Callable[[int, str, int], None] | None = None
+
+    def set_telegram_card_recorder(self, fn: Callable[[int, str, int], None]) -> None:
+        self._telegram_card_recorder = fn
+
+    @property
+    def telegram_card_recorder(self) -> Callable[[int, str, int], None] | None:
+        return self._telegram_card_recorder
 
     def set_revision_applier(self, fn: Callable[[str, str, str, str, bool], None]) -> None:
         """Wire up the function that actually applies an approved strategy

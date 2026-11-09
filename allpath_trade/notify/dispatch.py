@@ -116,8 +116,20 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
             {"text": "✅ Approve", "callback_data": f"rv:approve:{review_id}:{nonce}"},
             {"text": "❌ Reject", "callback_data": f"rv:reject:{review_id}:{nonce}"},
         ]]}
-        api.send_message(chat_id, to_telegram_html(_prefixed_for_telegram(account, body)),
-                         reply_markup=keyboard)
+        recorder = getattr(queue, "telegram_card_recorder", None)
+        if recorder is None:
+            api.send_message(chat_id, to_telegram_html(_prefixed_for_telegram(account, body)),
+                             reply_markup=keyboard)
+            return
+        # Telegram order threads (flag on for this account): send the same
+        # card plus a reply hint, and remember its message id so a reply to
+        # it reaches the agent with this review's context.
+        from allpath_trade.order_threads import ORDER_THREAD_CARD_HINT
+
+        html = to_telegram_html(_prefixed_for_telegram(account, body + ORDER_THREAD_CARD_HINT))
+        message_id = api.send_message_id(chat_id, html, reply_markup=keyboard)
+        if message_id is not None:
+            recorder(review_id, chat_id, message_id)
     except Exception:  # noqa: BLE001, S110 — best-effort, never break the caller
         pass
 

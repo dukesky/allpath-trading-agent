@@ -77,6 +77,7 @@ DAILY_COLUMNS = [
     "strat_active_auto", "strat_active_confirm", "strat_active_notify",
     "models_chat", "models_review", "models_memory",
     "reflection_tokens_in", "reflection_tokens_out",
+    "order_thread_msgs",
 ]
 
 
@@ -230,6 +231,7 @@ def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str,
     regimes = list(conn.execute("SELECT ts, account, regime FROM regime_events ORDER BY ts"))
     usage = list(conn.execute(
         "SELECT ts, tier, model, input_tokens, output_tokens, purpose FROM llm_usage"))
+    thread_msgs = _order_thread_messages(conn)
 
     # Model per tier: every model called that day (successes and failures);
     # on a day with no call, the last model seen before it (still configured).
@@ -259,12 +261,46 @@ def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str,
                 proposals=proposals, history=history, trips=trips.get(account, []),
                 regimes=regimes, day_usage=day_usage)
             row["weekday"] = int(weekday)
+            row["order_thread_msgs"] = sum(1 for m in thread_msgs if m["account"] == account
+                                           and et_date(m["ts"]) == day)
             row.update({f"models_{t}": m for t, m in models.items()})
             active = (row["report_status"] != "none" or row["breaker_trips"]
                       or any(row[c] for _, _, c in PROPOSAL_TYPES) or row["prop_other"]
                       or row["trades_filled"] or row["trades_rejected"])
             if weekday or active:
                 rows.append({c: row.get(c, "") for c in DAILY_COLUMNS})
+    return rows
+
+
+def _order_thread_messages(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Human messages on Telegram order threads (TELEGRAM_ORDER_THREADS);
+    a DB from before that feature has no table and so no messages."""
+    if not table_exists(conn, "order_thread_messages"):
+        return []
+    return list(conn.execute("SELECT * FROM order_thread_messages ORDER BY ts, id"))
+
+
+ORDER_THREAD_COLUMNS = [
+    "id", "account", "ts", "date_et", "window", "review_id", "card_message_id",
+    "telegram_message_id", "user_id", "forwarded", "text",
+]
+
+
+def order_thread_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per human message on an order thread (who, when, which
+    card/review, the text as received). The text is the owner's own words
+    -- keep this export out of the public trading repo."""
+    rows = []
+    for m in _order_thread_messages(conn):
+        day = et_date(m["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+        rows.append({"id": m["id"], "account": m["account"], "ts": m["ts"],
+                     "date_et": day, "window": window_for(day),
+                     "review_id": m["review_id"], "card_message_id": m["card_message_id"],
+                     "telegram_message_id": m["telegram_message_id"],
+                     "user_id": m["user_id"], "forwarded": m["forwarded"],
+                     "text": m["text"]})
     return rows
 
 
