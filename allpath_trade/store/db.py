@@ -88,6 +88,36 @@ CREATE TABLE IF NOT EXISTS checkins (
     UNIQUE (account, et_date)
 );
 
+-- Telegram order threads (TELEGRAM_ORDER_THREADS / SHADOW_TELEGRAM_ORDER_
+-- THREADS, allpath_trade/order_threads.py). `telegram_cards`: which review a
+-- sent card message belongs to, so a Telegram reply-to can be matched.
+-- `order_thread_messages`: the ledger of every human message on a thread
+-- (who, when, which card/review, the text as received), read by the TDSC
+-- research exports. Empty unless the flag is on for an account.
+CREATE TABLE IF NOT EXISTS telegram_cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL,
+    review_id INTEGER NOT NULL,
+    chat_id TEXT NOT NULL,
+    telegram_message_id INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    UNIQUE (chat_id, telegram_message_id)
+);
+CREATE TABLE IF NOT EXISTS order_thread_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    review_id INTEGER NOT NULL,
+    card_message_id INTEGER NOT NULL,
+    telegram_message_id INTEGER,
+    chat_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    forwarded INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_order_thread_messages_review
+    ON order_thread_messages (account, review_id);
+
 -- Paper-study regime switches (spec 2026-10-25-regime-switch-design.md).
 CREATE TABLE IF NOT EXISTS regime_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

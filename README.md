@@ -433,6 +433,8 @@ uv run allpath-trade chat      # talk to the agent in a REPL
 | `EXPERIMENT_AUTO_APPLY_REVISIONS` | false | Reflection's own revisions auto-apply (bounded-experiment use); only a fallback once a paper regime is set with `allpath-trade regime set` |
 | `SHADOW_EXPERIMENT_AUTO_APPLY_REVISIONS` | — (inherit) | Shadow-only override of the flag above; unset means shadow follows `EXPERIMENT_AUTO_APPLY_REVISIONS` |
 | `SHADOW_DAILY_CHECKIN` | false | Shadow-only pilot: after the nightly chain, ask the owner 1–3 questions on Telegram; replies become dated views that shadow's reflection must answer to (no paper equivalent) |
+| `CONCISE_REPLIES` / `SHADOW_CONCISE_REPLIES` | false / — (inherit) | Chat replies (web and Telegram) lead with a one- or two-line answer, then a short "why"; details only on request. A system-prompt rule, nothing is truncated. The `SHADOW_` flag overrides the bare one for the shadow account |
+| `TELEGRAM_ORDER_THREADS` / `SHADOW_TELEGRAM_ORDER_THREADS` | false / — (inherit) | Reply (Telegram reply-to) to a review card to talk to the agent about that review, with its context injected. A reply never approves or changes the order: only the card's buttons do, and a change the agent proposes becomes a new card. Forwarded or quoted text is fenced as untrusted; each thread message is recorded in `order_thread_messages` |
 | `DAILY_REFLECTION` | true | Nightly reflection pass |
 | `CHAT_MODEL` / `REVIEW_MODEL` / `MEMORY_MODEL` | — | Per-tier model choice, any OpenAI-compatible or Anthropic provider |
 

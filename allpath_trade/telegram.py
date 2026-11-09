@@ -878,12 +878,27 @@ class TelegramPoller:
             return None
 
         from allpath_trade.checkin import CHECKIN_ACCOUNT, checkin_reply_text
+        from allpath_trade.order_threads import guard_chat_text, order_thread_turn
+
+        # Telegram order threads (flag-gated per account; off = None): a
+        # reply to a review card talks to the card's account about it. Runs
+        # only past the pairing gate above, so only the paired chat+user can
+        # ever open or extend a thread.
+        thread = order_thread_turn(self.holder.get(), message, text, chat_id=chat_id,
+                                   user_id=str(from_id), log_error=self._log_error)
+        if thread is not None:
+            thread_account, framed = thread
+            self._handle_chat_text(chat_id, framed, account=thread_account)
+            return None
 
         framed = checkin_reply_text(self.holder.get(), message, text, self._log_error)
         if framed is not None:  # shadow check-in pilot: a reply to the check-in
             self._handle_chat_text(chat_id, framed, account=CHECKIN_ACCOUNT)
             return None
 
+        # TDSC X6: with the flag on for this chat's account, forwarded/quoted
+        # text is fenced as untrusted; flag off returns `text` unchanged.
+        text = guard_chat_text(self.holder.get(), self._telegram_account(), message, text)
         self._handle_chat_text(chat_id, text)
         return None
 

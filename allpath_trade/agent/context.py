@@ -178,6 +178,27 @@ Do this even when the user writes to you in another language.
 """
 
 
+# CONCISE_REPLIES / SHADOW_CONCISE_REPLIES (config.account_flag): appended to
+# that account's chat system prompt by web/chat_service.py, web and Telegram
+# alike (both run through ChatService). A prompt rule, never a truncation:
+# the owner can always ask for the long version.
+CONCISE_REPLY_NOTE = """\
+
+## Reply style: answer first
+The owner reads you on a phone. Shape every chat reply like this:
+1. First line or two: the answer or your recommendation, in plain words
+   ("Hold NVDA; don't add above $140."). No preamble, no restating the
+   question.
+2. Then "Why:" and at most three short bullets with the numbers that matter.
+3. Stop. Offer more in one short line only when there is more worth knowing
+   ("Want the full breakdown?"). Leave out tables, option lists and
+   background unless he asks.
+When he asks for details, a breakdown or "show me", give the full answer.
+Brevity never hides a warning: a risk-gate block, a failed or unconfirmed
+order, a breaker trip, or an item waiting for his approval (with its #id)
+goes in the first lines.
+"""
+
 # Ops 2026-11-06: memory still said NVDA ~66 sh / 15% a week after a stop
 # had sold the whole position (consolidation was down with the LLM), and
 # agents repeated it as fact. Position size/weight must come from the live

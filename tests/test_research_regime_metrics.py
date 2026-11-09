@@ -198,3 +198,43 @@ def test_held_revisions_counted_per_day_and_in_holds_csv(tmp_path):
 def test_cli_rejects_missing_db(tmp_path, capsys):
     rc = main(["regime-metrics", "--db", str(tmp_path / "x.db"), "--out", str(tmp_path)])
     assert rc == 2
+
+
+def test_order_thread_messages_counted_and_exported(tmp_path):
+    from allpath_trade.store.order_threads import OrderThreadStore
+
+    b = DBBuilder(tmp_path / "prod.db")
+    b.report(date="2026-12-02")
+    rid = b.review(ts="2026-12-02T15:00:00+00:00", kind="order", source="sentinel",
+                   status="pending", account="shadow")
+    store = OrderThreadStore(b.conn, "shadow")
+    from datetime import datetime
+    for i, text in enumerate(("why this size?", "make it half")):
+        store.log_message(review_id=rid, card_message_id=55, telegram_message_id=100 + i,
+                          chat_id="111", user_id="111", text=text, forwarded=bool(i),
+                          now=datetime.fromisoformat(f"2026-12-02T16:0{i}:00+00:00"))
+    path = b.close()
+    rows = daily_rows(open_readonly(path), "2026-12-02", "2026-12-02")
+    assert _row(rows, "2026-12-02", "shadow")["order_thread_msgs"] == 2
+    assert _row(rows, "2026-12-02", "paper")["order_thread_msgs"] == 0
+    out = tmp_path / "out"
+    assert main(["regime-metrics", "--db", str(path), "--from", "2026-12-01",
+                 "--to", "2026-12-03", "--out", str(out)]) == 0
+    msgs = _read(out / "order_threads.csv")
+    assert [(m["account"], m["review_id"], m["text"], m["forwarded"]) for m in msgs] == [
+        ("shadow", str(rid), "why this size?", "0"), ("shadow", str(rid), "make it half", "1")]
+    assert msgs[0]["date_et"] == "2026-12-02" and msgs[0]["window"] == "B'"
+
+
+def test_order_thread_export_tolerates_a_db_without_the_table(tmp_path):
+    b = DBBuilder(tmp_path / "prod.db")
+    b.report(date="2026-12-02")
+    b.conn.execute("DROP TABLE order_thread_messages")
+    b.conn.commit()
+    path = b.close()
+    rows = daily_rows(open_readonly(path), "2026-12-02", "2026-12-02")
+    assert _row(rows, "2026-12-02")["order_thread_msgs"] == 0
+    out = tmp_path / "out"
+    assert main(["regime-metrics", "--db", str(path), "--from", "2026-12-02",
+                 "--to", "2026-12-02", "--out", str(out)]) == 0
+    assert _read(out / "order_threads.csv") == []
