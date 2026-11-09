@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -127,6 +129,61 @@ def cmd_status(settings: Settings, broker: Broker, account: str = "paper") -> in
     return 0
 
 
+def prepare_demo(workdir: Path, host: str):
+    """Set up a demo working directory and return `(app, token)`.
+
+    Changes the process's working directory to `workdir`, so every relative
+    path (`.env`, the DB, `strategies/`, `memory/`) and any later settings
+    save resolve inside it. Split from `cmd_demo` so tests can build the app
+    without running uvicorn."""
+    from allpath_trade.app import build_components
+    from allpath_trade.demo import DemoBroker, DemoData, demo_token, scrub_outbound_env, seed_demo
+    from allpath_trade.web.app import create_app
+
+    scrub_outbound_env()
+    workdir.mkdir(parents=True, exist_ok=True)
+    os.chdir(workdir)
+    store = SettingsStore()
+    token = store.get("WEB_TOKEN") or demo_token(host)
+    if not store.get("WEB_TOKEN"):
+        store.set("WEB_TOKEN", token)
+    settings = store.load()
+    conn = connect(settings.db_path)
+    try:
+        seed_demo(conn, settings.strategies_dir, settings.memory_dir)
+    finally:
+        conn.close()
+    data = DemoData()
+
+    def builder(s, b, c):
+        return build_components(s, b, c, data=data)
+
+    app = create_app(settings, broker=DemoBroker(), start_scheduler=False,
+                     builder=builder)
+    return app, token
+
+
+def cmd_demo(workdir: str | None, host: str, port: int | None) -> int:
+    import tempfile
+
+    import uvicorn
+
+    from allpath_trade.demo import DEMO_PORT
+
+    port = port or DEMO_PORT
+    path = (Path(workdir).expanduser().resolve() if workdir
+            else Path(tempfile.mkdtemp(prefix="allpath-demo-")))
+    app, token = prepare_demo(path, host)
+    shown = "localhost" if host in {"127.0.0.1", "localhost"} else host
+    print(f"[allpath-trade demo] sample data in {path}", flush=True)
+    print(f"[allpath-trade demo] open http://{shown}:{port} and sign in with: {token}",
+          flush=True)
+    print("[allpath-trade demo] nothing here reaches a broker; Ctrl-C to stop",
+          flush=True)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
+
+
 def cmd_serve(settings: Settings, host: str | None, port: int | None) -> int:
     import uvicorn
 
@@ -146,14 +203,17 @@ def cmd_serve(settings: Settings, host: str | None, port: int | None) -> int:
     app = create_app(settings, start_scheduler=True)
 
     shown = "localhost" if host in {"127.0.0.1", "localhost"} else host
-    print(f"[allpath-trade] http://{shown}:{port}")
+    # flush=True: under a pipe or log capture stdout is block-buffered, and
+    # a newcomer would see neither the URL nor the first-run token.
+    print(f"[allpath-trade] http://{shown}:{port}", flush=True)
     # The token is the session cookie's value -- only worth printing (into
     # terminal scrollback and any log capture) the moment it's generated.
     # On later starts, point at where it already lives instead of repeating it.
     if had_token:
-        print("[allpath-trade] access token: unchanged (see WEB_TOKEN in .env)")
+        print("[allpath-trade] access token: unchanged (see WEB_TOKEN in .env)",
+              flush=True)
     else:
-        print(f"[allpath-trade] access token: {token}")
+        print(f"[allpath-trade] access token: {token}", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 
@@ -869,11 +929,28 @@ def main(argv: list[str] | None = None,
                     "switcher picks the account per browser session.")
     p_serve.add_argument("--host", default=None, help="bind address")
     p_serve.add_argument("--port", type=int, default=None, help="port")
+    p_demo = sub.add_parser(
+        "demo", help="tour the web UI on sample data, no keys needed",
+        description="Start the web UI on seeded sample data in its own "
+                    "working directory: a static demo portfolio, simulated "
+                    "fills, offline sample prices, no scheduler, no "
+                    "Telegram, no email. Never reads or writes the .env, "
+                    "database, strategies or memory of the current directory.")
+    p_demo.add_argument("--dir", default=None,
+                        help="demo working directory (default: a new temp dir)")
+    p_demo.add_argument("--host", default="127.0.0.1", help="bind address")
+    p_demo.add_argument("--port", type=int, default=None,
+                        help="port (default 8790)")
 
     if argv is not None and len(argv) == 0:
         parser.print_help()
         return 0
     args = parser.parse_args(argv)
+
+    # Before any settings load: the demo must never read the .env of the
+    # directory it was started from (see allpath_trade/demo.py).
+    if args.command == "demo":
+        return cmd_demo(args.dir, args.host, args.port)
 
     try:
         settings = SettingsStore().load()

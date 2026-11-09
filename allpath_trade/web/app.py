@@ -19,7 +19,7 @@ from allpath_trade.store.app_state import TELEGRAM_CHAT_ID_KEY, AppState
 from allpath_trade.telegram import TelegramAPI, TelegramPoller, prefixed_chunks
 from allpath_trade.web.auth import install_auth
 from allpath_trade.web.chat_service import ChatService
-from allpath_trade.web.deps import ComponentHolder
+from allpath_trade.web.deps import Builder, ComponentHolder
 from allpath_trade.web.markdown import (
     MAX_TELEGRAM_REPLY_CHUNKS,
     to_telegram_html,
@@ -340,7 +340,8 @@ def _stop_telegram(app: FastAPI) -> None:
 
 def create_app(settings: Settings, broker: Broker | None = None,
                start_scheduler: bool = False, scheduler_cls: type | None = None,
-               telegram_poller_cls: type | None = None) -> FastAPI:
+               telegram_poller_cls: type | None = None,
+               builder: Builder | None = None) -> FastAPI:
     if scheduler_cls is None:
         from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -361,7 +362,9 @@ def create_app(settings: Settings, broker: Broker | None = None,
 
     app = FastAPI(title="AllPath Trade", lifespan=lifespan, docs_url=None,
                   redoc_url=None, openapi_url=None)
-    app.state.holder = ComponentHolder(settings, broker)
+    # `builder` is ComponentHolder's own hook, passed through for
+    # `allpath-trade demo` (offline data source); None keeps the default.
+    app.state.holder = ComponentHolder(settings, broker, builder=builder)
     # Constructed once, here, and shared for the life of the process --
     # not lazily inside the /chat route anymore. The Telegram poller (Task 3)
     # is handed this exact same object so its messages share the web chat's

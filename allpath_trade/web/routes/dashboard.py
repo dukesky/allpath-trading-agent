@@ -95,6 +95,10 @@ def nav_context(request: Request) -> dict:
         "other_account_pending": other_pending,
         "setup_missing": missing,
         "setup_banner": bool(missing) and not _is_setup_path(request.url.path),
+        # `allpath-trade demo` (allpath_trade/demo.py) swaps the setup
+        # banner for a "this is sample data" one. Only DemoBroker is named
+        # "demo", so every real install renders exactly as before.
+        "demo_mode": getattr(getattr(c, "broker", None), "name", "") == "demo",
     }
 
 
