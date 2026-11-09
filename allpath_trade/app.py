@@ -313,7 +313,8 @@ def _build_account_components(account: str, *, settings: Settings,
 
 
 def build_components(settings: Settings, broker: Broker | None = None,
-                     conn: sqlite3.Connection | None = None) -> Components:
+                     conn: sqlite3.Connection | None = None,
+                     data: DataSource | None = None) -> Components:
     # shadow-dual-active T2: one-shot, idempotent move of a legacy
     # single-account memory/strategies layout into memory/paper/ and
     # strategies/paper/ (backing up first if anything legacy is found).
@@ -330,7 +331,10 @@ def build_components(settings: Settings, broker: Broker | None = None,
 
     if conn is None:
         conn = connect(settings.db_path)
-    data = YFinanceSource()
+    # `data` is injectable only for `allpath-trade demo` (offline sample
+    # quotes); every other caller leaves it None and gets yfinance as before.
+    if data is None:
+        data = YFinanceSource()
     notifier = build_notifier(settings)
     app_state = AppState(conn)
     llm_usage = LLMUsage(conn)
