@@ -1,22 +1,22 @@
 <div align="center">
 
-# All Path Trading Agent
+# AllPath
 
-**自部署、基于 LLM 的中长线交易 agent 框架**
+**一个能对话的个人股票助手：它提方案、讲理由，下单前先问你。**
 
-*它了解你的目标，与你共创策略，监控市场，通过你自己的券商账户执行交易——并与你共同成长。*
+*自部署、开源、默认模拟盘。密钥和数据都留在你自己的机器上。*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![arXiv](https://img.shields.io/badge/arXiv-2610.26662-b31b1b.svg)](https://arxiv.org/abs/2610.26662)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#路线图)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#参与贡献)
 
+[一分钟试用](#一分钟试用无需任何密钥) ·
 [快速上手](#快速上手) ·
 [架构](#架构) ·
 [安全模型](#安全模型) ·
-[路线图](#路线图) ·
-[参与贡献](#参与贡献) ·
+[论文](#论文) ·
 [English](README.md) ·
 [**官网 →**](https://trading.all-path.com)
 
@@ -25,17 +25,47 @@
 ---
 
 <p align="center">
-  <img src="docs/images/dashboard-demo.png" alt="AllPath Trading Agent 仪表盘——资产曲线、持仓、策略卡片（演示数据）" width="900">
+  <img src="docs/images/demo/pending.png" alt="Pending 页面：规则触发后，agent 解释为什么建议买入，在你点 Approve 之前什么都不会发生；夜间反思还提议上调一个止损，以 diff 形式展示。" width="900">
 </p>
+<p align="center"><sub>来自 <code>allpath-trade demo</code> 的 Pending 页面（示例数据，非真实账户）。规则触发，agent 给出看法，你批准之前不会成交；昨晚的反思想修改它自己的一条策略，同样要等你点头。</sub></p>
 
-<p align="center"><b>一个只提案、不擅自行动的交易 agent。你来批准。</b><br>
-用 YAML 写策略，哨兵每小时巡检；和一个记得你思路的 agent 聊天（网页或 Telegram）；每一笔订单前面都有一道人工审批门。默认模拟盘；agent 没有任何直接下单或写策略文件的工具。</p>
+## 一分钟试用（无需任何密钥）
 
-<p align="center"><sub>截图均为虚构演示数据，非真实账户。</sub></p>
+```bash
+git clone https://github.com/dukesky/allpath-trading-agent.git
+cd allpath-trading-agent
+uv run allpath-trade demo
+```
 
----
+打开 <http://localhost:8790>，用 `demo` 登录。你会看到一个示例组合、三条策略、一笔附带 agent 分析的待批订单、一条策略修订提案和一份夜间报告。demo 跑在独立的临时目录里，成交是模拟的、行情是离线示例数据：不需要 Alpaca 账户，不需要 LLM 密钥，也不会有任何请求到达券商。（需要先装 [uv](https://docs.astral.sh/uv/getting-started/installation/)；`uv run` 首次运行会自动装好依赖。）
 
-> **项目状态：** Phase 1-6 已完成——券商连接、行情数据、风控和交易日志已可对接 Alpaca 模拟盘账户；策略引擎 + 哨兵循环（YAML 策略、规则求值、版本管理、定时监控、硬规则自动执行）现已运行；LLM agent 核心（多 provider 聊天客户端、工具调用循环、`allpath-trade chat` REPL，以及对已入队软规则触发进行联网研究的 ReviewAgent）已就位；记忆系统（四层精选 markdown 层 + 沉淀 + 会话检索）使 agent 能在跨会话中学习和回忆耐久模式；Web 界面（`allpath-trade serve`，带 token 认证，局域网可达）把仪表盘、聊天和确认队列都带到了你的手机上。Phase 5.5 把这个 Web 界面补全了——仪表盘上可见的哨兵心跳、邮件之外新增的 ntfy 推送、按策略独立控制的通知开关，以及每日记忆沉淀现在也会读取当天的网页聊天内容，而不只是终端会话。Phase 6 补上了第三个循环：收盘后的**反思**流程会依据当天的交易与价格重新检验每个策略，把耐久的经验教训写入记忆，并为需要你批准的策略修订提出建议——详见[反思循环](#反思循环)。现在也可以从 Telegram 直接找 agent 聊——与网页端同一条对话、同一套记忆，双向同步——详见[Telegram 聊天](#telegram-聊天)；无论在哪个聊天入口起草或修订策略，现在都会进入 Pending 等你批准，不再需要打开终端。Phase 7 加入了第二个、始终在线的账户——**Shadow**，一个镜像你真实券商账户的本地账本，只记账不下单——与 Paper 并行运行；详见[双账户](#双账户)。**默认仅模拟盘（paper trading，Shadow 只记账、从不真实下单）。**
+想接入自己的账户？运行 `uv run allpath-trade serve`，setup 向导会引导你填 LLM 密钥和免费的 Alpaca 模拟盘密钥。详见[快速上手](#快速上手)。
+
+## 它能做什么
+
+- **你说，它起草。** 在网页或 Telegram 里问一只股票、讲一个想法。agent 会查实时价格和新闻，起草一条策略：一段文字论点加上确定性的规则，存成你能直接读的 YAML 文件。
+- **盯盘的是代码，不是模型。** 哨兵按计划用普通代码检查每条规则，不花 LLM 费用。
+- **下单前先问你。** 规则触发时你会收到一张卡片：订单、触发条件、agent 的看法，点 Approve 或 Reject。每条策略可以单独设定自主程度：`notify`、`confirm` 或 `auto`。
+- **在监督下学习。** 每天收盘后它对照每条策略的论点复盘，把经验写进你能读的记忆，并提议修改自己的策略。这些修改同样要等你批准。
+- **模型绕不过的闸门。** 每笔订单前面都有确定性的风控闸门、回撤熔断和交易时段保护。
+
+<p align="center"><code>规则触发 → 风控闸门 → 审批卡片 → 下单 → 交易日志 → 通知 → 夜间反思</code></p>
+
+## 论文
+
+AllPath 的论文 **AllPath: Layered Verification for a Deployed, Self-Revising LLM Trading Agent under Human-Gated and Autonomous Regimes**（Tian Zhang, Meng Li）已被 ACM ICAIF 2026 的第三届 LLMs and Generative AI in Finance（AI4F）workshop 录用（non-archival）。arXiv：[2610.26662](https://arxiv.org/abs/2610.26662)。
+
+```bibtex
+@misc{zhang2026allpath,
+  title         = {AllPath: Layered Verification for a Deployed, Self-Revising LLM Trading Agent under Human-Gated and Autonomous Regimes},
+  author        = {Zhang, Tian and Li, Meng},
+  year          = {2026},
+  eprint        = {2610.26662},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AI},
+  note          = {Accepted to the AI4F Workshop at ACM ICAIF 2026 (non-archival)}
+}
+```
 
 ## 目录
 
@@ -180,7 +210,7 @@ LLM / 策略规则  →  订单意图  →  风控守门（确定性）  →  �
 
 ## 快速上手
 
-最快的路径：装好之后直接运行 `serve` 并打开对应网址——首次运行的
+只是想看看？[`allpath-trade demo`](#一分钟试用无需任何密钥) 不需要任何密钥。要接入自己的账户：装好之后直接运行 `serve` 并打开对应网址——首次运行的
 setup 向导会依次引导你填 LLM 密钥、Alpaca 模拟盘密钥、导入 Shadow 持仓，
 全程不用手动编辑 `.env`。下面的步骤是手动路径，`chat`/`status` 这类终端
 命令仍然需要它。
@@ -188,6 +218,7 @@ setup 向导会依次引导你填 LLM 密钥、Alpaca 模拟盘密钥、导入 S
 ### 前置条件
 
 - Python ≥ 3.11 与 [uv](https://docs.astral.sh/uv/)
+- 一个 LLM API 密钥：[OpenRouter](https://openrouter.ai/keys)（默认）、[Anthropic](https://console.anthropic.com/settings/keys) 或任何 OpenAI 兼容的服务商，按量付费，主要花在聊天和夜间反思上
 - 一个免费的 [Alpaca 模拟盘账户](https://app.alpaca.markets/paper/dashboard/overview)
 - 编译时启用 FTS5 的 SQLite（Python ≥ 3.11 官方构建默认包含）——记忆搜索功能需要
 

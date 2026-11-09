@@ -1,23 +1,22 @@
 <div align="center">
 
-# All Path Trading Agent
+# AllPath
 
-**A self-hosted, LLM-powered autonomous trading agent framework**
+**A personal stock assistant you talk to. It proposes, explains, and asks before it trades.**
 
-*It learns your goals, co-creates strategies with you, monitors the market, trades stocks and options through your own brokerage account — and grows alongside you.*
+*Self-hosted, open source, paper trading by default. Your keys and your data stay on your machine.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![arXiv](https://img.shields.io/badge/arXiv-2610.26662-b31b1b.svg)](https://arxiv.org/abs/2610.26662)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
-[![Tests](https://img.shields.io/badge/tests-2368%20passing-brightgreen.svg)](#development)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
+[![Tests](https://img.shields.io/badge/tests-2964%20passing-brightgreen.svg)](#development)
 
+[Try the demo](#try-it-in-one-minute-no-keys) ·
 [Getting Started](#getting-started) ·
 [Architecture](#architecture) ·
-[Options via MCP](#options-trading-via-alpacas-mcp-server) ·
-[Autonomy](#the-autonomy-ladder) ·
-[Memory](#the-memory-system) ·
 [Safety](#safety-model) ·
+[Paper](#paper) ·
 [中文文档](README.zh-CN.md) ·
 [**Website →**](https://trading.all-path.com)
 
@@ -26,17 +25,31 @@
 ---
 
 <p align="center">
-  <img src="docs/images/hackathon/dashboard.png" alt="AllPath dashboard — live competition account: equity curve, positions across stocks and options, sentinel heartbeat" width="900">
+  <img src="docs/images/demo/pending.png" alt="The Pending page: a rule fired, the agent explains why it recommends the buy, and nothing happens until you press Approve. A nightly reflection also proposes raising a stop, shown as a diff." width="900">
 </p>
+<p align="center"><sub>The Pending page from <code>allpath-trade demo</code> (sample data, not a real account). A rule fired; the agent explains its view; nothing trades until you approve. Last night's reflection also wants to change one of its own strategies, and that waits for you too.</sub></p>
 
-<p align="center"><b>An agent that reasons like an analyst and executes like a machine.</b><br>
-Strategies are human-readable YAML documents — a prose thesis plus deterministic rules. A sentinel evaluates them on a schedule at zero LLM cost; an agent researches, drafts, reflects nightly, and revises its own strategies; a deterministic risk gate that no model can bypass sits in front of every order. You choose the autonomy level per strategy: notify-only, confirm-first, or fully autonomous.</p>
+## Try it in one minute (no keys)
 
-<p align="center">
-  <code>rule fires → contract selected via Alpaca MCP → risk gate → order → journal → notification → nightly reflection</code>
-</p>
+```bash
+git clone https://github.com/dukesky/allpath-trading-agent.git
+cd allpath-trading-agent
+uv run allpath-trade demo
+```
 
-> **🏆 Currently competing in the [Alpaca AI Trading Agents Hackathon](https://lablab.ai/ai-hackathons/alpaca-ai-trading-agents-hackathon) (Aug 28 – Sep 4, 2026).** The screenshots in this README are the *live competition account*: a fresh $100k paper account run with **zero human intervention** — the agent picked the tickers, drafted the strategies (stock + options legs with paired exits), executes autonomously, and revises itself every night. Options data and order routing go through **Alpaca's official MCP server**. See [The Live Autonomous Run](#the-live-autonomous-run).
+Open <http://localhost:8790> and sign in with `demo`. You get a sample portfolio, three strategies, a pending order with the agent's analysis, a proposed strategy revision and a nightly report. The demo runs in its own temp directory with simulated fills and offline sample prices: no Alpaca account, no LLM key, and nothing reaches a broker. (Needs [uv](https://docs.astral.sh/uv/getting-started/installation/); `uv run` installs everything on first use.)
+
+Ready for the real thing? `uv run allpath-trade serve` starts a setup wizard that asks for an LLM key and free Alpaca paper keys. See [Getting Started](#getting-started).
+
+## What it does
+
+- **You talk, it drafts.** Ask about a ticker or describe an idea, on the web or Telegram. The agent researches live prices and news and drafts a strategy: a prose thesis plus deterministic rules, as a YAML file you can read.
+- **Code watches, not the model.** A sentinel checks every rule on a schedule with plain code, at zero LLM cost.
+- **It asks before it trades.** When a rule fires you get a card with the order, the trigger, and the agent's view: Approve or Reject. You set autonomy per strategy: `notify`, `confirm`, or `auto`.
+- **It learns, under supervision.** Every night it reviews the day against each thesis, writes lessons to a memory you can read, and proposes revisions to its own strategies. Those wait for your approval too.
+- **A gate the model cannot bypass.** A deterministic risk gate, a drawdown circuit breaker and market-hours guards sit in front of every order.
+
+<p align="center"><code>rule fires → risk gate → approval card → order → journal → notification → nightly reflection</code></p>
 
 ## Paper
 
@@ -53,6 +66,8 @@ AllPath is described in **AllPath: Layered Verification for a Deployed, Self-Rev
   note          = {Accepted to the AI4F Workshop at ACM ICAIF 2026 (non-archival)}
 }
 ```
+
+> Built during the [Alpaca AI Trading Agents Hackathon](https://lablab.ai/ai-hackathons/alpaca-ai-trading-agents-hackathon) (Aug 28 – Sep 4, 2026). The screenshots under [System at a Glance](#system-at-a-glance) come from that live competition account: a fresh $100k paper account run with no human intervention. See [The Live Autonomous Run](#the-live-autonomous-run).
 
 ## Table of Contents
 
@@ -363,7 +378,7 @@ Notification honesty is a design rule: autonomous executions send receipts too; 
 
 **Telegram** — the same agent, same conversation, same memory as web chat, mirrored both ways; `/account` switches Paper/Shadow; approvals are inline buttons. Pair once with `/start <web token>` in a private chat.
 
-**CLI** — `status`, `chat` (full REPL), `strategies`, `rearm`, `reviews list/approve/reject`, `breaker status/reset`, `memory show`, `check` (one sentinel pass), `serve`.
+**CLI** — `status`, `chat` (full REPL), `strategies`, `rearm`, `reviews list/approve/reject`, `breaker status/reset`, `memory show`, `check` (one sentinel pass), `serve`, `demo` (the web UI on sample data, no keys).
 
 ## Two Accounts: Paper & Shadow
 
@@ -390,11 +405,12 @@ Judging criteria mapping — P&L (live equity curve on the dashboard), technolog
 
 ## Getting Started
 
-The fastest path: install, run `serve`, open the URL — a first-run setup wizard walks you through an LLM key, Alpaca paper keys, and optional Shadow import, so you never hand-edit `.env`.
+Just looking? [`allpath-trade demo`](#try-it-in-one-minute-no-keys) needs no keys. For your own setup: install, run `serve`, open the URL. A first-run setup wizard walks you through an LLM key, Alpaca paper keys, and an optional Shadow import, so you never hand-edit `.env`.
 
 ### Prerequisites
 
 - Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/)
+- An LLM API key: [OpenRouter](https://openrouter.ai/keys) (default), [Anthropic](https://console.anthropic.com/settings/keys), or any OpenAI-compatible provider. Pay as you go; chat and the nightly reflection are the main costs.
 - A free [Alpaca paper trading account](https://app.alpaca.markets/paper/dashboard/overview) (enable options level ≥ 2 for options strategies)
 - SQLite built with FTS5 (standard in official Python ≥ 3.11 builds)
 
@@ -452,6 +468,7 @@ allpath_trade/
 ├── reflect.py      # Nightly reflection session
 ├── execution.py    # Executor — the single trading entry point (stocks + options)
 ├── scheduler.py    # APScheduler wiring: sentinel ticks + after-close chain
+├── demo.py         # `allpath-trade demo`: sample data, static broker, offline quotes
 └── cli.py          # CLI: status, chat, serve, breaker, reviews, rearm, ...
 ```
 
