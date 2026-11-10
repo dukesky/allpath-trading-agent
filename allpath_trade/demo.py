@@ -377,6 +377,12 @@ def seed_demo(conn: sqlite3.Connection, strategies_root: Path, memory_root: Path
             "the 12% target and the 15% cap. The risk gate pre-check passed."),
         "sources": [],
     }))
+    # Sample decision brief, shown only with CARD_REASON_BRIEF on.
+    queue.attach_brief(int(handle), {
+        "why": "NVDA is under the 215 add trigger after an orderly -4% pullback.",
+        "risk": "A deeper slide; the weight goes to about 10%, under the 15% cap.",
+        "plan": "Fits the plan to add to this core holding only on pullbacks.",
+        "origin": "demo"})
     strategies.set_rule_state("nvda-ai-infra", "add-on-pullback", RuleState.TRIGGERED)
 
     old = AAPL_YAML
@@ -386,12 +392,17 @@ def seed_demo(conn: sqlite3.Connection, strategies_root: Path, memory_root: Path
         old.splitlines(keepends=True), new.splitlines(keepends=True),
         fromfile="aapl-services.yaml (current)",
         tofile="aapl-services.yaml (proposed)"))
-    queue.add_strategy_revision(
+    revision = queue.add_strategy_revision(
         strategy_id="aapl-services", ticker="AAPL", old_yaml=old, new_yaml=new,
         diff=diff, rationale=(
             "Sample proposal (demo data) from last night's reflection: AAPL is "
             "11% above entry, so the 225 stop would give back most of the "
             "gain. Raise it to 245."))
+    queue.attach_brief(int(revision), {
+        "why": "AAPL is 11% above entry, so the 225 stop gives back most of the gain.",
+        "risk": "A stop at 245 sits closer to the price and can trigger on a normal dip.",
+        "plan": "",
+        "origin": "demo"})
 
     yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()
     ReportStore(conn, account="paper").add(

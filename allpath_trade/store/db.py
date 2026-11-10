@@ -380,6 +380,10 @@ _MIGRATIONS = [
     # human (strategy/auto_gate.py), shown on its Pending card. NULL = not
     # held (every pre-existing row, and every human-regime row).
     "ALTER TABLE pending_reviews ADD COLUMN hold_reason TEXT",
+    # Decision brief (allpath_trade/card_brief.py): JSON {why, risk, plan,
+    # origin}, written only when CARD_REASON_BRIEF is on for the row's
+    # account. NULL = no brief; the card keeps its old layout.
+    "ALTER TABLE pending_reviews ADD COLUMN decision_brief TEXT",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

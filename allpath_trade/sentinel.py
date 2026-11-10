@@ -808,6 +808,17 @@ class Sentinel:
                                 kind=kind, option_preview=option_preview)
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
+        # CARD_REASON_BRIEF: only an agent built with the flag on ever sets
+        # `brief` (already grounded, agent/review.py). Storing it is display
+        # only; a failure here just means the card keeps its old layout.
+        brief = getattr(analysis, "brief", None)
+        if brief:
+            try:
+                self.queue.attach_brief(rid, brief)
+            except Exception as exc:  # noqa: BLE001 — never lose the trigger over a brief
+                print(f"[sentinel] could not store card brief for #{rid}: {exc}",
+                      file=sys.stderr)
+                brief = None
 
         if analysis.is_unparseable():
             # The LLM's output couldn't be parsed as a recommendation at all —
@@ -829,7 +840,7 @@ class Sentinel:
             recommendation = f"{analysis.recommendation} — {analysis.reasoning[:300]}"
             self._notify_queued(doc, rid, ticker, action, recommendation,
                                 price=price, intent=intent, kind=kind,
-                                option_preview=option_preview)
+                                option_preview=option_preview, brief=brief)
             return TriggerOutcome(**base, disposition="queued",
                                   detail="analysis attached: " + recommendation)
 
@@ -917,7 +928,8 @@ class Sentinel:
     def _notify_queued(self, doc: StrategyDoc, review_id: int, ticker: str, action: str,
                        recommendation: str, *, price: Decimal | None = None,
                        intent: OrderIntent | None = None, kind: str = "order",
-                       option_preview: str = "", no_analysis_reason: str = "") -> None:
+                       option_preview: str = "", no_analysis_reason: str = "",
+                       brief: dict | None = None) -> None:
         # Ops 2026-11-06: an order review with no recommendation went out
         # looking like any other card, and 21 were approved blind while the
         # LLM was out of credits. Every order kind is meant to carry the
@@ -951,7 +963,8 @@ class Sentinel:
             no_analysis_reason=no_analysis_reason,
             stop_warning=(self._stop_warning(doc)
                           if kind == "order" and intent is not None
-                          and intent.side == OrderSide.BUY else ""))
+                          and intent.side == OrderSide.BUY else ""),
+            brief=brief)
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's

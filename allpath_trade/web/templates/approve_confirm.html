@@ -15,7 +15,11 @@
       <span class="chip {{ 'chip-shadow' if account == 'shadow' else 'chip-paper' }}">{{ account | capitalize }}</span>
     </p>
     <p><strong>{{ side }} {{ ticker }}</strong>{% if amount_label %} · {{ amount_label }}{% endif %}</p>
-    {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}
+    {% if condition %}<p class="muted" style="font-size:13px">Rule: <code>{{ condition }}</code></p>{% endif %}{% if brief %}
+    {# Decision brief (CARD_REASON_BRIEF): why / risk / plan, from the stored review. #}
+    <div class="decision-brief" style="border-left:3px solid var(--line);padding:2px 0 2px 10px;margin:8px 0;font-size:14px">
+      {% for label, text in brief %}<p style="margin:2px 0"><strong>{{ label }}:</strong> {{ text }}</p>{% endfor %}
+    </div>{% endif %}
     {# Ops 2026-11-06: the review agent's verdict, or a loud note that there is none. #}
     {% if no_analysis %}<p class="warn" style="font-size:13px;font-weight:600">⚠ No agent analysis: {{ no_analysis_reason }}. Check this order yourself before approving.</p>{% endif %}
     {% if agent_recommendation %}<p class="muted" style="font-size:13px">Agent recommends: <strong>{{ agent_recommendation }}</strong></p>{% endif %}

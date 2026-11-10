@@ -2,6 +2,35 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Decision brief on review cards (unreleased)
+
+- **`CARD_REASON_BRIEF` / `SHADOW_CARD_REASON_BRIEF`** (per-account, off by
+  default, same bare/`SHADOW_` semantics as the flags below; intended: shadow
+  on, paper off until its experiment ends). A review card gets three short
+  lines right under the action line: `Why:` (what the rule saw, with the
+  number), `Risk:` and `Plan:` (how it fits the owner's recorded view or the
+  strategy's thesis), about 40 words, on Telegram, email, the Pending page
+  and the approve-link page. A notification card with a brief is shorter
+  than before: the recommendation line keeps only the verdict (no reasoning
+  excerpt) and the footer is two lines. The full reasoning stays on the
+  review, the Pending page and the approve page.
+- The brief comes from the same model call as the long text: the review
+  agent returns a `brief` object next to `reasoning`; the chat and reflection
+  agents pass optional `brief_*` arguments on `propose_order`,
+  `draft_strategy` and `propose_strategy_revision`. No second LLM call. With
+  the flag on the review agent also sees the owner's active views for the
+  ticker.
+- Grounding: a brief is kept only if every number in it also appears in the
+  review's stored fields (analysis or rationale, rule condition, action,
+  snapshot, intent, views). A missing, malformed, over-long (80 words) or
+  ungrounded brief is dropped and the card falls back to the old layout.
+- Stored in `pending_reviews.decision_brief` (JSON: why, risk, plan, origin);
+  `allpath-research regime-metrics` writes it to `card_briefs.csv`.
+- With the flag off, card text, the review prompt and the tool schemas are
+  byte-for-byte what they were. The brief never resolves a review.
+- `allpath-trade demo` seeds a sample brief on its two pending reviews
+  (visible with `CARD_REASON_BRIEF=true`).
+
 ## Concise replies and Telegram order threads (unreleased)
 
 Both per-account, off by default; the bare flag applies to every account and

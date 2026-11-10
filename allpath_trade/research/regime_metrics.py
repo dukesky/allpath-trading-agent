@@ -304,6 +304,40 @@ def order_thread_rows(conn: sqlite3.Connection, start: str, end: str) -> list[di
     return rows
 
 
+CARD_BRIEF_COLUMNS = [
+    "review_id", "account", "ts", "date_et", "window", "kind", "source", "status",
+    "origin", "why", "risk", "plan",
+]
+
+
+def card_brief_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per review that carries a decision brief (CARD_REASON_BRIEF,
+    allpath_trade/card_brief.py): the same text its card showed. A DB from
+    before the feature has no column and so no rows."""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(pending_reviews)")}
+    if "decision_brief" not in columns:
+        return []
+    rows = []
+    for r in conn.execute(
+            "SELECT id, account, ts, kind, source, status, decision_brief"
+            " FROM pending_reviews WHERE decision_brief IS NOT NULL ORDER BY ts, id"):
+        day = et_date(r["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+        try:
+            brief = json.loads(r["decision_brief"])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(brief, dict):
+            continue
+        rows.append({"review_id": r["id"], "account": r["account"], "ts": r["ts"],
+                     "date_et": day, "window": window_for(day), "kind": r["kind"],
+                     "source": r["source"], "status": r["status"],
+                     "origin": brief.get("origin", ""), "why": brief.get("why", ""),
+                     "risk": brief.get("risk", ""), "plan": brief.get("plan", "")})
+    return rows
+
+
 def _account_day(day: str, account: str, eod: str, *, revisions: list[Revision],
                  orders: list[Order], order_reviews, skips, reports, proposals,
                  history, trips, regimes, day_usage) -> dict[str, Any]:

@@ -58,7 +58,10 @@ class QueueingOrderSink:
         self.telegram_bot_token = telegram_bot_token
         self.web_base_url = web_base_url
 
-    def propose(self, intent: OrderIntent) -> str:
+    def propose(self, intent: OrderIntent, brief: dict | None = None) -> str:
+        """`brief` is an already-accepted decision brief
+        (allpath_trade/card_brief.py), or None: stored on the review and
+        shown on its card. None leaves everything as it was."""
         preview = self._preview(intent)
         review_id = self.queue.add(
             strategy_id="", rule_id="", ticker=intent.ticker,
@@ -67,11 +70,18 @@ class QueueingOrderSink:
             snapshot={"proposed_ts": datetime.now(UTC).isoformat()},
             intent=intent, source="chat",
             conversation_id=self.conversation_id, risk_preview=preview)
-        self._notify_queued(review_id, intent)
+        if brief:
+            try:
+                self.queue.attach_brief(int(review_id), brief)
+            except Exception as exc:  # noqa: BLE001 — the proposal is already queued
+                print(f"[order_sink] could not store card brief: {exc}", file=sys.stderr)
+                brief = None
+        self._notify_queued(review_id, intent, brief)
         return (f"queued for the user's approval (#{review_id}). "
                 f"Risk pre-check: {preview}")
 
-    def _notify_queued(self, review_id: int, intent: OrderIntent) -> None:
+    def _notify_queued(self, review_id: int, intent: OrderIntent,
+                       brief: dict | None = None) -> None:
         # Best-effort, never breaks the proposal: the row above is already
         # committed by the time this runs, same reasoning as
         # action_tools.py's `_notify_chat_draft_queued`. Not gated on any
@@ -83,7 +93,8 @@ class QueueingOrderSink:
             approve_url = events.approve_link(self.web_base_url, review_id)
             subject, body = events.review_queued(
                 account=self.account, review_id=review_id, ticker=intent.ticker,
-                action=intent.reason, strategy_id="", approve_url=approve_url)
+                action=intent.reason, strategy_id="", approve_url=approve_url,
+                brief=brief)
             notify_review_queued(
                 queue=self.queue, notifier=self.notifier, app_state=self.app_state,
                 telegram_bot_token=self.telegram_bot_token, review_id=review_id,

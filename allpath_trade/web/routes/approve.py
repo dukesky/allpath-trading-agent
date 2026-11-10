@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
-from allpath_trade import market_hours
+from allpath_trade import card_brief, market_hours
 from allpath_trade.agent.review import analysis_is_unparseable
 from allpath_trade.agent.shadow_tools import current_shadow_state
 from allpath_trade.execution import ExecutionError
@@ -292,6 +292,11 @@ def confirm(request: Request, review_id: str, k: str = "") -> HTMLResponse:
     context = _confirm_context(b, row)
     context["token"] = k
     context["account"] = row["account"]
+    # Decision brief (CARD_REASON_BRIEF): empty unless the flag is on for
+    # the row's account and a brief is stored.
+    context["brief"] = card_brief.shown(
+        getattr(components(request), "settings", None), row["account"],
+        row["decision_brief"])
     return templates.TemplateResponse(
         request, "approve_confirm.html", context, headers=_SECURITY_HEADERS)
 

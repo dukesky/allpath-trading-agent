@@ -76,11 +76,16 @@ def cmd_status_json(settings: Settings, broker: Broker, account: str = "paper") 
 # auth artifact, and `snapshot` can hold whole strategy YAML files (fetch a
 # single row's detail from the web UI instead).
 _REVIEW_JSON_EXCLUDED = {"approval_token_hash", "snapshot"}
-_REVIEW_JSON_PARSED = ("agent_analysis", "intent", "risk_preview", "execution_result")
+_REVIEW_JSON_PARSED = ("agent_analysis", "intent", "risk_preview", "execution_result",
+                       "decision_brief")
 
 
 def _review_to_json(row) -> dict:
     d = {k: v for k, v in dict(row).items() if k not in _REVIEW_JSON_EXCLUDED}
+    if d.get("decision_brief") is None:
+        # No brief (CARD_REASON_BRIEF off, or none accepted): the row reads
+        # exactly as it did before the column existed.
+        d.pop("decision_brief", None)
     for key in _REVIEW_JSON_PARSED:
         if isinstance(d.get(key), str):
             try:
@@ -504,6 +509,9 @@ def cmd_reviews_reanalyze(q, review_agent, review_id: int) -> int:
         print(f"error: review agent failed, nothing attached: {exc}", file=sys.stderr)
         return 1
     q.attach_analysis(review_id, analysis.model_dump_json())
+    if getattr(analysis, "brief", None):
+        # CARD_REASON_BRIEF on for this account: keep the fresh brief too.
+        q.attach_brief(review_id, analysis.brief)
     if analysis.is_unparseable():
         # TDSC red-team F6: a non-answer is not the agent's "skip".
         print(f"review {review_id}: no agent analysis, the agent's reply "
