@@ -152,9 +152,13 @@ def _render(request: Request, template: str, *, include_activity: bool,
     messages: list[dict] = []
     activity: list[str] = []
     llm_error: str | None = None
+    demo_prompts: tuple[str, ...] = ()
     try:
         messages = service.messages()
         activity = service.activity if include_activity else []
+        # Non-empty only for the keyless demo's scripted model
+        # (allpath_trade/demo_chat.py); every real client has none.
+        demo_prompts = service.demo_prompts()
     except LLMConfigError as exc:
         # `serve` only requires broker credentials -- the LLM key is
         # optional at startup precisely so Settings can be reached to add
@@ -176,7 +180,7 @@ def _render(request: Request, template: str, *, include_activity: bool,
         "page": "chat", "messages": messages,
         "activity": activity, "pending": pending, "llm_error": llm_error,
         "onboarding": onboarding, "hint_import": hint_import,
-        "notice": notice,
+        "notice": notice, "demo_prompts": demo_prompts,
         # setup-wizard T6: the attach control's own limits are rendered from
         # the SAME constants the server validates against, so the inline
         # client-side check can't drift into rejecting what the server

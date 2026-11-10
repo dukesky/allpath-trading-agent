@@ -59,11 +59,16 @@ class ChatService:
     concurrent paper one, matching the two pipelines' general "own everything,
     isolated" design."""
 
-    def __init__(self, holder, account: str = DEFAULT_ACCOUNT) -> None:
+    def __init__(self, holder, account: str = DEFAULT_ACCOUNT,
+                 llm_builder: Callable | None = None) -> None:
         if not is_valid_account(account):
             raise ValueError(f"invalid account: {account!r}")
         self.holder = holder
         self.account = account
+        # Only `allpath-trade demo` passes one (demo_chat.build_demo_llm:
+        # the real client with a key, a scripted one without). None, the
+        # default for `serve` and everything else, means llm.factory.build_llm.
+        self._llm_builder = llm_builder
         self._lock = threading.Lock()
         self._turn_lock = threading.Lock()
         self._session: AgentSession | None = None
@@ -104,6 +109,8 @@ class ChatService:
         from allpath_trade.llm.factory import build_llm
         from allpath_trade.web.account_ctx import bundle_for
 
+        if self._llm_builder is not None:
+            build_llm = self._llm_builder
         c = self.holder.get()
         # `b` is this ChatService's own account bundle -- for the paper
         # account this IS `c` itself (see account_ctx.bundle_for's
@@ -284,6 +291,11 @@ class ChatService:
 
     def messages(self) -> list[dict]:
         return list(self.session().history)
+
+    def demo_prompts(self) -> tuple[str, ...]:
+        """Suggested prompts of the keyless demo's scripted model
+        (allpath_trade/demo_chat.py). Empty for every real LLM client."""
+        return tuple(getattr(self.session().llm, "suggested_prompts", ()))
 
     def note_resolution(self, line: str, source: str = "web") -> None:
         """Record an out-of-band event (an approval, a fill) in the transcript

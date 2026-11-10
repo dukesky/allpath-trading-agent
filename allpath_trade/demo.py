@@ -17,7 +17,8 @@ anywhere:
 
 LLM keys in the environment are left alone on purpose: with one, the chat
 page talks to a real model against the sandboxed demo data; without one it
-shows the usual "add a key" notice and every other page still works.
+runs on a small scripted stand-in (allpath_trade/demo_chat.py) that answers
+a few sample questions through the real tool loop.
 """
 
 from __future__ import annotations
@@ -65,11 +66,13 @@ DEMO_PRICES: dict[str, Decimal] = {
     "NVDA": Decimal("212.40"),
     "AAPL": Decimal("268.10"),
     "MSFT": Decimal("505.20"),
+    "AMZN": Decimal("231.50"),  # not held: the keyless chat drafts a strategy on it
 }
 _PREV_CLOSE: dict[str, Decimal] = {
     "NVDA": Decimal("209.85"),
     "AAPL": Decimal("270.02"),
     "MSFT": Decimal("501.10"),
+    "AMZN": Decimal("229.90"),
 }
 _HOLDINGS: dict[str, tuple[Decimal, Decimal]] = {  # ticker: (qty, avg entry)
     "NVDA": (Decimal(40), Decimal("188.25")),

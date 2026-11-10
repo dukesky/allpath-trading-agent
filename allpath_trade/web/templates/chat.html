@@ -5,7 +5,19 @@
    equivalent (spec §⑥). #}
 <p class="row" style="margin:0 0 10px">{% include "_account_chip.html" %}</p>
 {% include "_chat_messages.html" %}
-{% if onboarding %}
+{% if demo_prompts and current_account != 'shadow' %}
+{# Keyless `allpath-trade demo` only (allpath_trade/demo_chat.py): the
+   questions the scripted stand-in can answer. Never set under `serve`. #}
+<div class="card onboarding-card" id="demo-prompts" style="margin:12px 0">
+  <p><strong>Keyless demo: try one of these</strong></p>
+  <p class="muted">No LLM key is set, so a scripted stand-in answers these from the sample data, using the real tools. Add a key on <a href="/settings">Settings</a> to chat with a real model.</p>
+  <div class="examples">
+    {% for prompt in demo_prompts %}
+    <button type="button" class="example" data-fill="{{ prompt }}">{{ prompt }}</button>
+    {% endfor %}
+  </div>
+</div>
+{% elif onboarding %}
 {# setup-wizard T4: per-account onboarding hint, above the input. Renders
    even when `llm_error` is set (outside the `{% if not llm_error %}` block
    below) -- it needs no LLM call, and it's the one thing on this page
@@ -34,6 +46,16 @@
   // when the form isn't on the page (the llm_error branch below omits it),
   // which is fine: there's nothing to fill in that state either.
   document.querySelectorAll('.onboarding-card .example').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var input = document.getElementById('chat-input');
+      if (input) { input.value = btn.dataset.fill; input.focus(); }
+    });
+  });
+</script>
+{% endif %}
+{% if demo_prompts and current_account != 'shadow' %}
+<script>
+  document.querySelectorAll('#demo-prompts .example').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var input = document.getElementById('chat-input');
       if (input) { input.value = btn.dataset.fill; input.focus(); }
