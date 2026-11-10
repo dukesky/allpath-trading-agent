@@ -938,6 +938,15 @@ class ReviewQueue:
             (json.dumps(brief), review_id, self._account))
         self._conn.commit()
 
+    def record_brief_drop(self, review_id: int, drop: dict | None) -> None:
+        """Keep what the grounding check dropped from a decision brief (the
+        raw text and the reason), or clear it with None. Evidence only: no
+        card or page shows it and it never changes the row's status."""
+        self._conn.execute(
+            "UPDATE pending_reviews SET brief_drop = ? WHERE id = ? AND account = ?",
+            (json.dumps(drop) if drop else None, review_id, self._account))
+        self._conn.commit()
+
     def set_hold_reason(self, review_id: int, reason: str) -> None:
         """TDSC red-team F1: record why the auto regime left this revision
         for a human. Display only; the row stays pending and approvable."""

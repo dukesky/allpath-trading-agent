@@ -809,16 +809,16 @@ class Sentinel:
             return TriggerOutcome(**base, disposition="queued",
                                   detail=f"agent review failed: {exc}")
         # CARD_REASON_BRIEF: only an agent built with the flag on ever sets
-        # `brief` (already grounded, agent/review.py). Storing it is display
-        # only; a failure here just means the card keeps its old layout.
+        # `brief` (already grounded, agent/review.py) or `brief_drop` (what
+        # the check dropped, kept as evidence). Storing them is display and
+        # bookkeeping only; a failure just means the card keeps its old layout.
         brief = getattr(analysis, "brief", None)
-        if brief:
-            try:
-                self.queue.attach_brief(rid, brief)
-            except Exception as exc:  # noqa: BLE001 — never lose the trigger over a brief
-                print(f"[sentinel] could not store card brief for #{rid}: {exc}",
-                      file=sys.stderr)
-                brief = None
+        brief_drop = getattr(analysis, "brief_drop", None)
+        if brief or brief_drop:
+            from allpath_trade import card_brief
+
+            brief = card_brief.store(
+                self.queue, rid, card_brief.Checked(brief, "", brief_drop), log="review")
 
         if analysis.is_unparseable():
             # The LLM's output couldn't be parsed as a recommendation at all —

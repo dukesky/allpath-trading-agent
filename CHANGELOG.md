@@ -2,6 +2,31 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Decision brief: dropped briefs leave evidence, fewer false drops (unreleased)
+
+Only affects accounts with `CARD_REASON_BRIEF` on; with the flag off nothing
+changes. After the first real brief (shadow, 2026-11-09) was dropped over a
+lone "9" and its text was kept nowhere.
+
+- **Evidence**: whatever the grounding check drops is stored on the review in
+  `pending_reviews.brief_drop` (JSON: reason, origin, kept_brief, missing
+  figures, the raw brief text, ts), next to the stderr line, which now names
+  the review id. `allpath-research regime-metrics` writes it to
+  `card_brief_drops.csv`. A review agent that returns no brief at all is
+  recorded too (`reason: no brief`).
+- **Now counted as backed**: figures from the analysis `sources` list; the
+  share estimate the card itself shows; a figure written rounded, truncated,
+  to the nearest ten from 100 up, or with a k/M/B suffix (within 10%); a gap
+  the trigger data implies (price against the rule's thresholds and the
+  average entry, weight against its limits, as a difference or a percent);
+  a date that is in the stored review, or the review's own date.
+- **Still refused**: figures from tool results that are not in the stored
+  analysis, bare counts nothing stored carries ("9 days to earnings"),
+  arithmetic between numbers picked out of prose.
+- **Softer failure**: Why and Risk must each pass or there is no brief; an
+  ungrounded or over-long Plan line is left off and the rest is kept (and
+  recorded with `kept_brief: true`).
+
 ## Decision brief on review cards (unreleased)
 
 - **`CARD_REASON_BRIEF` / `SHADOW_CARD_REASON_BRIEF`** (per-account, off by

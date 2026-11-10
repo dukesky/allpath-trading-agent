@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import difflib
-import sys
 from collections.abc import Callable
 from typing import Optional
 
@@ -200,17 +199,11 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
         if card_brief:
             from allpath_trade import card_brief as _brief
 
-            brief, dropped = _brief.from_tool_args(
+            checked = _brief.from_tool_args(
                 brief_why, brief_risk, brief_plan, origin="reflection",
                 sources=[rationale, old_yaml, new_yaml, doc.position.ticker])
-            if brief:
-                try:
-                    queue.attach_brief(int(rid), brief)
-                except Exception as exc:  # noqa: BLE001 — the revision is already queued
-                    print(f"[reflection] could not store card brief: {exc}",
-                          file=sys.stderr)
-            elif dropped != "no brief":
-                print(f"[reflection] card brief dropped: {dropped}", file=sys.stderr)
+            if checked.brief or checked.drop:
+                _brief.store(queue, int(rid), checked, log="reflection")
         if on_proposed is not None:
             on_proposed(int(rid))
         return (f"Revision queued for user approval (#{rid}). It will not "

@@ -58,10 +58,12 @@ class QueueingOrderSink:
         self.telegram_bot_token = telegram_bot_token
         self.web_base_url = web_base_url
 
-    def propose(self, intent: OrderIntent, brief: dict | None = None) -> str:
+    def propose(self, intent: OrderIntent, brief: dict | None = None,
+                brief_drop: dict | None = None) -> str:
         """`brief` is an already-accepted decision brief
         (allpath_trade/card_brief.py), or None: stored on the review and
-        shown on its card. None leaves everything as it was."""
+        shown on its card. `brief_drop` is what its check dropped, kept on
+        the review as evidence. Both None leaves everything as it was."""
         preview = self._preview(intent)
         review_id = self.queue.add(
             strategy_id="", rule_id="", ticker=intent.ticker,
@@ -70,12 +72,12 @@ class QueueingOrderSink:
             snapshot={"proposed_ts": datetime.now(UTC).isoformat()},
             intent=intent, source="chat",
             conversation_id=self.conversation_id, risk_preview=preview)
-        if brief:
-            try:
-                self.queue.attach_brief(int(review_id), brief)
-            except Exception as exc:  # noqa: BLE001 — the proposal is already queued
-                print(f"[order_sink] could not store card brief: {exc}", file=sys.stderr)
-                brief = None
+        if brief or brief_drop:
+            from allpath_trade import card_brief
+
+            brief = card_brief.store(
+                self.queue, int(review_id), card_brief.Checked(brief, "", brief_drop),
+                log="order_sink")
         self._notify_queued(review_id, intent, brief)
         return (f"queued for the user's approval (#{review_id}). "
                 f"Risk pre-check: {preview}")

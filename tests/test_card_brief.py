@@ -212,24 +212,25 @@ def _raw(**over):
 
 
 def test_grounded_brief_is_accepted_and_cleaned():
-    brief, dropped = card_brief.accept(_raw(why="  Price 207.30 is under\n the 215 trigger. "),
-                                       sources=SOURCES, origin="review_agent")
-    assert dropped == ""
+    brief, dropped, drop = card_brief.accept(
+        _raw(why="  Price 207.30 is under\n the 215 trigger. "),
+        sources=SOURCES, origin="review_agent")
+    assert dropped == "" and drop is None
     assert brief == {"why": "Price 207.30 is under the 215 trigger.",
                      "risk": "Weight rises to about 10%.", "plan": "",
                      "origin": "review_agent"}
 
 
 def test_rounded_numbers_and_fractions_as_percent_count_as_grounded():
-    brief, _ = card_brief.accept(
+    checked = card_brief.accept(
         _raw(why="Price 207 is under 215.", risk="Weight is 8.3% now, 12% is the limit."),
         sources=SOURCES, origin="x")
-    assert brief is not None
+    assert checked.brief is not None
 
 
 def test_number_missing_from_the_stored_fields_drops_the_brief():
-    brief, dropped = card_brief.accept(_raw(risk="Earnings in 3 days could cut 20%."),
-                                       sources=SOURCES, origin="x")
+    brief, dropped, _drop = card_brief.accept(_raw(risk="Earnings in 3 days could cut 20%."),
+                                              sources=SOURCES, origin="x")
     assert brief is None
     assert "3" in dropped and "20" in dropped
     assert card_brief.ungrounded_numbers(_raw(), SOURCES) == []
@@ -250,7 +251,7 @@ def test_malformed_or_overlong_briefs_are_dropped():
 
 def test_tool_args_without_any_brief_are_just_no_brief():
     assert card_brief.from_tool_args(None, "", None, sources=[], origin="chat") == (
-        None, "no brief")
+        None, "no brief", None)
 
 
 def test_load_tolerates_bad_stored_values():
@@ -522,7 +523,8 @@ def test_flag_on_propose_order_hands_the_brief_to_the_sink(tmp_path):
           brief_why="Puts 500 of idle cash into MSFT on the dip.",
           brief_risk="The dip continues.")
     _call(reg, "propose_order", ticker="MSFT", side="buy", notional="500", reason="dip")
-    [(_, brief), (_intent,)] = sink.calls
+    [(_, brief, drop), (_intent,)] = sink.calls
+    assert drop is None
     assert brief["origin"] == "chat" and brief["why"].startswith("Puts 500")
 
 
