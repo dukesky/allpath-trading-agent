@@ -10,7 +10,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![arXiv](https://img.shields.io/badge/arXiv-2610.26662-b31b1b.svg)](https://arxiv.org/abs/2610.26662)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
-[![Tests](https://img.shields.io/badge/tests-3051%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-3097%20passing-brightgreen.svg)](#development)
 
 [Try the demo](#try-it-in-one-minute-no-keys) ·
 [Getting Started](#getting-started) ·
