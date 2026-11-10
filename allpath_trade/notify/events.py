@@ -21,6 +21,14 @@ FOOTER = ("\n\nOpen the AllPath Trade dashboard to act on this. "
           "just that item, valid for 24 hours and dead as soon as it's used.")
 
 
+# The same statements in two lines, for a card that carries a decision brief
+# (CARD_REASON_BRIEF, allpath_trade/card_brief.py): that card is meant to be
+# read in a few seconds. Still true whether or not the card has a link.
+BRIEF_FOOTER = ("\n\nAct on this in the AllPath Trade dashboard. This message never "
+                "carries your dashboard access token; an approval link, if present, "
+                "works once, for this item only, for 24 hours.")
+
+
 class Subject(str):
     """A notification subject line that also carries a structured,
     secret-free description of the event (`.event`) for the machine-readable
@@ -254,9 +262,13 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
 
     `brief` (allpath_trade/card_brief.py, CARD_REASON_BRIEF) is the review's
     stored decision brief. When given, its "Why / Risk / Plan" lines go
-    right under the action lines (proposal, strategy, price, size) and
-    above the agent's longer recommendation; every other line is unchanged.
-    None (the flag off, or no usable brief) gives exactly the old body."""
+    right under the action lines (proposal, strategy, price, size), and the
+    card gets shorter around them: the recommendation line keeps only the
+    verdict (the " — <reasoning excerpt>" tail is dropped; the full
+    reasoning stays on the review and on the Pending/approve pages) and
+    the footer is `BRIEF_FOOTER`. Warnings, the shadow "you'll place it
+    yourself" line and the approve link are unchanged. None (the flag off,
+    or no usable brief) gives exactly the old body."""
     subject_noun = ticker or "Ledger"
     # int(): `review_id` is usually a ReviewHandle, whose `.token` must never
     # reach the event (see Subject's docstring).
@@ -286,7 +298,11 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
         from allpath_trade.card_brief import brief_lines
 
         lines.extend(brief_lines(brief))
-    if recommendation:
+    if recommendation and brief:
+        # Callers pass "<verdict> — <reasoning excerpt>"; the brief replaces
+        # the excerpt.
+        lines.append(f"The agent recommends: {recommendation.split(' — ', 1)[0]}")
+    elif recommendation:
         lines.append(f"The agent recommends: {recommendation}")
     if account == "shadow" and kind == "order":
         lines.append("If approved, you'll place it yourself — approving here "
@@ -294,7 +310,7 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     body = "\n".join(lines)
     if approve_url:
         body += f"\nReview & approve: {approve_url}"
-    return subject, body + FOOTER
+    return subject, body + (BRIEF_FOOTER if brief else FOOTER)
 
 
 def daily_digest(*, account: str, triggers: int, trades: int, pending: int,

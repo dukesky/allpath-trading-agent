@@ -10,7 +10,10 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
   lines right under the action line: `Why:` (what the rule saw, with the
   number), `Risk:` and `Plan:` (how it fits the owner's recorded view or the
   strategy's thesis), about 40 words, on Telegram, email, the Pending page
-  and the approve-link page. The full analysis stays below it.
+  and the approve-link page. A notification card with a brief is shorter
+  than before: the recommendation line keeps only the verdict (no reasoning
+  excerpt) and the footer is two lines. The full reasoning stays on the
+  review, the Pending page and the approve page.
 - The brief comes from the same model call as the long text: the review
   agent returns a `brief` object next to `reasoning`; the chat and reflection
   agents pass optional `brief_*` arguments on `propose_order`,

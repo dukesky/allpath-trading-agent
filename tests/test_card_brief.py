@@ -113,20 +113,55 @@ def test_card_text_without_a_brief_is_byte_identical_to_before():
     assert events.review_queued(**REVISION_KW, brief=None)[1] == REVISION_BODY_BEFORE
 
 
-def test_order_card_puts_the_brief_under_the_action_lines():
+def test_order_card_with_a_brief_is_the_short_layout():
     subject, body = events.review_queued(**ORDER_KW, brief=BRIEF)
-    lines = body.split("\n")
-    at = lines.index("Est. size: ~9.65 shares at that price")
-    assert lines[at + 1:at + 4] == BRIEF_LINES
-    assert lines[at + 4] == "The agent recommends: execute — orderly pullback"
-    # Nothing else moved or went away: drop the brief and it is the old card.
-    assert "\n".join(line for line in lines if line not in BRIEF_LINES) == ORDER_BODY_BEFORE
+    assert body == (
+        "Item #12 is waiting for you.\n"
+        "Proposed: buy $2000 on NVDA\n"
+        "Strategy: nvda-ai-infra\n"
+        "Price at trigger: $207.30\n"
+        "Est. size: ~9.65 shares at that price\n"
+        "Why: Price 204 is under the 205 buy trigger.\n"
+        "Risk: The dip continues after weak guidance.\n"
+        "Plan: Fits the plan to add on pullbacks.\n"
+        "The agent recommends: execute\n"
+        "If approved, you'll place it yourself — approving here only records it in "
+        "your shadow ledger.\n"
+        "Review & approve: https://x.test/a/12?k=tok" + events.BRIEF_FOOTER)
+    assert len(body) < len(ORDER_BODY_BEFORE)
+    assert len(events.BRIEF_FOOTER) < len(events.FOOTER) / 1.5
     assert subject == events.review_queued(**ORDER_KW)[0]
     assert "brief" not in json.dumps(subject.event)
     assert_english_only(body)
 
 
-def test_revision_card_puts_the_brief_under_the_action_lines():
+def test_short_layout_drops_only_the_reasoning_excerpt():
+    long = "execute — " + "The pullback is orderly — volume is falling. " * 6
+    _, body = events.review_queued(**{**ORDER_KW, "recommendation": long}, brief=BRIEF)
+    assert "The agent recommends: execute\n" in body
+    assert "orderly" not in body
+    # Without a brief the excerpt is still there, as before.
+    assert long in events.review_queued(**{**ORDER_KW, "recommendation": long})[1]
+
+
+def test_short_layout_keeps_warnings_and_the_shadow_note():
+    _, body = events.review_queued(
+        **{**ORDER_KW, "recommendation": ""}, brief=BRIEF,
+        no_analysis_reason="LLM unavailable", stop_warning="Stop already fired.",
+        option_preview="2x NVDA261016C00220000")
+    lines = body.split("\n")
+    assert lines[0] == "⚠ No agent analysis: LLM unavailable"
+    assert lines[1] == "⚠ Stop already fired."
+    assert any(line.startswith("Option order at trigger: 2x NVDA261016C00220000")
+               for line in lines)
+    assert any(line.startswith("If approved, you'll place it yourself") for line in lines)
+    assert "Review & approve: https://x.test/a/12?k=tok" in lines
+    for fact in ("never carries your dashboard access token", "works once",
+                 "this item only", "24 hours"):
+        assert fact in events.BRIEF_FOOTER
+
+
+def test_revision_card_with_a_brief_is_the_short_layout():
     brief = {"why": "The 225 stop gives back most of the gain.",
              "risk": "A stop at 245 can trigger on a normal dip.", "plan": ""}
     _, body = events.review_queued(**REVISION_KW, brief=brief)
@@ -135,7 +170,7 @@ def test_revision_card_puts_the_brief_under_the_action_lines():
         "Proposed: revise strategy 'aapl-services' to v3 on AAPL\n"
         "Strategy: aapl-services\n"
         "Why: The 225 stop gives back most of the gain.\n"
-        "Risk: A stop at 245 can trigger on a normal dip." + FOOTER)
+        "Risk: A stop at 245 can trigger on a normal dip." + events.BRIEF_FOOTER)
 
 
 def test_brief_and_order_thread_hint_share_one_telegram_card(tmp_path, monkeypatch):
@@ -323,7 +358,11 @@ def test_sentinel_stores_the_brief_and_puts_it_on_the_card(tmp_path):
     lines = body.split("\n")
     at = lines.index(BRIEF_LINES[0])
     assert lines[at:at + 3] == BRIEF_LINES
-    assert lines[at + 3] == "The agent recommends: execute — because"
+    # The verdict only: the brief replaces the reasoning excerpt on the card,
+    # and the full reasoning stays on the review.
+    assert lines[at + 3] == "The agent recommends: execute"
+    assert "because" not in body and "because" in row["agent_analysis"]
+    assert body.endswith(events.BRIEF_FOOTER)
 
 
 def test_sentinel_card_without_a_brief_keeps_the_old_layout(tmp_path):
@@ -333,8 +372,13 @@ def test_sentinel_card_without_a_brief_keeps_the_old_layout(tmp_path):
     assert row["decision_brief"] is None
     _, with_brief = _run_confirm(tmp_path / "b", BriefAgent(dict(BRIEF)))
     assert "Why:" not in with_none
+    assert "The agent recommends: execute — because" in with_none
+    assert with_none.endswith(events.FOOTER)
+    # Same card apart from the brief, the verdict-only line and the footer.
     assert "\n".join(line for line in with_brief.split("\n")
-                     if line not in BRIEF_LINES) == with_none
+                     if line not in BRIEF_LINES).replace(
+        "The agent recommends: execute", "The agent recommends: execute — because"
+    ).replace(events.BRIEF_FOOTER, events.FOOTER) == with_none
 
 
 def test_sentinel_card_survives_a_brief_that_cannot_be_stored(tmp_path):
