@@ -2,6 +2,28 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Keyless demo chat and repo hygiene (unreleased)
+
+- **`allpath-trade demo` chat works with no LLM key.** With none configured,
+  the demo's chat runs on a scripted stand-in (`allpath_trade/demo_chat.py`)
+  that answers three suggested questions through the real tool loop: why the
+  pending NVDA order was proposed, which position is riskiest, and "draft a
+  pullback strategy", which queues a real strategy draft on Pending. The page
+  opens on one example exchange. Every scripted answer is labelled as such;
+  any other question gets a short reply saying this is the keyless demo and
+  how to add a key. With a key the demo builds the real client and seeds no
+  conversation, as before.
+- The stand-in is reachable only through `allpath-trade demo`
+  (`create_app(..., llm_builder=...)`, `None` everywhere else). `serve`
+  without a key still shows "Chat needs an LLM key". No change to trading,
+  review, approval, scheduler or Telegram behaviour.
+- README (both languages): an animated tour of the demo chat
+  (`docs/images/demo/chat-demo.gif`, demo data only) is the new hero.
+- New `CONTRIBUTING.md` and GitHub issue templates (bug report, feature
+  request).
+- Stopped tracking personal dev files (`.claude/settings.local.json`,
+  `.claude/launch.json`, `.superpowers/snapshot/`); they are ignored now.
+
 ## Decision brief on review cards (unreleased)
 
 - **`CARD_REASON_BRIEF` / `SHADOW_CARD_REASON_BRIEF`** (per-account, off by

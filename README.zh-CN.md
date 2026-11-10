@@ -25,9 +25,9 @@
 ---
 
 <p align="center">
-  <img src="docs/images/demo/pending.png" alt="Pending 页面：规则触发后，agent 解释为什么建议买入，在你点 Approve 之前什么都不会发生；夜间反思还提议上调一个止损，以 diff 形式展示。" width="900">
+  <img src="docs/images/demo/chat-demo.gif" alt="无密钥 demo 聊天的动图：先问 agent 为什么提议这笔 NVDA 订单并得到三条理由，再让它为 AMZN 起草一条回调买入策略，最后在 Pending 页面以 diff 查看新策略并批准。" width="900">
 </p>
-<p align="center"><sub>来自 <code>allpath-trade demo</code> 的 Pending 页面（示例数据，非真实账户）。规则触发，agent 给出看法，你批准之前不会成交；昨晚的反思想修改它自己的一条策略，同样要等你点头。</sub></p>
+<p align="center"><sub><code>allpath-trade demo</code> 里的聊天（示例数据，不需要 LLM 密钥：回答是预设脚本，工具调用和审批流程是真的）。问它为什么提议一笔订单，让它起草一条策略，再到 Pending 批准。</sub></p>
 
 ## 一分钟试用（无需任何密钥）
 
@@ -38,6 +38,13 @@ uv run allpath-trade demo
 ```
 
 打开 <http://localhost:8790>，用 `demo` 登录。你会看到一个示例组合、三条策略、一笔附带 agent 分析的待批订单、一条策略修订提案和一份夜间报告。demo 跑在独立的临时目录里，成交是模拟的、行情是离线示例数据：不需要 Alpaca 账户，不需要 LLM 密钥，也不会有任何请求到达券商。（需要先装 [uv](https://docs.astral.sh/uv/getting-started/installation/)；`uv run` 首次运行会自动装好依赖。）
+
+没有密钥也能聊天：一个小的预设脚本会基于示例数据、通过真实的工具调用回答几条建议问题，所以你让它起草的策略会真的出现在 Pending 等你批准；其他问题会得到一句如实说明"这是无密钥 demo"的回复。在 Settings 页面填入 LLM 密钥后，同一个聊天就换成真实模型。
+
+<p align="center">
+  <img src="docs/images/demo/pending.png" alt="Pending 页面：规则触发后，agent 解释为什么建议买入，在你点 Approve 之前什么都不会发生；夜间反思还提议上调一个止损，以 diff 形式展示。" width="900">
+</p>
+<p align="center"><sub>来自 <code>allpath-trade demo</code> 的 Pending 页面（示例数据，非真实账户）。规则触发，agent 给出看法，你批准之前不会成交；昨晚的反思想修改它自己的一条策略，同样要等你点头。</sub></p>
 
 想接入自己的账户？运行 `uv run allpath-trade serve`，setup 向导会引导你填 LLM 密钥和免费的 Alpaca 模拟盘密钥。详见[快速上手](#快速上手)。
 
@@ -447,7 +454,7 @@ uv run allpath-trade memory show   # 查看 agent 记忆文件
 - **数据源**——Tiingo（日线）、Finnhub（新闻 / 情绪）
 - **健壮性加固**——资金路径上的边界情况、错误处理与测试覆盖
 
-较大的改动请先开 issue 讨论再提 pull request。所有资金路径代码都要求附带完备测试。
+环境搭建、测试命令和基本规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。较大的改动请先开 issue 讨论再提 pull request。所有资金路径代码都要求附带完备测试。
 
 ## 安全
 
