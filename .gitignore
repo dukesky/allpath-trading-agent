@@ -27,3 +27,10 @@ dist/
 # TDSC research exports contain production trading data; this repo is public.
 # Outputs go to the private paper repo (allpath-paper/data/tdsc/), never here.
 /research/tdsc/out/
+
+# Personal dev tooling (Claude Code local settings, worktrees, Superpowers
+# scratch files). Per-developer; never part of the project.
+.claude/settings.local.json
+.claude/launch.json
+.claude/worktrees/
+.superpowers/

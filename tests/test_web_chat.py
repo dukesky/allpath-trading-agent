@@ -568,7 +568,7 @@ def test_chat_page_has_optimistic_echo_and_disable_hooks(tmp_path, monkeypatch):
     # Task 2: the form must wire up the client-side instant-echo /
     # thinking-indicator / double-send-guard behavior via htmx hooks and
     # hx-disabled-elt, so a slow /chat/send turn doesn't look like a no-op
-    # to the user (see .superpowers/sdd/task-2-brief.md). We can only assert
+    # to the user. We can only assert
     # on the rendered markup here -- the actual DOM manipulation on submit
     # needs a browser.
     client = make_client(tmp_path, monkeypatch, [])
