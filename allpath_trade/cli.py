@@ -144,6 +144,7 @@ def prepare_demo(workdir: Path, host: str):
     without running uvicorn."""
     from allpath_trade.app import build_components
     from allpath_trade.demo import DemoBroker, DemoData, demo_token, scrub_outbound_env, seed_demo
+    from allpath_trade.demo_chat import DemoLLM, build_demo_llm, seed_sample_chat
     from allpath_trade.web.app import create_app
 
     scrub_outbound_env()
@@ -157,6 +158,11 @@ def prepare_demo(workdir: Path, host: str):
     conn = connect(settings.db_path)
     try:
         seed_demo(conn, settings.strategies_dir, settings.memory_dir)
+        # No LLM key: the chat runs on the scripted stand-in, and opens on
+        # one example exchange. With a key nothing is seeded and the chat
+        # is the real model's, as before.
+        if isinstance(build_demo_llm(settings), DemoLLM):
+            seed_sample_chat(conn)
     finally:
         conn.close()
     data = DemoData()
@@ -165,7 +171,7 @@ def prepare_demo(workdir: Path, host: str):
         return build_components(s, b, c, data=data)
 
     app = create_app(settings, broker=DemoBroker(), start_scheduler=False,
-                     builder=builder)
+                     builder=builder, llm_builder=build_demo_llm)
     return app, token
 
 

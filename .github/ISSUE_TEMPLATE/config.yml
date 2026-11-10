@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Try the keyless demo first
+    url: https://github.com/dukesky/allpath-trading-agent#try-it-in-one-minute-no-keys
+    about: "`uv run allpath-trade demo` shows the whole UI on sample data, with no accounts or keys."
+  - name: Security report
+    url: https://github.com/dukesky/allpath-trading-agent#security
+    about: Please do not post exploit details in a public issue. See the Security section.

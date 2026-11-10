@@ -5,6 +5,7 @@ import hashlib
 import queue
 import sys
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -341,7 +342,8 @@ def _stop_telegram(app: FastAPI) -> None:
 def create_app(settings: Settings, broker: Broker | None = None,
                start_scheduler: bool = False, scheduler_cls: type | None = None,
                telegram_poller_cls: type | None = None,
-               builder: Builder | None = None) -> FastAPI:
+               builder: Builder | None = None,
+               llm_builder: Callable | None = None) -> FastAPI:
     if scheduler_cls is None:
         from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -383,7 +385,9 @@ def create_app(settings: Settings, broker: Broker | None = None,
     # `app.state.chat` is kept as a second alias to the same paper instance,
     # for the same reason.
     app.state.chat_services = {
-        account: ChatService(app.state.holder, account=account)
+        # `llm_builder` is None except under `allpath-trade demo`.
+        account: ChatService(app.state.holder, account=account,
+                             llm_builder=llm_builder)
         for account in ACCOUNTS
     }
     app.state.chat_service = app.state.chat_services[DEFAULT_ACCOUNT]

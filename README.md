@@ -10,7 +10,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![arXiv](https://img.shields.io/badge/arXiv-2610.26662-b31b1b.svg)](https://arxiv.org/abs/2610.26662)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
-[![Tests](https://img.shields.io/badge/tests-2964%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-3051%20passing-brightgreen.svg)](#development)
 
 [Try the demo](#try-it-in-one-minute-no-keys) ·
 [Getting Started](#getting-started) ·
@@ -25,9 +25,9 @@
 ---
 
 <p align="center">
-  <img src="docs/images/demo/pending.png" alt="The Pending page: a rule fired, the agent explains why it recommends the buy, and nothing happens until you press Approve. A nightly reflection also proposes raising a stop, shown as a diff." width="900">
+  <img src="docs/images/demo/chat-demo.gif" alt="Animated tour of the keyless demo chat: asking why the agent proposed an NVDA order and getting three reasons, asking it to draft a pullback strategy for AMZN, then opening the Pending page to read the new strategy as a diff and approve it." width="900">
 </p>
-<p align="center"><sub>The Pending page from <code>allpath-trade demo</code> (sample data, not a real account). A rule fired; the agent explains its view; nothing trades until you approve. Last night's reflection also wants to change one of its own strategies, and that waits for you too.</sub></p>
+<p align="center"><sub>The chat in <code>allpath-trade demo</code> (sample data, no LLM key: the answers are scripted, the tools and the approval flow are real). Ask why it proposed an order, have it draft a strategy, and approve the draft on Pending.</sub></p>
 
 ## Try it in one minute (no keys)
 
@@ -38,6 +38,13 @@ uv run allpath-trade demo
 ```
 
 Open <http://localhost:8790> and sign in with `demo`. You get a sample portfolio, three strategies, a pending order with the agent's analysis, a proposed strategy revision and a nightly report. The demo runs in its own temp directory with simulated fills and offline sample prices: no Alpaca account, no LLM key, and nothing reaches a broker. (Needs [uv](https://docs.astral.sh/uv/getting-started/installation/); `uv run` installs everything on first use.)
+
+The chat works without a key too: a small scripted stand-in answers a few suggested questions from the sample data through the real tools, so a strategy you ask it to draft shows up on Pending for your approval. Anything else gets an honest "this is the keyless demo" reply. Add an LLM key on the Settings page and the same chat runs on a real model.
+
+<p align="center">
+  <img src="docs/images/demo/pending.png" alt="The Pending page: a rule fired, the agent explains why it recommends the buy, and nothing happens until you press Approve. A nightly reflection also proposes raising a stop, shown as a diff." width="900">
+</p>
+<p align="center"><sub>The Pending page from <code>allpath-trade demo</code> (sample data, not a real account). A rule fired; the agent explains its view; nothing trades until you approve. Last night's reflection also wants to change one of its own strategies, and that waits for you too.</sub></p>
 
 Ready for the real thing? `uv run allpath-trade serve` starts a setup wizard that asks for an LLM key and free Alpaca paper keys. See [Getting Started](#getting-started).
 
@@ -472,6 +479,7 @@ allpath_trade/
 ├── execution.py    # Executor — the single trading entry point (stocks + options)
 ├── scheduler.py    # APScheduler wiring: sentinel ticks + after-close chain
 ├── demo.py         # `allpath-trade demo`: sample data, static broker, offline quotes
+├── demo_chat.py    # scripted stand-in LLM for the demo's keyless chat
 └── cli.py          # CLI: status, chat, serve, breaker, reviews, rearm, ...
 ```
 
@@ -490,7 +498,7 @@ allpath_trade/
 ## Development
 
 ```bash
-uv run pytest                  # 2368 tests, network-free
+uv run pytest                  # network-free unit suite
 uv run pytest -m integration   # live integration tests (Alpaca paper keys required)
 uv run ruff check .            # lint
 ```
@@ -506,7 +514,7 @@ Contributions are welcome. High-impact areas:
 - **Data sources** — Tiingo (EOD), Finnhub (news / sentiment)
 - **Hardening** — edge cases and test coverage on the money path
 
-Please open an issue to discuss substantial changes before submitting a pull request.
+Setup, the test command and the ground rules are in [CONTRIBUTING.md](CONTRIBUTING.md). Please open an issue to discuss substantial changes before submitting a pull request.
 
 ## Security
 

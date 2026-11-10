@@ -1,2 +1,0 @@
-- Mid/long-term horizon, AI infrastructure thesis
-- Prefers staged entries
