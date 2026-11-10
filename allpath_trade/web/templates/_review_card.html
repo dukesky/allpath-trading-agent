@@ -101,7 +101,12 @@
     {% if item['intent']['qty'] %}{{ item['intent']['qty'] }} shares{% else %}{{ item['intent']['notional'] | money }}{% endif %}
     {{ item['intent']['ticker'] }}
   </p>
-  {% endif %}
+  {% endif %}{% if item['decision_brief'] %}
+  {# Decision brief (CARD_REASON_BRIEF): why / risk / plan from the stored
+     review, right under the action line. The full analysis stays below. #}
+  <div class="decision-brief" style="border-left:3px solid var(--line);padding:2px 0 2px 10px;margin:8px 0;font-size:14px">
+    {% for label, text in item['decision_brief'] %}<p style="margin:2px 0"><strong>{{ label }}:</strong> {{ text }}</p>{% endfor %}
+  </div>{% endif %}
   {% if item['stop_warning'] %}
   {# Ops 2026-11-06 item 6: the strategy's one-shot stop is already spent. #}
   <p class="warn" style="font-size:13px;margin:8px 0 0;font-weight:600">⚠ {{ item['stop_warning'] }}</p>

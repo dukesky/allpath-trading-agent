@@ -14,7 +14,7 @@ from allpath_trade.agent.memory_tools import register_memory_tools
 from allpath_trade.agent.readonly_tools import register_readonly_tools
 from allpath_trade.agent.reflection_tools import register_reflection_tools
 from allpath_trade.agent.tools import ToolRegistry, fence_external
-from allpath_trade.config import Settings
+from allpath_trade.config import Settings, account_flag
 from allpath_trade.llm.base import LLMClient, LLMResponse
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
@@ -518,7 +518,11 @@ class Reflector:
         register_reflection_tools(
             registry, strategies=c.strategies, queue=c.queue,
             on_proposed=proposed_rids.append if auto_apply else None,
-            views_for=views.relevant if views is not None else None)
+            views_for=views.relevant if views is not None else None,
+            # Decision brief on review cards (allpath_trade/card_brief.py):
+            # optional brief_* tool arguments, only with the flag on.
+            **({"card_brief": True}
+               if account_flag(self.settings, "card_reason_brief", c.account) else {}))
 
         identity = load_identity()
         base_prompt = build_system_prompt(

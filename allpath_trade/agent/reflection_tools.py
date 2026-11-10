@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import sys
 from collections.abc import Callable
 from typing import Optional
 
@@ -33,6 +34,7 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
                               queue: ReviewQueue,
                               on_proposed: Optional[Callable[[int], None]] = None,
                               views_for: Callable[[str], list[dict]] | None = None,
+                              card_brief: bool = False,
                               ) -> None:
     """Registers the one tool a reflection session gets for changing a
     strategy: `propose_strategy_revision`. There is deliberately no
@@ -46,10 +48,19 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
     takes a `view_alignment` and refuses a proposal that leaves it out while
     such a view exists; the alignment is prefixed to the rationale so the
     Pending card shows it. None (paper, or the pilot off) leaves the tool and
-    its schema exactly as before."""
+    its schema exactly as before.
+
+    `card_brief` (CARD_REASON_BRIEF on for this account, see
+    allpath_trade/card_brief.py): the tool also takes optional `brief_*`
+    arguments, checked against the rationale and the proposed YAML and
+    stored on the queued review. False leaves the schema as before and
+    ignores the arguments."""
 
     def propose_strategy_revision(strategy_id: str, new_yaml: str, rationale: str,
-                                  view_alignment: str | None = None) -> str:
+                                  view_alignment: str | None = None,
+                                  brief_why: str | None = None,
+                                  brief_risk: str | None = None,
+                                  brief_plan: str | None = None) -> str:
         rationale = rationale.strip()[:_MAX_RATIONALE_CHARS]
         if not rationale:
             return "error: rationale is required"
@@ -186,6 +197,20 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
             strategy_id=strategy_id, ticker=doc.position.ticker,
             old_yaml=old_yaml, new_yaml=new_yaml, diff=diff, rationale=rationale,
             is_new=False)
+        if card_brief:
+            from allpath_trade import card_brief as _brief
+
+            brief, dropped = _brief.from_tool_args(
+                brief_why, brief_risk, brief_plan, origin="reflection",
+                sources=[rationale, old_yaml, new_yaml, doc.position.ticker])
+            if brief:
+                try:
+                    queue.attach_brief(int(rid), brief)
+                except Exception as exc:  # noqa: BLE001 — the revision is already queued
+                    print(f"[reflection] could not store card brief: {exc}",
+                          file=sys.stderr)
+            elif dropped != "no brief":
+                print(f"[reflection] card brief dropped: {dropped}", file=sys.stderr)
         if on_proposed is not None:
             on_proposed(int(rid))
         return (f"Revision queued for user approval (#{rid}). It will not "
@@ -200,6 +225,10 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
             "description": "Required when the owner has an active view on this "
                            "ticker or on MARKET: 'agree: ...', 'extend: ...' or "
                            "'contradict: ...' with one line of why."}
+    if card_brief:
+        from allpath_trade.card_brief import TOOL_PROPERTIES
+
+        properties.update(TOOL_PROPERTIES)
     registry.register(
         "propose_strategy_revision",
         "Propose a revision to an existing strategy's YAML, based on "

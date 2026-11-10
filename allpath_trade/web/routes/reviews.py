@@ -10,6 +10,7 @@ import yaml
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
+from allpath_trade import card_brief
 from allpath_trade.agent.review import analysis_is_unparseable
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
@@ -27,8 +28,12 @@ from allpath_trade.web.templating import templates
 router = APIRouter()
 
 
-def _decorate(row) -> dict:  # row: sqlite3.Row
+def _decorate(row, settings: object = None) -> dict:  # row: sqlite3.Row
     item = dict(row)
+    # Decision brief (CARD_REASON_BRIEF): labelled lines when the flag is on
+    # for the row's account, else an empty list and the card renders as before.
+    item["decision_brief"] = card_brief.shown(
+        settings, item.get("account", ""), item.get("decision_brief"))
     for field in ("snapshot", "intent", "agent_analysis", "execution_result"):
         raw = item.get(field)
         item[field] = json.loads(raw) if raw else None
@@ -367,7 +372,8 @@ def reviews(request: Request) -> HTMLResponse:
     # slice-then-filter order matters — with >=20 pending rows, slicing
     # first would take only pending rows off the top and filtering would
     # then empty the "Resolved" section even when resolved rows exist.
-    all_items = [_decorate(r) for r in b.queue.list(None)]
+    settings = getattr(c, "settings", None)
+    all_items = [_decorate(r, settings) for r in b.queue.list(None)]
     items = [r for r in all_items if r["status"] == "pending"]
     recent = [r for r in all_items if r["status"] != "pending"][:20]
     _attach_revision_diffs(b, items)

@@ -212,7 +212,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   approve_url: str = "", kind: str = "order",
                   option_preview: str = "",
                   no_analysis_reason: str = "",
-                  stop_warning: str = "") -> tuple[Subject, str]:
+                  stop_warning: str = "",
+                  brief: dict | None = None) -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -249,7 +250,13 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
 
     `no_analysis_reason`, when non-empty, puts a "⚠ No agent analysis: ..."
     warning on the FIRST line (ops 2026-11-06: reviews with an empty
-    analysis read like normal cards and were approved blind for a week)."""
+    analysis read like normal cards and were approved blind for a week).
+
+    `brief` (allpath_trade/card_brief.py, CARD_REASON_BRIEF) is the review's
+    stored decision brief. When given, its "Why / Risk / Plan" lines go
+    right under the action lines (proposal, strategy, price, size) and
+    above the agent's longer recommendation; every other line is unchanged.
+    None (the flag off, or no usable brief) gives exactly the old body."""
     subject_noun = ticker or "Ledger"
     # int(): `review_id` is usually a ReviewHandle, whose `.token` must never
     # reach the event (see Subject's docstring).
@@ -275,6 +282,10 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     if option_preview:
         lines.append(f"Option order at trigger: {option_preview} — re-priced and "
                      "re-checked when you approve")
+    if brief:
+        from allpath_trade.card_brief import brief_lines
+
+        lines.extend(brief_lines(brief))
     if recommendation:
         lines.append(f"The agent recommends: {recommendation}")
     if account == "shadow" and kind == "order":

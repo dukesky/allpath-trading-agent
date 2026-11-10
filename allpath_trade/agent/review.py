@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+import sys
+from collections.abc import Callable, Iterator
+from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
+from allpath_trade import card_brief as _brief
 from allpath_trade.agent.context import (
     LIVE_POSITIONS_NOTE,
     live_position_line,
@@ -73,6 +76,10 @@ class ReviewAnalysis(BaseModel):
     # `recommendation` is then a placeholder, never the agent's decision, and
     # every surface must show "no agent analysis" instead of "skip".
     unparseable: bool = False
+    # Decision brief (allpath_trade/card_brief.py). Only ever set by an
+    # agent built with `card_brief=True`, after the grounding check; stored
+    # in its own column, so it is excluded from the `agent_analysis` dump.
+    brief: Any = Field(default=None, exclude=True)
 
     def is_unparseable(self) -> bool:
         """The flag, or the reasoning prefix that rows attached before the
@@ -91,7 +98,8 @@ def analysis_is_unparseable(analysis: object) -> bool:
 class ReviewAgent:
     def __init__(self, llm: LLMClient, registry: ToolRegistry,
                  max_iters: int = 8, memory: MemoryStore | None = None,
-                 broker: Broker | None = None) -> None:
+                 broker: Broker | None = None, *, card_brief: bool = False,
+                 views_for: Callable[[str], list[dict]] | None = None) -> None:
         self.llm = llm
         self.registry = registry
         self.max_iters = max_iters
@@ -100,6 +108,12 @@ class ReviewAgent:
         # analyze time so the prompt states the live position (and that it
         # beats the memory dossier). None keeps the old prompt exactly.
         self.broker = broker
+        # CARD_REASON_BRIEF on for this account: ask for a `brief` object in
+        # the same reply and show the owner's active views (`views_for`) so
+        # its "plan" line has something to answer to. Off (the default)
+        # leaves the prompt exactly as it was.
+        self.card_brief = card_brief
+        self.views_for = views_for
 
     def analyze(self, review: dict) -> ReviewAnalysis:
         extras = ""
@@ -119,6 +133,13 @@ class ReviewAgent:
             rule_type=review["rule_type"], ticker=review["ticker"],
             condition=review["condition"], action=review["action"],
             snapshot=review["snapshot"]) + extras
+        views_text = ""
+        if self.card_brief:
+            views_text = self._views_text(review["ticker"])
+            if views_text:
+                prompt_content += ("\nthe owner's recorded views (his stated "
+                                   f"plan):\n{views_text}\n")
+            prompt_content += _brief.REVIEW_PROMPT_ADDENDUM
         history: list[dict] = [{"role": "user", "content": prompt_content}]
         text = ""
         for _ in range(self.max_iters):
@@ -132,7 +153,27 @@ class ReviewAgent:
                 continue
             text = resp.text or ""
             break
-        return self._parse(text)
+        analysis = self._parse(text)
+        raw_brief, analysis.brief = analysis.brief, None
+        if self.card_brief and not analysis.is_unparseable():
+            analysis.brief, dropped = _brief.accept(
+                raw_brief, origin="review_agent",
+                sources=[analysis.reasoning, views_text, *_brief.row_sources(review)])
+            if dropped:
+                print(f"[review] {review['ticker']}: card brief dropped: {dropped}",
+                      file=sys.stderr)
+        return analysis
+
+    def _views_text(self, ticker: str) -> str:
+        if self.views_for is None:
+            return ""
+        try:
+            from allpath_trade.agent.view_tools import format_view
+
+            return "\n".join(format_view(v) for v in self.views_for(ticker))
+        except Exception as exc:  # noqa: BLE001 — views are context, never a blocker
+            print(f"[review] views unavailable for {ticker}: {exc}", file=sys.stderr)
+            return ""
 
     def _matching_lessons(self, ticker: str, budget: int = 1000) -> str:
         if self.memory is None:

@@ -930,6 +930,14 @@ class ReviewQueue:
             (analysis_json, review_id, self._account))
         self._conn.commit()
 
+    def attach_brief(self, review_id: int, brief: dict) -> None:
+        """Store an accepted decision brief (allpath_trade/card_brief.py).
+        Display only: it never changes the row's status."""
+        self._conn.execute(
+            "UPDATE pending_reviews SET decision_brief = ? WHERE id = ? AND account = ?",
+            (json.dumps(brief), review_id, self._account))
+        self._conn.commit()
+
     def set_hold_reason(self, review_id: int, reason: str) -> None:
         """TDSC red-team F1: record why the auto regime left this revision
         for a human. Display only; the row stays pending and approvable."""

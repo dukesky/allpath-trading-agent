@@ -44,6 +44,8 @@ def cmd_regime_metrics(args: argparse.Namespace) -> int:
     write_csv(out / "llm_failures_daily.csv", rm.LLM_FAILURE_COLUMNS, failures)
     write_csv(out / "order_threads.csv", rm.ORDER_THREAD_COLUMNS,
               rm.order_thread_rows(conn, args.start, args.end))
+    write_csv(out / "card_briefs.csv", rm.CARD_BRIEF_COLUMNS,
+              rm.card_brief_rows(conn, args.start, args.end))
     holds = rm.hold_rows(conn, args.start, args.end)
     write_csv(out / "holds.csv", rm.HOLD_COLUMNS, holds)
     (out / "summary.md").write_text(rm.summary_markdown(

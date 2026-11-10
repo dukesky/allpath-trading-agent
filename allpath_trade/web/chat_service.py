@@ -140,7 +140,11 @@ class ChatService:
             queue=b.queue, conversation_id=conversation_id,
             notifier=c.notifier, web_base_url=c.settings.web_base_url,
             app_state=c.app_state, telegram_bot_token=c.settings.telegram_bot_token,
-            account=self.account)
+            account=self.account,
+            # Decision brief on review cards (allpath_trade/card_brief.py):
+            # optional brief_* tool arguments, only with the flag on.
+            **({"card_brief": True}
+               if account_flag(c.settings, "card_reason_brief", self.account) else {}))
         if self.account == "shadow":
             # shadow-dual-active T6: registered ONLY on the shadow account's
             # own ChatService -- paper's chat build (self.account == "paper")

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import yaml
 from pydantic import ValidationError
 
+from allpath_trade import card_brief as _brief
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.execution import ExecutionError, Executor
@@ -46,9 +47,26 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                           web_base_url: str = "",
                           app_state: AppState | None = None,
                           telegram_bot_token: str = "",
-                          account: str = DEFAULT_ACCOUNT) -> None:
+                          account: str = DEFAULT_ACCOUNT,
+                          card_brief: bool = False) -> None:
+    # `card_brief` (CARD_REASON_BRIEF on for this account, see
+    # allpath_trade/card_brief.py): draft_strategy and propose_order take
+    # optional `brief_*` arguments, written in the same tool call as the
+    # reason, checked against it and stored on the queued review. Off (the
+    # default) leaves both tool schemas and every card as they were; the
+    # arguments are then ignored even if a model sends them.
 
-    def _notify_chat_draft_queued(doc, review_id, *, is_new: bool) -> None:
+    def _accepted_brief(why, risk, plan, sources: list[str]) -> dict | None:
+        if not card_brief:
+            return None
+        brief, dropped = _brief.from_tool_args(why, risk, plan, sources=sources,
+                                               origin="chat")
+        if dropped and dropped != "no brief":
+            print(f"[action_tools] card brief dropped: {dropped}", file=sys.stderr)
+        return brief
+
+    def _notify_chat_draft_queued(doc, review_id, *, is_new: bool,
+                                  brief: dict | None = None) -> None:
         # Spec §④/降级: a notification failure must never affect queueing --
         # the row above is already committed by the time this runs, so the
         # whole thing is best-effort and swallows everything.
@@ -77,7 +95,7 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             subject, body = events.review_queued(
                 account=account, review_id=review_id, ticker=doc.position.ticker,
                 action=action, strategy_id=doc.id, approve_url=approve_url,
-                kind="strategy_revision")
+                kind="strategy_revision", brief=brief)
             notify_review_queued(
                 queue=queue, notifier=notifier, app_state=app_state,
                 telegram_bot_token=telegram_bot_token, review_id=review_id,
@@ -86,7 +104,9 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             print(f"[action_tools] chat draft notification failed: {exc}",
                   file=sys.stderr)
 
-    def draft_strategy(strategy_id: str, yaml_text: str, reason: str) -> str:
+    def draft_strategy(strategy_id: str, yaml_text: str, reason: str,
+                       brief_why: str | None = None, brief_risk: str | None = None,
+                       brief_plan: str | None = None) -> str:
         if not is_valid_strategy_id(strategy_id):
             return f"error: invalid strategy id {strategy_id!r}"
         try:
@@ -161,7 +181,16 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                 # failure must return an error string, not lose the drafted
                 # YAML (it's still right there in the conversation).
                 return f"error: could not queue draft: {exc}"
-            _notify_chat_draft_queued(doc, rid, is_new=is_new)
+            brief = _accepted_brief(brief_why, brief_risk, brief_plan,
+                                    [reason, old_text, new_text, doc.position.ticker])
+            if brief:
+                try:
+                    queue.attach_brief(int(rid), brief)
+                except Exception as exc:  # noqa: BLE001 — the draft is already queued
+                    print(f"[action_tools] could not store card brief: {exc}",
+                          file=sys.stderr)
+                    brief = None
+            _notify_chat_draft_queued(doc, rid, is_new=is_new, brief=brief)
             msg = (f"Draft queued for your approval as #{rid} — open Pending "
                    "(or tap the link in the notification). It will not "
                    "take effect until you approve it.")
@@ -184,7 +213,9 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         return f"saved {strategy_id} v{doc.version}"
 
     def propose_order(ticker: str, side: str, reason: str,
-                      qty: str | None = None, notional: str | None = None) -> str:
+                      qty: str | None = None, notional: str | None = None,
+                      brief_why: str | None = None, brief_risk: str | None = None,
+                      brief_plan: str | None = None) -> str:
         try:
             intent = OrderIntent(
                 ticker=ticker, side=OrderSide(side.lower()),
@@ -197,6 +228,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             # Web chat: no blocking confirm() here — queue it and return, the
             # user resolves it with a button. The terminal path below is
             # untouched and still used when order_sink is not injected.
+            brief = _accepted_brief(
+                brief_why, brief_risk, brief_plan,
+                [reason, intent.ticker, str(intent.qty or ""), str(intent.notional or "")])
+            if brief:
+                return order_sink.propose(intent, brief)
             return order_sink.propose(intent)
         size = f"qty {intent.qty}" if intent.qty else f"${intent.notional}"
         if not confirm(f"Submit order: {intent.side.value} {size} "
@@ -216,6 +252,7 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         return "rejected by risk gate: " + "; ".join(result.decision.reasons)
 
     t = "string"
+    brief_properties = dict(_brief.TOOL_PROPERTIES) if card_brief else {}
     registry.register(
         "draft_strategy",
         "Draft or revise a strategy YAML -- including a brand-new strategy, "
@@ -235,7 +272,7 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         "restriction.",
         {"type": "object", "properties": {
             "strategy_id": {"type": t}, "yaml_text": {"type": t},
-            "reason": {"type": t}},
+            "reason": {"type": t}, **brief_properties},
          "required": ["strategy_id", "yaml_text", "reason"]},
         draft_strategy)
     registry.register(
@@ -244,6 +281,7 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         "then passes the deterministic risk gate.",
         {"type": "object", "properties": {
             "ticker": {"type": t}, "side": {"type": t, "enum": ["buy", "sell"]},
-            "qty": {"type": t}, "notional": {"type": t}, "reason": {"type": t}},
+            "qty": {"type": t}, "notional": {"type": t}, "reason": {"type": t},
+            **brief_properties},
          "required": ["ticker", "side", "reason"]},
         propose_order)

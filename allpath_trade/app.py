@@ -279,8 +279,17 @@ def _build_account_components(account: str, *, settings: Settings,
         register_readonly_tools(review_registry, data=data, broker=broker,
                                 journal=journal, strategies=strategies,
                                 queue=queue)
+        brief_kwargs: dict = {}
+        if account_flag(settings, "card_reason_brief", account):
+            # Decision brief on review cards (allpath_trade/card_brief.py):
+            # the review agent writes it in the same reply, answering to
+            # this account's active views. Off = the agent built as before.
+            from allpath_trade.store.views import ViewStore
+
+            brief_kwargs = {"card_brief": True,
+                            "views_for": ViewStore(conn, account).relevant}
         sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory,
-                                            broker=broker)
+                                            broker=broker, **brief_kwargs)
         # TDSC R5: label memory-tier usage by role and account, so reflection
         # cost per regime is separable from consolidation and per account.
         bundle.consolidator = Consolidator(

@@ -203,6 +203,13 @@ class Settings(BaseSettings):
     shadow_concise_replies: bool | None = None
     telegram_order_threads: bool = False
     shadow_telegram_order_threads: bool | None = None
+    # Decision brief on review cards (allpath_trade/card_brief.py): three
+    # short lines (why, risk, plan) under the action line, written in the
+    # same model call as the long analysis and stored on the review. Same
+    # bare/shadow_ pattern as the two flags above, off by default; paper
+    # must stay off while its experiment runs. .env-only.
+    card_reason_brief: bool = False
+    shadow_card_reason_brief: bool | None = None
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.
