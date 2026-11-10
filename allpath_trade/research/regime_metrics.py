@@ -338,6 +338,50 @@ def card_brief_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict
     return rows
 
 
+CARD_BRIEF_DROP_COLUMNS = [
+    "review_id", "account", "ts", "date_et", "window", "kind", "source", "origin",
+    "kept_brief", "reason", "missing", "raw_why", "raw_risk", "raw_plan",
+]
+
+
+def card_brief_drop_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per review whose model-written decision brief lost something
+    to the grounding check (`pending_reviews.brief_drop`): the raw text, the
+    reason, the figures that were not backed. `kept_brief` 1 = only the Plan
+    line was left off; 0 = the card had no brief. Drop rate = these rows
+    against `card_briefs.csv`. Model-written text about the owner's book:
+    private repo only, like the other text exports."""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(pending_reviews)")}
+    if "brief_drop" not in columns:
+        return []
+    rows = []
+    for r in conn.execute(
+            "SELECT id, account, ts, kind, source, brief_drop FROM pending_reviews"
+            " WHERE brief_drop IS NOT NULL ORDER BY ts, id"):
+        day = et_date(r["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+        try:
+            drop = json.loads(r["brief_drop"])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(drop, dict):
+            continue
+        raw = drop.get("raw")
+        lines = raw if isinstance(raw, dict) else {"why": "" if raw is None else str(raw)}
+        missing = drop.get("missing")
+        rows.append({
+            "review_id": r["id"], "account": r["account"], "ts": r["ts"],
+            "date_et": day, "window": window_for(day), "kind": r["kind"],
+            "source": r["source"], "origin": drop.get("origin", ""),
+            "kept_brief": int(bool(drop.get("kept_brief"))),
+            "reason": drop.get("reason", ""),
+            "missing": "|".join(str(m) for m in missing) if isinstance(missing, list) else "",
+            "raw_why": lines.get("why", ""), "raw_risk": lines.get("risk", ""),
+            "raw_plan": lines.get("plan", "")})
+    return rows
+
+
 def _account_day(day: str, account: str, eod: str, *, revisions: list[Revision],
                  orders: list[Order], order_reviews, skips, reports, proposals,
                  history, trips, regimes, day_usage) -> dict[str, Any]:

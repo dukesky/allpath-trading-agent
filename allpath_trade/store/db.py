@@ -384,6 +384,10 @@ _MIGRATIONS = [
     # origin}, written only when CARD_REASON_BRIEF is on for the row's
     # account. NULL = no brief; the card keeps its old layout.
     "ALTER TABLE pending_reviews ADD COLUMN decision_brief TEXT",
+    # What the grounding check dropped from a model-written brief, and why
+    # (JSON: reason, origin, kept_brief, missing, raw, ts). NULL = nothing
+    # was dropped. Never shown on a card; for drop-rate analysis.
+    "ALTER TABLE pending_reviews ADD COLUMN brief_drop TEXT",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

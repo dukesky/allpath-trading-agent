@@ -80,6 +80,9 @@ class ReviewAnalysis(BaseModel):
     # agent built with `card_brief=True`, after the grounding check; stored
     # in its own column, so it is excluded from the `agent_analysis` dump.
     brief: Any = Field(default=None, exclude=True)
+    # What that check dropped (raw brief text and reason), for
+    # `pending_reviews.brief_drop`. Also excluded from the dump.
+    brief_drop: Any = Field(default=None, exclude=True)
 
     def is_unparseable(self) -> bool:
         """The flag, or the reasoning prefix that rows attached before the
@@ -156,12 +159,12 @@ class ReviewAgent:
         analysis = self._parse(text)
         raw_brief, analysis.brief = analysis.brief, None
         if self.card_brief and not analysis.is_unparseable():
-            analysis.brief, dropped = _brief.accept(
+            # Sentinel/CLI store both and log the drop (card_brief.store).
+            analysis.brief, _reason, analysis.brief_drop = _brief.accept(
                 raw_brief, origin="review_agent",
-                sources=[analysis.reasoning, views_text, *_brief.row_sources(review)])
-            if dropped:
-                print(f"[review] {review['ticker']}: card brief dropped: {dropped}",
-                      file=sys.stderr)
+                sources=[*_brief.analysis_sources(analysis.reasoning, analysis.sources),
+                         views_text, *_brief.row_sources(review)],
+                derived=_brief.row_derived(review))
         return analysis
 
     def _views_text(self, ticker: str) -> str:

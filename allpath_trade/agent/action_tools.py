@@ -56,14 +56,10 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
     # default) leaves both tool schemas and every card as they were; the
     # arguments are then ignored even if a model sends them.
 
-    def _accepted_brief(why, risk, plan, sources: list[str]) -> dict | None:
+    def _checked_brief(why, risk, plan, sources: list[str]) -> _brief.Checked | None:
         if not card_brief:
             return None
-        brief, dropped = _brief.from_tool_args(why, risk, plan, sources=sources,
-                                               origin="chat")
-        if dropped and dropped != "no brief":
-            print(f"[action_tools] card brief dropped: {dropped}", file=sys.stderr)
-        return brief
+        return _brief.from_tool_args(why, risk, plan, sources=sources, origin="chat")
 
     def _notify_chat_draft_queued(doc, review_id, *, is_new: bool,
                                   brief: dict | None = None) -> None:
@@ -181,15 +177,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
                 # failure must return an error string, not lose the drafted
                 # YAML (it's still right there in the conversation).
                 return f"error: could not queue draft: {exc}"
-            brief = _accepted_brief(brief_why, brief_risk, brief_plan,
-                                    [reason, old_text, new_text, doc.position.ticker])
-            if brief:
-                try:
-                    queue.attach_brief(int(rid), brief)
-                except Exception as exc:  # noqa: BLE001 — the draft is already queued
-                    print(f"[action_tools] could not store card brief: {exc}",
-                          file=sys.stderr)
-                    brief = None
+            checked = _checked_brief(brief_why, brief_risk, brief_plan,
+                                     [reason, old_text, new_text, doc.position.ticker])
+            brief = None
+            if checked is not None and (checked.brief or checked.drop):
+                brief = _brief.store(queue, int(rid), checked, log="action_tools")
             _notify_chat_draft_queued(doc, rid, is_new=is_new, brief=brief)
             msg = (f"Draft queued for your approval as #{rid} — open Pending "
                    "(or tap the link in the notification). It will not "
@@ -228,11 +220,11 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             # Web chat: no blocking confirm() here — queue it and return, the
             # user resolves it with a button. The terminal path below is
             # untouched and still used when order_sink is not injected.
-            brief = _accepted_brief(
+            checked = _checked_brief(
                 brief_why, brief_risk, brief_plan,
                 [reason, intent.ticker, str(intent.qty or ""), str(intent.notional or "")])
-            if brief:
-                return order_sink.propose(intent, brief)
+            if checked is not None and (checked.brief or checked.drop):
+                return order_sink.propose(intent, checked.brief, checked.drop)
             return order_sink.propose(intent)
         size = f"qty {intent.qty}" if intent.qty else f"${intent.notional}"
         if not confirm(f"Submit order: {intent.side.value} {size} "
