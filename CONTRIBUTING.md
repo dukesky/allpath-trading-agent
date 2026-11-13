@@ -24,12 +24,13 @@ Open <http://localhost:8790> and sign in with `demo`. The demo uses sample data,
 
 ```bash
 env -u OPENAI_API_KEY uv run pytest -q
-uv run ruff check path/to/files_you_changed.py
+uv run ruff check allpath_trade path/to/tests_you_changed.py
+./scripts/demo-smoke.sh
 ```
 
 The unit suite never touches the network: brokers, data sources and LLM clients are injected fakes. `env -u OPENAI_API_KEY` keeps a key exported in your shell from leaking into settings-dependent tests. Live integration tests are opt-in (`uv run pytest -m integration`, Alpaca paper keys required).
 
-Run both before you open a pull request. Older test files still carry lint warnings, so check the files you touched rather than the whole tree; new and changed files should be clean. Add tests with every bug fix and feature. Code on the money path (risk gate, execution, review queue, strategy apply) needs thorough tests, including the refusal cases.
+Run these before you open a pull request; CI (`.github/workflows/ci.yml`) runs the same steps on every push and pull request to `main`. Older test files still carry style findings, so lint the package plus the test files you touched; new and changed files should be clean. `scripts/demo-smoke.sh` starts the keyless demo on a free local port, loads the chat page and stops it. Add tests with every bug fix and feature. Code on the money path (risk gate, execution, review queue, strategy apply) needs thorough tests, including the refusal cases.
 
 ## Ground rules
 
@@ -45,7 +46,13 @@ Run both before you open a pull request. Older test files still carry lint warni
 - Commits follow [Conventional Commits](https://www.conventionalcommits.org/): `feat: ...`, `fix: ...`, `docs: ...`, `chore: ...`, `test: ...`.
 - A pull request says what changed and why, how you tested it, and includes a screenshot for UI changes (from the demo). Add a line to `CHANGELOG.md` for anything a user would notice.
 
+## Docker
+
+`docker compose --profile demo up` runs the keyless demo in a container on <http://localhost:8790>. See "Run with Docker" in the README.
+
 ## Where to start
+
+Strategy templates live in `docs/examples/strategies/`; a new template needs no code, only a YAML file and a row in that folder's README (a test loads every template).
 
 Good first areas: a US market holiday calendar, a `docker-compose.yml`, the dashboard chart label overlap, and keeping `README.zh-CN.md` in step with the English README. Larger areas are listed under [Contributing](README.md#contributing) in the README.
 

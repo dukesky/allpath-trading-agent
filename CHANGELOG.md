@@ -2,6 +2,33 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Pre-launch repo work: CI, Docker, templates (unreleased)
+
+- **CI** (`.github/workflows/ci.yml`): on every push and pull request to
+  `main`, Ubuntu with uv: `uv sync --locked`, ruff, the unit suite, and a
+  demo smoke test (`scripts/demo-smoke.sh` starts `allpath-trade demo` with
+  no LLM key on a free loopback port, waits for `/login`, loads the chat
+  page, asks one scripted question, stops it). Ruff scope: the whole repo
+  for errors only (`E9,F63,F7,F82`), and the `allpath_trade/` package with
+  the full rule set minus `UP045` and `PLR1730` (one existing line each);
+  `tests/` is not style-linted yet. Both READMEs show the live workflow
+  badge instead of a hand-edited test count.
+- **Docker**: `Dockerfile`, `compose.yaml`, `docker/entrypoint.sh`.
+  `docker compose --profile demo up` serves the keyless demo on
+  `127.0.0.1:8790`; `--profile app` runs `serve` on `127.0.0.1:8791` with
+  `.env`, the database, `strategies/` and `memory/` in the `allpath-data`
+  volume, importing the project folder's `.env` once on first start.
+- **README**: a "Why not X?" table (TradingAgents, ai-hedge-fund, Freqtrade,
+  Ghostfolio, broker conditional orders) and a "Run with Docker" section, in
+  both languages.
+- **Strategy templates**: six draft templates in `docs/examples/strategies/`
+  with an index, loaded by `tests/test_strategy_templates.py`. Fixed
+  `docs/examples/strategy-example.yaml`, whose `position_weight < 12` and
+  `< 18` conditions were always true (the variable is a fraction).
+- `docs/growth/good-first-issues.md`: five issue drafts (not filed).
+- No change to application code: trading, review, approval, scheduler and
+  Telegram behaviour are untouched.
+
 ## Decision brief: dropped briefs leave evidence, fewer false drops (unreleased)
 
 Only affects accounts with `CARD_REASON_BRIEF` on; with the flag off nothing

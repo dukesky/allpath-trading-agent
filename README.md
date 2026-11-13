@@ -10,7 +10,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![arXiv](https://img.shields.io/badge/arXiv-2610.26662-b31b1b.svg)](https://arxiv.org/abs/2610.26662)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
-[![Tests](https://img.shields.io/badge/tests-3097%20passing-brightgreen.svg)](#development)
+[![CI](https://github.com/dukesky/allpath-trading-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dukesky/allpath-trading-agent/actions/workflows/ci.yml)
 
 [Try the demo](#try-it-in-one-minute-no-keys) ·
 [Getting Started](#getting-started) ·
@@ -78,6 +78,7 @@ AllPath is described in **AllPath: Layered Verification for a Deployed, Self-Rev
 
 ## Table of Contents
 
+- [Why not X?](#why-not-x)
 - [Why AllPath](#why-allpath)
 - [System at a Glance](#system-at-a-glance)
 - [Architecture](#architecture)
@@ -100,6 +101,20 @@ AllPath is described in **AllPath: Layered Verification for a Deployed, Self-Rev
 - [Security](#security)
 - [Disclaimer](#disclaimer)
 - [License](#license)
+
+## Why not X?
+
+Honest answer: for several jobs, one of these is the better tool. The table says what each is better at and where AllPath differs. Descriptions of the other projects come from their own READMEs and docs as of 2026-11-13; they move fast, so check them yourself.
+
+| If you want... | Use | What it is better at | Where AllPath differs |
+|---|---|---|---|
+| A team of LLM analysts debating one ticker, with backtests | [TradingAgents](https://github.com/TauricResearch/TradingAgents) | Multi-agent research (analysts, bull/bear researchers, trader, risk team, portfolio manager), many model providers, backtesting over a ticker and date grid. Its README calls it a framework "designed for research purposes"; approved orders go to a simulated exchange. | AllPath is one agent in a long-running loop on a brokerage account (Alpaca paper by default): rules are watched by code between conversations, and orders wait in an approval queue. AllPath has no backtester. |
+| To study how LLM "investor" agents decide, with paper funds and backtests | [ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) | A terminal app with paper-trading funds on a fake-money ledger, an approval step, a kill switch and backtesting against a benchmark. Its README says it is for educational purposes and "does not actually make any trades". | AllPath connects to a broker account and keeps running: scheduled rule checks, Telegram/email approval cards, a nightly reflection, and memory you can read as markdown. No fund backtests. |
+| An automated crypto bot with backtesting and optimisation | [Freqtrade](https://github.com/freqtrade/freqtrade) | A mature crypto trading bot written in Python: many spot and futures exchanges, dry-run mode, backtesting, hyperparameter optimisation, FreqAI machine learning, Telegram and web UI control. | AllPath is for US stocks (and options) held for weeks to months. Strategies are YAML you write by talking to the agent, each with its own autonomy level. No crypto, no backtesting, no parameter optimisation. |
+| To track what you own across brokers | [Ghostfolio](https://github.com/ghostfolio/ghostfolio) | Portfolio tracking for stocks, ETFs and crypto on multiple platforms: performance over time, portfolio composition, static risk analysis, import and export. Its README describes tracking and analysis, not placing orders. | AllPath's Shadow account also mirrors holdings you enter by hand, but as input for an agent that proposes actions. As a tracker it is much thinner than Ghostfolio. The two fit together. |
+| A stop, a bracket or a trailing stop on one position | Your broker's conditional orders (for example [Alpaca's order types](https://docs.alpaca.markets/docs/orders-at-alpaca)) | Stop, stop-limit, bracket, OCO, OTO and trailing-stop orders are handled by the broker, need no software of yours running, and a trailing stop tracks the high-water mark. AllPath's rule language cannot express a true trailing stop. | A broker order is one fixed instruction. AllPath adds the layer above it: a written thesis per position, rules that depend on portfolio weight, an agent that explains each trigger and asks first, a risk gate on every order, and nightly revisions you approve. AllPath checks rules on a schedule (hourly by default) while it is running, so use broker stops as well when a stop must hold without it. |
+
+What AllPath is for: a personal, self-hosted assistant that stays connected to one brokerage account, remembers what you told it in files you can read, and puts every order through a deterministic risk gate and (unless you choose otherwise per strategy) your approval.
 
 ## Why AllPath
 
@@ -439,6 +454,24 @@ Open `http://localhost:8791` and follow the setup wizard. The access token is pr
 
 The sentinel, nightly reflection, memory consolidation, and Telegram bridge all run inside this one process.
 
+### Run with Docker
+
+No Python or uv on your machine: use Docker instead. Both services publish on `127.0.0.1` only.
+
+```bash
+docker compose --profile demo up     # keyless demo on http://localhost:8790, sign in with: demo
+```
+
+```bash
+docker compose --profile app up -d   # your own install on http://localhost:8791
+```
+
+```bash
+docker compose --profile app logs app   # the access token is printed here on the first start
+```
+
+The `app` profile keeps `.env`, the SQLite database, `strategies/` and `memory/` in the `allpath-data` volume, so they survive rebuilds. It is paper trading by default, like any install. If the project folder has a `.env` when the container first starts, it is copied into the volume once; after that the copy in the volume is the one the app and the setup wizard use, so later edits to the host file are not picked up (change settings in the web UI instead). Different ports: `ALLPATH_PORT=8800 docker compose --profile app up -d` (`ALLPATH_DEMO_PORT` for the demo). The demo profile stores nothing.
+
 ### Verify from the terminal
 
 ```bash
@@ -500,7 +533,8 @@ allpath_trade/
 ```bash
 uv run pytest                  # network-free unit suite
 uv run pytest -m integration   # live integration tests (Alpaca paper keys required)
-uv run ruff check .            # lint
+uv run ruff check allpath_trade   # lint the package (tests/ still has style findings)
+./scripts/demo-smoke.sh        # start the keyless demo, load the chat, stop it
 ```
 
 **Engineering conventions** — Python ≥ 3.11, synchronous core; monetary values are `Decimal`, never `float`; money-path modules ship with exhaustive unit tests; unit tests never touch the network (broker/data/MCP clients are injectable fakes); every feature is built spec-first with the design docs committed alongside the code.
