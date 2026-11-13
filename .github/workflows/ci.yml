@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # Whole repo, correctness rules only: syntax errors, undefined names,
+      # broken comparisons. Passes without touching existing code.
+      - name: Lint (whole repo, errors only)
+        run: uv run ruff check . --select E9,F63,F7,F82
+
+      # The package itself, with the project's full rule set. UP045 and
+      # PLR1730 are ignored because one existing line each trips them; drop
+      # the --ignore once those two lines are cleaned up. tests/ still has
+      # about 110 style findings and is not linted with the full set yet.
+      - name: Lint (package, full rule set)
+        run: uv run ruff check allpath_trade --ignore UP045,PLR1730
+
+      - name: Unit tests
+        run: env -u OPENAI_API_KEY uv run pytest -q
+
+      - name: Demo smoke test (no LLM key)
+        run: ./scripts/demo-smoke.sh
