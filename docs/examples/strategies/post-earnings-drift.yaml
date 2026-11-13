@@ -1,0 +1,43 @@
+# TEMPLATE, not advice. XYZ is a placeholder ticker and every price level
+# assumes a $100 stock so the percentages are easy to read. Replace the
+# ticker, the levels and the sizes with your own before using it.
+# How to use a template: see README.md in this folder.
+#
+# Post-earnings drift: after a strong report, buy only if the price holds
+# above the level it gapped to, and leave if the gap fails.
+#
+# The rule language knows nothing about earnings dates. You write this
+# strategy AFTER the report, with the gap level filled in: here the stock
+# gapped from 100 to 108, so "held the gap" means price above 108 and
+# "gap failed" means price back under 103.
+name: XYZ - post-earnings drift (template)
+status: draft
+version: 1
+authorization: confirm
+horizon: swing
+bias: bullish
+thesis: >
+  Template. XYZ beat and raised, and gapped up to 108. Stocks that hold a
+  post-earnings gap often keep drifting for weeks. Enter only above the
+  gap level, take half off at +15%, exit if the gap fills.
+  Invalidation: price closes back inside the pre-earnings range.
+position:
+  ticker: XYZ
+  target_weight: '0.04'
+  max_weight: '0.05'
+rules:
+- id: entry-above-gap
+  type: soft
+  condition: position_weight == 0 and price > 108
+  action: buy $1500
+- id: take-profit
+  type: soft
+  condition: position_weight > 0 and pnl_pct > 15
+  action: sell 50%
+- id: gap-failed
+  type: hard
+  condition: position_weight > 0 and price < 103
+  action: sell all
+review:
+  cadence: daily
+  invalidation: Price closes back inside the pre-earnings range

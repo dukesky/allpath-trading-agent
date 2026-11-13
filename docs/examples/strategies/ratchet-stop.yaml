@@ -1,0 +1,39 @@
+# TEMPLATE, not advice. XYZ is a placeholder ticker and every price level
+# assumes a $100 stock so the percentages are easy to read. Replace the
+# ticker, the levels and the sizes with your own before using it.
+# How to use a template: see README.md in this folder.
+#
+# Ratchet stop: a hard stop that you (or the nightly reflection, with your
+# approval) move up as the position gains.
+#
+# This is NOT an automatic trailing stop. The rule language compares
+# price, position_weight, position_qty, avg_entry_price, pnl_pct and
+# target_weight against numbers; it has no "highest price since entry".
+# The stop below stays at 88 until a revision raises it. The second rule
+# only tells you when it is time to do that.
+name: XYZ - stop you ratchet up by hand (template)
+status: draft
+version: 1
+authorization: confirm
+horizon: medium
+bias: neutral
+thesis: >
+  Template. Protect an existing XYZ position with a hard stop 12% below
+  the reference price. When the position is 15% in profit, raise the stop
+  (edit this file through chat, or approve the revision the nightly
+  reflection proposes) so a winner cannot turn into a loser.
+position:
+  ticker: XYZ
+  target_weight: '0.08'
+rules:
+- id: stop-loss
+  type: hard
+  condition: position_weight > 0 and price < 88
+  action: sell all
+- id: trim-and-raise-stop
+  type: soft
+  condition: position_weight > 0 and pnl_pct > 15
+  action: sell 10%
+review:
+  cadence: weekly
+  invalidation: Stop not raised after the position gained more than 15%
