@@ -10,6 +10,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![arXiv](https://img.shields.io/badge/arXiv-2610.26662-b31b1b.svg)](https://arxiv.org/abs/2610.26662)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
+[![CI](https://github.com/dukesky/allpath-trading-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dukesky/allpath-trading-agent/actions/workflows/ci.yml)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#参与贡献)
 
 [一分钟试用](#一分钟试用无需任何密钥) ·
@@ -76,6 +77,7 @@ AllPath 的论文 **AllPath: Layered Verification for a Deployed, Self-Revising 
 
 ## 目录
 
+- [为什么不用 X？](#为什么不用-x)
 - [概述](#概述)
 - [核心特性](#核心特性)
 - [架构](#架构)
@@ -93,6 +95,20 @@ AllPath 的论文 **AllPath: Layered Verification for a Deployed, Self-Revising 
 - [安全](#安全)
 - [免责声明](#免责声明)
 - [协议](#协议)
+
+## 为什么不用 X？
+
+实话说：有些事情下面这些工具做得更好。表里写了它们各自更擅长什么、AllPath 的不同在哪里。对其他项目的描述来自它们自己的 README 和文档（截至 2026-11-13），这些项目更新很快，请以它们的最新说明为准。
+
+| 如果你想要…… | 用它 | 它更擅长什么 | AllPath 的不同 |
+|---|---|---|---|
+| 一组 LLM 分析师围绕一只股票辩论，并能回测 | [TradingAgents](https://github.com/TauricResearch/TradingAgents) | 多智能体研究（分析师、多空研究员、交易员、风控团队、组合经理），支持很多模型提供商，可以按股票和日期网格回测。README 写明它是"为研究目的设计"的框架，批准的订单发往模拟交易所。 | AllPath 是一个长期运行、连着券商账户（默认 Alpaca 模拟盘）的 agent：对话之间由代码盯规则，订单在审批队列里等你。AllPath 没有回测。 |
+| 研究 LLM"投资人"agent 如何决策，带模拟基金和回测 | [ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) | 终端应用：用虚拟资金账本做 paper trading 的基金、审批步骤、kill switch、对比基准的回测。README 写明仅供教育用途，并且"不会真的下单"。 | AllPath 连接券商账户并持续运行：定时检查规则、Telegram/邮件审批卡片、夜间反思、可以当 markdown 读的记忆。没有基金回测。 |
+| 带回测和参数优化的自动化加密货币机器人 | [Freqtrade](https://github.com/freqtrade/freqtrade) | 成熟的 Python 加密货币交易机器人：支持很多现货和合约交易所，有 dry-run 模式、回测、超参数优化、FreqAI 机器学习，可用 Telegram 和 Web UI 控制。 | AllPath 面向持有数周到数月的美股（和期权）。策略是你和 agent 对话写出的 YAML，每条策略有自己的自主级别。不支持加密货币、回测和参数优化。 |
+| 跨券商记录自己持有什么 | [Ghostfolio](https://github.com/ghostfolio/ghostfolio) | 股票、ETF、加密货币的组合跟踪：收益表现、组合构成、静态风险分析、导入导出。README 描述的是跟踪和分析，不是下单。 | AllPath 的 Shadow 账户也会镜像你手动录入的持仓，但它是给 agent 提建议用的输入；作为记账工具远不如 Ghostfolio。两者可以一起用。 |
+| 给一个持仓挂止损、bracket 或移动止损 | 券商的条件单（例如 [Alpaca 的订单类型](https://docs.alpaca.markets/docs/orders-at-alpaca)） | stop、stop-limit、bracket、OCO、OTO 和 trailing stop 由券商处理，不需要你自己的软件一直开着；trailing stop 会跟踪最高价。AllPath 的规则语言写不出真正的移动止损。 | 条件单是一条固定指令。AllPath 做的是它上面那一层：每个持仓有成文的 thesis，规则可以依赖组合权重，agent 解释每次触发并先问你，每笔订单过风控闸门，夜间修订要你批准。AllPath 只在运行时按计划检查规则（默认每小时），所以必须始终有效的止损请同时挂在券商。 |
+
+AllPath 适合的场景：一个自部署的个人助手，长期连着一个券商账户，把你说过的话记在你读得懂的文件里，每笔订单都经过确定性的风控闸门，并且（除非你按策略另行设置）先经你批准。
 
 ## 概述
 
@@ -276,6 +292,24 @@ uv run allpath-trade serve --host 0.0.0.0
 ```
 
 哨兵在同一进程内运行，所以这一条命令同时覆盖了监控、记忆沉淀和 Web 界面。
+
+### 用 Docker 运行
+
+机器上没有 Python 和 uv 也可以用 Docker。两个服务都只发布在 `127.0.0.1`。
+
+```bash
+docker compose --profile demo up     # 无密钥 demo：http://localhost:8790，用 demo 登录
+```
+
+```bash
+docker compose --profile app up -d   # 你自己的安装：http://localhost:8791
+```
+
+```bash
+docker compose --profile app logs app   # 首次启动时访问 token 打印在这里
+```
+
+`app` profile 把 `.env`、SQLite 数据库、`strategies/` 和 `memory/` 存在 `allpath-data` volume 里，重建镜像不会丢，默认仍是模拟盘。容器第一次启动时，如果项目目录里有 `.env`，会被复制进 volume 一次；之后应用和 setup 向导读写的是 volume 里的那份，再改宿主机上的文件不会生效（请在 Web 界面里改设置）。换端口：`ALLPATH_PORT=8800 docker compose --profile app up -d`（demo 用 `ALLPATH_DEMO_PORT`）。demo profile 不保存任何数据。
 
 ## Web 界面
 

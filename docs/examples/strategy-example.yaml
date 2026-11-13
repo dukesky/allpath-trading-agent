@@ -28,12 +28,12 @@ rules:
   state: armed
 - id: add-on-dip-1
   type: soft
-  condition: price < 190 and position_weight < 12
+  condition: price < 190 and position_weight < 0.12
   action: buy $6000
   state: armed
 - id: add-on-dip-2
   type: soft
-  condition: price < 180 and position_weight < 18
+  condition: price < 180 and position_weight < 0.18
   action: buy $6000
   state: armed
 - id: stop-loss

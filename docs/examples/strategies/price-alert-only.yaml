@@ -1,0 +1,35 @@
+# TEMPLATE, not advice. XYZ is a placeholder ticker and every price level
+# assumes a $100 stock so the percentages are easy to read. Replace the
+# ticker, the levels and the sizes with your own before using it.
+# How to use a template: see README.md in this folder.
+#
+# Price alerts only: `authorization: notify` sends you a message when a
+# rule fires and never places an order. A safe first strategy, and a way
+# to watch a stock you have not decided on.
+#
+# Every rule still needs a valid action: it is what the alert describes,
+# and under `notify` it is never sent. Both alerts use a buy because a
+# sell rule is skipped without a message while you hold nothing.
+name: XYZ - price alerts, no orders (template)
+status: draft
+version: 1
+authorization: notify
+horizon: medium
+bias: neutral
+thesis: >
+  Template. I am watching XYZ and have not decided to trade it. Tell me
+  when it pulls back 10% from the reference price or breaks out 10% above it.
+position:
+  ticker: XYZ
+  target_weight: '0.05'
+rules:
+- id: alert-pullback
+  type: soft
+  condition: price < 90
+  action: buy $1000
+- id: alert-breakout
+  type: soft
+  condition: price > 110
+  action: buy $1000
+review:
+  cadence: weekly

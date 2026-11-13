@@ -1,0 +1,40 @@
+# TEMPLATE, not advice. XYZ is a placeholder ticker and every price level
+# assumes a $100 stock so the percentages are easy to read. Replace the
+# ticker, the levels and the sizes with your own before using it.
+# How to use a template: see README.md in this folder.
+#
+# Take-profit ladder: sell a quarter of the position at three gain levels
+# and keep the rest. pnl_pct is the percent gain on your average entry
+# price (20 means +20%). Each rung fires once.
+name: XYZ - take-profit ladder (template)
+status: draft
+version: 1
+authorization: confirm
+horizon: medium
+bias: bullish
+thesis: >
+  Template. I already hold XYZ. Take profits in steps instead of guessing
+  the top: a quarter of the position at +20%, +40% and +60% on cost, and
+  let the remainder run.
+position:
+  ticker: XYZ
+  target_weight: '0.08'
+rules:
+- id: take-profit-1
+  type: soft
+  condition: position_weight > 0 and pnl_pct > 20
+  action: sell 25%
+- id: take-profit-2
+  type: soft
+  condition: position_weight > 0 and pnl_pct > 40
+  action: sell 25%
+- id: take-profit-3
+  type: soft
+  condition: position_weight > 0 and pnl_pct > 60
+  action: sell 25%
+- id: stop-loss
+  type: hard
+  condition: position_weight > 0 and pnl_pct < -12
+  action: sell all
+review:
+  cadence: weekly

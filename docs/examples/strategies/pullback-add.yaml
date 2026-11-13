@@ -1,0 +1,38 @@
+# TEMPLATE, not advice. XYZ is a placeholder ticker and every price level
+# assumes a $100 stock so the percentages are easy to read. Replace the
+# ticker, the levels and the sizes with your own before using it.
+# How to use a template: see README.md in this folder.
+#
+# Pullback add: grow an existing core position on pullbacks only, up to a
+# weight cap. The add rule re-arms (at most once a day), and a re-arming
+# buy must cap position_weight in its condition: the loader enforces that
+# when the strategy is drafted.
+name: XYZ - add to a core holding on pullbacks (template)
+status: draft
+version: 1
+authorization: confirm
+horizon: long
+bias: bullish
+thesis: >
+  Template. XYZ is a long-term core holding. Never chase strength: add
+  $1,500 each time the price is under 95 while the position is below its
+  10% target. Invalidation: two quarters of results that break the
+  long-term thesis.
+position:
+  ticker: XYZ
+  target_weight: '0.10'
+  max_weight: '0.12'
+rules:
+- id: add-on-pullback
+  type: soft
+  condition: price < 95 and position_weight < target_weight
+  action: buy $1500
+  rearm: 24h
+  max_fires_per_day: 1
+- id: stop-loss
+  type: hard
+  condition: position_weight > 0 and price < 75
+  action: sell all
+review:
+  cadence: weekly
+  invalidation: Two consecutive quarters that contradict the long-term thesis

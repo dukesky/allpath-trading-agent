@@ -1,0 +1,38 @@
+# TEMPLATE, not advice. XYZ is a placeholder ticker and every price level
+# assumes a $100 stock so the percentages are easy to read. Replace the
+# ticker, the levels and the sizes with your own before using it.
+# How to use a template: see README.md in this folder.
+#
+# Dip buyer: open a starter position only after a pullback, add once more
+# if it keeps falling, and cut the whole position at a hard stop.
+name: XYZ - buy the dip (template)
+status: draft
+version: 1
+authorization: confirm
+horizon: medium
+bias: bullish
+thesis: >
+  Template. I want to own XYZ but not at today's price. Open a starter
+  position 10% below the reference price and add once at 15% below.
+  Invalidation: the reason I wanted the stock no longer holds, or the
+  stop is hit.
+position:
+  ticker: XYZ
+  target_weight: '0.06'
+  max_weight: '0.08'
+rules:
+- id: starter-entry
+  type: soft
+  condition: position_weight == 0 and price < 90
+  action: buy $2000
+- id: second-entry
+  type: soft
+  condition: position_weight > 0 and position_weight < 0.06 and price < 85
+  action: buy $2000
+- id: stop-loss
+  type: hard
+  condition: position_weight > 0 and price < 78
+  action: sell all
+review:
+  cadence: weekly
+  invalidation: The original reason to own the stock no longer holds

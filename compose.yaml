@@ -1,0 +1,41 @@
+# AllPath with Docker Compose. Both services publish on 127.0.0.1 only.
+#
+#   docker compose --profile demo up    keyless demo, sample data, nothing saved
+#   docker compose --profile app up     your own install (paper trading by default)
+#
+# See "Run with Docker" in README.md.
+
+services:
+  demo:
+    profiles: [demo]
+    build: .
+    image: allpath-trade:local
+    command: [demo]
+    ports:
+      - "127.0.0.1:${ALLPATH_DEMO_PORT:-8790}:8790"
+    # No volume and no .env: the demo runs on sample data in a temp folder
+    # inside the container and never reaches a broker.
+
+  app:
+    profiles: [app]
+    build: .
+    image: allpath-trade:local
+    command: [serve]
+    ports:
+      - "127.0.0.1:${ALLPATH_PORT:-8791}:8791"
+    volumes:
+      # .env, the SQLite database, strategies/ and memory/ live here.
+      - allpath-data:/data
+      # Read-only. Used once, on the first start, to import ./.env if you
+      # have one (see docker/entrypoint.sh).
+      - .:/host:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8791/login', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  allpath-data:
