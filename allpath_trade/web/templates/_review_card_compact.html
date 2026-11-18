@@ -1,0 +1,127 @@
+{# Compact review card (COMPACT_CARDS on for the row's account, see
+   allpath_trade/compact_cards.py). Used instead of _review_card.html for
+   order, option-order and strategy-revision rows; a shadow ledger edit
+   keeps the classic card. Same data, different order: what and the agent's
+   verdict first, one sentence of why and risk, then everything the classic
+   card shows (rule, plan, full analysis, YAML diff) behind a disclosure.
+   Warnings are never collapsed. `item['compact']` is built by
+   compact_cards.web_view; LLM prose still goes through |md, everything
+   else through normal autoescaping. #}
+{% from "_split_diff.html" import split_diff %}
+{% set cc = item['compact'] %}
+<div class="card compact-card" id="review-{{ item['id'] }}" style="margin-bottom:12px">
+  <div class="row">
+    <strong>{{ cc['title'] }}</strong>
+    <span class="muted">#{{ item['id'] }}</span>
+    <span style="margin-left:auto" class="muted">{{ item['ts'] | ago }}</span>
+  </div>
+  {% if item['kind'] == 'strategy_revision' %}
+  <div class="row" style="margin:4px 0">
+    <span class="chip">{{ item['source'] or '?' }}</span>
+    {% if item['is_new'] %}<span class="badge">New strategy</span>{% endif %}
+  </div>
+  <p style="font-size:14px;margin:8px 0 4px"><strong>{{ cc['header'] }}</strong></p>
+  {% if cc['changes'] %}
+  <ul class="compact-changes" style="font-size:14px;margin:0 0 6px;padding-left:20px">
+    {% for change in cc['changes'] %}<li>{{ change }}</li>{% endfor %}
+    {% if cc['more'] %}<li class="muted">+{{ cc['more'] }} smaller changes in the full diff below</li>{% endif %}
+  </ul>
+  {% endif %}
+  {% if cc['effect'] %}<p style="font-size:14px;margin:4px 0"><strong>Effect now:</strong> {{ cc['effect'] }}</p>{% endif %}
+  {% if cc['why'] %}<p style="font-size:14px;margin:4px 0"><strong>Why:</strong> {{ cc['why'] }}</p>{% endif %}
+  {% if cc['risk'] %}<p style="font-size:14px;margin:4px 0"><strong>Risk:</strong> {{ cc['risk'] }}</p>{% endif %}
+  {% if item['status'] == 'pending' and item['auth_becomes_auto'] %}
+  <p class="warn" style="font-size:13px;margin:8px 0 0">This proposal sets authorization: auto — once approved, hard rules can place orders without asking you.</p>
+  {% endif %}
+  {% if item['status'] == 'pending' and item['status_regresses'] %}
+  <p class="warn" style="font-size:13px;margin:8px 0 0">This proposal takes the strategy out of active — the sentinel will stop monitoring it.</p>
+  {% endif %}
+  {% if item['status'] == 'pending' and item.get('hold_reason') %}
+  <p class="warn" style="font-size:13px;margin:8px 0 0">Held for human: {{ item['hold_reason'] }}</p>
+  {% endif %}
+  {% if item['revision_diff']['stale'] %}
+  <p class="warn" style="font-size:13px;margin:8px 0 0">The strategy file has changed since this proposal — approving will fail safely; re-propose or reject.</p>
+  {% endif %}
+  {% if item['status'] == 'pending' and item['lands_as_draft'] %}
+  <p class="muted" style="font-size:13px;margin:8px 0 0">This strategy will be draft after approval — activate it on the strategy page to arm its rules.</p>
+  {% endif %}
+  <details class="compact-details" style="margin-top:10px">
+    <summary style="font-size:13px">Full reason and YAML diff</summary>
+    <p style="font-size:13px;margin:8px 0"><strong>Rationale:</strong> {{ item['snapshot']['rationale'] }}</p>
+    {{ split_diff(item['revision_diff']['rows'], item['revision_diff']['left_label'], item['revision_diff']['right_label']) }}
+  </details>
+  {% else %}
+  {% if item['agent_analysis'] and item['analysis_unparseable'] %}
+  <p class="warn" style="font-size:13px;margin:6px 0;font-weight:600">⚠ No agent analysis: the agent's reply could not be parsed. Check this order yourself before approving.</p>
+  {% elif cc['verdict'] %}
+  <p style="font-size:15px;margin:6px 0"><strong>Agent: {{ cc['verdict'] }}</strong></p>
+  {% elif cc['chat'] %}
+  <p class="muted" style="font-size:13px;margin:6px 0">Proposed in chat</p>
+  {% else %}
+  <p class="warn" style="font-size:13px;margin:6px 0;font-weight:600">⚠ No agent analysis: LLM unavailable. Check this order yourself before approving.</p>
+  {% endif %}
+  {% if cc['why'] %}<p style="font-size:14px;margin:4px 0"><strong>Why:</strong> {{ cc['why'] }}</p>{% endif %}
+  {% if cc['risk'] %}<p style="font-size:14px;margin:4px 0"><strong>Risk:</strong> {{ cc['risk'] }}</p>{% endif %}
+  {% if item['stop_warning'] %}
+  <p class="warn" style="font-size:13px;margin:8px 0 0;font-weight:600">⚠ {{ item['stop_warning'] }}</p>
+  {% endif %}
+  {% if item['price_context'] %}
+  {% set pc = item['price_context'] %}
+  <div class="review-price-context">
+    {% if pc.current_price is not none %}
+    <span class="{{ pc.price_class }}">Now {{ pc.current_price | money }}{% if pc.day_change_pct is not none %} ({{ "%+.1f"|format(pc.day_change_pct) }}% today){% endif %}</span>
+    {% endif %}
+    {% if pc.deviation_pct is not none %}<span class="muted">{{ "%+.1f"|format(pc.deviation_pct) }}% since trigger</span>{% endif %}
+    <span class="muted review-market-note">{{ 'Market open — fills near current price' if pc.market_open else 'Market closed — fills at next open' }}</span>
+  </div>
+  {% endif %}
+  <details class="compact-details" style="margin-top:10px">
+    <summary style="font-size:13px">Details: rule, plan and full analysis</summary>
+    <p class="muted" style="font-size:13px;margin:8px 0 6px">
+      {% if item['source'] == 'chat' %}
+      From chat — triggered on <code>{{ item['condition'] }}</code>
+      {% else %}
+      {{ item['strategy_id'] }}/{{ item['rule_id'] }} — triggered on <code>{{ item['condition'] }}</code>
+      {% endif %}
+    </p>
+    {% if item['source'] == 'chat' and item['action'] %}
+    <p class="review-reason">{{ item['action'] }}</p>
+    {% endif %}
+    {% if item['kind'] == 'option_order' and item['intent'] %}
+    {% set oi = item['intent'] %}
+    {% set pv = item['snapshot'].get('preview') if item['snapshot'] is mapping else none %}
+    <p style="font-family:var(--mono);font-size:13px;margin:6px 0">
+      {% if oi['op'] == 'buy' %}
+      buy {{ oi['right'] }} · {{ oi['underlying'] }} · budget {{ oi['budget'] | money }}
+      {% if pv %}<br><span class="muted">At trigger: {{ pv['qty'] }}x {{ pv['occ_symbol'] }} ≈ {{ pv['est_premium'] | money }} — re-priced at approval</span>{% endif %}
+      {% else %}
+      close options · {{ oi['underlying'] }}
+      <br><span class="muted">At trigger: {% for p in oi['positions_at_trigger'] %}{{ p['occ_symbol'] }} x{{ p['qty'] }}{% if not loop.last %}, {% endif %}{% endfor %} — re-checked at approval</span>
+      {% endif %}
+    </p>
+    {% elif item['intent'] %}
+    <p style="font-family:var(--mono);font-size:13px;margin:6px 0">
+      {{ item['intent']['side'] }}
+      {% if item['intent']['qty'] %}{{ item['intent']['qty'] }} shares{% else %}{{ item['intent']['notional'] | money }}{% endif %}
+      {{ item['intent']['ticker'] }}
+      {% if item['price_context'] and item['price_context'].trigger_price is not none %}· triggered at {{ item['price_context'].trigger_price | money }}{% endif %}
+      {% if item['price_context'] and item['price_context'].est_shares is not none %}· &asymp; {{ "%.2f"|format(item['price_context'].est_shares) }} shares at current price{% endif %}
+    </p>
+    {% endif %}
+    {% if cc['plan'] %}<p style="font-size:13px;margin:6px 0"><strong>Plan:</strong> {{ cc['plan'] }}</p>{% endif %}
+    {% if item['agent_analysis'] %}
+    <div class="muted" style="font-size:13px;margin-top:8px">{{ item['agent_analysis'].get('reasoning', '') | md }}</div>
+    {% for src in item['agent_analysis'].get('sources', []) %}
+    <p class="muted" style="font-size:12px;margin:2px 0">
+      {% if src.startswith('http://') or src.startswith('https://') %}
+      <a href="{{ src }}" target="_blank" rel="noopener noreferrer">{{ src }}</a>
+      {% else %}
+      {{ src }}
+      {% endif %}
+    </p>
+    {% endfor %}
+    {% endif %}
+  </details>
+  {% endif %}
+  {% include "_review_card_outcome.html" %}
+</div>

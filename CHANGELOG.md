@@ -2,6 +2,33 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Compact cards (unreleased)
+
+- **`COMPACT_CARDS` / `SHADOW_COMPACT_CARDS`** (per-account, off by default;
+  `allpath_trade/compact_cards.py`). With the flag off every message and
+  page is unchanged.
+  - Order review card: `CRDO · Buy $1,500 (~11 sh @ $135.35)`, then
+    `Agent: SKIP`, then one sentence of Why and one of Risk (first sentence,
+    hard cap 28 words, cut at render time; the stored brief is untouched).
+    Subject: `[Shadow] CRDO buy $1,500 — agent says skip`. Rule, plan,
+    strategy id and full analysis are behind a disclosure on the Pending
+    page; the email keeps a one-line footer, Telegram none. Without a brief
+    the Why line is the first sentence of the agent's reasoning.
+  - With `CARD_REASON_BRIEF` also on, the review agent is asked for a Why
+    that gives the reason for its verdict instead of restating the rule
+    (same model call, same grounding check and `brief_drop` record).
+  - Notify-only / skipped rules: one plain sentence, e.g. `FIG fell to
+    $19.80 (your alert: price ≤ $20). Nothing to approve.` A skip names its
+    reason only when the code knows it.
+  - Strategy revision: a list of changes computed from the old and new YAML
+    (no model), an "Effect now" line from a read-only dry run of the
+    sentinel's evaluator, one sentence of why, and a link to the full diff.
+    The Pending page shows the summary first and keeps the side-by-side
+    diff collapsed.
+  - `pending_reviews.card_format` records `compact` for a review whose
+    notification used the new layout (NULL = classic); research export
+    `card_formats.csv`.
+
 ## Pre-launch repo work: CI, Docker, templates (unreleased)
 
 - **CI** (`.github/workflows/ci.yml`): on every push and pull request to

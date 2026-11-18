@@ -126,7 +126,12 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
         # it reaches the agent with this review's context.
         from allpath_trade.order_threads import ORDER_THREAD_CARD_HINT
 
-        html = to_telegram_html(_prefixed_for_telegram(account, body + ORDER_THREAD_CARD_HINT))
+        hint = ORDER_THREAD_CARD_HINT
+        if getattr(body, "card_format", None):
+            # A compact card (allpath_trade/compact_cards.py): same hint,
+            # one short line. Only ever printed here, where replies work.
+            from allpath_trade.compact_cards import ORDER_THREAD_HINT as hint
+        html = to_telegram_html(_prefixed_for_telegram(account, body + hint))
         message_id = api.send_message_id(chat_id, html, reply_markup=keyboard)
         if message_id is not None:
             recorder(review_id, chat_id, message_id)
@@ -185,12 +190,22 @@ def notify_review_queued(*, queue: ReviewQueue, notifier: Notifier | None,
     is a channel the queueing event itself can never silence (mirrors
     action_tools.py's existing "must never be silenceable by the proposal
     itself" reasoning for its own email leg)."""
+    # A compact card (allpath_trade/compact_cards.py) carries its own email
+    # text (the card plus a one-line footer) and the layout name to record
+    # on the review. A classic body has neither attribute and is sent as is.
+    email_body = getattr(body, "email", body)
+    card_format = getattr(body, "card_format", None)
+    if card_format:
+        try:
+            queue.record_card_format(int(review_id), card_format)
+        except Exception:  # noqa: BLE001, S110 — bookkeeping, never block the send
+            pass
     if notify_email and notifier is not None:
-        notifier.send(subject, body)
+        notifier.send(subject, email_body)
     else:
         # The agent feed is never muted by `notify_email` (a human-inbox
         # preference) -- see notify/agent.py's send_agent_only.
-        send_agent_only(notifier, subject, body)
+        send_agent_only(notifier, subject, email_body)
     push_telegram_review_queued(queue=queue, app_state=app_state,
                                 telegram_bot_token=telegram_bot_token,
                                 review_id=review_id, body=body, account=account)

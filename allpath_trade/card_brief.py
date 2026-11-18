@@ -67,6 +67,26 @@ REVIEW_PROMPT_ADDENDUM = (
     + _RULES.format(long_text="your reasoning", context="trigger data above")
     + "\n")
 
+# The same request for an account that also has COMPACT_CARDS on
+# (allpath_trade/compact_cards.py): the card shows the trade and the verdict
+# on its first two lines, so Why must be the reason for the verdict, not the
+# rule condition again, and each line is one short sentence. The card cuts
+# each line to its first sentence and a hard word cap whatever comes back.
+_COMPACT_SHAPE = (
+    '"why": ONE sentence, at most 20 words: the reason for your recommendation '
+    "(why act now, or why not). The card already shows the order, the price "
+    "and that the rule fired, so do not restate the rule condition or say "
+    "that it was met; "
+    '"risk": ONE sentence, at most 20 words: the main risk of approving, or '
+    "what would make this wrong; "
+    '"plan": one sentence on how this fits the owner\'s recorded view or the '
+    "strategy's thesis (leave it empty if neither is known)")
+COMPACT_REVIEW_PROMPT_ADDENDUM = (
+    "\nThe owner decides on this card in a few seconds. Add a \"brief\" object "
+    "to the same JSON, next to \"reasoning\": {" + _COMPACT_SHAPE + "}. "
+    + _RULES.format(long_text="your reasoning", context="trigger data above")
+    + "\n")
+
 _TOOL_RULES = _RULES.format(long_text="your reason/rationale",
                             context="proposal itself")
 

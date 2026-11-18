@@ -1,0 +1,78 @@
+{% if item['status'] == 'pending' %}
+  <div class="row" style="margin-top:12px">
+    {# Minor 3: an auto-flipping proposal's Approve button carries the same
+       interaction weight as the strategy page's Activate button (see
+       strategy_detail.html) -- a confirm() dialog, not a bare submit --
+       since clicking it has the exact same consequence (hard rules can
+       place orders unattended from this point on). #}
+    <form method="post" action="/reviews/{{ item['id'] }}/approve"{% if item['auth_becomes_auto'] %} onsubmit="return confirm('This proposal sets authorization: auto — once approved, hard rules can place orders without asking you. Approve anyway?')"{% endif %}><button class="primary" type="submit">Approve</button></form>
+    <form method="post" action="/reviews/{{ item['id'] }}/reject" style="display:flex;gap:6px;align-items:center">
+      <input type="text" name="note" placeholder="reason (optional)" style="font-size:13px">
+      <button class="danger" type="submit">Reject</button>
+    </form>
+  </div>
+  {% else %}
+  {# The persisted `status` column alone cannot tell "order went out" apart
+     from "risk gate blocked it" or "the broker call failed": approve() sets
+     status='approved' *before* executing, and leaves it there whichever of
+     those three things happens next (allpath_trade/store/reviews.py). The
+     outcome — and the risk-gate/broker detail — only lives in
+     `execution_result`, so render that instead of the bare status. #}
+  {% set er = item['execution_result'] %}
+  <p class="muted" style="font-size:13px;margin:10px 0 0">
+    {% if item['status'] == 'rejected' %}
+    Rejected{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
+    {% elif item['status'] == 'superseded' %}
+    {# Spec §③: a same-strategy_id chat proposal replaces an earlier
+       pending chat proposal rather than piling up alongside it --
+       store/reviews.py's supersede_pending_chat_revision leaves the old
+       row's status here, with resolution_note naming the replacement, so
+       history shows why it's gone from Pending without the user having
+       acted on it themselves. #}
+    Superseded{% if item['resolution_note'] %} — {{ item['resolution_note'] }}{% endif %}
+    {% elif item['kind'] == 'strategy_revision' %}
+    {# Same minimal-honesty scope as the info line above: a revision has no
+       order/risk-gate outcome, so the order branch's copy ("order status
+       unknown") would be false here. #}
+    {% if er and er.get('applied') %}
+    Revision applied
+    {% elif er and er.get('error') %}
+    Revision failed after approval (file may not have been written) — {{ er['error'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
+    {% elif item['kind'] == 'shadow_edit' %}
+    {# Same shape as strategy_revision above: execution_result is either
+       {"applied": true} or {"error": ...} -- no order/risk-gate outcome. #}
+    {% if er and er.get('applied') %}
+    Applied to the shadow ledger
+    {% elif er and er.get('error') %}
+    Failed after approval — {{ er['error'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
+    {% elif item['kind'] == 'option_order' %}
+    {% if er and er.get('error') %}
+    Execution failed (review claimed, order status unknown) — {{ er['error'] }}
+    {% elif er and er.get('summary') %}
+    {{ er['summary'] }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
+    {% elif er and er.get('error') %}
+    Execution failed (review claimed, order status unknown) — {{ er['error'] }}
+    {% elif er and er.get('submitted') %}
+    {# C3: a shadow row's "execution" was a ledger write, never a routed
+       order -- and this card is the durable record someone reads back days
+       later, long after the approval message is gone. It reads the ROW's
+       own account (never `current_account`): the reviews page can only
+       ever list one account's rows, but the two must not be able to drift. #}
+    {% if item['account'] == 'shadow' %}Order recorded (shadow){% else %}Order submitted{% endif %}
+    {% elif er and not er.get('submitted', True) %}
+    Blocked by the risk gate — {{ er.get('decision', {}).get('reasons', []) | join('; ') }}
+    {% else %}
+    {{ item['status'] }}
+    {% endif %}
+    {{ item['resolved_ts'] | ago }}
+  </p>
+  {% endif %}

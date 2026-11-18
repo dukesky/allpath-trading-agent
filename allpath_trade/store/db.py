@@ -388,6 +388,10 @@ _MIGRATIONS = [
     # (JSON: reason, origin, kept_brief, missing, raw, ts). NULL = nothing
     # was dropped. Never shown on a card; for drop-rate analysis.
     "ALTER TABLE pending_reviews ADD COLUMN brief_drop TEXT",
+    # Which card layout the review's notification used: 'compact'
+    # (allpath_trade/compact_cards.py, COMPACT_CARDS on for the account) or
+    # NULL for the classic card. For the research exports.
+    "ALTER TABLE pending_reviews ADD COLUMN card_format TEXT",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

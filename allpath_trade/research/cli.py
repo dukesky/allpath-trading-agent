@@ -48,6 +48,8 @@ def cmd_regime_metrics(args: argparse.Namespace) -> int:
               rm.card_brief_rows(conn, args.start, args.end))
     write_csv(out / "card_brief_drops.csv", rm.CARD_BRIEF_DROP_COLUMNS,
               rm.card_brief_drop_rows(conn, args.start, args.end))
+    write_csv(out / "card_formats.csv", rm.CARD_FORMAT_COLUMNS,
+              rm.card_format_rows(conn, args.start, args.end))
     holds = rm.hold_rows(conn, args.start, args.end)
     write_csv(out / "holds.csv", rm.HOLD_COLUMNS, holds)
     (out / "summary.md").write_text(rm.summary_markdown(
