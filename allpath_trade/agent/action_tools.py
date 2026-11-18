@@ -10,6 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from allpath_trade import card_brief as _brief
+from allpath_trade import compact_cards
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.execution import ExecutionError, Executor
@@ -62,7 +63,8 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
         return _brief.from_tool_args(why, risk, plan, sources=sources, origin="chat")
 
     def _notify_chat_draft_queued(doc, review_id, *, is_new: bool,
-                                  brief: dict | None = None) -> None:
+                                  brief: dict | None = None, old_text: str = "",
+                                  new_text: str = "", reason: str = "") -> None:
         # Spec §④/降级: a notification failure must never affect queueing --
         # the row above is already committed by the time this runs, so the
         # whole thing is best-effort and swallows everything.
@@ -88,10 +90,20 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             action = (f"create new strategy '{doc.id}'" if is_new
                       else f"revise strategy '{doc.id}' to v{doc.version}")
             approve_url = events.approve_link(web_base_url, review_id)
+            compact_kwargs: dict = {}
+            if compact_cards.enabled(queue):
+                # COMPACT_CARDS on for this account: a list of what changes
+                # (computed from the two texts) and a dry run of what
+                # approving would do now, instead of the bare action line.
+                dry_run = getattr(queue, "revision_effect", None)
+                compact_kwargs = {"compact": {
+                    "old_yaml": old_text, "new_yaml": new_text, "is_new": is_new,
+                    "rationale": reason, "web_base_url": web_base_url,
+                    "effect": dry_run(new_text, doc.id) if dry_run else ""}}
             subject, body = events.review_queued(
                 account=account, review_id=review_id, ticker=doc.position.ticker,
                 action=action, strategy_id=doc.id, approve_url=approve_url,
-                kind="strategy_revision", brief=brief)
+                kind="strategy_revision", brief=brief, **compact_kwargs)
             notify_review_queued(
                 queue=queue, notifier=notifier, app_state=app_state,
                 telegram_bot_token=telegram_bot_token, review_id=review_id,
@@ -182,7 +194,8 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             brief = None
             if checked is not None and (checked.brief or checked.drop):
                 brief = _brief.store(queue, int(rid), checked, log="action_tools")
-            _notify_chat_draft_queued(doc, rid, is_new=is_new, brief=brief)
+            _notify_chat_draft_queued(doc, rid, is_new=is_new, brief=brief,
+                                      old_text=old_text, new_text=new_text, reason=reason)
             msg = (f"Draft queued for your approval as #{rid} — open Pending "
                    "(or tap the link in the notification). It will not "
                    "take effect until you approve it.")

@@ -10,8 +10,9 @@ import yaml
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
-from allpath_trade import card_brief
+from allpath_trade import card_brief, compact_cards
 from allpath_trade.agent.review import analysis_is_unparseable
+from allpath_trade.config import account_flag
 from allpath_trade.execution import ExecutionError
 from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.web.account_ctx import bundle, bundle_for
@@ -358,6 +359,31 @@ def _attach_revision_diffs(c, items: list[dict]) -> None:
             }
 
 
+def _attach_compact(b, settings: object, items: list[dict]) -> None:
+    """Compact cards (allpath_trade/compact_cards.py): for a row whose
+    account has COMPACT_CARDS on, add `item["compact"]` and the page renders
+    it with `_review_card_compact.html`. Off, no key is added and the row
+    renders with the classic template exactly as before. "Effect now" is a
+    read-only dry run by the account's sentinel, for pending revisions."""
+    for item in items:
+        if not account_flag(settings, compact_cards.FLAG, item.get("account", "")):
+            continue
+        try:
+            effect = ""
+            if item["kind"] == "strategy_revision" and item["status"] == "pending":
+                dry_run = getattr(getattr(b, "sentinel", None), "revision_effect", None)
+                if dry_run is not None:
+                    effect = dry_run(item["snapshot"].get("new_yaml", ""),
+                                     item["strategy_id"])
+            view = compact_cards.web_view(item, effect=effect)
+        except Exception as exc:  # noqa: BLE001 — the row renders with the classic card
+            print(f"[reviews] compact card failed for #{item.get('id')}: {exc}",
+                  file=sys.stderr)
+            continue
+        if view is not None:
+            item["compact"] = view
+
+
 @router.get("/reviews", response_class=HTMLResponse)
 def reviews(request: Request) -> HTMLResponse:
     # shadow-dual-active T5: this list is the CURRENT account's rows only
@@ -380,6 +406,7 @@ def reviews(request: Request) -> HTMLResponse:
     _attach_revision_diffs(b, recent)
     _attach_price_context(c, items)
     _attach_stop_warnings(b, items)
+    _attach_compact(b, settings, [*items, *recent])
     return templates.TemplateResponse(request, "reviews.html", {
         "page": "reviews", "items": items, "recent": recent,
         "error": request.query_params.get("error"),

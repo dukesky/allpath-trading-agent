@@ -82,10 +82,11 @@ _REVIEW_JSON_PARSED = ("agent_analysis", "intent", "risk_preview", "execution_re
 
 def _review_to_json(row) -> dict:
     d = {k: v for k, v in dict(row).items() if k not in _REVIEW_JSON_EXCLUDED}
-    for key in ("decision_brief", "brief_drop"):
+    for key in ("decision_brief", "brief_drop", "card_format"):
         if d.get(key) is None:
-            # No brief / nothing dropped (always so with CARD_REASON_BRIEF
-            # off): the row reads exactly as it did before the column existed.
+            # No brief / nothing dropped / classic card (always so with
+            # CARD_REASON_BRIEF and COMPACT_CARDS off): the row reads
+            # exactly as it did before the column existed.
             d.pop(key, None)
     for key in _REVIEW_JSON_PARSED:
         if isinstance(d.get(key), str):

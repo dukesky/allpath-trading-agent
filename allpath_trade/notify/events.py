@@ -97,12 +97,26 @@ def approve_link(base_url: str, review_id: object) -> str:
 
 
 def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
-                   condition: str, disposition: str) -> tuple[Subject, str]:
+                   condition: str, disposition: str, compact: bool = False,
+                   price: Decimal | None = None, reason: str = "") -> tuple[Subject, str]:
+    """`compact` (allpath_trade/compact_cards.py, COMPACT_CARDS on for the
+    account): one plain sentence instead of the three lines and footer
+    below. `price` is the trigger price and `reason` a plain clause the
+    caller knows to be true (why nothing was ordered); both are only used
+    by the compact message. The event dict is the same either way."""
+    event = {"type": "rule_triggered", "account": account, "strategy_id": strategy_id,
+             "rule_id": rule_id, "ticker": ticker, "condition": condition,
+             "disposition": disposition}
+    if compact:
+        from allpath_trade import compact_cards
+
+        text, body = compact_cards.rule_message(
+            ticker=ticker, rule_id=rule_id, condition=condition,
+            disposition=disposition, price=price, reason=reason,
+            prefix=_prefix(account))
+        return Subject(text, event), body
     subject = Subject(
-        f"{_prefix(account)}[AllPath] {ticker}: rule {rule_id} triggered",
-        {"type": "rule_triggered", "account": account, "strategy_id": strategy_id,
-         "rule_id": rule_id, "ticker": ticker, "condition": condition,
-         "disposition": disposition})
+        f"{_prefix(account)}[AllPath] {ticker}: rule {rule_id} triggered", event)
     body = (f"Strategy {strategy_id}, rule {rule_id} triggered on {ticker}.\n"
             f"Condition: {condition}\n"
             f"Disposition: {disposition}." + FOOTER)
@@ -221,7 +235,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   option_preview: str = "",
                   no_analysis_reason: str = "",
                   stop_warning: str = "",
-                  brief: dict | None = None) -> tuple[Subject, str]:
+                  brief: dict | None = None,
+                  compact: dict | None = None) -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -268,16 +283,54 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
     reasoning stays on the review and on the Pending/approve pages) and
     the footer is `BRIEF_FOOTER`. Warnings, the shadow "you'll place it
     yourself" line and the approve link are unchanged. None (the flag off,
-    or no usable brief) gives exactly the old body."""
+    or no usable brief) gives exactly the old body.
+
+    `compact` (allpath_trade/compact_cards.py, COMPACT_CARDS on for the
+    account) is None for the classic card. A dict asks for the compact
+    card of an order (keys `side`, `notional`, `qty`, `price`, `source`),
+    an option order, or a strategy revision (keys `old_yaml`, `new_yaml`,
+    `is_new`, `rationale`, `effect`, `web_base_url`); every other kind
+    (a shadow ledger edit) keeps the classic card. The compact body is a
+    `compact_cards.CardBody`; the event dict is the same either way."""
     subject_noun = ticker or "Ledger"
     # int(): `review_id` is usually a ReviewHandle, whose `.token` must never
     # reach the event (see Subject's docstring).
+    event = {"type": "review_queued", "account": account, "review_id": int(review_id),
+             "kind": kind, "ticker": ticker, "strategy_id": strategy_id,
+             "action": action,
+             "next": f"allpath-trade reviews --account {account} list --json"}
+    if compact is not None and kind in ("order", "option_order", "strategy_revision"):
+        from allpath_trade import compact_cards
+
+        try:
+            if kind == "strategy_revision":
+                text, card = compact_cards.revision_card(
+                    account=account, review_id=int(review_id), ticker=ticker,
+                    strategy_id=strategy_id, old_yaml=compact.get("old_yaml", ""),
+                    new_yaml=compact.get("new_yaml", ""),
+                    is_new=bool(compact.get("is_new")),
+                    rationale=compact.get("rationale", ""), brief=brief,
+                    effect=compact.get("effect", ""), approve_url=approve_url,
+                    web_base_url=compact.get("web_base_url", ""),
+                    prefix=_prefix(account))
+            else:
+                # An option order's `price` is the underlying's: not shown
+                # next to an option action, where it reads as the premium.
+                text, card = compact_cards.order_card(
+                    account=account, review_id=int(review_id), ticker=ticker,
+                    action=action, recommendation=recommendation, brief=brief,
+                    kind=kind, side=compact.get("side", ""),
+                    notional=compact.get("notional"), qty=compact.get("qty"),
+                    price=compact.get("price") if kind == "order" else None,
+                    source=compact.get("source", ""), option_preview=option_preview,
+                    no_analysis_reason=no_analysis_reason, stop_warning=stop_warning,
+                    approve_url=approve_url, prefix=_prefix(account))
+            return Subject(text, event), card
+        except Exception as exc:  # noqa: BLE001 — fall back to the classic card
+            print(f"[notify] compact card failed for #{int(review_id)}, sending the "
+                  f"classic card: {exc}", file=sys.stderr)
     subject = Subject(
-        f"{_prefix(account)}[AllPath] {subject_noun}: waiting for your approval",
-        {"type": "review_queued", "account": account, "review_id": int(review_id),
-         "kind": kind, "ticker": ticker, "strategy_id": strategy_id,
-         "action": action,
-         "next": f"allpath-trade reviews --account {account} list --json"})
+        f"{_prefix(account)}[AllPath] {subject_noun}: waiting for your approval", event)
     proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
     lines = [f"Item #{review_id} is waiting for you.", proposed]
     if no_analysis_reason:

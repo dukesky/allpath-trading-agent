@@ -124,6 +124,15 @@ class ReviewQueue:
         # TELEGRAM_ORDER_THREADS flag is on; None means cards are pushed
         # exactly as before.
         self._telegram_card_recorder: Callable[[int, str, int], None] | None = None
+        # Compact cards (allpath_trade/compact_cards.py): True when
+        # COMPACT_CARDS is on for this account, set once in app.py. The
+        # places that build a card for one of this queue's reviews read it
+        # here, since they all already hold the queue. Card text only.
+        self.compact_cards: bool = False
+        # `fn(new_yaml, strategy_id) -> str`: the sentinel's dry run of what
+        # approving a strategy revision would do right now (compact cards
+        # only; wired in app.py with the flag). None = the line is left out.
+        self.revision_effect: Callable[[str, str], str] | None = None
 
     def set_telegram_card_recorder(self, fn: Callable[[int, str, int], None]) -> None:
         self._telegram_card_recorder = fn
@@ -945,6 +954,15 @@ class ReviewQueue:
         self._conn.execute(
             "UPDATE pending_reviews SET brief_drop = ? WHERE id = ? AND account = ?",
             (json.dumps(drop) if drop else None, review_id, self._account))
+        self._conn.commit()
+
+    def record_card_format(self, review_id: int, card_format: str) -> None:
+        """Note which card layout this review's notification used
+        (allpath_trade/compact_cards.py). Bookkeeping for the research
+        exports: it never changes the row's status."""
+        self._conn.execute(
+            "UPDATE pending_reviews SET card_format = ? WHERE id = ? AND account = ?",
+            (card_format, review_id, self._account))
         self._conn.commit()
 
     def set_hold_reason(self, review_id: int, reason: str) -> None:

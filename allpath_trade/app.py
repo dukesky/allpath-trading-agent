@@ -261,6 +261,13 @@ def _build_account_components(account: str, *, settings: Settings,
                        observations=observations, web_base_url=settings.web_base_url,
                        app_state=app_state, telegram_bot_token=settings.telegram_bot_token,
                        account=account, breaker=breaker, options_backend=options_backend)
+    if account_flag(settings, "compact_cards", account):
+        # Compact cards (allpath_trade/compact_cards.py): this account's
+        # cards lead with the trade and the verdict, and a strategy revision
+        # lists its changes plus a dry run of what approving would do now.
+        # Card text only. Off = every card built as before.
+        queue.compact_cards = True
+        queue.revision_effect = sentinel.revision_effect
 
     bundle = AccountComponents(
         account=account, broker=broker, data=data, conn=conn, journal=journal,
@@ -288,6 +295,10 @@ def _build_account_components(account: str, *, settings: Settings,
 
             brief_kwargs = {"card_brief": True,
                             "views_for": ViewStore(conn, account).relevant}
+            if account_flag(settings, "compact_cards", account):
+                # Compact cards: ask for a one-sentence Why that gives the
+                # reason for the verdict instead of restating the rule.
+                brief_kwargs["compact_brief"] = True
         sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory,
                                             broker=broker, **brief_kwargs)
         # TDSC R5: label memory-tier usage by role and account, so reflection

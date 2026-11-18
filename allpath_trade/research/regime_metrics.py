@@ -338,6 +338,33 @@ def card_brief_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict
     return rows
 
 
+CARD_FORMAT_COLUMNS = [
+    "review_id", "account", "ts", "date_et", "window", "kind", "source", "status",
+    "card_format",
+]
+
+
+def card_format_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per review, with the layout of the card its notification
+    used: "compact" (COMPACT_CARDS, allpath_trade/compact_cards.py) or
+    "classic" (everything else, including every row from before the
+    column existed and reviews that sent no card). No card text."""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(pending_reviews)")}
+    select = "card_format" if "card_format" in columns else "NULL AS card_format"
+    rows = []
+    for r in conn.execute(
+            f"SELECT id, account, ts, kind, source, status, {select}"
+            " FROM pending_reviews ORDER BY ts, id"):
+        day = et_date(r["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+        rows.append({"review_id": r["id"], "account": r["account"], "ts": r["ts"],
+                     "date_et": day, "window": window_for(day), "kind": r["kind"],
+                     "source": r["source"], "status": r["status"],
+                     "card_format": r["card_format"] or "classic"})
+    return rows
+
+
 CARD_BRIEF_DROP_COLUMNS = [
     "review_id", "account", "ts", "date_et", "window", "kind", "source", "origin",
     "kept_brief", "reason", "missing", "raw_why", "raw_risk", "raw_plan",

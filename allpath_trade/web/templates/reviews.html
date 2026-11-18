@@ -5,12 +5,12 @@
 {% include "_regime_banner.html" %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if notice %}<p class="flash-ok">{{ notice }}</p>{% endif %}
-{% for item in items %}{% include "_review_card.html" %}{% else %}
+{% for item in items %}{% include ("_review_card_compact.html" if item.get('compact') else "_review_card.html") %}{% else %}
 <p class="muted">Nothing waiting on you.</p>
 {% endfor %}
 
 {% if recent %}
 <h2>Resolved</h2>
-{% for item in recent %}{% include "_review_card.html" %}{% endfor %}
+{% for item in recent %}{% include ("_review_card_compact.html" if item.get('compact') else "_review_card.html") %}{% endfor %}
 {% endif %}
 {% endblock %}

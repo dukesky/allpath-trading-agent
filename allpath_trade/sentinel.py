@@ -3,12 +3,13 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel
 
-from allpath_trade import market_hours
+from allpath_trade import compact_cards, market_hours
 from allpath_trade.broker.base import (
     Broker,
     BrokerNotConfigured,
@@ -48,12 +49,14 @@ from allpath_trade.strategy.actions import (
     to_order_intent,
 )
 from allpath_trade.strategy.conditions import evaluate_condition
+from allpath_trade.strategy.loader import parse_strategy_text
 from allpath_trade.strategy.model import (
     Authorization,
     Rule,
     RuleState,
     RuleType,
     StrategyDoc,
+    StrategyStatus,
 )
 from allpath_trade.strategy.stops import stop_warning
 from allpath_trade.strategy.store import StrategyStore
@@ -476,12 +479,13 @@ class Sentinel:
             # held) — there is no order to report, but the rule itself did
             # fire and the user has no other way to learn that, so still
             # notify (briefly) rather than staying silent.
-            self._notify_rule(doc, rule_id, condition, "skipped")
+            self._notify_rule(doc, rule_id, condition, "skipped", price=price,
+                              reason=lambda: self._no_order_reason(spec, ticker, position))
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="skipped",
                                   detail="no actionable order (e.g. no position)")
         if doc.authorization == Authorization.NOTIFY:
-            self._notify_rule(doc, rule_id, condition, "notified")
+            self._notify_rule(doc, rule_id, condition, "notified", price=price)
             return TriggerOutcome(strategy_id=doc.id, rule_id=rule_id,
                                   disposition="notified")
         if (doc.authorization == Authorization.AUTO
@@ -875,16 +879,72 @@ class Sentinel:
         # The agent actively decided not to act, and the review is already
         # resolved, so there's no order to report — but the rule the user
         # wrote still fired, and this is the only place they'd learn that.
-        self._notify_rule(doc, rule_id, condition, "skipped")
+        self._notify_rule(doc, rule_id, condition, "skipped", price=price,
+                          reason=lambda: self._agent_skip_reason(analysis.reasoning))
         return TriggerOutcome(**base, disposition="skipped",
                               detail=f"agent skip: {analysis.reasoning[:300]}")
 
     def _notify_rule(self, doc: StrategyDoc, rule_id: str, condition: str,
-                     disposition: str) -> None:
-        subject, body = events.rule_triggered(
-            account=self.account, strategy_id=doc.id, rule_id=rule_id,
-            ticker=doc.position.ticker, condition=condition, disposition=disposition)
+                     disposition: str, *, price: Decimal | None = None,
+                     reason: Callable[[], str] | None = None) -> None:
+        # `price`/`reason` are only used (and `reason` only computed) when
+        # COMPACT_CARDS is on for this account (allpath_trade/
+        # compact_cards.py); otherwise the call is exactly the old one.
+        if compact_cards.enabled(self.queue):
+            subject, body = events.rule_triggered(
+                account=self.account, strategy_id=doc.id, rule_id=rule_id,
+                ticker=doc.position.ticker, condition=condition,
+                disposition=disposition, compact=True, price=price,
+                reason=reason() if reason is not None else "")
+        else:
+            subject, body = events.rule_triggered(
+                account=self.account, strategy_id=doc.id, rule_id=rule_id,
+                ticker=doc.position.ticker, condition=condition, disposition=disposition)
         self._send(doc, subject, body)
+
+    @staticmethod
+    def _no_order_reason(spec: ActionSpec, ticker: str, position: Position | None) -> str:
+        """Why `to_order_intent` proposed nothing, when that is certain from
+        the same inputs; "" otherwise (the message then gives no reason)."""
+        held = position.qty if position else Decimal(0)
+        if spec.kind in (ActionKind.SELL_ALL, ActionKind.SELL_PCT, ActionKind.SELL_VALUE):
+            return f"you hold no {ticker} to sell" if held <= 0 else ""
+        if spec.kind == ActionKind.BUY_TO_TARGET:
+            return "the position is already at or above its target size"
+        return ""
+
+    @staticmethod
+    def _agent_skip_reason(reasoning: str) -> str:
+        why = compact_cards.one_sentence(reasoning)
+        return f"the agent decided not to trade: {why}" if why else (
+            "the agent decided not to trade")
+
+    def revision_effect(self, new_yaml: str, strategy_id: str) -> str:
+        """Compact cards: what this account's next sentinel pass would do if
+        the proposed strategy text were approved now. A dry run: it reads
+        the account, the positions and one quote, evaluates the proposed
+        rules with the same context and evaluator `_check_strategy` uses,
+        and writes nothing (no fire record, no rule state, no order, no
+        notification). "" when it cannot be computed; the card then has no
+        "Effect now" line."""
+        try:
+            doc = parse_strategy_text(strategy_id, new_yaml)
+            if doc.status != StrategyStatus.ACTIVE:
+                return compact_cards.revision_effect(doc, price=Decimal(0), ctx={})
+            account = self.broker.get_account()
+            position = {p.ticker: p for p in self.broker.get_positions()}.get(
+                doc.position.ticker)
+            price = self.data.get_quote(doc.position.ticker).price
+            ctx = self._build_ctx(doc, price, position, account.equity)
+            confirm_only = (self.app_state is not None
+                            and regime_demands_confirm(self.app_state, self.account))
+            return compact_cards.revision_effect(
+                doc, price=price, ctx=ctx, position=position, equity=account.equity,
+                confirm_only=confirm_only)
+        except Exception as exc:  # noqa: BLE001 — a card line, never a blocker
+            print(f"[sentinel] effect dry run failed for {strategy_id}: {exc}",
+                  file=sys.stderr)
+            return ""
 
     def _stop_warning(self, doc: StrategyDoc) -> str:
         """Ops 2026-11-06 item 6: a stock buy on a strategy whose one-shot
@@ -964,7 +1024,12 @@ class Sentinel:
             stop_warning=(self._stop_warning(doc)
                           if kind == "order" and intent is not None
                           and intent.side == OrderSide.BUY else ""),
-            brief=brief)
+            brief=brief,
+            **({"compact": {
+                "side": intent.side.value if intent is not None else "",
+                "notional": intent.notional if intent is not None else None,
+                "qty": intent.qty if intent is not None else None,
+                "price": price}} if compact_cards.enabled(self.queue) else {}))
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's

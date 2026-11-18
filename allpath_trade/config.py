@@ -210,6 +210,14 @@ class Settings(BaseSettings):
     # must stay off while its experiment runs. .env-only.
     card_reason_brief: bool = False
     shadow_card_reason_brief: bool | None = None
+    # Compact cards (allpath_trade/compact_cards.py): order cards lead with
+    # the trade and the agent's verdict, then one sentence of why and risk;
+    # notify-only messages are one plain sentence; strategy revisions show
+    # a list of changes instead of a YAML diff. Card text only. Same
+    # bare/shadow_ pattern, off by default; paper must stay off while its
+    # experiment runs. .env-only.
+    compact_cards: bool = False
+    shadow_compact_cards: bool | None = None
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.
