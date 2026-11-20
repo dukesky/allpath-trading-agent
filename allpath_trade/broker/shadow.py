@@ -79,7 +79,7 @@ class ShadowLedger(Broker):
             price = self._valuation_price(row["ticker"], row["last_price"], avg_cost)
             equity += Decimal(row["qty"]) * price
         # Long options the owner holds (allpath_trade/shadow_options.py):
-        # contracts x 100 x the last price he supplied, or cost until then.
+        # contracts x 100 x the last price they supplied, or cost until then.
         for row in self._conn.execute("SELECT * FROM shadow_option_positions"):
             mark = Decimal(row["last_price"] if row["last_price"] is not None
                            else row["avg_cost"])
@@ -265,7 +265,7 @@ class ShadowLedger(Broker):
             self._audit(now, ticker, f"remove_position {ticker}: was {before}")
 
     # --- option holdings (allpath_trade/shadow_options.py) -----------------
-    # Long options the owner holds at his real broker. NOT part of
+    # Long options the owner holds at their real broker. NOT part of
     # `get_positions()`: nothing that trades (rules, the expiry sweep, the
     # risk gate, the executor) ever sees them. Written only through the
     # human-approved `shadow_edit` path, like the helpers above; each write
@@ -278,7 +278,7 @@ class ShadowLedger(Broker):
     def get_option_positions(self) -> list[Position]:
         """The option holdings as `Position`s (ticker = OCC symbol, qty =
         contracts, avg_entry_price = premium per share), valued at the last
-        price the owner supplied, or at cost when he has given none."""
+        price the owner supplied, or at cost when they have given none."""
         out = []
         for row in self.get_option_rows():
             contracts = Decimal(row["contracts"])
@@ -366,7 +366,7 @@ class ShadowLedger(Broker):
 
     def record_option_fill(self, symbol: str, side: str, contracts: Decimal,
                            price: Decimal) -> None:
-        """Book an option trade the owner made at his real broker, at HIS
+        """Book an option trade the owner made at their real broker, at THEIR
         fill: a buy adds contracts at a weighted average cost and takes
         contracts x 100 x price from cash; a sell (to close) removes
         contracts and adds the proceeds. The fill price becomes the mark.

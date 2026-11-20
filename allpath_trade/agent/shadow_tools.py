@@ -743,7 +743,7 @@ def register_shadow_option_tools(registry: ToolRegistry, *, ledger: ShadowLedger
                 subject, body = events.review_queued(
                     account="shadow", review_id=rid, ticker="", action=title,
                     strategy_id="", approve_url=events.approve_link(web_base_url, rid),
-                    kind="shadow_edit")
+                    kind="shadow_edit", **i18n.lang_kw(queue))
                 notify_review_queued(
                     queue=queue, notifier=notifier, app_state=app_state,
                     telegram_bot_token=telegram_bot_token, review_id=rid,
@@ -826,7 +826,7 @@ def register_shadow_option_tools(registry: ToolRegistry, *, ledger: ShadowLedger
         if n["contracts"] <= 0 or n["contracts"] != n["contracts"].to_integral_value():
             return "error: contracts must be a whole number > 0"
         if n["price"] < 0 or (side_l == "buy" and n["price"] == 0):
-            return "error: price must be his real fill price per share"
+            return "error: price must be their real fill price per share"
         option = option_snapshot(ledger, symbol)
         held = Decimal(option["contracts"]) if option else Decimal(0)
         cash = Decimal(cash_snapshot(ledger)["cash"])
@@ -857,7 +857,7 @@ def register_shadow_option_tools(registry: ToolRegistry, *, ledger: ShadowLedger
         return (f"{queued}\nThe facts below are from BEFORE this trade is applied; add the "
                 f"trade ({side_l} {n['contracts']} contracts = "
                 f"{n['contracts'] * 100} shares controlled, ${amount:,.2f} premium) when "
-                f"you evaluate it for him.\n{facts}")
+                f"you evaluate it for them.\n{facts}")
 
     def option_position_check(underlying: str, right: str, strike: str, expiry: str) -> str:
         try:
@@ -874,14 +874,14 @@ def register_shadow_option_tools(registry: ToolRegistry, *, ledger: ShadowLedger
     registry.register(
         "shadow_set_option_position",
         "Enter or correct a LONG option holding in the shadow ledger (what the owner "
-        "holds at his real broker): contracts and average cost per share, optionally the "
-        "current price per share he gave. 0 contracts removes it. Not a trade and cash is "
-        "untouched. Queues the edit for his approval.",
+        "holds at their real broker): contracts and average cost per share, optionally the "
+        "current price per share they gave. 0 contracts removes it. Not a trade and cash is "
+        "untouched. Queues the edit for their approval.",
         {"type": "object", "properties": {
             **contract, "contracts": {"type": t},
             "avg_cost": {"type": t, "description": "Premium paid per share (not per "
                                                     "contract)."},
-            "last_price": {"type": t, "description": "Current price per share, only if he "
+            "last_price": {"type": t, "description": "Current price per share, only if they "
                                                       "gave it. Never an estimate."}},
          "required": [*keys, "contracts", "avg_cost"]},
         shadow_set_option_position)
@@ -893,21 +893,21 @@ def register_shadow_option_tools(registry: ToolRegistry, *, ledger: ShadowLedger
         shadow_remove_option_position)
     registry.register(
         "shadow_mark_option",
-        "Record the current price per share the OWNER gives for an option he holds; the "
+        "Record the current price per share the OWNER gives for an option they hold; the "
         "ledger has no option quotes. Same approval flow.",
         {"type": "object", "properties": {**contract, "price": {"type": t}},
          "required": [*keys, "price"]},
         shadow_mark_option)
     registry.register(
         "shadow_record_option_trade",
-        "Record an option trade the owner TELLS you he made at his broker (his contracts "
-        "and his fill price per share); cash moves by contracts x 100 x price. Queues it "
-        "for his approval and returns the facts for your evaluation. This never places "
+        "Record an option trade the owner TELLS you they made at their broker (their contracts "
+        "and their fill price per share); cash moves by contracts x 100 x price. Queues it "
+        "for their approval and returns the facts for your evaluation. This never places "
         "or proposes an order.",
         {"type": "object", "properties": {
             **contract, "side": {"type": t, "enum": ["buy", "sell"]},
             "contracts": {"type": t},
-            "price": {"type": t, "description": "His fill price per share."}},
+            "price": {"type": t, "description": "Their fill price per share."}},
          "required": [*keys, "side", "contracts", "price"]},
         shadow_record_option_trade)
     registry.register(

@@ -44,7 +44,7 @@ class AccountComponents:
     reports, memory, observations, session search, sentinel, and (LLM
     permitting) consolidator/reflector. Shared, process-wide objects (the
     sqlite connection, the data source, the notifier, the LLM usage store,
-    app_state, and MemoryStore's shared profile.md file) are NOT duplicated
+    app_state, and the shared profile file that paper owns) are NOT duplicated
     per account -- `conn`/`data` are carried here too as plain references
     (every account's stores/tools need them close at hand), everything else
     process-wide lives only on the parent `Components` container below.

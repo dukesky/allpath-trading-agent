@@ -344,7 +344,7 @@ Memory is **curated markdown, not embeddings** — small enough to read, audited
 
 | Layer | Contents | Cadence |
 |---|---|---|
-| `user_profile.md` | Risk tolerance, goals, decision habits | Slowly evolving; shared across accounts |
+| `user_profile.md` | Risk tolerance, goals, decision habits | Slowly evolving. Paper reads and writes the shared file; shadow reads it too but writes its own `shadow/user_profile.md`, which paper never sees |
 | `strategies/` | Per-strategy working notes and revision rationale | Per revision |
 | `stocks/` | Per-ticker dossiers: behavior patterns, trade history, ticker-specific lessons | Compounds over time |
 | `lessons.md` | Distilled cross-cutting insights from retrospectives | Nightly |
@@ -404,7 +404,7 @@ Notification honesty is a design rule: autonomous executions send receipts too; 
 
 ## Two Accounts: Paper & Shadow
 
-Two always-on accounts run in parallel — separate strategies, memory, queues, reflection, and equity curves, one shared user profile:
+Two always-on accounts run in parallel — separate strategies, memory, queues, reflection, and equity curves, one user profile that paper owns and shadow can read but not write (shadow keeps its own profile entries, which never reach paper):
 
 | Account | What it is |
 |---|---|

@@ -6,7 +6,7 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
 
 - **`OPTION_HOLDINGS` / `SHADOW_OPTION_HOLDINGS`** (off by default, shadow
   only; `allpath_trade/shadow_options.py`). The shadow ledger can hold and
-  mark the long options the owner has at his real broker. It never trades
+  mark the long options the owner has at their real broker. It never trades
   them.
   - New table `shadow_option_positions` (OCC symbol, contracts, average cost
     and the owner's last price per share). `ShadowLedger.get_account()`
@@ -25,7 +25,7 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
     avg_cost[,last_price]` rows. "Reset ledger" also clears option lines.
   - Marking: no option quotes are fetched and no price is invented. A line
     is valued at the last price the owner supplied (stale after 3 days) or
-    at cost; an expired contract is flagged for him to close out.
+    at cost; an expired contract is flagged for them to close out.
   - A reported option trade is booked at the owner's fill after approval
     and comes with facts for an evaluation: plan for the underlying,
     exposure including shares (contracts x 100, not delta-adjusted),
@@ -37,6 +37,27 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
     of the same underlying's options).
   - Paper: no change. With no option rows and the flag off, shadow is
     unchanged too.
+## Shadow memory isolation (unreleased)
+
+- **The shadow account no longer writes the shared user profile** (TDSC
+  red-team F5/M6). `memory/user_profile.md` stays the profile the paper
+  account reads and writes. A shadow `MemoryStore` still reads it, but its
+  own profile entries now go to `memory/shadow/user_profile.md`, which no
+  other account reads; shadow cannot replace or remove a shared entry (the
+  tool says so). In shadow's prompts the shared profile comes first, then
+  its own entries, each within the layer budget. Not behind a flag. Entries
+  that shadow wrote to the shared file before this change stay where they
+  are until someone edits the file.
+- New test `tests/test_shadow_isolation.py`: with every shadow setting on
+  and a canary written to every shadow store (ledger, option lines, all
+  four memory layers, views, observations, a pending ledger edit, chat, a
+  report, a strategy file), the paper account's chat prompt and tools,
+  reflection messages and tools, review prompt and tools, consolidation
+  prompt, rule notifications, digest and rendered profile are byte-identical
+  to a run with the settings off and no shadow data.
+- Comments and tool descriptions added with option holdings now refer to
+  the owner as "they / their".
+
 ## Agent language (unreleased)
 
 - **`AGENT_LANGUAGE` / `SHADOW_AGENT_LANGUAGE`** (`en` default, or `zh`;

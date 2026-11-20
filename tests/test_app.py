@@ -89,7 +89,7 @@ def test_shadow_and_paper_strategy_dirs_are_separate(tmp_path):
     assert shadow_dir.name == "shadow"
 
 
-def test_shadow_and_paper_memory_dirs_are_separate_but_share_profile(tmp_path):
+def test_shadow_and_paper_memory_dirs_are_separate_and_shadow_profile_is_private(tmp_path):
     settings = _settings(tmp_path)
     components = build_components(settings, broker=FakeBroker())
 
@@ -97,8 +97,12 @@ def test_shadow_and_paper_memory_dirs_are_separate_but_share_profile(tmp_path):
     shadow_memory = components.accounts["shadow"].memory
 
     assert paper_memory.path_for("stock", "AAPL") != shadow_memory.path_for("stock", "AAPL")
-    # Profile is deliberately shared -- same file regardless of account.
-    assert paper_memory.path_for("profile", None) == shadow_memory.path_for("profile", None)
+    # TDSC F5/M6: shadow reads the shared profile but writes its own file
+    # (memory/store.py PRIVATE_PROFILE_ACCOUNTS); paper only ever sees the
+    # shared one at the root.
+    assert paper_memory.path_for("profile", None) == settings.memory_dir / "user_profile.md"
+    assert shadow_memory.path_for("profile", None) == (
+        settings.memory_dir / "shadow" / "user_profile.md")
 
 
 _STRAT_V1 = ("id: growth\nname: Growth\nstatus: active\nversion: 1\n"

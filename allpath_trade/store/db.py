@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS shadow_orders (
 
 -- Option holdings of the shadow ledger (OPTION_HOLDINGS / SHADOW_OPTION_
 -- HOLDINGS, allpath_trade/shadow_options.py): long option lines the owner
--- holds at his real broker. Holdings and marks only -- nothing here is ever
+-- holds at their real broker. Holdings and marks only -- nothing here is ever
 -- traded by the app. `symbol` is the OCC symbol; `avg_cost` and `last_price`
 -- are per share (x100 per contract); `last_price` is the last price the
 -- owner supplied (NULL = none yet: valued at cost), never a quote.
