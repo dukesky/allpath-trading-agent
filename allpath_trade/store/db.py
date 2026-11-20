@@ -279,7 +279,11 @@ CREATE TABLE IF NOT EXISTS shadow_positions (
     avg_cost TEXT NOT NULL,
     last_price TEXT,
     last_price_ts TEXT,
-    updated_ts TEXT NOT NULL
+    updated_ts TEXT NOT NULL,
+    -- Holdings sync: 1 when the owner's brokerage shows no cost for this
+    -- position (a transfer). `avg_cost` is then a placeholder and the
+    -- position's P/L must not be quoted as real.
+    cost_unknown INTEGER NOT NULL DEFAULT 0
 );
 
 -- Single-row table (CHECK id=1) holding shadow cash. INSERT ... ON
@@ -349,7 +353,9 @@ CREATE TABLE IF NOT EXISTS shadow_syncs (
     n_closed INTEGER NOT NULL DEFAULT 0,
     n_qty_changed INTEGER NOT NULL DEFAULT 0,
     n_cost_changed INTEGER NOT NULL DEFAULT 0,
-    cash_changed INTEGER NOT NULL DEFAULT 0
+    cash_changed INTEGER NOT NULL DEFAULT 0,
+    n_cost_unknown INTEGER NOT NULL DEFAULT 0,
+    n_option_lines INTEGER NOT NULL DEFAULT 0
 );
 
 -- Pre-trade consult (PRE_TRADE_CONSULT / SHADOW_PRE_TRADE_CONSULT,
@@ -454,6 +460,9 @@ _MIGRATIONS = [
     # AGENT_LANGUAGE (allpath_trade/i18n.py): the language of the card that
     # was sent for this review, recorded like card_format. NULL = English.
     "ALTER TABLE pending_reviews ADD COLUMN card_lang TEXT",
+    # Holdings sync (allpath_trade/holdings_sync.py): see the column's own
+    # comment in SCHEMA. Existing rows read 0 (cost known).
+    "ALTER TABLE shadow_positions ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 0",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

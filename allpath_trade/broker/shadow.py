@@ -425,6 +425,39 @@ class ShadowLedger(Broker):
             self._audit(now, symbol,
                         f"option fill reported by the owner: {side} {contracts} {symbol} "
                         f"@ {price} (cash {'-' if side == 'buy' else '+'}{amount})")
+    # --- holdings sync (allpath_trade/holdings_sync.py) -------------------
+
+    def set_cost_unknown(self, ticker: str, unknown: bool) -> None:
+        """Mark (or clear) a position whose cost the owner's brokerage does
+        not show: its `avg_cost` is then a placeholder. An audit row is
+        written only when the flag actually changes."""
+        ticker = ticker.strip().upper()
+        now = datetime.now(UTC)
+        with self._conn.transaction():
+            row = self._conn.execute(
+                "SELECT cost_unknown FROM shadow_positions WHERE ticker = ?",
+                (ticker,)).fetchone()
+            if row is None or bool(row["cost_unknown"]) == bool(unknown):
+                return
+            self._conn.execute(
+                "UPDATE shadow_positions SET cost_unknown = ? WHERE ticker = ?",
+                (1 if unknown else 0, ticker))
+            self._audit(now, ticker, f"cost basis of {ticker} marked "
+                                     f"{'unknown (placeholder cost)' if unknown else 'known'}")
+
+    def cost_unknown_tickers(self) -> list[str]:
+        return [r["ticker"] for r in self._conn.execute(
+            "SELECT ticker FROM shadow_positions WHERE cost_unknown = 1 ORDER BY ticker")]
+
+    def note_reconciliation(self, note: str) -> None:
+        """The marker row of a reconciliation with the real account: an
+        `adjust` audit row with no ticker whose note starts with
+        "reconciliation:" (the same shape a manual reconciliation left)."""
+        if not note.startswith("reconciliation:"):
+            raise ValueError("a reconciliation note must start with 'reconciliation:'")
+        with self._conn.transaction():
+            self._audit(datetime.now(UTC), "", note)
+
     def record_real_fill(self, ticker: str, side: str, qty: Decimal,
                          price: Decimal) -> Order:
         """Book a trade the owner made at his real brokerage, at HIS price

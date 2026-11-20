@@ -198,7 +198,7 @@ class ChatService:
 
             register_holdings_sync_tool(
                 registry, ledger=b.broker, queue=b.queue, strategies=b.strategies,
-                conversation_id_fn=lambda: conversation_id,
+                conversation_id_fn=lambda: conversation_id, data=c.data,
                 notifier=c.notifier, web_base_url=c.settings.web_base_url,
                 app_state=c.app_state,
                 telegram_bot_token=c.settings.telegram_bot_token)
