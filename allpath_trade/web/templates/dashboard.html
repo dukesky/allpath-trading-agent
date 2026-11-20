@@ -77,6 +77,25 @@
 </div>
 {% else %}<p class="muted">No open positions.</p>{% endif %}
 
+{% if option_rows %}
+<h2>Options held</h2>
+<p class="muted" style="font-size:12.5px">Holdings only. Valued at the last price you supplied (or at cost); the app has no option quotes and never trades these.</p>
+<table>
+  <tr><th>Contract</th><th class="num">Contracts</th><th class="num">Avg cost</th><th class="num">Mark</th><th class="num">Value</th><th class="num">P/L</th><th>Status</th></tr>
+  {% for o in option_rows %}
+  <tr>
+    <td>{{ o.label }}</td>
+    <td class="num">{{ o.contracts }}</td>
+    <td class="num">{{ o.avg_cost | money }}</td>
+    <td class="num">{{ o.mark | money }}</td>
+    <td class="num">{{ o.value | money }}</td>
+    <td class="num {% if o.unrealized_pl > 0 %}up{% elif o.unrealized_pl < 0 %}down{% endif %}">{{ o.unrealized_pl | money }}</td>
+    <td class="muted">{% if o.expired %}<span class="badge">expired: close it out</span>{% elif o.dte is not none %}{{ o.dte }}d to expiry{% endif %}{% if o.mark_stale %} <span class="badge">{{ o.note }}</span>{% else %} · {{ o.note }}{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
 <h2>Strategies</h2>
 {% for s in strategy_cards %}
 <a class="card strategy-card" href="/strategies/{{ s.id }}">

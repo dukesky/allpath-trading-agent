@@ -11,6 +11,7 @@ from allpath_trade.broker.base import (
     OrderSide,
     OrderStatus,
     Position,
+    parse_occ_symbol,
 )
 from allpath_trade.data.base import DataSource
 from allpath_trade.scheduler import today_et_date
@@ -32,6 +33,7 @@ from allpath_trade.store.db import LockedConnection
 # ledger deals in.
 _QTY_QUANT = Decimal("0.000001")
 _AVG_COST_QUANT = Decimal("0.000001")
+_OPTION_MULTIPLIER = Decimal(100)
 
 
 class ShadowLedger(Broker):
@@ -76,6 +78,12 @@ class ShadowLedger(Broker):
             avg_cost = Decimal(row["avg_cost"])
             price = self._valuation_price(row["ticker"], row["last_price"], avg_cost)
             equity += Decimal(row["qty"]) * price
+        # Long options the owner holds (allpath_trade/shadow_options.py):
+        # contracts x 100 x the last price he supplied, or cost until then.
+        for row in self._conn.execute("SELECT * FROM shadow_option_positions"):
+            mark = Decimal(row["last_price"] if row["last_price"] is not None
+                           else row["avg_cost"])
+            equity += Decimal(row["contracts"]) * _OPTION_MULTIPLIER * mark
         try:
             self._upsert_equity_daily(equity, cash)
         except Exception:  # noqa: BLE001, S110 -- best-effort: a write failure
@@ -255,6 +263,168 @@ class ShadowLedger(Broker):
             before = f"{existing['qty']}@{existing['avg_cost']}" if existing else "none (no-op)"
             self._conn.execute("DELETE FROM shadow_positions WHERE ticker = ?", (ticker,))
             self._audit(now, ticker, f"remove_position {ticker}: was {before}")
+
+    # --- option holdings (allpath_trade/shadow_options.py) -----------------
+    # Long options the owner holds at his real broker. NOT part of
+    # `get_positions()`: nothing that trades (rules, the expiry sweep, the
+    # risk gate, the executor) ever sees them. Written only through the
+    # human-approved `shadow_edit` path, like the helpers above; each write
+    # appends an `adjust` audit row.
+
+    def get_option_rows(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM shadow_option_positions ORDER BY underlying, symbol")]
+
+    def get_option_positions(self) -> list[Position]:
+        """The option holdings as `Position`s (ticker = OCC symbol, qty =
+        contracts, avg_entry_price = premium per share), valued at the last
+        price the owner supplied, or at cost when he has given none."""
+        out = []
+        for row in self.get_option_rows():
+            contracts = Decimal(row["contracts"])
+            avg_cost = Decimal(row["avg_cost"])
+            mark = Decimal(row["last_price"]) if row["last_price"] is not None else avg_cost
+            out.append(Position(
+                ticker=row["symbol"], qty=contracts, avg_entry_price=avg_cost,
+                market_value=contracts * _OPTION_MULTIPLIER * mark,
+                unrealized_pl=contracts * _OPTION_MULTIPLIER * (mark - avg_cost)))
+        return out
+
+    def _option_row(self, symbol: str):
+        return self._conn.execute(
+            "SELECT * FROM shadow_option_positions WHERE symbol = ?", (symbol,)).fetchone()
+
+    @staticmethod
+    def _option_root(symbol: str) -> str:
+        occ = parse_occ_symbol(symbol)
+        if occ is None:
+            raise ValueError(f"not an option symbol: {symbol!r}")
+        return occ.root
+
+    def set_option_position(self, symbol: str, contracts: Decimal, avg_cost: Decimal,
+                            last_price: Decimal | None = None) -> None:
+        """Set an option holding to an exact size and cost (0 contracts
+        removes it). `last_price`, when given, is the owner's current price
+        per share and becomes the mark; without it an existing mark is kept.
+        Cash is not touched: this states what is held, it is not a trade."""
+        root = self._option_root(symbol)
+        if contracts < 0 or contracts != contracts.to_integral_value():
+            raise ValueError(f"set_option_position: contracts must be a whole number >= 0 "
+                             f"(got {contracts})")
+        if avg_cost <= 0:
+            raise ValueError(f"set_option_position: avg_cost must be > 0 (got {avg_cost})")
+        if last_price is not None and last_price < 0:
+            raise ValueError(f"set_option_position: last_price must be >= 0 (got {last_price})")
+        if contracts == 0:
+            self.remove_option_position(symbol)
+            return
+        now = datetime.now(UTC)
+        with self._conn.transaction():
+            existing = self._option_row(symbol)
+            before = (f"{existing['contracts']}@{existing['avg_cost']}" if existing
+                      else "none")
+            self._conn.execute(
+                "INSERT INTO shadow_option_positions"
+                " (symbol, underlying, contracts, avg_cost, last_price, last_price_ts,"
+                "  updated_ts) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(symbol) DO UPDATE SET contracts = excluded.contracts,"
+                " avg_cost = excluded.avg_cost, updated_ts = excluded.updated_ts,"
+                " last_price = COALESCE(excluded.last_price, last_price),"
+                " last_price_ts = COALESCE(excluded.last_price_ts, last_price_ts)",
+                (symbol, root, str(contracts), str(avg_cost),
+                 None if last_price is None else str(last_price),
+                 None if last_price is None else now.isoformat(), now.isoformat()))
+            mark = f", mark {last_price}" if last_price is not None else ""
+            self._audit(now, symbol, f"set_option_position {symbol}: {before} -> "
+                                     f"{contracts}@{avg_cost}{mark}")
+
+    def remove_option_position(self, symbol: str) -> None:
+        now = datetime.now(UTC)
+        with self._conn.transaction():
+            existing = self._option_row(symbol)
+            before = (f"{existing['contracts']}@{existing['avg_cost']}" if existing
+                      else "none (no-op)")
+            self._conn.execute(
+                "DELETE FROM shadow_option_positions WHERE symbol = ?", (symbol,))
+            self._audit(now, symbol, f"remove_option_position {symbol}: was {before}")
+
+    def mark_option(self, symbol: str, price: Decimal) -> None:
+        """Record the price per share the owner says this option is at
+        now. The only way a mark changes: the app has no option quotes."""
+        if price < 0:
+            raise ValueError(f"mark_option: price must be >= 0 (got {price})")
+        now = datetime.now(UTC)
+        with self._conn.transaction():
+            existing = self._option_row(symbol)
+            if existing is None:
+                raise ValueError(f"no option position {symbol} to mark")
+            self._conn.execute(
+                "UPDATE shadow_option_positions SET last_price = ?, last_price_ts = ?"
+                " WHERE symbol = ?", (str(price), now.isoformat(), symbol))
+            self._audit(now, symbol, f"mark_option {symbol}: "
+                                     f"{existing['last_price'] or 'none'} -> {price}")
+
+    def record_option_fill(self, symbol: str, side: str, contracts: Decimal,
+                           price: Decimal) -> None:
+        """Book an option trade the owner made at his real broker, at HIS
+        fill: a buy adds contracts at a weighted average cost and takes
+        contracts x 100 x price from cash; a sell (to close) removes
+        contracts and adds the proceeds. The fill price becomes the mark.
+        Raises ValueError, writing nothing, when the ledger cannot hold it
+        (selling more contracts than it has; a buy costing more than its
+        cash): the book is then out of sync and must be corrected first."""
+        self._option_root(symbol)
+        if contracts <= 0 or contracts != contracts.to_integral_value():
+            raise ValueError(f"contracts must be a whole number > 0 (got {contracts})")
+        if price < 0:
+            raise ValueError(f"price must be >= 0 (got {price})")
+        if side not in ("buy", "sell"):
+            raise ValueError(f"side must be buy or sell (got {side!r})")
+        now = datetime.now(UTC)
+        amount = contracts * _OPTION_MULTIPLIER * price
+        with self._conn.transaction():
+            existing = self._option_row(symbol)
+            held = Decimal(existing["contracts"]) if existing else Decimal(0)
+            cash = self._get_cash()
+            if side == "buy":
+                if price <= 0:
+                    raise ValueError("a buy needs a price > 0")
+                if amount > cash:
+                    raise ValueError(
+                        f"insufficient cash in the ledger: need {amount}, have {cash}")
+                old_avg = Decimal(existing["avg_cost"]) if existing else Decimal(0)
+                new_held = held + contracts
+                new_avg = ((held * old_avg + contracts * price) / new_held).quantize(
+                    _AVG_COST_QUANT, rounding=ROUND_HALF_UP)
+                self._conn.execute(
+                    "INSERT INTO shadow_option_positions"
+                    " (symbol, underlying, contracts, avg_cost, last_price, last_price_ts,"
+                    "  updated_ts) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT(symbol) DO UPDATE SET contracts = excluded.contracts,"
+                    " avg_cost = excluded.avg_cost, last_price = excluded.last_price,"
+                    " last_price_ts = excluded.last_price_ts,"
+                    " updated_ts = excluded.updated_ts",
+                    (symbol, self._option_root(symbol), str(new_held), str(new_avg),
+                     str(price), now.isoformat(), now.isoformat()))
+                self._set_cash_raw(cash - amount, now)
+            else:
+                if contracts > held:
+                    raise ValueError(
+                        f"oversell: reported {contracts} contracts, the ledger has {held}")
+                remaining = held - contracts
+                if remaining == 0:
+                    self._conn.execute(
+                        "DELETE FROM shadow_option_positions WHERE symbol = ?", (symbol,))
+                else:
+                    self._conn.execute(
+                        "UPDATE shadow_option_positions SET contracts = ?, last_price = ?,"
+                        " last_price_ts = ?, updated_ts = ? WHERE symbol = ?",
+                        (str(remaining), str(price), now.isoformat(), now.isoformat(),
+                         symbol))
+                self._set_cash_raw(cash + amount, now)
+            self._audit(now, symbol,
+                        f"option fill reported by the owner: {side} {contracts} {symbol} "
+                        f"@ {price} (cash {'-' if side == 'buy' else '+'}{amount})")
 
     def record_fill(self, order_id: str, actual_price: Decimal) -> None:
         """Corrects a past FILLED order's fill price after the fact (e.g.

@@ -94,6 +94,14 @@ def register_readonly_tools(registry: ToolRegistry, *, data: DataSource,
                          f"value={p.market_value} pl={p.unrealized_pl}")
         if not positions:
             lines.append("  no open positions")
+        # Shadow option holdings, apart from shares (shadow_options.py); a
+        # broker without an option ledger (paper) adds nothing.
+        from allpath_trade.shadow_options import lines_for
+
+        option_lines = lines_for(broker, data, equity=acct.equity)
+        if option_lines:
+            lines.append("options held (holdings only; never traded by the app):")
+            lines.extend(f"  {text}" for text in option_lines)
         recent = journal.recent(limit=5)
         if recent:
             lines.append("recent trades:")

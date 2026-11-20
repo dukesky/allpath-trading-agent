@@ -160,7 +160,23 @@ def live_snapshot(*, broker: Any, data: Any, breaker: Any, now: datetime,
                      else _stock_line(p, equity, data))
     if not positions:
         lines.append("- no open positions")
+    # Option holdings recorded in the shadow ledger (shadow_options.py), apart
+    # from shares; they are in the equity figure above.
+    from allpath_trade.shadow_options import lines_for
+
+    ledger_options = lines_for(broker, data, now=now, equity=equity)
+    if ledger_options:
+        lines.append("Options in the ledger (holdings only; mark = the last price the "
+                     "owner supplied, never a quote):")
+        lines += [f"- {text}" for text in ledger_options]
     doc_options = _doc_option_lines(strategies, data) if strategies is not None else []
+    if ledger_options:
+        # The ledger is the record now; a doc's own description of the same
+        # underlying's options would only repeat it with stale numbers.
+        held = {occ.root for p in broker.get_option_positions()
+                if (occ := parse_occ_symbol(p.ticker)) is not None}
+        doc_options = [text for text in doc_options
+                       if text[2:].split(" ", 1)[0] not in held]
     if doc_options:
         lines.append("Options held at the real broker (not in the ledger; size from "
                      "the strategy doc, moneyness from the live price -- any "

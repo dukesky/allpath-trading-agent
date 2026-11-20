@@ -225,6 +225,14 @@ class Settings(BaseSettings):
     # default; paper must stay off while its experiment runs. .env-only.
     reflection_revision_cards: bool = False
     shadow_reflection_revision_cards: bool | None = None
+    # Option holdings in the shadow ledger (allpath_trade/shadow_options.py):
+    # the shadow chat agent gets tools to enter, mark and close out the long
+    # options the owner holds at his real broker, and to record an option
+    # trade he reports. Holdings and marks only: the app never proposes or
+    # queues an option order for shadow. Same bare/shadow_ pattern, off by
+    # default; only meaningful for shadow (paper has no option ledger).
+    option_holdings: bool = False
+    shadow_option_holdings: bool | None = None
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.

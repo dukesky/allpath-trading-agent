@@ -313,6 +313,22 @@ CREATE TABLE IF NOT EXISTS shadow_orders (
     note TEXT NOT NULL DEFAULT ''
 );
 
+-- Option holdings of the shadow ledger (OPTION_HOLDINGS / SHADOW_OPTION_
+-- HOLDINGS, allpath_trade/shadow_options.py): long option lines the owner
+-- holds at his real broker. Holdings and marks only -- nothing here is ever
+-- traded by the app. `symbol` is the OCC symbol; `avg_cost` and `last_price`
+-- are per share (x100 per contract); `last_price` is the last price the
+-- owner supplied (NULL = none yet: valued at cost), never a quote.
+CREATE TABLE IF NOT EXISTS shadow_option_positions (
+    symbol TEXT PRIMARY KEY,
+    underlying TEXT NOT NULL,
+    contracts TEXT NOT NULL,
+    avg_cost TEXT NOT NULL,
+    last_price TEXT,
+    last_price_ts TEXT,
+    updated_ts TEXT NOT NULL
+);
+
 -- One row per ET calendar day, upserted both by get_account (every read,
 -- best-effort) and (eventually) a nightly job -- see ShadowLedger.
 CREATE TABLE IF NOT EXISTS shadow_equity_daily (
