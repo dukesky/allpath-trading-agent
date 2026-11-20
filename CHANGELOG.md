@@ -37,6 +37,24 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
     of the same underlying's options).
   - Paper: no change. With no option rows and the flag off, shadow is
     unchanged too.
+## Agent language (unreleased)
+
+- **`AGENT_LANGUAGE` / `SHADOW_AGENT_LANGUAGE`** (`en` default, or `zh`;
+  `allpath_trade/i18n.py`). With `SHADOW_AGENT_LANGUAGE=zh` the shadow
+  account's agent-authored content is Chinese: chat replies, review and
+  revision cards (classic and compact), rule-trigger messages, receipts,
+  the daily digest, the check-in, the reflection report and its revision
+  reasons, and the Telegram outcome lines and button labels. Code-built
+  text uses a translation table, model-written text a prompt instruction.
+  Never translated: tickers, numbers, rule and strategy ids, strategy YAML,
+  memory files, callback data, the web pages.
+  - Length limits count one CJK character as half a word (`i18n.text_units`;
+    unchanged for text with no CJK), and a Chinese sentence ends at 。！？.
+    The brief number check also reads 万 / 亿 and dates like 11月20日.
+  - New column `pending_reviews.card_lang` (NULL = English), written like
+    `card_format`; `card_formats.csv` gains a `card_lang` column. Stored chat
+    turns of a non-English account carry `lang`.
+  - With the setting at `en` every message is built exactly as before.
 
 ## Reflection revision cards (unreleased)
 

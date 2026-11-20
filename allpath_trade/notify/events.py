@@ -4,6 +4,7 @@ import sys
 from decimal import Decimal
 from typing import Self
 
+from allpath_trade.i18n import Localized, tr, word
 from allpath_trade.store.accounts import ACCOUNTS
 
 # Approve-by-link (Part A) is opt-in via Settings -> Access (web_base_url):
@@ -98,7 +99,8 @@ def approve_link(base_url: str, review_id: object) -> str:
 
 def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
                    condition: str, disposition: str, compact: bool = False,
-                   price: Decimal | None = None, reason: str = "") -> tuple[Subject, str]:
+                   price: Decimal | None = None, reason: str = "",
+                   lang: str = "en") -> tuple[Subject, str]:
     """`compact` (allpath_trade/compact_cards.py, COMPACT_CARDS on for the
     account): one plain sentence instead of the three lines and footer
     below. `price` is the trigger price and `reason` a plain clause the
@@ -113,8 +115,16 @@ def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
         text, body = compact_cards.rule_message(
             ticker=ticker, rule_id=rule_id, condition=condition,
             disposition=disposition, price=price, reason=reason,
-            prefix=_prefix(account))
-        return Subject(text, event), body
+            prefix=_prefix(account), lang=lang)
+        return Subject(text, event), _localized(body, lang)
+    if lang != "en":
+        subject = Subject(tr(lang, "{prefix}[AllPath] {ticker}: rule {rule_id} triggered",
+                             prefix=_prefix(account), ticker=ticker, rule_id=rule_id), event)
+        body = tr(lang, "Strategy {strategy_id}, rule {rule_id} triggered on {ticker}.\n"
+                        "Condition: {condition}\nDisposition: {disposition}.",
+                  strategy_id=strategy_id, rule_id=rule_id, ticker=ticker,
+                  condition=condition, disposition=tr(lang, disposition)) + tr(lang, FOOTER)
+        return subject, Localized(body, lang)
     subject = Subject(
         f"{_prefix(account)}[AllPath] {ticker}: rule {rule_id} triggered", event)
     body = (f"Strategy {strategy_id}, rule {rule_id} triggered on {ticker}.\n"
@@ -126,7 +136,7 @@ def rule_triggered(*, account: str, strategy_id: str, rule_id: str, ticker: str,
 def order_result(*, account: str, ticker: str, side: str, submitted: bool,
                  detail: str, filled_qty: Decimal | None = None,
                  filled_avg_price: Decimal | None = None,
-                 stop_warning: str = "") -> tuple[Subject, str]:
+                 stop_warning: str = "", lang: str = "en") -> tuple[Subject, str]:
     """`filled_qty`/`filled_avg_price` (from the `Order` the executor
     returned, when there is one) are ONLY used for the shadow wording
     below -- paper's own body is unchanged by this task and never reads
@@ -162,6 +172,28 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
         {"type": "order_result", "account": account, "ticker": ticker,
          "side": side, "submitted": submitted, "recorded_only": shadow_order,
          "filled_qty": _dec(filled_qty), "filled_avg_price": _dec(filled_avg_price)})
+    if lang != "en":
+        headline_l = (tr(lang, "order recorded — place it yourself") if shadow_order
+                      else tr(lang, "order {outcome}", outcome=word(lang, outcome)))
+        subject = Subject(tr(lang, "{prefix}[AllPath] {ticker}: {headline}",
+                             prefix=_prefix(account), ticker=ticker, headline=headline_l),
+                          subject.event)
+        side_l = word(lang, side)
+        if shadow_order:
+            fill = ""
+            if filled_qty is not None and filled_avg_price is not None:
+                fill = tr(lang, ": {side} {qty} {ticker} @ ~${price}", side=side_l,
+                          qty=filled_qty, ticker=ticker, price=f"{filled_avg_price:,.2f}")
+            body = tr(lang, "A {side} order for {ticker} was recorded in your shadow "
+                            "ledger — place this order in your brokerage now{fill}.\n{detail}",
+                      side=side_l, ticker=ticker, fill=fill, detail=detail)
+        else:
+            body = tr(lang, "A {side} order for {ticker} was {outcome}.\n{detail}",
+                      side=side_l, ticker=ticker, outcome=word(lang, outcome), detail=detail)
+        body += tr(lang, FOOTER)
+        if stop_warning:
+            body = f"⚠ {stop_warning}\n{body}"
+        return subject, Localized(body, lang)
     if shadow_order:
         fill = ""
         if filled_qty is not None and filled_avg_price is not None:
@@ -236,7 +268,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   no_analysis_reason: str = "",
                   stop_warning: str = "",
                   brief: dict | None = None,
-                  compact: dict | None = None) -> tuple[Subject, str]:
+                  compact: dict | None = None,
+                  lang: str = "en") -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -313,7 +346,7 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                     effect=compact.get("effect", ""), approve_url=approve_url,
                     web_base_url=compact.get("web_base_url", ""),
                     prefix=_prefix(account),
-                    hold_reason=compact.get("hold_reason", ""))
+                    hold_reason=compact.get("hold_reason", ""), lang=lang)
             else:
                 # An option order's `price` is the underlying's: not shown
                 # next to an option action, where it reads as the premium.
@@ -325,11 +358,18 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                     price=compact.get("price") if kind == "order" else None,
                     source=compact.get("source", ""), option_preview=option_preview,
                     no_analysis_reason=no_analysis_reason, stop_warning=stop_warning,
-                    approve_url=approve_url, prefix=_prefix(account))
+                    approve_url=approve_url, prefix=_prefix(account), lang=lang)
             return Subject(text, event), card
         except Exception as exc:  # noqa: BLE001 — fall back to the classic card
             print(f"[notify] compact card failed for #{int(review_id)}, sending the "
                   f"classic card: {exc}", file=sys.stderr)
+    if lang != "en":
+        return _review_queued_localized(
+            lang, event, account=account, review_id=review_id, ticker=ticker,
+            action=action, strategy_id=strategy_id, recommendation=recommendation,
+            trigger_price=trigger_price, est_shares=est_shares, approve_url=approve_url,
+            kind=kind, option_preview=option_preview,
+            no_analysis_reason=no_analysis_reason, stop_warning=stop_warning, brief=brief)
     subject = Subject(
         f"{_prefix(account)}[AllPath] {subject_noun}: waiting for your approval", event)
     proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
@@ -369,7 +409,7 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
 
 def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
                  llm_cost: str = "", llm_health: str = "",
-                 no_stop: str = "") -> tuple[Subject, str]:
+                 no_stop: str = "", lang: str = "en") -> tuple[Subject, str]:
     """`llm_cost`, when non-empty, is one extra line naming today's
     estimated LLM spend (store/llm_usage.py + llm/prices.py) -- the caller
     (scheduler.py's `_send_daily_digest`) only ever passes a non-empty
@@ -387,6 +427,19 @@ def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
         f"{_prefix(account)}[AllPath] Daily summary",
         {"type": "daily_digest", "account": account, "triggers": triggers,
          "trades": trades, "pending": pending})
+    if lang != "en" and account == "shadow":
+        body = tr(lang, "Shadow account today: {triggers} rule trigger(s), "
+                        "{trades} order(s) recorded, "
+                        "{pending} item(s) still waiting for your approval.",
+                  triggers=triggers, trades=trades, pending=pending)
+        if llm_cost:
+            body += tr(lang, "\nEstimated LLM cost today (all accounts): {cost} "
+                             "(see Settings -> Usage).", cost=llm_cost)
+        for extra in (llm_health, no_stop):
+            if extra:
+                body += f"\n{extra}"
+        return (Subject(tr(lang, "{prefix}[AllPath] Daily summary", prefix=_prefix(account)),
+                        subject.event), Localized(body + tr(lang, FOOTER), lang))
     if account == "shadow":
         body = (f"Shadow account today: {triggers} rule trigger(s), "
                 f"{trades} order(s) recorded, "
@@ -418,7 +471,8 @@ def daily_digest(*, account: str, triggers: int, trades: int, pending: int,
     return subject, body + FOOTER
 
 
-def daily_report(*, account: str, date: str, summary: str, body: str) -> tuple[Subject, str]:
+def daily_report(*, account: str, date: str, summary: str, body: str,
+                 lang: str = "en") -> tuple[Subject, str]:
     """The end-of-day reflection notification (Phase 6). `summary` (the
     short push-friendly text the reflection itself produced) leads the full
     body so an email/console reader gets the punchy version before the full
@@ -427,5 +481,61 @@ def daily_report(*, account: str, date: str, summary: str, body: str) -> tuple[S
     subject = Subject(
         f"{_prefix(account)}[AllPath] Daily reflection {date}",
         {"type": "daily_report", "account": account, "date": date})
+    if lang != "en":
+        return (Subject(tr(lang, "{prefix}[AllPath] Daily reflection {date}",
+                           prefix=_prefix(account), date=date), subject.event),
+                Localized(f"{summary}\n\n{body}" + tr(lang, FOOTER), lang))
     full_body = f"{summary}\n\n{body}" + FOOTER
     return subject, full_body
+
+
+def _localized(body: str, lang: str) -> str:
+    """`body` tagged with its language when it is not English (a compact
+    card already carries `.lang`)."""
+    if lang == "en" or getattr(body, "lang", None):
+        return body
+    return Localized(body, lang)
+
+
+def _review_queued_localized(lang: str, event: dict, *, account: str, review_id: int,
+                             ticker: str, action: str, strategy_id: str,
+                             recommendation: str, trigger_price: str, est_shares: str,
+                             approve_url: str, kind: str, option_preview: str,
+                             no_analysis_reason: str, stop_warning: str,
+                             brief: dict | None) -> tuple[Subject, str]:
+    """The classic review card in another language: the same lines in the
+    same order as `review_queued` builds them in English."""
+    subject = Subject(tr(lang, "{prefix}[AllPath] {noun}: waiting for your approval",
+                         prefix=_prefix(account), noun=ticker or word(lang, "ledger")), event)
+    proposed = (tr(lang, "Proposed: {action} on {ticker}", action=action, ticker=ticker)
+                if ticker else tr(lang, "Proposed: {action}", action=action))
+    lines = [tr(lang, "Item #{review_id} is waiting for you.", review_id=review_id), proposed]
+    if no_analysis_reason:
+        lines.insert(0, tr(lang, "⚠ No agent analysis: {reason}",
+                           reason=tr(lang, no_analysis_reason)))
+    if stop_warning:
+        lines.insert(1 if no_analysis_reason else 0, f"⚠ {stop_warning}")
+    if strategy_id:
+        lines.append(tr(lang, "Strategy: {strategy_id}", strategy_id=strategy_id))
+    if trigger_price:
+        lines.append(tr(lang, "Price at trigger: {price}", price=trigger_price))
+    if est_shares:
+        lines.append(tr(lang, "Est. size: ~{shares} shares at that price", shares=est_shares))
+    if option_preview:
+        lines.append(tr(lang, "Option order at trigger: {preview} — re-priced and "
+                              "re-checked when you approve", preview=option_preview))
+    if brief:
+        from allpath_trade.card_brief import brief_lines
+
+        lines.extend(brief_lines(brief, lang))
+    if recommendation:
+        verdict, _sep, tail = recommendation.partition(" — ")
+        shown = word(lang, verdict) if brief or not tail else f"{word(lang, verdict)} — {tail}"
+        lines.append(tr(lang, "The agent recommends: {recommendation}", recommendation=shown))
+    if account == "shadow" and kind == "order":
+        lines.append(tr(lang, "If approved, you'll place it yourself — approving here "
+                              "only records it in your shadow ledger."))
+    body = "\n".join(lines)
+    if approve_url:
+        body += tr(lang, "\nReview & approve: {url}", url=approve_url)
+    return subject, Localized(body + tr(lang, BRIEF_FOOTER if brief else FOOTER), lang)

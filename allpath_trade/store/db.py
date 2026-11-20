@@ -408,6 +408,9 @@ _MIGRATIONS = [
     # (allpath_trade/compact_cards.py, COMPACT_CARDS on for the account) or
     # NULL for the classic card. For the research exports.
     "ALTER TABLE pending_reviews ADD COLUMN card_format TEXT",
+    # AGENT_LANGUAGE (allpath_trade/i18n.py): the language of the card that
+    # was sent for this review, recorded like card_format. NULL = English.
+    "ALTER TABLE pending_reviews ADD COLUMN card_lang TEXT",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

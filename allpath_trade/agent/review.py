@@ -103,7 +103,7 @@ class ReviewAgent:
                  max_iters: int = 8, memory: MemoryStore | None = None,
                  broker: Broker | None = None, *, card_brief: bool = False,
                  views_for: Callable[[str], list[dict]] | None = None,
-                 compact_brief: bool = False) -> None:
+                 compact_brief: bool = False, language: str = "en") -> None:
         self.llm = llm
         self.registry = registry
         self.max_iters = max_iters
@@ -122,6 +122,7 @@ class ReviewAgent:
         # wording (one sentence each, Why = the reason for the verdict).
         # Same reply, same grounding check; only used with `card_brief`.
         self.compact_brief = compact_brief
+        self.language = language
 
     def analyze(self, review: dict) -> ReviewAnalysis:
         extras = ""
@@ -149,6 +150,10 @@ class ReviewAgent:
                                    f"plan):\n{views_text}\n")
             prompt_content += (_brief.COMPACT_REVIEW_PROMPT_ADDENDUM if self.compact_brief
                                else _brief.REVIEW_PROMPT_ADDENDUM)
+        if self.language != "en":
+            from allpath_trade.i18n import language_instruction
+
+            prompt_content += language_instruction(self.language)
         history: list[dict] = [{"role": "user", "content": prompt_content}]
         text = ""
         for _ in range(self.max_iters):

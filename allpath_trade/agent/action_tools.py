@@ -10,7 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from allpath_trade import card_brief as _brief
-from allpath_trade import compact_cards
+from allpath_trade import compact_cards, i18n
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.broker.base import OrderIntent, OrderSide
 from allpath_trade.execution import ExecutionError, Executor
@@ -103,7 +103,8 @@ def register_action_tools(registry: ToolRegistry, *, strategies: StrategyStore,
             subject, body = events.review_queued(
                 account=account, review_id=review_id, ticker=doc.position.ticker,
                 action=action, strategy_id=doc.id, approve_url=approve_url,
-                kind="strategy_revision", brief=brief, **compact_kwargs)
+                kind="strategy_revision", brief=brief, **compact_kwargs,
+                **i18n.lang_kw(queue))
             notify_review_queued(
                 queue=queue, notifier=notifier, app_state=app_state,
                 telegram_bot_token=telegram_bot_token, review_id=review_id,

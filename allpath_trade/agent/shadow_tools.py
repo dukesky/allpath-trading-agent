@@ -42,6 +42,7 @@ from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
+from allpath_trade import i18n
 from allpath_trade.broker.base import _MAX_MAGNITUDE
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier
@@ -551,7 +552,8 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
             # this message is already about the ledger edit itself.
             subject, body = events.review_queued(
                 account="shadow", review_id=review_id, ticker="", action=action_title,
-                strategy_id="", approve_url=approve_url, kind="shadow_edit")
+                strategy_id="", approve_url=approve_url, kind="shadow_edit",
+                **i18n.lang_kw(queue))
             notify_review_queued(
                 queue=queue, notifier=notifier, app_state=app_state,
                 telegram_bot_token=telegram_bot_token, review_id=review_id,

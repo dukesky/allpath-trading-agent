@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from allpath_trade import market_hours
+from allpath_trade import i18n, market_hours
 from allpath_trade.broker.unconfigured import UnconfiguredBroker
 from allpath_trade.execution import refresh_pending_fills
 from allpath_trade.notify import events
@@ -518,7 +518,7 @@ def _send_one_digest(components, account: str, acc, today: str,
     subject, body = events.daily_digest(
         account=account, triggers=triggers, trades=acc.journal.trades_today(),
         pending=len(acc.queue.list()), llm_cost=llm_cost, llm_health=llm_health,
-        no_stop=_no_stop_line(acc))
+        no_stop=_no_stop_line(acc), **i18n.lang_kw(acc.queue))
     # I4: `Notifier.send` is non-raising by contract (notify/base.py) and
     # reports failure by RETURNING False -- a dead SMTP server, an ntfy
     # topic that 404s. Stamping the watermark regardless made that failure

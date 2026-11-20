@@ -15,6 +15,8 @@ from allpath_trade.agent.review import _json_candidates
 from allpath_trade.agent.tools import fence_external
 from allpath_trade.agent.view_tools import format_view
 from allpath_trade.checkin_facts import live_snapshot
+from allpath_trade.i18n import language_instruction, tr
+from allpath_trade.i18n import of as lang_of
 from allpath_trade.llm.base import LLMClient
 from allpath_trade.market_hours import ET
 from allpath_trade.store.views import CheckinStore, ViewStore
@@ -139,11 +141,17 @@ def checkin_reply_text(components: Any, message: dict[str, Any], text: str,
     return frame_checkin_reply(checkin, text) if checkin is not None else None
 
 
-def build_checkin_message(et_date: str, questions: list[str]) -> str:
-    lines = [f"[Shadow] Evening check-in ({et_date})", ""]
+def build_checkin_message(et_date: str, questions: list[str], lang: str = "en",
+                          extra: str = "") -> str:
+    """`extra` is one more line under the questions (holdings sync: a
+    request for a fresh screenshot); the message may then have no questions."""
+    lines = [tr(lang, "[Shadow] Evening check-in ({et_date})", et_date=et_date), ""]
     lines += [f"{i}. {q}" for i, q in enumerate(questions, 1)]
-    lines += ["", ("Reply to this message -- a line or two is enough. "
-                   "Skip any you don't care about.")]
+    if extra:
+        lines += ([""] if questions else []) + [extra]
+    if questions:
+        lines += ["", tr(lang, "Reply to this message -- a line or two is enough. "
+                               "Skip any you don't care about.")]
     return "\n".join(lines)
 
 
@@ -169,6 +177,19 @@ class DailyCheckin:
         self.account = account
         self.checkins = CheckinStore(acc.conn, account)
         self.views = ViewStore(acc.conn, account)
+        # AGENT_LANGUAGE: the account's language (app.py records it on the queue).
+        self.lang = lang_of(getattr(acc, "queue", None))
+        # Holdings sync (allpath_trade/holdings_sync.py): returns a line asking
+        # for a fresh screenshot when the last sync is stale, else "".
+        self.extra_line: Any = None
+
+    def _extra_line(self, now: datetime) -> str:
+        if self.extra_line is None:
+            return ""
+        try:
+            return str(self.extra_line(now) or "")
+        except Exception:  # noqa: BLE001 — an optional line never blocks the check-in
+            return ""
 
     def run_daily(self, now: datetime | None = None) -> str:
         now = now or datetime.now(UTC)
@@ -176,12 +197,14 @@ class DailyCheckin:
         if self.checkins.exists_for(et_date):
             return f"already sent ({et_date})"
         questions = self._questions(self._facts(et_date, now))
-        if not questions:
+        extra = self._extra_line(now)
+        if not questions and not extra:
             return "nothing to ask"
         message_id = self.api.send_message_id(
-            self.chat_id, _escape(build_checkin_message(et_date, questions)),
+            self.chat_id,
+            _escape(build_checkin_message(et_date, questions, self.lang, extra)),
             reply_markup={"force_reply": True,
-                          "input_field_placeholder": "Your take..."})
+                          "input_field_placeholder": tr(self.lang, "Your take...")})
         if message_id is None:
             raise RuntimeError("check-in message was not delivered")
         self.checkins.add(et_date=et_date, questions=questions,
@@ -211,7 +234,8 @@ class DailyCheckin:
         return fence_external(facts[:_MAX_FACTS_CHARS])
 
     def _questions(self, facts: str) -> list[str]:
-        resp = self.llm.complete([{"role": "system", "content": CHECKIN_PROMPT},
+        resp = self.llm.complete([{"role": "system",
+                                   "content": CHECKIN_PROMPT + language_instruction(self.lang)},
                                   {"role": "user", "content": facts}])
         for data in _json_candidates(resp.text or ""):
             raw = data.get("questions")

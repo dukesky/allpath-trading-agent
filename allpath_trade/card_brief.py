@@ -38,6 +38,8 @@ from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
+from allpath_trade.i18n import text_units, tr
+
 FLAG = "card_reason_brief"
 
 MAX_FIELD_CHARS = 240
@@ -156,11 +158,13 @@ COMPACT_REVISION_TOOL_PROPERTIES: dict[str, dict[str, str]] = {
 # no stored field carries. Those are exactly the figures the check is for.
 # ---------------------------------------------------------------------------
 
+# 万 / 亿: Chinese text (AGENT_LANGUAGE=zh) writes 1.5万 for 15,000.
+_CJK_SUFFIX = {"万": 4, "亿": 8}
 _SUFFIX = {"k": 3, "K": 3, "thousand": 3, "M": 6, "MM": 6, "million": 6,
            "B": 9, "bn": 9, "billion": 9}
 _NUMBER = re.compile(
     r"(?<![A-Za-z0-9_.])(\d+(?:,\d{3})*(?:\.\d+)?)"
-    r"(?:\s?(k|K|MM|M|B|bn|thousand|million|billion)\b)?")
+    r"(?:\s?(k|K|MM|M|B|bn|thousand|million|billion)\b|\s?(万|亿))?")
 
 _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
            "nov", "dec")
@@ -172,6 +176,8 @@ _DATE_PATTERNS = (
     # Nov 9, November 9th, 2026
     (re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+"
                 r"(\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s+\d{4}\b)?", re.IGNORECASE), True),
+    # 11月20日 / 11月20号 (Chinese text)
+    (re.compile(r"(?<!\d)(\d{1,2})月(\d{1,2})[日号]"), False),
 )
 
 
@@ -188,7 +194,8 @@ def _numbers(text: str) -> list[_Num]:
             base = Decimal(match.group(1).replace(",", ""))
         except InvalidOperation:
             continue
-        scale = Decimal(10) ** _SUFFIX.get(match.group(2) or "", 0)
+        scale = Decimal(10) ** (_SUFFIX.get(match.group(2) or "", 0)
+                                + _CJK_SUFFIX.get(match.group(3) or "", 0))
         quantum = Decimal(1).scaleb(base.as_tuple().exponent) * scale
         found.append(_Num(base * scale, quantum, match.group(0).strip()))
     return found
@@ -336,7 +343,7 @@ def accept(raw: Any, *, sources: list[str], origin: str,
             return fail(f"brief has no {key}")
         if len(brief[key]) > MAX_FIELD_CHARS:
             return fail(f"the {key} line is over {MAX_FIELD_CHARS} characters")
-    required_words = sum(len(brief[key].split()) for key in _REQUIRED)
+    required_words = sum(text_units(brief[key]) for key in _REQUIRED)
     if required_words > MAX_TOTAL_WORDS:
         return fail(f"brief is {required_words} words (limit {MAX_TOTAL_WORDS})")
     missing = [m for key in _REQUIRED
@@ -353,7 +360,7 @@ def accept(raw: Any, *, sources: list[str], origin: str,
                        "have: " + ", ".join(plan_missing))
         elif len(brief["plan"]) > MAX_FIELD_CHARS:
             partial = f"plan line left off: over {MAX_FIELD_CHARS} characters"
-        elif required_words + len(brief["plan"].split()) > MAX_TOTAL_WORDS:
+        elif required_words + text_units(brief["plan"]) > MAX_TOTAL_WORDS:
             partial = f"plan line left off: brief over {MAX_TOTAL_WORDS} words"
         if partial:
             brief["plan"] = ""
@@ -491,10 +498,13 @@ def load(raw: Any) -> dict[str, str] | None:
     return brief
 
 
-def brief_lines(brief: dict[str, str] | None) -> list[str]:
+def brief_lines(brief: dict[str, str] | None, lang: str = "en") -> list[str]:
     """The card lines: "Why: ...", "Risk: ...", and "Plan: ..." when set."""
     if not brief:
         return []
+    if lang != "en":
+        return [tr(lang, label + ": {text}", text=brief[key])
+                for key, label in _FIELDS if brief.get(key)]
     return [f"{label}: {brief[key]}" for key, label in _FIELDS if brief.get(key)]
 
 

@@ -11,6 +11,7 @@ from allpath_trade.config import Settings, account_flag
 from allpath_trade.data.base import DataSource
 from allpath_trade.data.yf import YFinanceSource
 from allpath_trade.execution import Executor
+from allpath_trade.i18n import account_language
 from allpath_trade.llm.health import LLMOutageAlerter
 from allpath_trade.memory.consolidate import Consolidator
 from allpath_trade.memory.observations import ObservationLog
@@ -240,6 +241,9 @@ def _build_account_components(account: str, *, settings: Settings,
         from allpath_trade.agent.shadow_tools import apply_shadow_edit_factory
 
         queue.set_shadow_edit_applier(apply_shadow_edit_factory(broker, conn))
+    # AGENT_LANGUAGE: the language of this account's cards and messages.
+    language = account_language(settings, account)
+    queue.language = language
     conversations = ConversationStore(conn, account=account)
     reports = ReportStore(conn, account=account)
     memory = MemoryStore(settings.memory_dir, conn, account=account)
@@ -299,6 +303,8 @@ def _build_account_components(account: str, *, settings: Settings,
                 # Compact cards: ask for a one-sentence Why that gives the
                 # reason for the verdict instead of restating the rule.
                 brief_kwargs["compact_brief"] = True
+        if language != "en":
+            brief_kwargs["language"] = language
         sentinel.review_agent = ReviewAgent(review_llm, review_registry, memory=memory,
                                             broker=broker, **brief_kwargs)
         # TDSC R5: label memory-tier usage by role and account, so reflection
