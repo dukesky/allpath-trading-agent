@@ -692,12 +692,15 @@ def revision_card(*, account: str, review_id: int, ticker: str, strategy_id: str
                   old_yaml: str, new_yaml: str, is_new: bool = False,
                   rationale: str = "", brief: dict | None = None, effect: str = "",
                   approve_url: str = "", web_base_url: str = "",
-                  prefix: str = "") -> tuple[str, CardBody]:
+                  prefix: str = "", hold_reason: str = "") -> tuple[str, CardBody]:
     """Subject text and body of a compact strategy-revision card. `effect`
     is `revision_effect`'s sentence, or "" to leave the line out."""
     del account
     changes = revision_changes(old_yaml, new_yaml, is_new=is_new)
     lines = [revision_title(ticker=ticker, strategy_id=strategy_id, is_new=is_new)]
+    if hold_reason:
+        # The auto regime did not apply this one on its own (reflect.py).
+        lines.insert(0, f"⚠ Held for human: {' '.join(hold_reason.split())}")
     if changes is None:
         lines.append("Agent proposes a change (it could not be summarised; see the diff).")
         count = 0

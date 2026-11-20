@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from typing import Any
 
+from allpath_trade import card_brief, compact_cards
 from allpath_trade.agent.compact import Compactor
 from allpath_trade.agent.context import build_system_prompt, load_identity
 from allpath_trade.agent.loop import AgentSession
@@ -18,6 +19,7 @@ from allpath_trade.config import Settings, account_flag
 from allpath_trade.llm.base import LLMClient, LLMResponse
 from allpath_trade.notify import events
 from allpath_trade.notify.base import Notifier, send_report
+from allpath_trade.notify.dispatch import push_telegram_review_queued
 from allpath_trade.regime import effective_auto_apply
 from allpath_trade.scheduler import ET, ts_to_et_date
 from allpath_trade.store.accounts import DEFAULT_ACCOUNT
@@ -26,6 +28,10 @@ from allpath_trade.store.reviews import ReviewError, RevisionValidationError
 from allpath_trade.store.views import ViewStore
 from allpath_trade.strategy.auto_gate import auto_apply_holds
 from allpath_trade.strategy.loader import StrategyValidationError, parse_strategy_text
+
+# Per-account flag (config.account_flag): a Telegram card for each still-
+# pending revision a nightly reflection proposed. See `_send_revision_cards`.
+REVISION_CARDS_FLAG = "reflection_revision_cards"
 
 # Seed-briefing hard caps (spec §②: "种子简报...全部 fence_external 围栏").
 # Each is independent -- a chatty observation day can't starve the trades
@@ -514,10 +520,15 @@ class Reflector:
         proposed_rids: list[int] = []
         auto_apply = effective_auto_apply(
             AppState(c.conn), self.settings, c.account)
+        # REFLECTION_REVISION_CARDS on for this account: the same list also
+        # feeds `_send_revision_cards` after the auto-apply step. Off, the
+        # collector is wired exactly as before.
+        revision_cards = account_flag(self.settings, REVISION_CARDS_FLAG, c.account)
         views = self._views()
         register_reflection_tools(
             registry, strategies=c.strategies, queue=c.queue,
-            on_proposed=proposed_rids.append if auto_apply else None,
+            on_proposed=(proposed_rids.append if auto_apply or revision_cards
+                         else None),
             views_for=views.relevant if views is not None else None,
             # Decision brief on review cards (allpath_trade/card_brief.py):
             # optional brief_* tool arguments, only with the flag on.
@@ -655,7 +666,75 @@ class Reflector:
             if not send_report(self.notifier, subject, summary, full_body):
                 print(f"[reflection] notification failed ({et_date})",
                      file=sys.stderr)
+        if revision_cards and proposed_rids:
+            self._send_revision_cards(proposed_rids)
         return f"ok: report #{report_id} ({et_date})"
+
+    def _send_revision_cards(self, rids: list[int]) -> None:
+        """REFLECTION_REVISION_CARDS: one Telegram card with Approve / Reject
+        buttons for each revision THIS run proposed that is still pending
+        now, after the auto-apply step (so a revision the auto regime
+        applied gets none, and one it held for a human gets a card that
+        says why). In id order. Telegram only: the report email already
+        lists the night's revisions.
+
+        The card is the compact revision card when COMPACT_CARDS is on for
+        the account, else the classic revision text. It goes through the
+        same push as every other review card, so the buttons resolve it
+        through `ReviewQueue.approve()/reject()` and order-thread replies
+        work. Nothing here approves, holds or changes a review. One card
+        failing never stops the others or the run."""
+        c = self.components
+        app_state = AppState(c.conn)
+        for rid in sorted(set(rids)):
+            try:
+                row = dict(c.queue.get(rid))
+                if row["status"] != "pending" or row["kind"] != "strategy_revision":
+                    continue
+                subject_body = self._revision_card(row)
+                sent = push_telegram_review_queued(
+                    queue=c.queue, app_state=app_state,
+                    telegram_bot_token=self.settings.telegram_bot_token,
+                    review_id=rid, body=subject_body[1], account=c.account)
+                if sent:
+                    card_format = getattr(subject_body[1], "card_format", None)
+                    if card_format and row.get("card_format") != card_format:
+                        c.queue.record_card_format(rid, card_format)
+                elif self.settings.telegram_bot_token:
+                    print(f"[reflection] revision card for #{rid} was not sent "
+                          "(Telegram not paired, or the send failed)", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 — one card must not stop the rest
+                print(f"[reflection] revision card for #{rid} failed: {exc}",
+                      file=sys.stderr)
+
+    def _revision_card(self, row: dict) -> tuple[str, str]:
+        """`events.review_queued` for a pending reflection revision row."""
+        c = self.components
+        snapshot = json.loads(row["snapshot"] or "{}")
+        new_yaml = snapshot.get("new_yaml", "")
+        strategy_id = row["strategy_id"]
+        action = f"revise strategy '{strategy_id}'"
+        try:
+            version = parse_strategy_text(strategy_id, new_yaml).version
+            action = f"{action} to v{version}"
+        except StrategyValidationError:
+            pass  # the classic line just leaves the version off
+        brief = (card_brief.load(row.get("decision_brief"))
+                 if account_flag(self.settings, card_brief.FLAG, c.account) else None)
+        compact_kwargs: dict = {}
+        if account_flag(self.settings, compact_cards.FLAG, c.account):
+            dry_run = getattr(c.queue, "revision_effect", None)
+            compact_kwargs = {"compact": {
+                "old_yaml": snapshot.get("old_yaml", ""), "new_yaml": new_yaml,
+                "is_new": bool(snapshot.get("is_new")),
+                "rationale": snapshot.get("rationale", ""),
+                "web_base_url": self.settings.web_base_url,
+                "hold_reason": row.get("hold_reason") or "",
+                "effect": dry_run(new_yaml, strategy_id) if dry_run else ""}}
+        return events.review_queued(
+            account=c.account, review_id=int(row["id"]), ticker=row["ticker"],
+            action=action, strategy_id=strategy_id, kind="strategy_revision",
+            brief=brief, **compact_kwargs)
 
     def _fail(self, et_date: str, conversation_id: int, reason: str,
               tokens_used: int = 0) -> str:

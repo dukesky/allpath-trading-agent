@@ -218,6 +218,13 @@ class Settings(BaseSettings):
     # experiment runs. .env-only.
     compact_cards: bool = False
     shadow_compact_cards: bool | None = None
+    # Telegram card (Approve / Reject buttons) for each strategy revision a
+    # nightly reflection proposed that is still pending after the auto-apply
+    # step (reflect.py). Telegram only; off, a reflection revision sends no
+    # notification of its own, as before. Same bare/shadow_ pattern, off by
+    # default; paper must stay off while its experiment runs. .env-only.
+    reflection_revision_cards: bool = False
+    shadow_reflection_revision_cards: bool | None = None
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.
