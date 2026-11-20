@@ -241,8 +241,8 @@ class Settings(BaseSettings):
     # its experiment runs. .env-only. (Named AGENT_LANGUAGE, not LANGUAGE:
     # that is a locale variable on most systems.)
     # Holdings sync (allpath_trade/holdings_sync.py): the chat agent can
-    # compare the owner's real holdings (a screenshot, CSV or typed list he
-    # sends) with the shadow ledger and queue one reconciliation for his
+    # compare the owner's real holdings (a screenshot, CSV or typed list they
+    # send) with the shadow ledger and queue one reconciliation for their
     # confirmation. The app never connects to the brokerage. Same
     # bare/shadow_ pattern, off by default; only meaningful for shadow.
     # SHADOW_SYNC_STALE_DAYS: the evening check-in asks for a fresh
@@ -252,9 +252,9 @@ class Settings(BaseSettings):
     shadow_sync_stale_days: int = Field(default=7, ge=1)
     # Advisor for the owner's real account (allpath_trade/advisor.py), shadow.
     # PRE_TRADE_CONSULT: a stated intent to buy or sell triggers a structured
-    # check (plan fit, size and cash after, distance to his own levels, the
+    # check (plan fit, size and cash after, distance to their own levels, the
     # recent move, impulse flags, a verdict floor) before anything else, and a
-    # trade he reports is booked at his own fill after one confirmation.
+    # trade they report is booked at their own fill after one confirmation.
     # ACT_PROMPT_CARDS: a rule that fires is worded as a prompt to act at the
     # broker, with Done @ price / Skipped / Discuss buttons; an `auto`
     # strategy on that account is then dispatched as `confirm`, so the ledger

@@ -211,7 +211,8 @@ def order_result(*, account: str, ticker: str, side: str, submitted: bool,
 
 
 def drawdown_halt(*, account: str, peak: Decimal, equity: Decimal,
-                  drawdown: Decimal, demoted: list[str]) -> tuple[Subject, str]:
+                  drawdown: Decimal, demoted: list[str],
+                  lang: str = "en") -> tuple[Subject, str]:
     """The drawdown circuit breaker's own alert (Task 7) -- always sent
     through `self.notifier.send` directly plus `push_telegram_receipt`, NOT
     the per-strategy `_send`/`notify_email` gate every other sentinel event
@@ -222,6 +223,21 @@ def drawdown_halt(*, account: str, peak: Decimal, equity: Decimal,
         f"{_prefix(account)}[AllPath] TRADING HALTED: {drawdown:.1%} drawdown",
         {"type": "drawdown_halt", "account": account, "peak": str(peak),
          "equity": str(equity), "drawdown": str(drawdown), "demoted": list(demoted)})
+    if lang != "en":
+        names_l = ", ".join(demoted) if demoted else tr(lang, "none were set to auto")
+        body_l = tr(
+            lang, "Equity {equity} is {drawdown} below its peak {peak}.\n"
+                  "The drawdown circuit breaker tripped. Auto strategies demoted to "
+                  "confirm: {names}.\nNo further orders will execute without your "
+                  "approval.\nTo resume: review the account, restore strategies to auto "
+                  "deliberately, then reset the breaker from the repo directory:\n"
+                  "{command}\nYou will get another alert at each further 5% below the "
+                  "peak while it stays tripped.",
+            equity=f"${equity:,.2f}", drawdown=f"{drawdown:.1%}", peak=f"${peak:,.2f}",
+            names=names_l, command=_reset_command(account)) + tr(lang, FOOTER)
+        return (Subject(tr(lang, "{prefix}[AllPath] TRADING HALTED: {drawdown} drawdown",
+                           prefix=_prefix(account), drawdown=f"{drawdown:.1%}"),
+                        subject.event), Localized(body_l, lang))
     names = ", ".join(demoted) if demoted else "none were set to auto"
     body = (f"Equity ${equity:,.2f} is {drawdown:.1%} below its peak "
             f"${peak:,.2f}.\n"
@@ -242,7 +258,7 @@ def _reset_command(account: str) -> str:
 
 def drawdown_deepening(*, account: str, peak: Decimal, equity: Decimal,
                        drawdown: Decimal, level: Decimal,
-                       tripped_at: str) -> tuple[Subject, str]:
+                       tripped_at: str, lang: str = "en") -> tuple[Subject, str]:
     """Ops 2026-11-06: the breaker freezes its peak once tripped and used to
     say nothing more however far equity fell. Sent (like `drawdown_halt`,
     straight to the notifier + Telegram) at each further 5% step below the
@@ -251,6 +267,19 @@ def drawdown_deepening(*, account: str, peak: Decimal, equity: Decimal,
         f"{_prefix(account)}[AllPath] DRAWDOWN STILL FALLING: {drawdown:.1%} below peak",
         {"type": "drawdown_deepening", "account": account, "peak": str(peak),
          "equity": str(equity), "drawdown": str(drawdown), "level": str(level)})
+    if lang != "en":
+        body_l = tr(
+            lang, "Equity {equity} is now {drawdown} below the frozen peak {peak}, past "
+                  "the {level} mark.\nThe drawdown breaker has been tripped since {since} "
+                  "UTC and is still tripped; nothing new was demoted.\nReview the account. "
+                  "To reset the breaker, from the repo directory:\n{command}",
+            equity=f"${equity:,.2f}", drawdown=f"{drawdown:.1%}", peak=f"${peak:,.2f}",
+            level=f"{level:.0%}", since=tripped_at[:16],
+            command=_reset_command(account)) + tr(lang, FOOTER)
+        return (Subject(tr(lang, "{prefix}[AllPath] DRAWDOWN STILL FALLING: {drawdown} "
+                                 "below peak", prefix=_prefix(account),
+                           drawdown=f"{drawdown:.1%}"), subject.event),
+                Localized(body_l, lang))
     body = (f"Equity ${equity:,.2f} is now {drawdown:.1%} below the frozen "
             f"peak ${peak:,.2f}, past the {level:.0%} mark.\n"
             f"The drawdown breaker has been tripped since {tripped_at[:16]} UTC "
@@ -512,6 +541,9 @@ def _review_queued_localized(lang: str, event: dict, *, account: str, review_id:
     same order as `review_queued` builds them in English."""
     subject = Subject(tr(lang, "{prefix}[AllPath] {noun}: waiting for your approval",
                          prefix=_prefix(account), noun=ticker or word(lang, "ledger")), event)
+    from allpath_trade.i18n import ledger_title
+
+    action = ledger_title(lang, action) if kind == "shadow_edit" else action
     proposed = (tr(lang, "Proposed: {action} on {ticker}", action=action, ticker=ticker)
                 if ticker else tr(lang, "Proposed: {action}", action=action))
     lines = [tr(lang, "Item #{review_id} is waiting for you.", review_id=review_id), proposed]

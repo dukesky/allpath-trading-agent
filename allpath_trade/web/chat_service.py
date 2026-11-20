@@ -193,7 +193,7 @@ class ChatService:
                          and account_flag(c.settings, "holdings_sync", self.account))
         if holdings_sync:
             # Holdings sync: one tool that compares what the owner sent with
-            # the ledger and queues a reconciliation for his confirmation.
+            # the ledger and queues a reconciliation for their confirmation.
             from allpath_trade.holdings_sync import register_holdings_sync_tool
 
             register_holdings_sync_tool(

@@ -501,7 +501,7 @@ def apply_shadow_edit_factory(
                                               price_d)
             elif op == "real_fill":
                 # A trade the owner reported (allpath_trade/advisor.py),
-                # booked at his own price and quantity.
+                # booked at their own price and quantity.
                 from allpath_trade.advisor import apply_real_fill
 
                 _stale_check(full_snapshot(ledger), before)

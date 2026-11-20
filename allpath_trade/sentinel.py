@@ -202,7 +202,8 @@ class Sentinel:
             if trip is not None:
                 subject, body = events.drawdown_halt(
                     account=self.account, peak=trip.peak, equity=trip.equity,
-                    drawdown=trip.drawdown, demoted=trip.demoted)
+                    drawdown=trip.drawdown, demoted=trip.demoted,
+                    **i18n.lang_kw(self.queue))
                 # Account-level halt, not a per-strategy notification
                 # preference -- send directly rather than through `_send`,
                 # so it reaches the operator even when every strategy on
@@ -264,7 +265,7 @@ class Sentinel:
                         and regime_demands_confirm(self.app_state, self.account))
 
         # Act-prompt cards (allpath_trade/advisor.py, shadow): the ledger must
-        # not change before the owner has acted at his broker, so an AUTO
+        # not change before the owner has acted at their broker, so an AUTO
         # strategy is dispatched as CONFIRM here too (in memory only).
         if getattr(self.queue, "act_prompts", False) is True:
             confirm_only = True
@@ -610,7 +611,7 @@ class Sentinel:
         subject, body = events.drawdown_deepening(
             account=self.account, peak=deeper.peak, equity=deeper.equity,
             drawdown=deeper.drawdown, level=deeper.level,
-            tripped_at=deeper.tripped_at)
+            tripped_at=deeper.tripped_at, **i18n.lang_kw(self.queue))
         if self.notifier is not None:
             self.notifier.send(subject, body)
         push_telegram_receipt(
@@ -964,7 +965,7 @@ class Sentinel:
         stop already fired (strategy/stops.py). Visibility only -- nothing
         here re-arms the stop. Never raises."""
         try:
-            return stop_warning(doc, self.strategies)
+            return stop_warning(doc, self.strategies, **i18n.lang_kw(self.queue))
         except Exception as exc:  # noqa: BLE001 — a warning must never block a notification
             print(f"[sentinel] stop check failed for {doc.id}: {exc}", file=sys.stderr)
             return ""

@@ -460,10 +460,10 @@ class ShadowLedger(Broker):
 
     def record_real_fill(self, ticker: str, side: str, qty: Decimal,
                          price: Decimal) -> Order:
-        """Book a trade the owner made at his real brokerage, at HIS price
+        """Book a trade the owner made at their real brokerage, at THEIR price
         and quantity (allpath_trade/advisor.py, human-approved like the other
         helpers here). Unlike `submit_order` it never looks up a quote: the
-        fill price is the one he reported. Raises ValueError, writing
+        fill price is the one they reported. Raises ValueError, writing
         nothing, when the ledger cannot hold the trade (more shares sold
         than it has, or less cash than the buy cost): the book is then out
         of sync and needs a holdings sync first."""

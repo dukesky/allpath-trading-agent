@@ -133,9 +133,12 @@ class ReviewQueue:
         # card language once at startup; "en" builds every card as before.
         self.language: str = "en"
         # ACT_PROMPT_CARDS (allpath_trade/advisor.py): app.py turns this on
-        # for an account whose rule-trigger cards ask the owner to act at his
+        # for an account whose rule-trigger cards ask the owner to act at their
         # broker (Done / Skipped / Discuss). Off = cards as before.
         self.act_prompts: bool = False
+        # Records an act-prompt card's Telegram message id when order threads
+        # are off, so a reply with the fill price finds its card.
+        self.act_card_recorder: Callable[[int, str, int], None] | None = None
         # `fn(new_yaml, strategy_id) -> str`: the sentinel's dry run of what
         # approving a strategy revision would do right now (compact cards
         # only; wired in app.py with the flag). None = the line is left out.

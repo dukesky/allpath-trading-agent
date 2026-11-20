@@ -1,16 +1,16 @@
 """Advisor for the owner's real account (shadow only).
 
-PRE_TRADE_CONSULT / SHADOW_PRE_TRADE_CONSULT: when the owner says he wants
+PRE_TRADE_CONSULT / SHADOW_PRE_TRADE_CONSULT: when the owner says they want
 to buy or sell something, the chat agent first calls `pre_trade_check`. The
 facts are computed here in code, with no model call: whether a plan exists
-for the name (strategy thesis, his recorded views), position size and cash
+for the name (strategy thesis, their recorded views), position size and cash
 after the trade, distance to the name's own stop / entry / take-profit
 levels, the recent price move, and the impulse flags (no plan, chasing a
-large same-day move, buying below his own stop, re-buying right after a
-stop-out, oversize, not enough cash, selling more than he holds). A verdict
+large same-day move, buying below their own stop, re-buying right after a
+stop-out, oversize, not enough cash, selling more than they hold). A verdict
 floor (go / wait / dont) follows from the flags; the agent may be stricter,
-never looser. When he reports that he made the trade, `record_real_trade`
-queues a ledger entry at HIS price and quantity for one-tap confirmation
+never looser. When they report that they made the trade, `record_real_trade`
+queues a ledger entry at THEIR price and quantity for one-tap confirmation
 (`ShadowLedger.record_real_fill`): the ledger never books a simulated fill
 for a real trade. Every consult is logged in `trade_consults`.
 
@@ -55,8 +55,8 @@ CAUTION = ("no_plan", "chasing", "oversize")
 
 PRE_TRADE_CHAT_NOTE = """\
 
-Pre-trade consult. This ledger mirrors the owner's REAL account; he places
-every order himself at his broker, and you never do. When he says he wants
+Pre-trade consult. This ledger mirrors the owner's REAL account; they place
+every order themself at their broker, and you never do. When they say they want
 to, is about to, or is thinking of buying or selling something (in any
 language: "I want to buy X", "thinking of selling Y", 我想买, 要不要卖,
 加仓, 清仓), FIRST call pre_trade_check, before any other tool and before you
@@ -67,21 +67,21 @@ Answer in this shape, short enough for a phone:
 1. Verdict, first line: go / wait / don't. Never looser than the tool's
    floor; you may be stricter and must say why.
 2. The ONE condition that would change the verdict.
-3. Why: does it fit his plan (quote his thesis, view or VISION entry, or say
+3. Why: does it fit their plan (quote their thesis, view or VISION entry, or say
    plainly that no plan exists), size and cash after the trade, how far the
-   price is from his own stop / entry / take-profit levels, the recent
+   price is from their own stop / entry / take-profit levels, the recent
    move, events.
 4. Impulse check: name each flag the tool raised. You have no position and
    no feelings about this trade. If it looks like chasing, revenge for a
    loss, boredom or a gamble, say that in one direct sentence. No lecture.
-5. Offer three next steps: (a) he does it and tells you the real fill; then
-   call record_real_trade with HIS price and quantity; (b) set an alert at a
+5. Offer three next steps: (a) they do it and tell you the real fill; then
+   call record_real_trade with THEIR price and quantity; (b) set an alert at a
    level (a draft_strategy alert rule); (c) drop it.
-Never record a trade he has not told you he actually made, and never at a
-price you looked up. If he reports a trade already done without having
+Never record a trade they have not told you they actually made, and never at a
+price you looked up. If they report a trade already done without having
 asked first, call record_real_trade, then run pre_trade_check anyway and
-tell him honestly how it fits, labelled as after the fact. A long-term view
-he states for the whole book goes into record_view with subject VISION
+tell them honestly how it fits, labelled as after the fact. A long-term view
+they state for the whole book goes into record_view with subject VISION
 (expires_days 180, the longest a view lasts) when that tool is available.
 """
 
@@ -470,6 +470,8 @@ i18n.register({
         "{prefix}✅ #{review_id} 已更正：成交价改为 {price}。",
     "{prefix}⚠️ #{review_id} was booked at the quote; the price could not be set to "
     "{price}: {error}": "{prefix}⚠️ #{review_id} 已按报价记账，但没能把成交价改成 {price}：{error}",
+    " If you did make this trade, tell me the fill in chat and I will record it.":
+        " 如果你其实已经做了这笔交易，在聊天里告诉我成交情况，我来记账。",
     "{prefix}⏭ Skipped #{review_id}. The ledger is unchanged.":
         "{prefix}⏭ 已跳过 #{review_id}，账本没有变化。",
     "Booked": "已记账", "Skipped": "已跳过", "Discuss": "讨论",
@@ -571,7 +573,7 @@ def register_advisor_tools(registry: ToolRegistry, *, ledger: Any, data: Any, qu
         except ValueError as exc:
             return f"error: {exc}"
         if qty_d <= 0 or price_d <= 0:
-            return "error: qty and price must be greater than 0 (his real fill)"
+            return "error: qty and price must be greater than 0 (their real fill)"
         before = full_snapshot(ledger)
         try:
             after = preview_real_fill(before, ticker=symbol, side=side_ok, qty=qty_d,
@@ -614,34 +616,34 @@ def register_advisor_tools(registry: ToolRegistry, *, ledger: Any, data: Any, qu
         except Exception as exc:  # noqa: BLE001 — the row is queued; a card is best-effort
             print(f"[advisor] card for #{rid} failed: {exc}", file=sys.stderr)
         return (f"QUEUED as #{rid}: one tap on the card (or the Pending page) books it at "
-                f"his price. The ledger is unchanged until then.\n{body}")
+                f"their price. The ledger is unchanged until then.\n{body}")
 
     s = {"type": "string"}
     registry.register(
         "pre_trade_check",
-        "MUST be called first whenever the owner says he wants to buy or sell something "
-        "in his real account, before any opinion or proposal. Returns the facts computed "
-        "in code: plan fit, size and cash after the trade, distance to his own stop / "
+        "MUST be called first whenever the owner says they want to buy or sell something "
+        "in their real account, before any opinion or proposal. Returns the facts computed "
+        "in code: plan fit, size and cash after the trade, distance to their own stop / "
         "entry levels, the recent move, impulse flags, and a verdict floor (go / wait / "
         "dont). Changes nothing.",
         {"type": "object", "properties": {
             "ticker": s, "side": {"type": "string", "enum": ["buy", "sell"]},
-            "qty": {"type": "string", "description": "Shares, if he said."},
-            "notional": {"type": "string", "description": "Dollar amount, if he gave "
+            "qty": {"type": "string", "description": "Shares, if they said."},
+            "notional": {"type": "string", "description": "Dollar amount, if they gave "
                                                            "that instead of shares."},
-            "price": {"type": "string", "description": "His intended price, if any; "
+            "price": {"type": "string", "description": "Their intended price, if any; "
                                                         "else the current quote is used."}},
          "required": ["ticker", "side"]},
         pre_trade_check)
     registry.register(
         "record_real_trade",
-        "Record a trade the owner TELLS you he has actually made at his broker, at HIS "
+        "Record a trade the owner TELLS you they have actually made at their broker, at THEIR "
         "fill price and quantity (never a quote, never an estimate). Queues one "
-        "confirmation card; the ledger changes only when he confirms.",
+        "confirmation card; the ledger changes only when they confirm.",
         {"type": "object", "properties": {
             "ticker": s, "side": {"type": "string", "enum": ["buy", "sell"]},
             "qty": {"type": "string", "description": "Shares actually filled."},
-            "price": {"type": "string", "description": "His actual fill price per share."},
+            "price": {"type": "string", "description": "Their actual fill price per share."},
             "consult_id": {"type": "string",
                            "description": "The PRE-TRADE CHECK # this follows, if any."}},
          "required": ["ticker", "side", "qty", "price"]},
@@ -693,17 +695,35 @@ def act_keyboard(review_id: int, nonce: str, price: Decimal | None,
     ]]}
 
 
+# "sold 100" or "bought 50" is NOT accepted: the number may be a share
+# count. Only a bare price, or one introduced as a fill ("done", "filled",
+# "成交") or by "@" / "$".
 _PRICE_REPLY = re.compile(
-    r"^\s*(?:done|filled|sold|bought|成交|已成交|已卖|已买|成交价)?\s*(?:@|at|在|：|:)?\s*"
-    r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:美元|块)?\s*[.。]?\s*$", re.IGNORECASE)
+    r"^\s*(?P<word>done|filled|成交|已成交|成交价)?\s*(?P<at>@|at|在|：|:)?\s*"
+    r"(?P<usd>\$)?\s*(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"\s*(?:美元|块)?\s*[.。]?\s*$", re.IGNORECASE)
+PRICE_REPLY_TOLERANCE = Decimal("0.20")
 
 
-def price_from_reply(text: str) -> Decimal | None:
-    """`135.10`, `done 135.1`, `成交 135.1`, `@ $135.10` -> the price; any
-    other text (a question, a sentence) -> None."""
+def price_from_reply(text: str, reference: Any = None) -> Decimal | None:
+    """The fill price in a reply under an act-prompt card: `135.10`,
+    `done 135.1`, `成交 135.1`, `@ $135.10`. None for anything else (a
+    question, a sentence, a share count), and for a number that is not a
+    plausible fill: more than 20% away from `reference` (the rule's trigger
+    price), or, when there is no reference, a bare number with nothing
+    marking it as a price. Such a reply goes to the normal order thread,
+    where the agent can ask what was meant."""
     match = _PRICE_REPLY.match(text or "")
-    value = _dec(match.group(1)) if match else None
-    return value if value and value > 0 else None
+    if match is None:
+        return None
+    value = _dec(match.group("num"))
+    if value is None or value <= 0:
+        return None
+    ref = _dec(reference)
+    if ref is not None and ref > 0:
+        return value if abs(value - ref) <= ref * PRICE_REPLY_TOLERANCE else None
+    marked = match.group("word") or match.group("at") or match.group("usd")
+    return value if marked else None
 
 
 def book_fill_price(ledger: Any, order_id: Any, price: Decimal) -> None:

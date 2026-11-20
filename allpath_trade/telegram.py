@@ -1062,11 +1062,23 @@ class TelegramPoller:
             {"text": "Paper", "callback_data": "acct:paper"},
             {"text": "Shadow", "callback_data": "acct:shadow"},
         ]]}
-        self.api.send_message(
-            chat_id,
-            f"This chat is currently on <b>{current.capitalize()}</b>. "
-            "Choose which account it talks to:",
-            reply_markup=keyboard)
+        lang = self._account_language(current)
+        if lang != "en":
+            text = i18n.tr(lang, "This chat is currently on <b>{account}</b>. "
+                                 "Choose which account it talks to:",
+                           account=current.capitalize())
+        else:
+            text = (f"This chat is currently on <b>{current.capitalize()}</b>. "
+                    "Choose which account it talks to:")
+        self.api.send_message(chat_id, text, reply_markup=keyboard)
+
+    def _account_language(self, account: str) -> str:
+        """AGENT_LANGUAGE of `account` (app.py records it on the account's
+        queue); English when it cannot be read."""
+        try:
+            return i18n.of(self.holder.get().accounts[account].queue)
+        except Exception:  # noqa: BLE001 — a bot message never fails on this
+            return "en"
 
     def _handle_pairing(self, chat_id: str, chat_type: Any, from_id: Any,
                          token: str, message_id: Any) -> bool:
@@ -1227,8 +1239,11 @@ class TelegramPoller:
         reply_to = message.get("reply_to_message")
         if not isinstance(reply_to, dict) or not isinstance(reply_to.get("message_id"), int):
             return False
-        price = advisor.price_from_reply(text)
-        if price is None:
+        # Forwarded or quoted text is third-party content (order_threads.py):
+        # it can never book a fill.
+        from allpath_trade.order_threads import is_forwarded
+
+        if is_forwarded(message) or message.get("quote") or not re.search(r"\d", text or ""):
             return False
         try:
             c = self.holder.get()
@@ -1247,6 +1262,10 @@ class TelegramPoller:
             if not advisor.is_act_row(queue, row) or row["status"] not in ("pending",
                                                                           "approved"):
                 return False
+            # A plausible fill only: near the price the rule fired at.
+            price = advisor.price_from_reply(text, reference=advisor.trigger_price(row))
+            if price is None:
+                return False
         except Exception as exc:  # noqa: BLE001 — routing must never break the poller
             self._log_error(f"act-prompt reply lookup failed: {exc}")
             return False
@@ -1258,10 +1277,15 @@ class TelegramPoller:
                     line = i18n.tr(
                         lang, "{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
                         prefix=prefix, review_id=review_id,
-                        reasons="; ".join(result.decision.reasons))
+                        reasons="; ".join(result.decision.reasons)) + i18n.tr(
+                        lang, " If you did make this trade, tell me the fill in chat and "
+                              "I will record it.")
                 else:
                     line = self._book_act_fill(bundle, review_id, result.order, price,
                                                prefix, lang, hint=False)
+                # The card is settled: no live buttons on it any more.
+                self.api.edit_message_reply_markup(chat_id, reply_to["message_id"],
+                                                   reply_markup=None)
             else:
                 order_id = (json.loads(row["execution_result"] or "{}").get("order")
                             or {}).get("id")
@@ -1295,6 +1319,11 @@ class TelegramPoller:
         except ReviewError:
             row = None
         stored = ((row["approval_token_hash"] or "")[:16]) if row is not None else ""
+        if row is not None and not advisor.is_act_row(bundle.queue, row):
+            # Only act-prompt cards carry this button.
+            if isinstance(callback_id, str):
+                self.api.answer_callback_query(callback_id, "Unrecognized action.")
+            return
         if row is None or row["status"] != "pending" or not hmac.compare_digest(stored, nonce):
             if isinstance(callback_id, str):
                 self.api.answer_callback_query(
@@ -1310,10 +1339,10 @@ class TelegramPoller:
         framed = frame_order_thread(
             review_id=review_id, account=account, row=row,
             card_text=card_text if isinstance(card_text, str) else "",
-            owner_text=("(He tapped Discuss on this card and has not typed anything yet.) "
-                        "In a few short lines: why the rule fired, what you recommend he "
-                        "does at his broker and why, and what would change that. Then ask "
-                        "what he wants to do."),
+            owner_text=("(They tapped Discuss on this card and have not typed anything yet.) "
+                        "In a few short lines: why the rule fired, what you recommend they "
+                        "do at their broker and why, and what would change that. Then ask "
+                        "what they want to do."),
             untrusted=[])
         self._handle_chat_text(chat_id, framed, account=account)
 
@@ -1330,10 +1359,19 @@ class TelegramPoller:
             # `events._prefix` -- an invalid account (already gated by
             # `_ACCOUNT_CALLBACK_RE` before reaching here) degrades to no
             # prefix instead of inventing a label for it.
-            toast = f"Switched to {account.capitalize()}"
+            toast = (f"Switched to {account.capitalize()}"
+                     if self._account_language(account) == "en" else
+                     i18n.tr(self._account_language(account), "Switched to {account}",
+                             account=account.capitalize()))
             self.api.answer_callback_query(callback_id, toast[:TELEGRAM_TOAST_LIMIT])
         if isinstance(message_id, int):
             self.api.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+        lang = self._account_language(account)
+        if lang != "en":
+            self.api.send_message(chat_id, i18n.tr(
+                lang, "Switched to <b>{account}</b>. This chat now talks to your "
+                      "{name} account.", account=account.capitalize(), name=account))
+            return
         self.api.send_message(
             chat_id,
             f"Switched to <b>{account.capitalize()}</b>. "
@@ -1459,7 +1497,7 @@ class TelegramPoller:
                         _toast("Not processed"), True)
             _echo("rejected (rejected via Telegram)")
             if advisor.is_act_row(queue, row):
-                # Act-prompt card: "Skipped" -- he did not make the trade.
+                # Act-prompt card: "Skipped" -- they did not make the trade.
                 return (_t("{prefix}⏭ Skipped #{review_id}. The ledger is unchanged.",
                            prefix=prefix, review_id=review_id), _toast("Skipped"), True)
             return (_t("{prefix}❌ Rejected #{review_id}.", prefix=prefix,
@@ -1532,9 +1570,12 @@ class TelegramPoller:
         if not result.submitted:
             reasons = "; ".join(result.decision.reasons)
             _echo(f"blocked by the risk gate ({reasons})")
-            return (_t("{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
-                       prefix=prefix, review_id=review_id, reasons=reasons),
-                    _toast("Blocked by risk gate"), True)
+            blocked = _t("{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
+                         prefix=prefix, review_id=review_id, reasons=reasons)
+            if advisor.is_act_row(queue, row):
+                blocked += _t(" If you did make this trade, tell me the fill in chat and "
+                              "I will record it.")
+            return blocked, _toast("Blocked by risk gate"), True
         if account == "shadow":
             # C3: approving a shadow order writes a ledger row -- nothing was
             # routed to a brokerage (broker/shadow.py has none behind it), so
@@ -1547,7 +1588,7 @@ class TelegramPoller:
                 message = self._book_act_fill(
                     bundle, review_id, result.order, advisor.trigger_price(row),
                     prefix, lang, hint=True)
-                _echo("the owner did it at his broker; fill booked in the shadow ledger")
+                _echo("the owner did it at their broker; fill booked in the shadow ledger")
                 return message, _toast("Booked"), True
             summary = ("order recorded in your shadow ledger — place it in "
                        "your brokerage now")

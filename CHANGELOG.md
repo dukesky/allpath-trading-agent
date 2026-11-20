@@ -73,6 +73,16 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
   strategies on the account are dispatched as `confirm` while the flag is on.
 - Research: `trade_consults.csv` (side, floor, flag codes, outcome; no
   ticker, size or text).
+- A reply under an act-prompt card books a fill only when it is a bare
+  price or one introduced by done / filled / 成交 / @ / $, and within 20% of
+  the rule's trigger price; `sold 100`, a forwarded or a quoted message go
+  to the normal order thread. It works without `TELEGRAM_ORDER_THREADS`
+  (the card is recorded for this purpose) and removes the card's buttons.
+  The Discuss button is refused on any card that is not an act prompt. A
+  Done blocked by the risk gate says how to record the trade anyway.
+- Chinese for the strings that were still English on a `zh` account: the
+  spent-stop warning, the drawdown breaker alerts, ledger-edit titles on
+  cards, and the `/account` switch messages.
 - With both flags off no tool is registered and every card, button and
   dispatch decision is as before.
 
@@ -104,6 +114,29 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
     comparable with history after it.
   - With the flag off the tool is not registered, a non-image document sent
     to the bot is ignored as before, and no message changes.
+  - Reconciliation marker: an applied sync writes a `shadow_orders` audit
+    row (no ticker, note starting `reconciliation:`), the shape a manual
+    reconciliation leaves; `last_sync`, the staleness reminder and
+    `shadow_syncs.csv` (new `n_adjusted`, `n_cost_unknown`,
+    `n_option_lines`; `source=manual` rows) count manual markers too.
+  - Cost unknown: `ZZZ 40 @ ?` or `cost_unknown` on a row. An existing
+    position keeps its ledger cost, a new one takes the price at sync as a
+    placeholder; either way `shadow_positions.cost_unknown` (new column) is
+    set, the chat prompt names those positions, and the table says their
+    P/L is not real. No quote available means the cost is asked for.
+  - Option lines: `options` from a screenshot or `OPTION,...` rows in text;
+    new, changed, re-priced and (only with `options_complete`) removed. The
+    option book is staleness-checked at approval.
+  - Plans: the comparison lists holdings with no active strategy, active
+    strategies whose symbol is no longer held (shares or options) with
+    their sell rules that are still on, and held symbols whose sell rules
+    are off. Nothing is changed or deleted; the agent is told to offer the
+    owner's rule (no position: keep entries, switch off trims and stops) as
+    an ordinary strategy revision.
+  - Stricter reading: a comma is only a thousands separator, an unmarked
+    third number (`ZZZ 40 190`) is asked about, a `Cost Basis` / total
+    column is never taken as cost per share, and `text` together with
+    `positions` is refused.
 ## Shadow memory isolation (unreleased)
 
 - **The shadow account no longer writes the shared user profile** (TDSC

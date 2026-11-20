@@ -327,7 +327,8 @@ class _CardAPI:
         return 500 + len(_CardAPI.sent)
 
 
-def _fire(tmp_path, monkeypatch, *, auth="confirm", act=True, lang="en", threads=False):
+def _fire(tmp_path, monkeypatch, *, auth="confirm", act=True, lang="en", threads=False,
+          act_recorder=False):
     """The stop rule fires at 88 on a shadow account holding 20 ZZZ."""
     monkeypatch.setattr(dispatch, "TelegramAPI", _CardAPI)
     _CardAPI.sent = []
@@ -337,6 +338,8 @@ def _fire(tmp_path, monkeypatch, *, auth="confirm", act=True, lang="en", threads
     w.queue.compact_cards = True
     if threads:
         w.queue.set_telegram_card_recorder(OrderThreadStore(w.conn, "shadow").add_card)
+    if act_recorder:
+        w.queue.act_card_recorder = OrderThreadStore(w.conn, "shadow").add_card
     app_state = AppState(w.conn)
     app_state.set(TELEGRAM_CHAT_ID_KEY, "111")
     notifier = SpyNotifier()
@@ -435,7 +438,7 @@ def test_discuss_starts_a_chat_turn_about_the_card_and_resolves_nothing(tmp_path
     assert w.queue.get(1)["status"] == "pending" and api.edited_markups == []
     [turn] = chat.calls
     assert turn["text"].startswith("[Order thread: review #1 (Shadow)]")
-    assert "He tapped Discuss" in turn["text"] and "ZZZ · Sell 20 sh @ $88" in turn["text"]
+    assert "They tapped Discuss" in turn["text"] and "ZZZ · Sell 20 sh @ $88" in turn["text"]
     assert api.answered_callbacks == [("cb1", "Let's talk it through.")]
     assert api.sent_messages[-1][1].endswith("here is why")
     # A stale or foreign nonce does nothing.
@@ -483,12 +486,64 @@ def test_a_question_under_the_card_is_still_an_order_thread(tmp_path, monkeypatc
     assert chat.calls and chat.calls[0]["text"].startswith("[Order thread: review #1")
 
 
-def test_price_reply_parser():
+def test_price_reply_parser_takes_only_a_plausible_fill():
+    ref = Decimal("135.35")
     for text, want in (("135.10", "135.10"), ("done 135.1", "135.1"), ("成交 135.1", "135.1"),
-                       ("@ $1,350.25", "1350.25"), ("Filled at 99", "99"), ("已成交：88.5。", "88.5")):
-        assert advisor.price_from_reply(text) == Decimal(want), text
-    for text in ("why 135?", "sell half at 135 instead", "", "0", "no", "135 or 136"):
-        assert advisor.price_from_reply(text) is None, text
+                       ("@ $140.25", "140.25"), ("Filled at 129", "129"),
+                       ("已成交：134.5。", "134.5")):
+        assert advisor.price_from_reply(text, ref) == Decimal(want), text
+    # Not a price: a question, a sentence, a share count, or a number that is
+    # nowhere near the price the rule fired at.
+    for text in ("why 135?", "sell half at 135 instead", "", "0", "no", "135 or 136",
+                 "sold 100", "bought 50", "2", "2026", "100", "200", "135,5"):
+        assert advisor.price_from_reply(text, ref) is None, text
+    # Without a trigger price a bare number is not enough; a marked one is.
+    assert advisor.price_from_reply("135.10") is None
+    assert advisor.price_from_reply("done 135.10") == Decimal("135.10")
+    assert advisor.price_from_reply("@ $1,350.25") == Decimal("1350.25")
+
+
+def test_forwarded_or_implausible_replies_never_book_a_fill(tmp_path, monkeypatch):
+    w = _fire(tmp_path, monkeypatch, threads=True)
+    card_id = w.conn.execute("SELECT telegram_message_id m FROM telegram_cards").fetchone()["m"]
+    chat = FakeChatService()
+    forwarded = _reply("87.10", card_id)
+    forwarded["message"]["forward_origin"] = {"type": "user"}
+    quoted = _reply("87.10", card_id, update_id=6)
+    quoted["message"]["quote"] = {"text": "87.10"}
+    shares = _reply("sold 20", card_id, update_id=7)        # a share count, not a price
+    far = _reply("8.71", card_id, update_id=8)              # a typo: 90% away from $88
+    api = FakeTelegramAPI(batches=[[forwarded, quoted, shares, far]])
+    poller = _poller(w, api, chat)
+    poller._chat_services = {"shadow": chat, "paper": chat}
+    poller.poll_once()
+    assert w.queue.get(1)["status"] == "pending"
+    assert w.ledger.get_orders(open_only=False) == []
+    assert len(chat.calls) == 4, "each goes to the order thread instead"
+
+
+def test_reply_with_a_price_works_without_order_threads_and_removes_the_buttons(
+        tmp_path, monkeypatch):
+    w = _fire(tmp_path, monkeypatch, threads=False, act_recorder=True)
+    [(html, _markup)] = _CardAPI.sent
+    assert "Reply to ask" not in html and "reply to this message with your real fill" in html
+    card_id = w.conn.execute("SELECT telegram_message_id m FROM telegram_cards").fetchone()["m"]
+    api = FakeTelegramAPI(batches=[[_reply("87.10", card_id)]])
+    _poller(w, api).poll_once()
+    assert w.queue.get(1)["status"] == "approved"
+    assert w.ledger.get_orders(open_only=False)[0].filled_avg_price == Decimal("87.10")
+    assert api.edited_markups == [("111", card_id, None)]
+
+
+def test_discuss_is_refused_on_a_card_that_is_not_an_act_prompt(tmp_path, monkeypatch):
+    w = _fire(tmp_path, monkeypatch, act=False)
+    nonce = w.queue.get(1)["approval_token_hash"][:16]
+    chat = FakeChatService()
+    api = FakeTelegramAPI(batches=[[_callback_update(1, 111, 111, f"rv:discuss:1:{nonce}")]])
+    poller = _poller(w, api, chat)
+    poller._chat_services = {"shadow": chat, "paper": chat}
+    poller.poll_once()
+    assert chat.calls == [] and api.answered_callbacks == [("cb1", "Unrecognized action.")]
 
 
 def test_consult_export_has_codes_only(tmp_path):

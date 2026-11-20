@@ -35,6 +35,9 @@ SHADOW_SETTINGS = {
     "shadow_concise_replies": True,
     "shadow_telegram_order_threads": True,
     "shadow_reflection_revision_cards": True,
+    "shadow_holdings_sync": True,
+    "shadow_pre_trade_consult": True,
+    "shadow_act_prompt_cards": True,
 }
 
 PAPER_STRATEGY = """
@@ -86,6 +89,17 @@ def write_shadow_data(client, tmp_path):
     if hasattr(shadow.broker, "set_option_position"):
         shadow.broker.set_option_position("ZZZ270115C00150000", Decimal(2), Decimal("12.30"),
                                           Decimal("14.10"))
+    # Holdings sync and pre-trade consult records.
+    shadow.broker.note_reconciliation(f"reconciliation: {MARK} manual check")
+    shadow.broker.set_cost_unknown("ZZZ", True)
+    c.conn.execute(
+        "INSERT INTO shadow_syncs (ts, source, mode, before, after) VALUES (?, 'text', "
+        "'full', ?, ?)", (NOW.isoformat(), f'{{"note": "{MARK}"}}', "{}"))
+    c.conn.execute(
+        "INSERT INTO trade_consults (ts, account, ticker, side, qty, price, value, flags,"
+        " floor, conversation_id) VALUES (?, 'shadow', 'ZZZ', 'buy', '10', '182.5',"
+        " '1825', '[\"chasing\"]', 'wait', 1)", (NOW.isoformat(),))
+    c.conn.commit()
     for layer, key in (("profile", None), ("stock", "ZZZ"), ("lesson", "sizing"),
                        ("strategy", "zzz-plan")):
         shadow.memory.apply(layer, key, "add",

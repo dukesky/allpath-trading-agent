@@ -360,7 +360,7 @@ CREATE TABLE IF NOT EXISTS shadow_syncs (
 
 -- Pre-trade consult (PRE_TRADE_CONSULT / SHADOW_PRE_TRADE_CONSULT,
 -- allpath_trade/advisor.py): one row per `pre_trade_check` the chat agent
--- ran on a trade the owner said he wanted to make -- what, the impulse/risk
+-- ran on a trade the owner said they wanted to make -- what, the impulse/risk
 -- flags the code raised, the verdict floor, and whether a real fill was
 -- recorded afterwards (`outcome`). No free text.
 CREATE TABLE IF NOT EXISTS trade_consults (
