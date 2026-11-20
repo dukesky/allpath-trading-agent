@@ -25,6 +25,29 @@ def write_csv(path: Path, columns: list[str], rows: list[dict]) -> None:
         w.writerows(rows)
 
 
+class _Cut:
+    """Applies `--shadow-study-end` to every table of one export run and
+    counts what it dropped (allpath_trade/research/study_cut.py)."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        from allpath_trade.research import study_cut
+
+        self._apply = study_cut.apply
+        self.cut = study_cut.parse_cut(args.shadow_study_end)
+        self.dropped = 0
+
+    def __call__(self, rows: list[dict]) -> list[dict]:
+        kept, dropped = self._apply(rows, self.cut)
+        self.dropped += dropped
+        return kept
+
+    def note(self) -> str:
+        if self.cut is None:
+            return "shadow study end: none (all shadow rows kept)"
+        return (f"shadow study end {self.cut.isoformat()}: dropped {self.dropped} shadow "
+                "row(s) after it; paper rows untouched")
+
+
 def _date(s: str) -> str:
     return date.fromisoformat(s).isoformat()
 
@@ -34,29 +57,31 @@ def cmd_regime_metrics(args: argparse.Namespace) -> int:
 
     conn = open_readonly(args.db)
     out = Path(args.out)
-    daily = rm.daily_rows(conn, args.start, args.end)
+    cut = _Cut(args)
+    daily = cut(rm.daily_rows(conn, args.start, args.end))
     write_csv(out / "regime_metrics_daily.csv", rm.DAILY_COLUMNS, daily)
     write_csv(out / "revisions.csv", rm.REVISION_COLUMNS,
-              rm.revision_rows(conn, args.start, args.end))
-    write_csv(out / "orders.csv", rm.ORDER_COLUMNS, rm.order_rows(conn, args.start, args.end))
+              cut(rm.revision_rows(conn, args.start, args.end)))
+    write_csv(out / "orders.csv", rm.ORDER_COLUMNS, cut(rm.order_rows(conn, args.start, args.end)))
     usage, failures = rm.llm_rows(conn, args.start, args.end)
-    write_csv(out / "llm_daily.csv", rm.LLM_COLUMNS, usage)
+    write_csv(out / "llm_daily.csv", rm.LLM_COLUMNS, cut(usage))
     write_csv(out / "llm_failures_daily.csv", rm.LLM_FAILURE_COLUMNS, failures)
     write_csv(out / "order_threads.csv", rm.ORDER_THREAD_COLUMNS,
-              rm.order_thread_rows(conn, args.start, args.end))
+              cut(rm.order_thread_rows(conn, args.start, args.end)))
     write_csv(out / "card_briefs.csv", rm.CARD_BRIEF_COLUMNS,
-              rm.card_brief_rows(conn, args.start, args.end))
+              cut(rm.card_brief_rows(conn, args.start, args.end)))
     write_csv(out / "card_brief_drops.csv", rm.CARD_BRIEF_DROP_COLUMNS,
-              rm.card_brief_drop_rows(conn, args.start, args.end))
+              cut(rm.card_brief_drop_rows(conn, args.start, args.end)))
     write_csv(out / "card_formats.csv", rm.CARD_FORMAT_COLUMNS,
-              rm.card_format_rows(conn, args.start, args.end))
-    holds = rm.hold_rows(conn, args.start, args.end)
+              cut(rm.card_format_rows(conn, args.start, args.end)))
+    holds = cut(rm.hold_rows(conn, args.start, args.end))
     write_csv(out / "holds.csv", rm.HOLD_COLUMNS, holds)
     (out / "summary.md").write_text(rm.summary_markdown(
         daily, db_label=Path(args.db).name, start=args.start, end=args.end,
         holds=holds))
     conn.close()
     print(f"wrote {len(daily)} account-days to {out}")
+    print(cut.note())
     return 0
 
 
@@ -66,12 +91,14 @@ def cmd_rule_outcomes(args: argparse.Namespace) -> int:
     conn = open_readonly(args.db)
     out = Path(args.out)
     sources = None if args.sources == "all" else tuple(args.sources.split(","))
-    rows = ro.rule_outcome_rows(conn, sources=sources, start=args.start, end=args.end)
+    cut = _Cut(args)
+    rows = cut(ro.rule_outcome_rows(conn, sources=sources, start=args.start, end=args.end))
     write_csv(out / "rule_outcomes.csv", ro.COLUMNS, rows)
     (out / "rule_outcomes_summary.md").write_text(ro.summary_markdown(
         rows, db_label=Path(args.db).name, sources=args.sources))
     conn.close()
     print(f"wrote {len(rows)} rule-outcome rows to {out}")
+    print(cut.note())
     return 0
 
 
@@ -84,13 +111,15 @@ def cmd_replay_rules(args: argparse.Namespace) -> int:
     cache = BarCache(args.bars or out / "bars",
                      fetch=None if args.offline else yfinance_fetch)
     sources = None if args.sources == "all" else tuple(args.sources.split(","))
-    rows = rp.replay_rows(conn, cache, asof=args.asof, sources=sources,
-                          start=args.start, end=args.end)
+    cut = _Cut(args)
+    rows = cut(rp.replay_rows(conn, cache, asof=args.asof, sources=sources,
+                              start=args.start, end=args.end))
     write_csv(out / "rule_replay.csv", rp.COLUMNS, rows)
     (out / "rule_replay_summary.md").write_text(rp.summary_markdown(
         rows, db_label=Path(args.db).name, asof=args.asof))
     conn.close()
     print(f"wrote {len(rows)} replay rows to {out} (bars cache: {cache.directory})")
+    print(cut.note())
     return 0
 
 
@@ -102,6 +131,13 @@ def _common(p: argparse.ArgumentParser) -> None:
                    default=datetime.now(ET).date().isoformat(),
                    help="last ET date (default today)")
     p.add_argument("--out", required=True, help="output directory")
+    from allpath_trade.research.study_cut import DEFAULT_SHADOW_STUDY_END
+
+    p.add_argument("--shadow-study-end", default=DEFAULT_SHADOW_STUDY_END,
+                   help="drop shadow-account rows after this ISO timestamp: the shadow "
+                        "account left the study when it was reconciled with the real "
+                        f"account (default {DEFAULT_SHADOW_STUDY_END}; 'none' keeps all). "
+                        "Paper rows are never dropped")
 
 
 def build_parser() -> argparse.ArgumentParser:

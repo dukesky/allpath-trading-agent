@@ -2,6 +2,17 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Shadow study end in the research exports (unreleased)
+
+- **`--shadow-study-end`** on `allpath-research regime-metrics`,
+  `rule-outcomes` and `replay-rules` (`allpath_trade/research/study_cut.py`).
+  The shadow account left the study when its ledger was reconciled with the
+  owner's real account; shadow rows after that moment are dropped from every
+  exported table (per-day tables keep the cut's own ET day; `llm_daily.csv`
+  rows labelled `...:shadow` are cut too). Default `2026-11-20T21:27:59Z`;
+  `--shadow-study-end none` keeps everything. Paper rows are never dropped.
+  Each run prints how many shadow rows it dropped.
+
 ## Option holdings in the shadow ledger (unreleased)
 
 - **`OPTION_HOLDINGS` / `SHADOW_OPTION_HOLDINGS`** (off by default, shadow
