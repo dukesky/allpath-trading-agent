@@ -282,6 +282,20 @@ def consult(ticker: str, side: str, *, qty: Any = None, notional: Any = None,
                     ticker_views = ticker_views or v["subject"] == ticker
         except Exception as exc:  # noqa: BLE001
             c.notes.append(f"views unavailable ({exc})")
+    # Options the owner holds on the same name (shadow_options.py): part of
+    # the exposure, listed apart from shares and never delta-adjusted.
+    try:
+        from allpath_trade.broker.base import parse_occ_symbol
+        from allpath_trade.shadow_options import line as option_line
+        from allpath_trade.shadow_options import view as option_view
+
+        for row in getattr(broker, "get_option_rows", list)():
+            occ = parse_occ_symbol(row["symbol"])
+            if occ is not None and occ.root == ticker:
+                c.notes.append("also held on this name (option, not delta-adjusted): "
+                               + option_line(option_view(row, now=now), c.equity, c.price))
+    except Exception as exc:  # noqa: BLE001 — optional context
+        c.notes.append(f"option holdings unavailable ({exc})")
     for doc in active:
         c.levels += price_levels(doc, c.price)
     c.moves = _moves(data, ticker, c.price, now)

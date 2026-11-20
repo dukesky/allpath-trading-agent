@@ -559,3 +559,14 @@ def test_consult_export_has_codes_only(tmp_path):
     assert "ZZZ" not in json.dumps(row)
     assert regime_metrics.trade_consult_rows(connect(":memory:"), "2026-11-01",
                                              "2026-11-30") == []
+
+
+def test_consult_lists_options_held_on_the_same_name(tmp_path):
+    w = _world(tmp_path, price="100", closes=[99, 100])
+    assert not any("option" in n for n in _consult(w, "buy", qty="1").notes)
+    w.ledger.set_option_position("ZZZ270115C00150000", Decimal(2), Decimal("12.30"))
+    w.ledger.set_option_position("QQQ270115C00150000", Decimal(1), Decimal(5))
+    c = _consult(w, "buy", qty="1")
+    [note] = [n for n in c.notes if "option" in n]
+    assert "ZZZ 2027-01-15 $150 call: 2 contracts (200 sh controlled" in note
+    assert "NOTE: also held on this name (option, not delta-adjusted)" in advisor.render_consult(c)
