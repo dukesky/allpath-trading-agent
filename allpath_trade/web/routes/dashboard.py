@@ -682,6 +682,18 @@ def dashboard(request: Request,
     except Exception as exc:  # noqa: BLE001 — a broker outage must not blank the page
         broker_error = f"Broker unavailable: {exc}"
 
+    # Option holdings of the shadow ledger, shown in their own table
+    # (allpath_trade/shadow_options.py). Paper's broker has no option ledger.
+    option_rows: list = []
+    if hasattr(b.broker, "get_option_rows"):
+        try:
+            from allpath_trade.shadow_options import mark_note, view
+
+            option_rows = [{**v, "note": mark_note(v)}
+                           for v in (view(r) for r in b.broker.get_option_rows())]
+        except Exception:  # noqa: BLE001 — an optional table must not blank the page
+            option_rows = []
+
     days = _range_days(range_key, _utcnow())
     equity_history = _cached_equity_history(b.broker, range_key, days)
     equity_summary = equity_period_summary(
@@ -727,6 +739,7 @@ def dashboard(request: Request,
 
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "dashboard", "account": account, "positions": positions,
+        "option_rows": option_rows,
         "price_as_of": price_as_of,
         "broker_error": broker_error, "broker_unconfigured": broker_unconfigured,
         "strategy_cards": strategy_cards,

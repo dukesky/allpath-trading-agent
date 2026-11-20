@@ -2,6 +2,42 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Option holdings in the shadow ledger (unreleased)
+
+- **`OPTION_HOLDINGS` / `SHADOW_OPTION_HOLDINGS`** (off by default, shadow
+  only; `allpath_trade/shadow_options.py`). The shadow ledger can hold and
+  mark the long options the owner has at his real broker. It never trades
+  them.
+  - New table `shadow_option_positions` (OCC symbol, contracts, average cost
+    and the owner's last price per share). `ShadowLedger.get_account()`
+    includes contracts x 100 x mark in equity; `get_positions()` is
+    unchanged (shares only), so rules, the expiry sweep, the risk gate and
+    the executor never see an option line. New ledger methods
+    `get_option_rows`, `get_option_positions`, `set_option_position`,
+    `remove_option_position`, `mark_option`, `record_option_fill`; each
+    write appends an `adjust` audit row.
+  - Writes go through `shadow_edit` reviews (new ops `set_option`,
+    `remove_option`, `mark_option`, `option_fill`) with the usual staleness
+    check. Chat tools (flag on): `shadow_set_option_position`,
+    `shadow_remove_option_position`, `shadow_mark_option`,
+    `shadow_record_option_trade`, `option_position_check`. The Settings CSV
+    import accepts `OPTION,underlying,call|put,strike,YYYY-MM-DD,contracts,
+    avg_cost[,last_price]` rows. "Reset ledger" also clears option lines.
+  - Marking: no option quotes are fetched and no price is invented. A line
+    is valued at the last price the owner supplied (stale after 3 days) or
+    at cost; an expired contract is flagged for him to close out.
+  - A reported option trade is booked at the owner's fill after approval
+    and comes with facts for an evaluation: plan for the underlying,
+    exposure including shares (contracts x 100, not delta-adjusted),
+    premium at risk as a share of equity, days to expiry, distance from
+    strike.
+  - Shown apart from shares: dashboard table "Options held", `option:`
+    lines in the chat prompt, a block in `get_portfolio`, and a block in the
+    check-in's live snapshot (which then drops the strategy-doc description
+    of the same underlying's options).
+  - Paper: no change. With no option rows and the flag off, shadow is
+    unchanged too.
+
 ## Reflection revision cards (unreleased)
 
 - **`REFLECTION_REVISION_CARDS` / `SHADOW_REFLECTION_REVISION_CARDS`**

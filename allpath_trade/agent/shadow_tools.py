@@ -201,6 +201,11 @@ def current_shadow_state(ledger: ShadowLedger, op: str, args: dict) -> object:
         return order_snapshot(ledger, args.get("order_id", ""))
     if op in ("import", "reset"):
         return full_snapshot(ledger)
+    if op in ("set_option", "remove_option", "mark_option"):
+        return option_snapshot(ledger, args.get("symbol", ""))
+    if op == "option_fill":
+        return {"option": option_snapshot(ledger, args.get("symbol", "")),
+                **cash_snapshot(ledger)}
     return None
 
 
@@ -220,6 +225,43 @@ def preview_import(before: dict, rows: list[dict], cash: Decimal | None) -> dict
 # --- CSV import parsing ------------------------------------------------------
 
 _CSV_HEADER = ("ticker", "qty", "avg_cost")
+
+
+def _parse_option_csv_row(cells: list[str]) -> tuple[dict, str]:
+    """`(row, "")` for a valid `OPTION,...` CSV row, else `({}, problem)`.
+    The row has the same keys as a stock row (`ticker` is the OCC symbol,
+    `qty` the contracts) plus `option: True` and `last_price`."""
+    from allpath_trade.shadow_options import occ_symbol
+
+    if len(cells) not in (7, 8):
+        return {}, ("an OPTION row is OPTION,underlying,call|put,strike,YYYY-MM-DD,"
+                    "contracts,avg_cost[,last_price]")
+    try:
+        symbol = occ_symbol(cells[1], cells[2], cells[3], cells[4])
+        contracts = _parse_money(cells[5], field="contracts")
+        avg_cost = _parse_money(cells[6], field="avg_cost")
+        last = (_parse_money(cells[7], field="last_price")
+                if len(cells) == 8 and cells[7] != "" else None)
+    except ValueError as exc:
+        return {}, str(exc)
+    if contracts < 0 or contracts != contracts.to_integral_value():
+        return {}, "contracts must be a whole number >= 0"
+    if avg_cost <= 0:
+        return {}, "avg_cost must be > 0"
+    if last is not None and last < 0:
+        return {}, "last_price must be >= 0"
+    return {"ticker": symbol, "qty": str(contracts), "avg_cost": str(avg_cost),
+            "last_price": None if last is None else str(last), "option": True}, ""
+
+
+def option_snapshot(ledger: ShadowLedger, symbol: str) -> dict | None:
+    """The CURRENT state of one option holding (contracts, cost, the
+    owner's last price), or None when the ledger has none."""
+    for row in ledger.get_option_rows():
+        if row["symbol"] == symbol:
+            return {"contracts": row["contracts"], "avg_cost": row["avg_cost"],
+                    "last_price": row["last_price"]}
+    return None
 
 
 def parse_shadow_csv(text: str) -> tuple[list[dict], Decimal | None, list[str]]:
@@ -271,6 +313,20 @@ def parse_shadow_csv(text: str) -> tuple[list[dict], Decimal | None, list[str]]:
                 errors.append(f"line {i}: cash must be >= 0")
                 continue
             cash = amount
+            continue
+
+        if cells[0].upper() == "OPTION":
+            # An option holding (allpath_trade/shadow_options.py):
+            # OPTION,<underlying>,<call|put>,<strike>,<YYYY-MM-DD>,<contracts>,
+            # <avg cost per share>[,<current price per share>]
+            row, problem = _parse_option_csv_row(cells)
+            if problem:
+                errors.append(f"line {i}: {problem}")
+            elif row["ticker"] in seen:
+                errors.append(f"line {i}: duplicate option {row['ticker']}")
+            else:
+                seen.add(row["ticker"])
+                rows.append(row)
             continue
 
         if len(cells) != 3:
@@ -400,21 +456,56 @@ def apply_shadow_edit_factory(
                 rows_d = [
                     (row["ticker"], _parse_money(row["qty"], field="qty"),
                      _parse_money(row["avg_cost"], field="avg_cost"))
-                    for row in args["rows"]]
+                    for row in args["rows"] if not row.get("option")]
+                options_d = [
+                    (row["ticker"], _parse_money(row["qty"], field="contracts"),
+                     _parse_money(row["avg_cost"], field="avg_cost"),
+                     (_parse_money(row["last_price"], field="last_price")
+                      if row.get("last_price") is not None else None))
+                    for row in args["rows"] if row.get("option")]
                 cash_d = (_parse_money(args["cash"], field="cash")
                          if args.get("cash") is not None else None)
                 _stale_check(full_snapshot(ledger), before)
                 with conn.transaction():
                     for ticker, qty_d, avg_cost_d in rows_d:
                         ledger.set_position(ticker, qty_d, avg_cost_d)
+                    for symbol, contracts_d, avg_cost_d, last_d in options_d:
+                        ledger.set_option_position(symbol, contracts_d, avg_cost_d, last_d)
                     if cash_d is not None:
                         ledger.set_cash(cash_d)
+            elif op == "set_option":
+                contracts_d = _parse_money(args["contracts"], field="contracts")
+                avg_cost_d = _parse_money(args["avg_cost"], field="avg_cost")
+                last_d = (_parse_money(args["last_price"], field="last_price")
+                          if args.get("last_price") is not None else None)
+                _stale_check(option_snapshot(ledger, args["symbol"]), before)
+                with conn.transaction():
+                    ledger.set_option_position(args["symbol"], contracts_d, avg_cost_d, last_d)
+            elif op == "remove_option":
+                _stale_check(option_snapshot(ledger, args["symbol"]), before)
+                with conn.transaction():
+                    ledger.remove_option_position(args["symbol"])
+            elif op == "mark_option":
+                price_d = _parse_money(args["price"], field="price")
+                _stale_check(option_snapshot(ledger, args["symbol"]), before)
+                with conn.transaction():
+                    ledger.mark_option(args["symbol"], price_d)
+            elif op == "option_fill":
+                contracts_d = _parse_money(args["contracts"], field="contracts")
+                price_d = _parse_money(args["price"], field="price")
+                _stale_check({"option": option_snapshot(ledger, args["symbol"]),
+                              **cash_snapshot(ledger)}, before)
+                with conn.transaction():
+                    ledger.record_option_fill(args["symbol"], args["side"], contracts_d,
+                                              price_d)
             elif op == "reset":
                 current = full_snapshot(ledger)
                 _stale_check(current, before)
                 with conn.transaction():
                     for ticker in current["positions"]:
                         ledger.remove_position(ticker)
+                    for row in ledger.get_option_rows():
+                        ledger.remove_option_position(row["symbol"])
                     ledger.set_cash(Decimal(0))
             else:
                 raise RevisionValidationError(f"unknown shadow edit op {op!r}")
@@ -620,3 +711,208 @@ def register_shadow_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
             "order_id": {"type": t}, "actual_price": {"type": t}},
          "required": ["order_id", "actual_price"]},
         shadow_record_fill)
+
+
+def register_shadow_option_tools(registry: ToolRegistry, *, ledger: ShadowLedger,
+                                 queue: ReviewQueue, data: object, strategies: object,
+                                 conversation_id_fn: Callable[[], int | None],
+                                 notifier: Notifier | None = None, web_base_url: str = "",
+                                 app_state: AppState | None = None,
+                                 telegram_bot_token: str = "") -> None:
+    """Option-holding tools for the shadow chat agent (OPTION_HOLDINGS,
+    allpath_trade/shadow_options.py). Every write queues a `shadow_edit`
+    review for the owner's approval; nothing here can queue an order, and
+    there is deliberately no tool that proposes an option trade."""
+    from allpath_trade import shadow_options as so
+
+    def _symbol(underlying: str, right: str, strike: str, expiry: str) -> str:
+        return so.occ_symbol(underlying, right, strike, expiry)
+
+    def _queue(op: str, symbol: str, title: str, args: dict, before: object,
+               after: object) -> str:
+        try:
+            rid = queue.add_shadow_edit(op=op, ticker="", action=title, args=args,
+                                        before=before, after=after,
+                                        conversation_id=conversation_id_fn())
+        except Exception as exc:  # noqa: BLE001 — a queue failure is the tool's answer
+            return f"error: could not queue ledger change: {exc}"
+        if notifier is not None or telegram_bot_token:
+            try:
+                subject, body = events.review_queued(
+                    account="shadow", review_id=rid, ticker="", action=title,
+                    strategy_id="", approve_url=events.approve_link(web_base_url, rid),
+                    kind="shadow_edit")
+                notify_review_queued(
+                    queue=queue, notifier=notifier, app_state=app_state,
+                    telegram_bot_token=telegram_bot_token, review_id=rid,
+                    subject=subject, body=body, account="shadow")
+            except Exception as exc:  # noqa: BLE001 — the row is queued; a card is best-effort
+                print(f"[shadow_tools] option edit notification failed: {exc}",
+                      file=sys.stderr)
+        return (f"Ledger change queued for your approval as #{rid}: {title}. It will not "
+                "take effect until you approve it (card, or the Pending page).")
+
+    def _numbers(**values: str) -> dict[str, Decimal]:
+        return {name: _parse_money(str(v).replace("$", "").replace(",", ""), field=name)
+                for name, v in values.items()}
+
+    def shadow_set_option_position(underlying: str, right: str, strike: str, expiry: str,
+                                   contracts: str, avg_cost: str,
+                                   last_price: str = "") -> str:
+        try:
+            symbol = _symbol(underlying, right, strike, expiry)
+            n = _numbers(contracts=contracts, avg_cost=avg_cost)
+            last = _numbers(last_price=last_price)["last_price"] if str(last_price).strip() \
+                else None
+        except ValueError as exc:
+            return f"error: {exc}"
+        if n["contracts"] < 0 or n["contracts"] != n["contracts"].to_integral_value():
+            return "error: contracts must be a whole number >= 0"
+        if n["avg_cost"] <= 0:
+            return ("error: avg_cost must be > 0 (premium paid per share; ask the owner, "
+                    "never guess)")
+        if last is not None and last < 0:
+            return "error: last_price must be >= 0"
+        before = option_snapshot(ledger, symbol)
+        after = None if n["contracts"] == 0 else {
+            "contracts": str(n["contracts"]), "avg_cost": str(n["avg_cost"]),
+            "last_price": None if last is None else str(last)}
+        return _queue("set_option", symbol, f"Set option {so.describe(symbol)}",
+                      {"symbol": symbol, "contracts": str(n["contracts"]),
+                       "avg_cost": str(n["avg_cost"]),
+                       "last_price": None if last is None else str(last)}, before, after)
+
+    def shadow_remove_option_position(underlying: str, right: str, strike: str,
+                                      expiry: str) -> str:
+        try:
+            symbol = _symbol(underlying, right, strike, expiry)
+        except ValueError as exc:
+            return f"error: {exc}"
+        before = option_snapshot(ledger, symbol)
+        if before is None:
+            return f"error: no option position {so.describe(symbol)} to remove"
+        return _queue("remove_option", symbol, f"Remove option {so.describe(symbol)}",
+                      {"symbol": symbol}, before, None)
+
+    def shadow_mark_option(underlying: str, right: str, strike: str, expiry: str,
+                           price: str) -> str:
+        try:
+            symbol = _symbol(underlying, right, strike, expiry)
+            value = _numbers(price=price)["price"]
+        except ValueError as exc:
+            return f"error: {exc}"
+        if value < 0:
+            return "error: price must be >= 0"
+        before = option_snapshot(ledger, symbol)
+        if before is None:
+            return f"error: no option position {so.describe(symbol)} to mark"
+        return _queue("mark_option", symbol,
+                      f"Mark option {so.describe(symbol)} at ${value:,.2f}",
+                      {"symbol": symbol, "price": str(value)}, before,
+                      {**before, "last_price": str(value)})
+
+    def shadow_record_option_trade(underlying: str, right: str, strike: str, expiry: str,
+                                   side: str, contracts: str, price: str) -> str:
+        side_l = str(side or "").strip().lower()
+        if side_l not in ("buy", "sell"):
+            return "error: side must be buy or sell"
+        try:
+            symbol = _symbol(underlying, right, strike, expiry)
+            n = _numbers(contracts=contracts, price=price)
+        except ValueError as exc:
+            return f"error: {exc}"
+        if n["contracts"] <= 0 or n["contracts"] != n["contracts"].to_integral_value():
+            return "error: contracts must be a whole number > 0"
+        if n["price"] < 0 or (side_l == "buy" and n["price"] == 0):
+            return "error: price must be his real fill price per share"
+        option = option_snapshot(ledger, symbol)
+        held = Decimal(option["contracts"]) if option else Decimal(0)
+        cash = Decimal(cash_snapshot(ledger)["cash"])
+        amount = n["contracts"] * 100 * n["price"]
+        if side_l == "sell" and n["contracts"] > held:
+            return (f"NOT QUEUED: the ledger holds {held} contracts of {so.describe(symbol)}, "
+                    f"fewer than the {n['contracts']} sold. Fix the holding first "
+                    "(shadow_set_option_position), then record the sale.")
+        if side_l == "buy" and amount > cash:
+            return (f"NOT QUEUED: this buy cost ${amount:,.2f} and the ledger has "
+                    f"${cash:,.2f} in cash. Correct the cash (or sync the holdings) "
+                    "first, then record it.")
+        title = (f"Record option trade: {side_l.upper()} {n['contracts']} "
+                 f"{so.describe(symbol)} @ ${n['price']:,.2f} (${amount:,.2f})")
+        queued = _queue("option_fill", symbol, title,
+                        {"symbol": symbol, "side": side_l, "contracts": str(n["contracts"]),
+                         "price": str(n["price"])},
+                        {"option": option, "cash": str(cash)},
+                        {"contracts": str(held + n["contracts"] if side_l == "buy"
+                                          else held - n["contracts"]),
+                         "cash": str(cash - amount if side_l == "buy" else cash + amount)})
+        if queued.startswith("error"):
+            return queued
+        try:
+            facts = so.evaluation_facts(ledger, data, strategies, symbol)
+        except Exception as exc:  # noqa: BLE001 — the record is queued either way
+            facts = f"OPTION CHECK: facts unavailable ({exc})"
+        return (f"{queued}\nThe facts below are from BEFORE this trade is applied; add the "
+                f"trade ({side_l} {n['contracts']} contracts = "
+                f"{n['contracts'] * 100} shares controlled, ${amount:,.2f} premium) when "
+                f"you evaluate it for him.\n{facts}")
+
+    def option_position_check(underlying: str, right: str, strike: str, expiry: str) -> str:
+        try:
+            symbol = _symbol(underlying, right, strike, expiry)
+        except ValueError as exc:
+            return f"error: {exc}"
+        return so.evaluation_facts(ledger, data, strategies, symbol)
+
+    t = "string"
+    contract = {"underlying": {"type": t, "description": "Underlying ticker, e.g. ZZZ."},
+                "right": {"type": t, "enum": ["call", "put"]},
+                "strike": {"type": t}, "expiry": {"type": t, "description": "YYYY-MM-DD"}}
+    keys = ["underlying", "right", "strike", "expiry"]
+    registry.register(
+        "shadow_set_option_position",
+        "Enter or correct a LONG option holding in the shadow ledger (what the owner "
+        "holds at his real broker): contracts and average cost per share, optionally the "
+        "current price per share he gave. 0 contracts removes it. Not a trade and cash is "
+        "untouched. Queues the edit for his approval.",
+        {"type": "object", "properties": {
+            **contract, "contracts": {"type": t},
+            "avg_cost": {"type": t, "description": "Premium paid per share (not per "
+                                                    "contract)."},
+            "last_price": {"type": t, "description": "Current price per share, only if he "
+                                                      "gave it. Never an estimate."}},
+         "required": [*keys, "contracts", "avg_cost"]},
+        shadow_set_option_position)
+    registry.register(
+        "shadow_remove_option_position",
+        "Remove an option holding from the shadow ledger (it expired or was closed "
+        "earlier). Same approval flow.",
+        {"type": "object", "properties": contract, "required": keys},
+        shadow_remove_option_position)
+    registry.register(
+        "shadow_mark_option",
+        "Record the current price per share the OWNER gives for an option he holds; the "
+        "ledger has no option quotes. Same approval flow.",
+        {"type": "object", "properties": {**contract, "price": {"type": t}},
+         "required": [*keys, "price"]},
+        shadow_mark_option)
+    registry.register(
+        "shadow_record_option_trade",
+        "Record an option trade the owner TELLS you he made at his broker (his contracts "
+        "and his fill price per share); cash moves by contracts x 100 x price. Queues it "
+        "for his approval and returns the facts for your evaluation. This never places "
+        "or proposes an order.",
+        {"type": "object", "properties": {
+            **contract, "side": {"type": t, "enum": ["buy", "sell"]},
+            "contracts": {"type": t},
+            "price": {"type": t, "description": "His fill price per share."}},
+         "required": [*keys, "side", "contracts", "price"]},
+        shadow_record_option_trade)
+    registry.register(
+        "option_position_check",
+        "Facts about an option the owner holds or asks about: exposure to the underlying "
+        "including shares (contracts x 100, not delta-adjusted), premium at risk as a "
+        "share of equity, days to expiry, distance from strike, the plan on file. Read "
+        "only.",
+        {"type": "object", "properties": contract, "required": keys},
+        option_position_check)

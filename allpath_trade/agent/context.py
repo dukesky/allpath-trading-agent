@@ -270,6 +270,12 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
                          f"avg={p.avg_entry_price} value={p.market_value}")
         if not positions:
             parts.append("position: none")
+        # Option holdings of the shadow ledger, listed apart from shares
+        # (allpath_trade/shadow_options.py). A broker without an option
+        # ledger (paper) adds nothing here.
+        from allpath_trade.shadow_options import lines_for
+
+        parts.extend(f"option: {text}" for text in lines_for(broker, equity=acct.equity))
     except Exception as exc:  # noqa: BLE001 — degraded snapshot beats no chat
         parts.append(f"account: unavailable ({exc})")
 
