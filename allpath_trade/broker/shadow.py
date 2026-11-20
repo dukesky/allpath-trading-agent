@@ -425,6 +425,76 @@ class ShadowLedger(Broker):
             self._audit(now, symbol,
                         f"option fill reported by the owner: {side} {contracts} {symbol} "
                         f"@ {price} (cash {'-' if side == 'buy' else '+'}{amount})")
+    # --- holdings sync (allpath_trade/holdings_sync.py) -------------------
+
+    def set_cost_unknown(self, ticker: str, unknown: bool) -> None:
+        """Mark (or clear) a position whose cost the owner's brokerage does
+        not show: its `avg_cost` is then a placeholder. An audit row is
+        written only when the flag actually changes."""
+        ticker = ticker.strip().upper()
+        now = datetime.now(UTC)
+        with self._conn.transaction():
+            row = self._conn.execute(
+                "SELECT cost_unknown FROM shadow_positions WHERE ticker = ?",
+                (ticker,)).fetchone()
+            if row is None or bool(row["cost_unknown"]) == bool(unknown):
+                return
+            self._conn.execute(
+                "UPDATE shadow_positions SET cost_unknown = ? WHERE ticker = ?",
+                (1 if unknown else 0, ticker))
+            self._audit(now, ticker, f"cost basis of {ticker} marked "
+                                     f"{'unknown (placeholder cost)' if unknown else 'known'}")
+
+    def cost_unknown_tickers(self) -> list[str]:
+        return [r["ticker"] for r in self._conn.execute(
+            "SELECT ticker FROM shadow_positions WHERE cost_unknown = 1 ORDER BY ticker")]
+
+    def note_reconciliation(self, note: str) -> None:
+        """The marker row of a reconciliation with the real account: an
+        `adjust` audit row with no ticker whose note starts with
+        "reconciliation:" (the same shape a manual reconciliation left)."""
+        if not note.startswith("reconciliation:"):
+            raise ValueError("a reconciliation note must start with 'reconciliation:'")
+        with self._conn.transaction():
+            self._audit(datetime.now(UTC), "", note)
+
+    def record_real_fill(self, ticker: str, side: str, qty: Decimal,
+                         price: Decimal) -> Order:
+        """Book a trade the owner made at their real brokerage, at THEIR price
+        and quantity (allpath_trade/advisor.py, human-approved like the other
+        helpers here). Unlike `submit_order` it never looks up a quote: the
+        fill price is the one they reported. Raises ValueError, writing
+        nothing, when the ledger cannot hold the trade (more shares sold
+        than it has, or less cash than the buy cost): the book is then out
+        of sync and needs a holdings sync first."""
+        ticker = ticker.strip().upper()
+        if qty <= 0 or price <= 0:
+            raise ValueError("record_real_fill: qty and price must be > 0")
+        order_side = OrderSide(side)
+        intent = OrderIntent(ticker=ticker, side=order_side, qty=qty,
+                             reason="real fill reported by the owner")
+        now = datetime.now(UTC)
+        with self._conn.transaction():
+            if order_side == OrderSide.BUY:
+                cash = self._get_cash()
+                if qty * price > cash:
+                    raise ValueError(
+                        f"insufficient cash in the ledger: need {qty * price}, have {cash}")
+                order = self._fill_buy(intent, now, qty, price)
+            else:
+                existing = self._conn.execute(
+                    "SELECT qty FROM shadow_positions WHERE ticker = ?", (ticker,)).fetchone()
+                held = Decimal(existing["qty"]) if existing else Decimal(0)
+                if qty > held:
+                    raise ValueError(f"oversell: reported {qty}, the ledger has {held}")
+                order = self._fill_sell(intent, now, qty, price)
+            self._conn.execute(
+                "UPDATE shadow_orders SET note = ? WHERE id = ?",
+                ("real fill reported by the owner", int(order.id)))
+            self._conn.execute(
+                "UPDATE shadow_positions SET last_price = ?, last_price_ts = ?"
+                " WHERE ticker = ?", (str(price), now.isoformat(), ticker))
+        return order
 
     def record_fill(self, order_id: str, actual_price: Decimal) -> None:
         """Corrects a past FILLED order's fill price after the fact (e.g.

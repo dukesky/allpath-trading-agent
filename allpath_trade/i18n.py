@@ -369,6 +369,71 @@ _ZH = {
 }
 
 
+_ZH.update({
+    # strategy/stops.py
+    "No armed stop: {names}. This buy adds to a position the stop no "
+    "longer protects; re-arm or revise the stop deliberately.":
+        "没有待触发的止损：{names}。这笔买入加的是止损已经不再保护的仓位；请想清楚后重新启用或修改止损。",
+    # drawdown breaker
+    "none were set to auto": "没有设为 auto 的策略",
+    "{prefix}[AllPath] TRADING HALTED: {drawdown} drawdown":
+        "{prefix}[AllPath] 交易已暂停：回撤 {drawdown}",
+    "Equity {equity} is {drawdown} below its peak {peak}.\n"
+    "The drawdown circuit breaker tripped. Auto strategies demoted to "
+    "confirm: {names}.\nNo further orders will execute without your "
+    "approval.\nTo resume: review the account, restore strategies to auto "
+    "deliberately, then reset the breaker from the repo directory:\n"
+    "{command}\nYou will get another alert at each further 5% below the "
+    "peak while it stays tripped.":
+        "净值 {equity}，比峰值 {peak} 低 {drawdown}。\n回撤熔断已触发。已从 auto 降为 confirm 的策略："
+        "{names}。\n在你批准之前不会再执行任何订单。\n恢复方法：检查账户，想清楚后把策略改回 auto，"
+        "然后在 repo 目录重置熔断：\n{command}\n熔断期间，净值每再比峰值低 5% 会再提醒一次。",
+    "{prefix}[AllPath] DRAWDOWN STILL FALLING: {drawdown} below peak":
+        "{prefix}[AllPath] 回撤仍在扩大：比峰值低 {drawdown}",
+    "Equity {equity} is now {drawdown} below the frozen peak {peak}, past "
+    "the {level} mark.\nThe drawdown breaker has been tripped since {since} "
+    "UTC and is still tripped; nothing new was demoted.\nReview the account. "
+    "To reset the breaker, from the repo directory:\n{command}":
+        "净值 {equity}，现在比冻结的峰值 {peak} 低 {drawdown}，已越过 {level} 这一档。\n"
+        "回撤熔断自 {since} UTC 起一直处于触发状态；没有新的策略被降级。\n请检查账户。"
+        "重置熔断请在 repo 目录执行：\n{command}",
+    # /account
+    "This chat is currently on <b>{account}</b>. Choose which account it talks to:":
+        "这个聊天现在连的是 <b>{account}</b>。选择它要连哪个账户：",
+    "Switched to {account}": "已切换到 {account}",
+    "Switched to <b>{account}</b>. This chat now talks to your {name} account.":
+        "已切换到 <b>{account}</b>。这个聊天现在连的是你的 {name} 账户。",
+})
+
+# Ledger-edit titles (agent/shadow_tools.py, web/routes/settings.py). They are
+# stored in English on the review and shown that way on the web pages; a card
+# in another language translates them when it is built.
+_LEDGER_TITLES_ZH = (
+    (re.compile(r"^Set position (.+)$"), r"设置持仓 \1"),
+    (re.compile(r"^Remove position (.+)$"), r"移除持仓 \1"),
+    (re.compile(r"^Set cash$"), "设置现金"),
+    (re.compile(r"^Correct fill #(\d+)$"), r"更正成交 #\1"),
+    (re.compile(r"^Reset ledger$"), "清空账本"),
+    (re.compile(r"^Import (\d+) position\(s\) from CSV$"), r"从 CSV 导入 \1 个持仓"),
+    (re.compile(r"^Set option (.+)$"), r"设置期权持仓 \1"),
+    (re.compile(r"^Remove option (.+)$"), r"移除期权持仓 \1"),
+    (re.compile(r"^Mark option (.+) at (\$[\d,.]+)$"), r"期权 \1 现价记为 \2"),
+    (re.compile(r"^Record option trade: BUY (.+)$"), r"记录期权成交：买入 \1"),
+    (re.compile(r"^Record option trade: SELL (.+)$"), r"记录期权成交：卖出 \1"),
+)
+
+
+def ledger_title(lang: str, title: str) -> str:
+    """A shadow ledger-edit title in `lang`; unchanged when it is not one of
+    the known English titles (or is already translated)."""
+    if lang != "zh":
+        return title
+    for pattern, replacement in _LEDGER_TITLES_ZH:
+        if pattern.match(title or ""):
+            return pattern.sub(replacement, title)
+    return title
+
+
 def register(entries: dict[str, str]) -> None:
     """Add translations from another module (holdings sync, advisor), so
     each feature keeps its own strings next to its code."""

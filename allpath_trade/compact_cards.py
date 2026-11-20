@@ -347,8 +347,11 @@ def order_card(*, account: str, review_id: int, ticker: str, action: str,
                kind: str = "order", source: str = "", option_preview: str = "",
                no_analysis_reason: str = "", stop_warning: str = "",
                approve_url: str = "", event: dict | None = None,
-               prefix: str = "", lang: str = "en") -> tuple[str, CardBody]:
-    """Subject text and body of a compact order card. `source` is "chat"
+               prefix: str = "", lang: str = "en",
+               shadow_line: str = "") -> tuple[str, CardBody]:
+    """Subject text and body of a compact order card. `shadow_line`, when
+    given, replaces the shadow "approving only records it" line (act-prompt
+    cards, allpath_trade/advisor.py). `source` is "chat"
     for an order proposed in conversation: it has no agent verdict, and its
     `action` is the proposal's free-text reason (used as the Why fallback,
     not as the headline). `event`/`prefix` are the caller's
@@ -383,7 +386,7 @@ def order_card(*, account: str, review_id: int, ticker: str, action: str,
             lines.append(tr(lang, "Risk: {text}", text=risk))
     tail = []
     if account == "shadow" and kind == "order":
-        tail.append(tr(lang, SHADOW_ORDER_LINE))
+        tail.append(shadow_line or tr(lang, SHADOW_ORDER_LINE))
     if approve_url:
         tail.append(tr(lang, "Review & approve: {url}", url=approve_url))
     if tail:

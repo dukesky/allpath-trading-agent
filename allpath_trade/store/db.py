@@ -279,7 +279,11 @@ CREATE TABLE IF NOT EXISTS shadow_positions (
     avg_cost TEXT NOT NULL,
     last_price TEXT,
     last_price_ts TEXT,
-    updated_ts TEXT NOT NULL
+    updated_ts TEXT NOT NULL,
+    -- Holdings sync: 1 when the owner's brokerage shows no cost for this
+    -- position (a transfer). `avg_cost` is then a placeholder and the
+    -- position's P/L must not be quoted as real.
+    cost_unknown INTEGER NOT NULL DEFAULT 0
 );
 
 -- Single-row table (CHECK id=1) holding shadow cash. INSERT ... ON
@@ -327,6 +331,51 @@ CREATE TABLE IF NOT EXISTS shadow_option_positions (
     last_price TEXT,
     last_price_ts TEXT,
     updated_ts TEXT NOT NULL
+);
+
+-- Holdings sync (HOLDINGS_SYNC / SHADOW_HOLDINGS_SYNC, allpath_trade/
+-- holdings_sync.py): one row per applied reconciliation of the shadow ledger
+-- with the owner's real account -- when, by whom, from what input, and the
+-- whole book before and after. This is what tells a sync apart from a trade
+-- and marks, for the research exports, where "ledger = real account" starts.
+CREATE TABLE IF NOT EXISTS shadow_syncs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    account TEXT NOT NULL DEFAULT 'shadow',
+    source TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'full',
+    by TEXT NOT NULL DEFAULT 'owner',
+    review_id INTEGER,
+    token TEXT NOT NULL DEFAULT '',
+    before TEXT NOT NULL,
+    after TEXT NOT NULL,
+    n_new INTEGER NOT NULL DEFAULT 0,
+    n_closed INTEGER NOT NULL DEFAULT 0,
+    n_qty_changed INTEGER NOT NULL DEFAULT 0,
+    n_cost_changed INTEGER NOT NULL DEFAULT 0,
+    cash_changed INTEGER NOT NULL DEFAULT 0,
+    n_cost_unknown INTEGER NOT NULL DEFAULT 0,
+    n_option_lines INTEGER NOT NULL DEFAULT 0
+);
+
+-- Pre-trade consult (PRE_TRADE_CONSULT / SHADOW_PRE_TRADE_CONSULT,
+-- allpath_trade/advisor.py): one row per `pre_trade_check` the chat agent
+-- ran on a trade the owner said they wanted to make -- what, the impulse/risk
+-- flags the code raised, the verdict floor, and whether a real fill was
+-- recorded afterwards (`outcome`). No free text.
+CREATE TABLE IF NOT EXISTS trade_consults (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    account TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty TEXT,
+    price TEXT,
+    value TEXT,
+    flags TEXT NOT NULL DEFAULT '[]',
+    floor TEXT NOT NULL,
+    conversation_id INTEGER,
+    outcome TEXT
 );
 
 -- One row per ET calendar day, upserted both by get_account (every read,
@@ -411,6 +460,9 @@ _MIGRATIONS = [
     # AGENT_LANGUAGE (allpath_trade/i18n.py): the language of the card that
     # was sent for this review, recorded like card_format. NULL = English.
     "ALTER TABLE pending_reviews ADD COLUMN card_lang TEXT",
+    # Holdings sync (allpath_trade/holdings_sync.py): see the column's own
+    # comment in SCHEMA. Existing rows read 0 (cost known).
+    "ALTER TABLE shadow_positions ADD COLUMN cost_unknown INTEGER NOT NULL DEFAULT 0",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

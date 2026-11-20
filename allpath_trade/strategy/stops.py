@@ -77,13 +77,19 @@ def _describe(doc: StrategyDoc, rule: Rule, strategies) -> str:
     return f"{doc.id}/{rule.id} ({rule.condition}), {state}{when}"
 
 
-def stop_warning(doc: StrategyDoc, strategies=None) -> str:
+def stop_warning(doc: StrategyDoc, strategies=None, lang: str = "en") -> str:
     """One line for a BUY on `doc`: "" while a stop is armed (or the
     strategy never had one), else names the spent stop(s)."""
     spent = spent_stop_rules(doc)
     if not spent:
         return ""
     names = "; ".join(_describe(doc, r, strategies) for r in spent)
+    if lang != "en":
+        from allpath_trade.i18n import tr
+
+        return tr(lang, "No armed stop: {names}. This buy adds to a position the stop no "
+                        "longer protects; re-arm or revise the stop deliberately.",
+                  names=names)
     return (f"No armed stop: {names}. This buy adds to a position the stop no "
             "longer protects; re-arm or revise the stop deliberately.")
 

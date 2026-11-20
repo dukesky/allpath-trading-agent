@@ -428,7 +428,8 @@ def test_research_export_lists_drops_with_text_and_reason(tmp_path):
     path = b.close()
     out = tmp_path / "out"
     assert main(["regime-metrics", "--db", str(path), "--from", "2026-12-01",
-                 "--to", "2026-12-03", "--out", str(out)]) == 0
+                 "--to", "2026-12-03", "--out", str(out),
+                 "--shadow-study-end", "none"]) == 0
     with open(out / "card_brief_drops.csv", newline="") as fh:
         rows = list(csv.DictReader(fh))
     assert [(r["review_id"], r["kept_brief"], r["missing"]) for r in rows] == [

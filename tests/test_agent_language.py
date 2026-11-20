@@ -340,3 +340,97 @@ def test_classic_english_card_is_the_same_object_shape_as_before():
     subject, body = events.review_queued(**ORDER_KW)
     assert type(body) is str and not hasattr(body, "lang")
     assert events.review_queued(**ORDER_KW, lang="en") == (subject, body)
+
+
+# --- the strings that were still English on shadow ----------------------------
+
+def test_stop_warning_drawdown_alerts_ledger_titles_and_account_switch_in_chinese():
+    from allpath_trade.strategy.loader import parse_strategy_text
+    from allpath_trade.strategy.stops import stop_warning
+
+    doc = parse_strategy_text("t", """
+name: T
+status: active
+position: {ticker: AAPL, target_weight: 10%}
+rules:
+  - {id: stop, type: hard, condition: "price < 90", action: "sell all", state: triggered}
+""")
+    english = stop_warning(doc)
+    assert english.startswith("No armed stop: t/stop (price < 90), spent. This buy adds")
+    assert stop_warning(doc, None, "en") == english
+    assert stop_warning(doc, None, "zh") == (
+        "没有待触发的止损：t/stop (price < 90), spent。这笔买入加的是止损已经不再保护的仓位；"
+        "请想清楚后重新启用或修改止损。")
+
+    kw = {"account": "shadow", "peak": Decimal(100000), "equity": Decimal(84000),
+          "drawdown": Decimal("0.16"), "demoted": ["zzz-swing"]}
+    subject, body = events.drawdown_halt(**kw, lang="zh")
+    assert subject == "[Shadow] [AllPath] 交易已暂停：回撤 16.0%"
+    assert body.startswith("净值 $84,000.00，比峰值 $100,000.00 低 16.0%。\n回撤熔断已触发。")
+    assert "zzz-swing" in body and "breaker reset --account shadow" in body
+    assert subject.event == events.drawdown_halt(**kw)[0].event
+    assert events.drawdown_halt(**kw)[1].startswith("Equity $84,000.00 is 16.0% below")
+    subject, body = events.drawdown_deepening(
+        account="shadow", peak=Decimal(100000), equity=Decimal(79000),
+        drawdown=Decimal("0.21"), level=Decimal("0.20"), tripped_at="2026-11-20T15:00:00",
+        lang="zh")
+    assert subject == "[Shadow] [AllPath] 回撤仍在扩大：比峰值低 21.0%"
+    assert "已越过 20% 这一档" in body and "2026-11-20T15:00 UTC" in body
+
+    for title, want in (
+            ("Set position ZZZ", "设置持仓 ZZZ"), ("Set cash", "设置现金"),
+            ("Remove position ZZZ", "移除持仓 ZZZ"), ("Correct fill #12", "更正成交 #12"),
+            ("Reset ledger", "清空账本"),
+            ("Import 3 position(s) from CSV", "从 CSV 导入 3 个持仓"),
+            ("Set option ZZZ 2027-01-15 $150 call", "设置期权持仓 ZZZ 2027-01-15 $150 call"),
+            ("Mark option ZZZ 2027-01-15 $150 call at $14.10",
+             "期权 ZZZ 2027-01-15 $150 call 现价记为 $14.10"),
+            ("持仓同步：3 处变化", "持仓同步：3 处变化"), ("something else", "something else")):
+        assert i18n.ledger_title("zh", title) == want
+        assert i18n.ledger_title("en", title) == title
+    subject, body = events.review_queued(
+        account="shadow", review_id=5, ticker="", action="Set cash", strategy_id="",
+        kind="shadow_edit", lang="zh")
+    assert "提议：设置现金" in body
+    # An order's free-text action is never run through the title table.
+    _s, body = events.review_queued(account="shadow", review_id=5, ticker="ZZZ",
+                                    action="Set cash", strategy_id="", kind="order", lang="zh")
+    assert "提议：ZZZ Set cash" in body
+
+
+def test_account_switch_messages_follow_the_target_accounts_language(tmp_path):
+    from types import SimpleNamespace
+
+    from tests.test_telegram_poller import (
+        FakeChatService,
+        FakeTelegramAPI,
+        _callback_update,
+        _update,
+        make_app_state,
+        make_poller,
+        pair,
+    )
+
+    app_state = make_app_state(tmp_path)
+    pair(app_state, 42)
+    api = FakeTelegramAPI()
+    poller = make_poller(api, FakeChatService(), app_state)
+    real = poller.holder.get
+
+    def get():
+        c = real()
+        c.accounts = {"paper": SimpleNamespace(queue=SimpleNamespace(language="en")),
+                      "shadow": SimpleNamespace(queue=SimpleNamespace(language="zh"))}
+        return c
+
+    poller.holder.get = get
+    poller._handle_update(_update(1, 42, "/account"))          # the chat defaults to shadow
+    assert api.sent_messages[-1][1] == (
+        "这个聊天现在连的是 <b>Shadow</b>。选择它要连哪个账户：")
+    poller._handle_update(_callback_update(2, 42, 42, "acct:paper"))
+    assert api.sent_messages[-1][1] == (
+        "Switched to <b>Paper</b>. This chat now talks to your paper account.")
+    assert api.answered_callbacks[-1][1] == "Switched to Paper"
+    poller._handle_update(_callback_update(3, 42, 42, "acct:shadow"))
+    assert api.sent_messages[-1][1] == "已切换到 <b>Shadow</b>。这个聊天现在连的是你的 shadow 账户。"
+    assert api.answered_callbacks[-1][1] == "已切换到 Shadow"

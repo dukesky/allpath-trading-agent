@@ -78,7 +78,13 @@ DAILY_COLUMNS = [
     "models_chat", "models_review", "models_memory",
     "reflection_tokens_in", "reflection_tokens_out",
     "order_thread_msgs",
+    # shadow only: "pre_sync" until the day of the first holdings sync
+    # (shadow_syncs), "synced" from that day on; "" for paper.
+    "shadow_segment",
 ]
+
+
+_UNSET: Any = object()
 
 
 def window_for(day: str) -> str:
@@ -217,6 +223,7 @@ def _breaker_state(trips: list[str], resets: tuple[str, ...], eod: str) -> str:
 
 
 def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    first_sync: Any = _UNSET
     revisions = load_revisions(conn)
     orders, order_reviews = load_orders(conn)
     skips = regime_skips(conn)
@@ -254,6 +261,8 @@ def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str,
             last_model[tier] = model
         models = {tier: "|".join(sorted(seen[tier])) if tier in seen
                   else last_model.get(tier, "") for tier in ("chat", "review", "memory")}
+        if first_sync is _UNSET:
+            first_sync = first_shadow_sync_date(conn)
         for account in ACCOUNTS:
             row = _account_day(
                 day, account, eod, revisions=revisions, orders=orders,
@@ -263,6 +272,9 @@ def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str,
             row["weekday"] = int(weekday)
             row["order_thread_msgs"] = sum(1 for m in thread_msgs if m["account"] == account
                                            and et_date(m["ts"]) == day)
+            row["shadow_segment"] = ("" if account != "shadow" else
+                                     "synced" if first_sync and day >= first_sync
+                                     else "pre_sync")
             row.update({f"models_{t}": m for t, m in models.items()})
             active = (row["report_status"] != "none" or row["breaker_trips"]
                       or any(row[c] for _, _, c in PROPOSAL_TYPES) or row["prop_other"]
@@ -364,6 +376,139 @@ def card_format_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dic
                      "source": r["source"], "status": r["status"],
                      "card_format": r["card_format"] or "classic",
                      "card_lang": r["card_lang"] or "en"})
+    return rows
+
+
+SHADOW_SYNC_COLUMNS = [
+    "sync_id", "ts", "date_et", "window", "source", "mode", "review_id", "first_sync",
+    "n_new", "n_closed", "n_qty_changed", "n_cost_changed", "cash_changed",
+    "n_cost_unknown", "n_option_lines", "n_adjusted", "positions_before",
+    "positions_after",
+]
+
+
+def _manual_reconciliations(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Reconciliations done by hand: `shadow_orders` marker rows (side
+    `adjust`, note starting "reconciliation:") that no `shadow_syncs` row
+    stands for, each with the number of ledger adjustments that follow it.
+    Only the marker's timestamp and that count are read; never a note's
+    text, a symbol or an amount."""
+    try:
+        found = list(conn.execute(
+            "SELECT id, ts, ticker, side, note LIKE 'reconciliation:%' AS marker,"
+            " note LIKE 'reconciliation: holdings sync from%' AS from_sync"
+            " FROM shadow_orders ORDER BY id"))
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for index, r in enumerate(found):
+        if not r["marker"] or r["from_sync"] or r["side"] != "adjust":
+            continue
+        adjusted = 0
+        for later in found[index + 1:]:
+            if later["side"] != "adjust" or later["marker"]:
+                break
+            adjusted += 1
+        out.append({"ts": r["ts"], "n_adjusted": adjusted})
+    return out
+
+
+def shadow_sync_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per reconciliation of the shadow ledger with the owner's real
+    account: an applied holdings sync (HOLDINGS_SYNC, allpath_trade/
+    holdings_sync.py) or a manual one (a "reconciliation:" marker row in
+    `shadow_orders`). The first one is where shadow stops being a
+    paper-style mirror; history on the two sides of it is not comparable.
+    Dates and counts only: no symbols, quantities, amounts or note text.
+    Empty for a database with neither."""
+    entries: list[dict[str, Any]] = []
+    try:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(shadow_syncs)")}
+        extra = [c for c in ("n_cost_unknown", "n_option_lines") if c in columns]
+        for r in conn.execute(
+                "SELECT id, ts, source, mode, review_id, before, after, n_new, n_closed,"
+                " n_qty_changed, n_cost_changed, cash_changed"
+                + "".join(f", {c}" for c in extra) + " FROM shadow_syncs ORDER BY id"):
+
+            def held(raw: str) -> int | str:
+                try:
+                    return len(json.loads(raw).get("positions") or {})
+                except (ValueError, AttributeError):
+                    return ""
+
+            entries.append({
+                "sync_id": r["id"], "ts": r["ts"], "source": r["source"], "mode": r["mode"],
+                "review_id": r["review_id"], "n_new": r["n_new"], "n_closed": r["n_closed"],
+                "n_qty_changed": r["n_qty_changed"], "n_cost_changed": r["n_cost_changed"],
+                "cash_changed": r["cash_changed"],
+                "n_cost_unknown": r["n_cost_unknown"] if "n_cost_unknown" in extra else "",
+                "n_option_lines": r["n_option_lines"] if "n_option_lines" in extra else "",
+                "n_adjusted": (r["n_new"] + r["n_closed"] + r["n_qty_changed"]
+                               + r["n_cost_changed"]),
+                "positions_before": held(r["before"]), "positions_after": held(r["after"])})
+    except sqlite3.OperationalError:
+        pass
+    entries += [{"sync_id": "", "source": "manual", "mode": "", "review_id": "", **m}
+                for m in _manual_reconciliations(conn)]
+    entries.sort(key=lambda e: str(e["ts"]))
+    rows = []
+    for index, entry in enumerate(entries):
+        day = et_date(entry["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+        rows.append({**{c: "" for c in SHADOW_SYNC_COLUMNS}, **entry, "date_et": day,
+                     "window": window_for(day), "first_sync": int(index == 0)})
+    return rows
+
+
+def first_shadow_sync_date(conn: sqlite3.Connection) -> str | None:
+    """ET date of the first reconciliation with the real account (an applied
+    holdings sync or a manual "reconciliation:" marker), or None."""
+    stamps = []
+    try:
+        row = conn.execute("SELECT ts FROM shadow_syncs ORDER BY id LIMIT 1").fetchone()
+        if row is not None:
+            stamps.append(row["ts"])
+    except sqlite3.OperationalError:
+        pass
+    stamps += [m["ts"] for m in _manual_reconciliations(conn)]
+    return et_date(min(stamps)) if stamps else None
+
+
+TRADE_CONSULT_COLUMNS = [
+    "consult_id", "account", "ts", "date_et", "window", "side", "floor", "flags",
+    "n_flags", "outcome", "shadow_segment",
+]
+
+
+def trade_consult_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per pre-trade consult (PRE_TRADE_CONSULT, allpath_trade/
+    advisor.py): the side, the verdict floor, the impulse/risk flag codes
+    and whether a real fill was recorded afterwards. No ticker, size, price
+    or text. Empty for a database without the table."""
+    try:
+        found = list(conn.execute(
+            "SELECT id, account, ts, side, floor, flags, outcome FROM trade_consults"
+            " ORDER BY id"))
+    except sqlite3.OperationalError:
+        return []
+    first_sync = first_shadow_sync_date(conn)
+    rows = []
+    for r in found:
+        day = et_date(r["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+        try:
+            flags = [str(f) for f in json.loads(r["flags"] or "[]")]
+        except ValueError:
+            flags = []
+        rows.append({"consult_id": r["id"], "account": r["account"], "ts": r["ts"],
+                     "date_et": day, "window": window_for(day), "side": r["side"],
+                     "floor": r["floor"], "flags": "|".join(flags), "n_flags": len(flags),
+                     "outcome": r["outcome"] or "",
+                     "shadow_segment": ("" if r["account"] != "shadow" else
+                                        "synced" if first_sync and day >= first_sync
+                                        else "pre_sync")})
     return rows
 
 

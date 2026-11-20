@@ -2,6 +2,17 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Shadow study end in the research exports (unreleased)
+
+- **`--shadow-study-end`** on `allpath-research regime-metrics`,
+  `rule-outcomes` and `replay-rules` (`allpath_trade/research/study_cut.py`).
+  The shadow account left the study when its ledger was reconciled with the
+  owner's real account; shadow rows after that moment are dropped from every
+  exported table (per-day tables keep the cut's own ET day; `llm_daily.csv`
+  rows labelled `...:shadow` are cut too). Default `2026-11-20T21:27:59Z`;
+  `--shadow-study-end none` keeps everything. Paper rows are never dropped.
+  Each run prints how many shadow rows it dropped.
+
 ## Option holdings in the shadow ledger (unreleased)
 
 - **`OPTION_HOLDINGS` / `SHADOW_OPTION_HOLDINGS`** (off by default, shadow
@@ -37,6 +48,95 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
     of the same underlying's options).
   - Paper: no change. With no option rows and the flag off, shadow is
     unchanged too.
+## Advisor for the real account (unreleased)
+
+- **`PRE_TRADE_CONSULT` / `SHADOW_PRE_TRADE_CONSULT`** (off by default,
+  shadow only; `allpath_trade/advisor.py`). Two chat tools:
+  - `pre_trade_check`: the agent is told to call it first on any stated
+    intent to buy or sell. Computed in code, no model call: plan fit
+    (strategy thesis, recorded views, including a `VISION` view), weight and
+    cash after the trade, distance to the name's own price levels (stop,
+    entry, take-profit), recent move, and impulse flags (`no_plan`,
+    `chasing`, `below_own_stop`, `rebuy_after_stop`, `oversize`,
+    `cash_short`, `oversell`) with a verdict floor (go / wait / dont).
+    Logged in the new table `trade_consults`.
+  - `record_real_trade`: queues a `shadow_edit` review (op `real_fill`);
+    confirming books the trade at the owner's reported price and quantity
+    (`ShadowLedger.record_real_fill`), never at a quote. Refused when the
+    ledger cannot hold it (sync first).
+- **`ACT_PROMPT_CARDS` / `SHADOW_ACT_PROMPT_CARDS`** (off by default, shadow
+  only). A rule-triggered order card ends with "Your move: place this at
+  your broker..." and has `Done @ <price>` / `Skipped` / `Discuss` buttons
+  (`rv:approve`, `rv:reject`, new `rv:discuss`). Done books the fill at the
+  trigger price; a reply to the card that is just a price books or corrects
+  the fill at that price; Discuss opens an order-thread turn. `auto`
+  strategies on the account are dispatched as `confirm` while the flag is on.
+- Research: `trade_consults.csv` (side, floor, flag codes, outcome; no
+  ticker, size or text).
+- A reply under an act-prompt card books a fill only when it is a bare
+  price or one introduced by done / filled / 成交 / @ / $, and within 20% of
+  the rule's trigger price; `sold 100`, a forwarded or a quoted message go
+  to the normal order thread. It works without `TELEGRAM_ORDER_THREADS`
+  (the card is recorded for this purpose) and removes the card's buttons.
+  The Discuss button is refused on any card that is not an act prompt. A
+  Done blocked by the risk gate says how to record the trade anyway.
+- Chinese for the strings that were still English on a `zh` account: the
+  spent-stop warning, the drawdown breaker alerts, ledger-edit titles on
+  cards, and the `/account` switch messages.
+- With both flags off no tool is registered and every card, button and
+  dispatch decision is as before.
+
+## Holdings sync (unreleased)
+
+- **`HOLDINGS_SYNC` / `SHADOW_HOLDINGS_SYNC`** (off by default, shadow only;
+  `allpath_trade/holdings_sync.py`). Brings the shadow ledger in line with
+  the owner's real brokerage account from something the owner sends: a
+  screenshot of the positions screen, a `.csv` / `.txt` file sent to the
+  Telegram bot, or a typed list. The app never connects to a brokerage.
+  - New chat tool `propose_holdings_sync`. It never writes the ledger. Rows
+    it cannot read, duplicates, and new symbols without a cost basis are
+    returned as questions and nothing is queued. Otherwise it queues one
+    `shadow_edit` review (op `sync`) whose card shows the parsed table and
+    the diff; `complete=false` only updates the listed symbols and never
+    closes a position. A symbol without a cost in the input keeps its
+    ledger cost.
+  - Confirming applies everything in one transaction and writes a row to
+    the new table `shadow_syncs` (ts, source, mode, review id, the book
+    before and after, counts). The audit rows are `adjust`, never a buy or
+    a sell. Strategies and rule states are not touched; held symbols with no
+    active strategy are listed as "no plan".
+  - `SHADOW_SYNC_STALE_DAYS` (default 7): the evening check-in adds a line
+    asking for a fresh screenshot when the last sync is older, and is sent
+    for that line alone when there are no questions.
+  - Research: `shadow_syncs.csv` (counts only, `first_sync` marks the first
+    one) and a `shadow_segment` column (`pre_sync` / `synced`) at the end of
+    `regime_metrics_daily.csv`. Shadow history before the first sync is not
+    comparable with history after it.
+  - With the flag off the tool is not registered, a non-image document sent
+    to the bot is ignored as before, and no message changes.
+  - Reconciliation marker: an applied sync writes a `shadow_orders` audit
+    row (no ticker, note starting `reconciliation:`), the shape a manual
+    reconciliation leaves; `last_sync`, the staleness reminder and
+    `shadow_syncs.csv` (new `n_adjusted`, `n_cost_unknown`,
+    `n_option_lines`; `source=manual` rows) count manual markers too.
+  - Cost unknown: `ZZZ 40 @ ?` or `cost_unknown` on a row. An existing
+    position keeps its ledger cost, a new one takes the price at sync as a
+    placeholder; either way `shadow_positions.cost_unknown` (new column) is
+    set, the chat prompt names those positions, and the table says their
+    P/L is not real. No quote available means the cost is asked for.
+  - Option lines: `options` from a screenshot or `OPTION,...` rows in text;
+    new, changed, re-priced and (only with `options_complete`) removed. The
+    option book is staleness-checked at approval.
+  - Plans: the comparison lists holdings with no active strategy, active
+    strategies whose symbol is no longer held (shares or options) with
+    their sell rules that are still on, and held symbols whose sell rules
+    are off. Nothing is changed or deleted; the agent is told to offer the
+    owner's rule (no position: keep entries, switch off trims and stops) as
+    an ordinary strategy revision.
+  - Stricter reading: a comma is only a thousands separator, an unmarked
+    third number (`ZZZ 40 190`) is asked about, a `Cost Basis` / total
+    column is never taken as cost per share, and `text` together with
+    `positions` is refused.
 ## Shadow memory isolation (unreleased)
 
 - **The shadow account no longer writes the shared user profile** (TDSC

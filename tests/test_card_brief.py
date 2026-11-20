@@ -756,7 +756,8 @@ def test_research_export_writes_the_same_brief_text(tmp_path):
     path = b.close()
     out = tmp_path / "out"
     assert main(["regime-metrics", "--db", str(path), "--from", "2026-12-01",
-                 "--to", "2026-12-03", "--out", str(out)]) == 0
+                 "--to", "2026-12-03", "--out", str(out),
+                 "--shadow-study-end", "none"]) == 0
     with open(out / "card_briefs.csv", newline="") as fh:
         [row] = list(csv.DictReader(fh))
     assert (row["review_id"], row["account"], row["kind"], row["origin"]) == (

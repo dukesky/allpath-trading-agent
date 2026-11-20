@@ -280,6 +280,12 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
         from allpath_trade.shadow_options import lines_for
 
         parts.extend(f"option: {text}" for text in lines_for(broker, equity=acct.equity))
+        # Holdings sync: positions whose cost the owner's brokerage does not
+        # show carry a placeholder cost (shadow ledger only).
+        unknown = getattr(broker, "cost_unknown_tickers", None)
+        if unknown is not None and (tickers := unknown()):
+            parts.append("cost basis UNKNOWN (placeholder avg; never quote P/L or cost "
+                         "for these): " + ", ".join(tickers))
     except Exception as exc:  # noqa: BLE001 — degraded snapshot beats no chat
         parts.append(f"account: unavailable ({exc})")
 

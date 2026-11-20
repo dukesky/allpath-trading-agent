@@ -219,7 +219,8 @@ def test_order_thread_messages_counted_and_exported(tmp_path):
     assert _row(rows, "2026-12-02", "paper")["order_thread_msgs"] == 0
     out = tmp_path / "out"
     assert main(["regime-metrics", "--db", str(path), "--from", "2026-12-01",
-                 "--to", "2026-12-03", "--out", str(out)]) == 0
+                 "--to", "2026-12-03", "--out", str(out),
+                 "--shadow-study-end", "none"]) == 0
     msgs = _read(out / "order_threads.csv")
     assert [(m["account"], m["review_id"], m["text"], m["forwarded"]) for m in msgs] == [
         ("shadow", str(rid), "why this size?", "0"), ("shadow", str(rid), "make it half", "1")]

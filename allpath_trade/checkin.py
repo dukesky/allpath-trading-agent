@@ -209,6 +209,8 @@ class DailyCheckin:
             raise RuntimeError("check-in message was not delivered")
         self.checkins.add(et_date=et_date, questions=questions,
                           telegram_message_id=message_id, now=now)
+        if extra and not questions:
+            return "sent the holdings-sync reminder"
         return f"sent {len(questions)} question(s)"
 
     def _facts(self, et_date: str, now: datetime) -> str:
@@ -276,6 +278,15 @@ def run_checkin_step(components: Any, *, verbose: bool) -> bool:
     checkin = DailyCheckin(
         llm=build_llm(settings, tier="chat", usage_store=components.llm_usage),
         acc=acc, api=TelegramAPI(token), chat_id=chat_id)
+    from allpath_trade.config import account_flag
+
+    if account_flag(settings, "holdings_sync", CHECKIN_ACCOUNT):
+        # Holdings sync: ask for a fresh screenshot once the last sync is old.
+        from allpath_trade.holdings_sync import stale_line
+
+        checkin.extra_line = lambda now: stale_line(
+            acc.conn, stale_days=getattr(settings, "shadow_sync_stale_days", 7),
+            now=now, lang=checkin.lang)
     status = checkin.run_daily()
     if verbose:
         print(f"[checkin:shadow] {status}")

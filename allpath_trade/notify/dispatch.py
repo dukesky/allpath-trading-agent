@@ -122,7 +122,24 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
             {"text": i18n.tr(lang, "❌ Reject"),
              "callback_data": f"rv:reject:{review_id}:{nonce}"},
         ]]}
+        from allpath_trade import advisor
+
+        if advisor.is_act_row(queue, row):
+            # Act-prompt cards: Done @ price / Skipped / Discuss on the same
+            # rv: callbacks (Done = approve, Skipped = reject).
+            keyboard = advisor.act_keyboard(review_id, nonce, advisor.trigger_price(row), lang)
         recorder = getattr(queue, "telegram_card_recorder", None)
+        act_recorder = (getattr(queue, "act_card_recorder", None)
+                        if advisor.is_act_row(queue, row) else None)
+        if recorder is None and act_recorder is not None:
+            # Act-prompt card without order threads: still remember the card,
+            # so a reply with the fill price can be matched to it.
+            message_id = api.send_message_id(
+                chat_id, to_telegram_html(_prefixed_for_telegram(account, body)),
+                reply_markup=keyboard)
+            if message_id is not None:
+                act_recorder(review_id, chat_id, message_id)
+            return message_id is not None
         if recorder is None:
             return bool(api.send_message(
                 chat_id, to_telegram_html(_prefixed_for_telegram(account, body)),
@@ -137,6 +154,8 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
             # A compact card (allpath_trade/compact_cards.py): same hint,
             # one short line. Only ever printed here, where replies work.
             from allpath_trade.compact_cards import ORDER_THREAD_HINT as hint
+        if advisor.is_act_row(queue, row):
+            hint = ""  # the act line on the card already says what a reply does
         html = to_telegram_html(_prefixed_for_telegram(account, body + i18n.tr(lang, hint)))
         message_id = api.send_message_id(chat_id, html, reply_markup=keyboard)
         if message_id is not None:

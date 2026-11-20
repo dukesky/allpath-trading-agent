@@ -202,7 +202,8 @@ class Sentinel:
             if trip is not None:
                 subject, body = events.drawdown_halt(
                     account=self.account, peak=trip.peak, equity=trip.equity,
-                    drawdown=trip.drawdown, demoted=trip.demoted)
+                    drawdown=trip.drawdown, demoted=trip.demoted,
+                    **i18n.lang_kw(self.queue))
                 # Account-level halt, not a per-strategy notification
                 # preference -- send directly rather than through `_send`,
                 # so it reaches the operator even when every strategy on
@@ -262,6 +263,12 @@ class Sentinel:
         # Sentinel without app_state are unaffected.
         confirm_only = (self.app_state is not None
                         and regime_demands_confirm(self.app_state, self.account))
+
+        # Act-prompt cards (allpath_trade/advisor.py, shadow): the ledger must
+        # not change before the owner has acted at their broker, so an AUTO
+        # strategy is dispatched as CONFIRM here too (in memory only).
+        if getattr(self.queue, "act_prompts", False) is True:
+            confirm_only = True
 
         for doc in docs:
             if confirm_only and doc.authorization == Authorization.AUTO:
@@ -604,7 +611,7 @@ class Sentinel:
         subject, body = events.drawdown_deepening(
             account=self.account, peak=deeper.peak, equity=deeper.equity,
             drawdown=deeper.drawdown, level=deeper.level,
-            tripped_at=deeper.tripped_at)
+            tripped_at=deeper.tripped_at, **i18n.lang_kw(self.queue))
         if self.notifier is not None:
             self.notifier.send(subject, body)
         push_telegram_receipt(
@@ -958,7 +965,7 @@ class Sentinel:
         stop already fired (strategy/stops.py). Visibility only -- nothing
         here re-arms the stop. Never raises."""
         try:
-            return stop_warning(doc, self.strategies)
+            return stop_warning(doc, self.strategies, **i18n.lang_kw(self.queue))
         except Exception as exc:  # noqa: BLE001 — a warning must never block a notification
             print(f"[sentinel] stop check failed for {doc.id}: {exc}", file=sys.stderr)
             return ""
@@ -1038,7 +1045,7 @@ class Sentinel:
                 "notional": intent.notional if intent is not None else None,
                 "qty": intent.qty if intent is not None else None,
                 "price": price}} if compact_cards.enabled(self.queue) else {}),
-            **i18n.lang_kw(self.queue))
+            **i18n.lang_kw(self.queue), **self._act_kw(kind, price))
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's
@@ -1050,6 +1057,15 @@ class Sentinel:
             telegram_bot_token=self.telegram_bot_token, review_id=review_id,
             subject=subject, body=body, account=self.account,
             notify_email=doc.notify_email)
+
+    def _act_kw(self, kind: str, price: Decimal | None) -> dict[str, str]:
+        """Act-prompt cards: the "your move" line for a stock order card of
+        an account that has them on; {} otherwise (the call is the old one)."""
+        if kind != "order" or getattr(self.queue, "act_prompts", False) is not True:
+            return {}
+        from allpath_trade.advisor import act_line
+
+        return {"shadow_line": act_line(price, i18n.of(self.queue))}
 
     def _send(self, doc: StrategyDoc, subject: str, body: str) -> None:
         # notify_email is a notification preference, not a trading

@@ -244,6 +244,11 @@ def _build_account_components(account: str, *, settings: Settings,
     # AGENT_LANGUAGE: the language of this account's cards and messages.
     language = account_language(settings, account)
     queue.language = language
+    if account == "shadow" and account_flag(settings, "act_prompt_cards", account):
+        # Act-prompt cards (allpath_trade/advisor.py): a fired rule asks the
+        # owner to act at their broker; nothing is booked before they say so.
+        queue.act_prompts = True
+        queue.act_card_recorder = OrderThreadStore(conn, account).add_card
     conversations = ConversationStore(conn, account=account)
     reports = ReportStore(conn, account=account)
     memory = MemoryStore(settings.memory_dir, conn, account=account)
