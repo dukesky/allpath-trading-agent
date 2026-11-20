@@ -432,6 +432,43 @@ def first_shadow_sync_date(conn: sqlite3.Connection) -> str | None:
     return et_date(row["ts"]) if row is not None else None
 
 
+TRADE_CONSULT_COLUMNS = [
+    "consult_id", "account", "ts", "date_et", "window", "side", "floor", "flags",
+    "n_flags", "outcome", "shadow_segment",
+]
+
+
+def trade_consult_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per pre-trade consult (PRE_TRADE_CONSULT, allpath_trade/
+    advisor.py): the side, the verdict floor, the impulse/risk flag codes
+    and whether a real fill was recorded afterwards. No ticker, size, price
+    or text. Empty for a database without the table."""
+    try:
+        found = list(conn.execute(
+            "SELECT id, account, ts, side, floor, flags, outcome FROM trade_consults"
+            " ORDER BY id"))
+    except sqlite3.OperationalError:
+        return []
+    first_sync = first_shadow_sync_date(conn)
+    rows = []
+    for r in found:
+        day = et_date(r["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+        try:
+            flags = [str(f) for f in json.loads(r["flags"] or "[]")]
+        except ValueError:
+            flags = []
+        rows.append({"consult_id": r["id"], "account": r["account"], "ts": r["ts"],
+                     "date_et": day, "window": window_for(day), "side": r["side"],
+                     "floor": r["floor"], "flags": "|".join(flags), "n_flags": len(flags),
+                     "outcome": r["outcome"] or "",
+                     "shadow_segment": ("" if r["account"] != "shadow" else
+                                        "synced" if first_sync and day >= first_sync
+                                        else "pre_sync")})
+    return rows
+
+
 CARD_BRIEF_DROP_COLUMNS = [
     "review_id", "account", "ts", "date_et", "window", "kind", "source", "origin",
     "kept_brief", "reason", "missing", "raw_why", "raw_risk", "raw_plan",

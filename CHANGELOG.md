@@ -48,6 +48,34 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
     of the same underlying's options).
   - Paper: no change. With no option rows and the flag off, shadow is
     unchanged too.
+## Advisor for the real account (unreleased)
+
+- **`PRE_TRADE_CONSULT` / `SHADOW_PRE_TRADE_CONSULT`** (off by default,
+  shadow only; `allpath_trade/advisor.py`). Two chat tools:
+  - `pre_trade_check`: the agent is told to call it first on any stated
+    intent to buy or sell. Computed in code, no model call: plan fit
+    (strategy thesis, recorded views, including a `VISION` view), weight and
+    cash after the trade, distance to the name's own price levels (stop,
+    entry, take-profit), recent move, and impulse flags (`no_plan`,
+    `chasing`, `below_own_stop`, `rebuy_after_stop`, `oversize`,
+    `cash_short`, `oversell`) with a verdict floor (go / wait / dont).
+    Logged in the new table `trade_consults`.
+  - `record_real_trade`: queues a `shadow_edit` review (op `real_fill`);
+    confirming books the trade at the owner's reported price and quantity
+    (`ShadowLedger.record_real_fill`), never at a quote. Refused when the
+    ledger cannot hold it (sync first).
+- **`ACT_PROMPT_CARDS` / `SHADOW_ACT_PROMPT_CARDS`** (off by default, shadow
+  only). A rule-triggered order card ends with "Your move: place this at
+  your broker..." and has `Done @ <price>` / `Skipped` / `Discuss` buttons
+  (`rv:approve`, `rv:reject`, new `rv:discuss`). Done books the fill at the
+  trigger price; a reply to the card that is just a price books or corrects
+  the fill at that price; Discuss opens an order-thread turn. `auto`
+  strategies on the account are dispatched as `confirm` while the flag is on.
+- Research: `trade_consults.csv` (side, floor, flag codes, outcome; no
+  ticker, size or text).
+- With both flags off no tool is registered and every card, button and
+  dispatch decision is as before.
+
 ## Holdings sync (unreleased)
 
 - **`HOLDINGS_SYNC` / `SHADOW_HOLDINGS_SYNC`** (off by default, shadow only;

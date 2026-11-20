@@ -263,6 +263,12 @@ class Sentinel:
         confirm_only = (self.app_state is not None
                         and regime_demands_confirm(self.app_state, self.account))
 
+        # Act-prompt cards (allpath_trade/advisor.py, shadow): the ledger must
+        # not change before the owner has acted at his broker, so an AUTO
+        # strategy is dispatched as CONFIRM here too (in memory only).
+        if getattr(self.queue, "act_prompts", False) is True:
+            confirm_only = True
+
         for doc in docs:
             if confirm_only and doc.authorization == Authorization.AUTO:
                 doc = doc.model_copy(update={"authorization": Authorization.CONFIRM})
@@ -1038,7 +1044,7 @@ class Sentinel:
                 "notional": intent.notional if intent is not None else None,
                 "qty": intent.qty if intent is not None else None,
                 "price": price}} if compact_cards.enabled(self.queue) else {}),
-            **i18n.lang_kw(self.queue))
+            **i18n.lang_kw(self.queue), **self._act_kw(kind, price))
         # notify_email gates the email/ntfy leg only (see _send's own
         # docstring) -- notify_review_queued (notify/dispatch.py) is the
         # shared choke point this method now shares with order_sink.py's
@@ -1050,6 +1056,15 @@ class Sentinel:
             telegram_bot_token=self.telegram_bot_token, review_id=review_id,
             subject=subject, body=body, account=self.account,
             notify_email=doc.notify_email)
+
+    def _act_kw(self, kind: str, price: Decimal | None) -> dict[str, str]:
+        """Act-prompt cards: the "your move" line for a stock order card of
+        an account that has them on; {} otherwise (the call is the old one)."""
+        if kind != "order" or getattr(self.queue, "act_prompts", False) is not True:
+            return {}
+        from allpath_trade.advisor import act_line
+
+        return {"shadow_line": act_line(price, i18n.of(self.queue))}
 
     def _send(self, doc: StrategyDoc, subject: str, body: str) -> None:
         # notify_email is a notification preference, not a trading

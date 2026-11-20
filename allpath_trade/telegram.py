@@ -36,7 +36,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from allpath_trade import i18n, market_hours
+from allpath_trade import advisor, i18n, market_hours
 from allpath_trade.agent.attachments import (
     ALLOWED_MIMES,
     IMAGES_ONLY_TEXT,
@@ -450,7 +450,7 @@ _TYPING_RESEND_SECONDS = 4
 # hexdigest, see that module) -- requiring the exact length here means a
 # truncated/garbled callback_data simply fails to match rather than being
 # compared against a wrong-length slice of the stored hash.
-_CALLBACK_RE = re.compile(r"^rv:(approve|reject):(\d+):([0-9a-f]{16})\Z")
+_CALLBACK_RE = re.compile(r"^rv:(approve|reject|discuss):(\d+):([0-9a-f]{16})\Z")
 
 # `acct:<paper|shadow>` -- the `/account` command's own inline-button
 # callback_data (shadow-dual-active T5). No nonce: unlike an approve/reject
@@ -902,6 +902,8 @@ class TelegramPoller:
         # reply to a review card talks to the card's account about it. Runs
         # only past the pairing gate above, so only the paired chat+user can
         # ever open or extend a thread.
+        if self._act_price_reply(message, text, chat_id):
+            return None
         thread = order_thread_turn(self.holder.get(), message, text, chat_id=chat_id,
                                    user_id=str(from_id), log_error=self._log_error)
         if thread is not None:
@@ -1163,6 +1165,10 @@ class TelegramPoller:
             return True
 
         action, review_id_raw, nonce = match.groups()
+        if action == "discuss":
+            # Act-prompt cards (allpath_trade/advisor.py): the third button.
+            self._handle_discuss(int(review_id_raw), nonce, chat_id, message, callback_id)
+            return True
         outcome_line, toast, acted = self._resolve_review_callback(
             int(review_id_raw), nonce, action)
         if isinstance(callback_id, str):
@@ -1180,6 +1186,136 @@ class TelegramPoller:
             self.api.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
         self.api.send_message(chat_id, to_telegram_html(outcome_line))
         return True
+
+    # --- act-prompt cards (ACT_PROMPT_CARDS, allpath_trade/advisor.py) -------
+
+    def _book_act_fill(self, bundle: Any, review_id: int, order: Any, price: Any,
+                       prefix: str, lang: str, *, hint: bool) -> str:
+        """After a "Done" (the order is already recorded at the quote): set
+        its fill to `price` (the owner's, or the one the button showed) and
+        say what was booked. A price that cannot be set is reported, never
+        hidden; the order then stays at the quote."""
+        booked = getattr(order, "filled_avg_price", None)
+        if price is not None and order is not None:
+            try:
+                advisor.book_fill_price(bundle.broker, order.id, price)
+                booked = price
+            except Exception as exc:  # noqa: BLE001 — report it, keep the quote fill
+                return i18n.tr(
+                    lang, "{prefix}⚠️ #{review_id} was booked at the quote; the price "
+                          "could not be set to {price}: {error}",
+                    prefix=prefix, review_id=review_id, price=advisor._money(price),
+                    error=exc)
+        side = getattr(getattr(order, "side", None), "value", "") or ""
+        message = i18n.tr(
+            lang, "{prefix}✅ Booked #{review_id}: {side} {qty} {ticker} @ {price} in your "
+                  "shadow ledger.",
+            prefix=prefix, review_id=review_id,
+            side=i18n.word(lang, side) if lang != "en" else side.upper(),
+            qty=advisor._plain(getattr(order, "filled_qty", 0) or 0),
+            ticker=getattr(order, "ticker", ""),
+            price=advisor._money(booked) if booked is not None else "?")
+        if hint:
+            message += i18n.tr(lang, " Fill different? Reply to the card with your price.")
+        return message
+
+    def _act_price_reply(self, message: dict[str, Any], text: str, chat_id: str) -> bool:
+        """A reply to an act-prompt card that is just a price ("135.10",
+        "done 135.1"): book the trade at that price -- approving the card if
+        it is still pending, correcting the fill if Done was already tapped.
+        False (normal routing: the order thread) for anything else."""
+        reply_to = message.get("reply_to_message")
+        if not isinstance(reply_to, dict) or not isinstance(reply_to.get("message_id"), int):
+            return False
+        price = advisor.price_from_reply(text)
+        if price is None:
+            return False
+        try:
+            c = self.holder.get()
+            conn = getattr(c, "conn", None)
+            if conn is None:
+                return False
+            from allpath_trade.store.order_threads import find_card
+
+            card = find_card(conn, chat_id, reply_to["message_id"])
+            if card is None:
+                return False
+            account, review_id = card["account"], int(card["review_id"])
+            bundle = c.accounts[account] if account != DEFAULT_ACCOUNT else c
+            queue = bundle.queue
+            row = queue.get(review_id)
+            if not advisor.is_act_row(queue, row) or row["status"] not in ("pending",
+                                                                          "approved"):
+                return False
+        except Exception as exc:  # noqa: BLE001 — routing must never break the poller
+            self._log_error(f"act-prompt reply lookup failed: {exc}")
+            return False
+        prefix, lang = _prefix(account), i18n.of(queue)
+        try:
+            if row["status"] == "pending":
+                result = queue.approve(review_id)
+                if not result.submitted:
+                    line = i18n.tr(
+                        lang, "{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
+                        prefix=prefix, review_id=review_id,
+                        reasons="; ".join(result.decision.reasons))
+                else:
+                    line = self._book_act_fill(bundle, review_id, result.order, price,
+                                               prefix, lang, hint=False)
+            else:
+                order_id = (json.loads(row["execution_result"] or "{}").get("order")
+                            or {}).get("id")
+                if not order_id:
+                    return False
+                advisor.book_fill_price(bundle.broker, order_id, price)
+                line = i18n.tr(lang, "{prefix}✅ #{review_id} corrected: fill price is now "
+                                     "{price}.", prefix=prefix, review_id=review_id,
+                               price=advisor._money(price))
+        except Exception as exc:  # noqa: BLE001 — say what happened, never crash the poller
+            line = i18n.tr(lang, "{prefix}Not processed: {error}", prefix=prefix, error=exc)
+        self.api.send_message(chat_id, to_telegram_html(line))
+        return True
+
+    def _handle_discuss(self, review_id: int, nonce: str, chat_id: str,
+                        message: Any, callback_id: Any) -> None:
+        """The Discuss button: a chat turn for the card's account about that
+        review, framed like a reply under the card. Resolves nothing; the
+        buttons stay."""
+        c = self.holder.get()
+        located = c.queue.locate(review_id)
+        if located is None:
+            if isinstance(callback_id, str):
+                self.api.answer_callback_query(callback_id, "Not found")
+            return
+        account = located[0]
+        bundle = c.accounts[account] if account != DEFAULT_ACCOUNT else c
+        lang = i18n.of(bundle.queue)
+        try:
+            row = bundle.queue.get(review_id)
+        except ReviewError:
+            row = None
+        stored = ((row["approval_token_hash"] or "")[:16]) if row is not None else ""
+        if row is None or row["status"] != "pending" or not hmac.compare_digest(stored, nonce):
+            if isinstance(callback_id, str):
+                self.api.answer_callback_query(
+                    callback_id, (_prefix(account) + i18n.tr(lang, "Already resolved"))[
+                        :TELEGRAM_TOAST_LIMIT])
+            return
+        if isinstance(callback_id, str):
+            self.api.answer_callback_query(
+                callback_id, i18n.tr(lang, "Let's talk it through.")[:TELEGRAM_TOAST_LIMIT])
+        from allpath_trade.order_threads import frame_order_thread
+
+        card_text = message.get("text") if isinstance(message, dict) else ""
+        framed = frame_order_thread(
+            review_id=review_id, account=account, row=row,
+            card_text=card_text if isinstance(card_text, str) else "",
+            owner_text=("(He tapped Discuss on this card and has not typed anything yet.) "
+                        "In a few short lines: why the rule fired, what you recommend he "
+                        "does at his broker and why, and what would change that. Then ask "
+                        "what he wants to do."),
+            untrusted=[])
+        self._handle_chat_text(chat_id, framed, account=account)
 
     def _handle_account_callback(self, account: str, chat_id: str,
                                  message_id: Any, callback_id: Any) -> None:
@@ -1322,6 +1458,10 @@ class TelegramPoller:
                 return (_t("{prefix}Not processed: {error}", prefix=prefix, error=exc),
                         _toast("Not processed"), True)
             _echo("rejected (rejected via Telegram)")
+            if advisor.is_act_row(queue, row):
+                # Act-prompt card: "Skipped" -- he did not make the trade.
+                return (_t("{prefix}⏭ Skipped #{review_id}. The ledger is unchanged.",
+                           prefix=prefix, review_id=review_id), _toast("Skipped"), True)
             return (_t("{prefix}❌ Rejected #{review_id}.", prefix=prefix,
                        review_id=review_id), _toast("Rejected"), True)
 
@@ -1401,6 +1541,14 @@ class TelegramPoller:
             # the tap has left the user with an order they still have to
             # place by hand. Both the chat message and the receipt `_echo`
             # feeds back to the agent have to say that, not "submitted".
+            if advisor.is_act_row(queue, row):
+                # Act-prompt card: "Done" -- book the fill at the price the
+                # button showed (the rule's trigger price), not the quote.
+                message = self._book_act_fill(
+                    bundle, review_id, result.order, advisor.trigger_price(row),
+                    prefix, lang, hint=True)
+                _echo("the owner did it at his broker; fill booked in the shadow ledger")
+                return message, _toast("Booked"), True
             summary = ("order recorded in your shadow ledger — place it in "
                        "your brokerage now")
             _echo(summary)

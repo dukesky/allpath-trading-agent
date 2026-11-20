@@ -132,6 +132,10 @@ class ReviewQueue:
         # AGENT_LANGUAGE (allpath_trade/i18n.py): app.py sets this account's
         # card language once at startup; "en" builds every card as before.
         self.language: str = "en"
+        # ACT_PROMPT_CARDS (allpath_trade/advisor.py): app.py turns this on
+        # for an account whose rule-trigger cards ask the owner to act at his
+        # broker (Done / Skipped / Discuss). Off = cards as before.
+        self.act_prompts: bool = False
         # `fn(new_yaml, strategy_id) -> str`: the sentinel's dry run of what
         # approving a strategy revision would do right now (compact cards
         # only; wired in app.py with the flag). None = the line is left out.

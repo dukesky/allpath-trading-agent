@@ -269,7 +269,7 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                   stop_warning: str = "",
                   brief: dict | None = None,
                   compact: dict | None = None,
-                  lang: str = "en") -> tuple[Subject, str]:
+                  lang: str = "en", shadow_line: str = "") -> tuple[Subject, str]:
     """`trigger_price`/`est_shares` are the price context available at the
     instant this item was queued (Part B) -- the same sample the rule
     triggered on, not a second, separately-fetched "live" quote (the
@@ -358,7 +358,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                     price=compact.get("price") if kind == "order" else None,
                     source=compact.get("source", ""), option_preview=option_preview,
                     no_analysis_reason=no_analysis_reason, stop_warning=stop_warning,
-                    approve_url=approve_url, prefix=_prefix(account), lang=lang)
+                    approve_url=approve_url, prefix=_prefix(account), lang=lang,
+                    shadow_line=shadow_line)
             return Subject(text, event), card
         except Exception as exc:  # noqa: BLE001 — fall back to the classic card
             print(f"[notify] compact card failed for #{int(review_id)}, sending the "
@@ -369,7 +370,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
             action=action, strategy_id=strategy_id, recommendation=recommendation,
             trigger_price=trigger_price, est_shares=est_shares, approve_url=approve_url,
             kind=kind, option_preview=option_preview,
-            no_analysis_reason=no_analysis_reason, stop_warning=stop_warning, brief=brief)
+            no_analysis_reason=no_analysis_reason, stop_warning=stop_warning, brief=brief,
+            shadow_line=shadow_line)
     subject = Subject(
         f"{_prefix(account)}[AllPath] {subject_noun}: waiting for your approval", event)
     proposed = f"Proposed: {action} on {ticker}" if ticker else f"Proposed: {action}"
@@ -398,7 +400,10 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
         lines.append(f"The agent recommends: {recommendation.split(' — ', 1)[0]}")
     elif recommendation:
         lines.append(f"The agent recommends: {recommendation}")
-    if account == "shadow" and kind == "order":
+    if account == "shadow" and kind == "order" and shadow_line:
+        # Act-prompt cards (allpath_trade/advisor.py): the caller's own line.
+        lines.append(shadow_line)
+    elif account == "shadow" and kind == "order":
         lines.append("If approved, you'll place it yourself — approving here "
                      "only records it in your shadow ledger.")
     body = "\n".join(lines)
@@ -502,7 +507,7 @@ def _review_queued_localized(lang: str, event: dict, *, account: str, review_id:
                              recommendation: str, trigger_price: str, est_shares: str,
                              approve_url: str, kind: str, option_preview: str,
                              no_analysis_reason: str, stop_warning: str,
-                             brief: dict | None) -> tuple[Subject, str]:
+                             brief: dict | None, shadow_line: str = "") -> tuple[Subject, str]:
     """The classic review card in another language: the same lines in the
     same order as `review_queued` builds them in English."""
     subject = Subject(tr(lang, "{prefix}[AllPath] {noun}: waiting for your approval",
@@ -533,8 +538,9 @@ def _review_queued_localized(lang: str, event: dict, *, account: str, review_id:
         shown = word(lang, verdict) if brief or not tail else f"{word(lang, verdict)} — {tail}"
         lines.append(tr(lang, "The agent recommends: {recommendation}", recommendation=shown))
     if account == "shadow" and kind == "order":
-        lines.append(tr(lang, "If approved, you'll place it yourself — approving here "
-                              "only records it in your shadow ledger."))
+        lines.append(shadow_line or tr(
+            lang, "If approved, you'll place it yourself — approving here "
+                  "only records it in your shadow ledger."))
     body = "\n".join(lines)
     if approve_url:
         body += tr(lang, "\nReview & approve: {url}", url=approve_url)

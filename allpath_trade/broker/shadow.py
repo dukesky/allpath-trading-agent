@@ -425,6 +425,43 @@ class ShadowLedger(Broker):
             self._audit(now, symbol,
                         f"option fill reported by the owner: {side} {contracts} {symbol} "
                         f"@ {price} (cash {'-' if side == 'buy' else '+'}{amount})")
+    def record_real_fill(self, ticker: str, side: str, qty: Decimal,
+                         price: Decimal) -> Order:
+        """Book a trade the owner made at his real brokerage, at HIS price
+        and quantity (allpath_trade/advisor.py, human-approved like the other
+        helpers here). Unlike `submit_order` it never looks up a quote: the
+        fill price is the one he reported. Raises ValueError, writing
+        nothing, when the ledger cannot hold the trade (more shares sold
+        than it has, or less cash than the buy cost): the book is then out
+        of sync and needs a holdings sync first."""
+        ticker = ticker.strip().upper()
+        if qty <= 0 or price <= 0:
+            raise ValueError("record_real_fill: qty and price must be > 0")
+        order_side = OrderSide(side)
+        intent = OrderIntent(ticker=ticker, side=order_side, qty=qty,
+                             reason="real fill reported by the owner")
+        now = datetime.now(UTC)
+        with self._conn.transaction():
+            if order_side == OrderSide.BUY:
+                cash = self._get_cash()
+                if qty * price > cash:
+                    raise ValueError(
+                        f"insufficient cash in the ledger: need {qty * price}, have {cash}")
+                order = self._fill_buy(intent, now, qty, price)
+            else:
+                existing = self._conn.execute(
+                    "SELECT qty FROM shadow_positions WHERE ticker = ?", (ticker,)).fetchone()
+                held = Decimal(existing["qty"]) if existing else Decimal(0)
+                if qty > held:
+                    raise ValueError(f"oversell: reported {qty}, the ledger has {held}")
+                order = self._fill_sell(intent, now, qty, price)
+            self._conn.execute(
+                "UPDATE shadow_orders SET note = ? WHERE id = ?",
+                ("real fill reported by the owner", int(order.id)))
+            self._conn.execute(
+                "UPDATE shadow_positions SET last_price = ?, last_price_ts = ?"
+                " WHERE ticker = ?", (str(price), now.isoformat(), ticker))
+        return order
 
     def record_fill(self, order_id: str, actual_price: Decimal) -> None:
         """Corrects a past FILLED order's fill price after the fact (e.g.

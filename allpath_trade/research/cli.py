@@ -77,6 +77,8 @@ def cmd_regime_metrics(args: argparse.Namespace) -> int:
     # Advisory-period tables: not part of the study, so never cut.
     write_csv(out / "shadow_syncs.csv", rm.SHADOW_SYNC_COLUMNS,
               rm.shadow_sync_rows(conn, args.start, args.end))
+    write_csv(out / "trade_consults.csv", rm.TRADE_CONSULT_COLUMNS,
+              rm.trade_consult_rows(conn, args.start, args.end))
     holds = cut(rm.hold_rows(conn, args.start, args.end))
     write_csv(out / "holds.csv", rm.HOLD_COLUMNS, holds)
     (out / "summary.md").write_text(rm.summary_markdown(

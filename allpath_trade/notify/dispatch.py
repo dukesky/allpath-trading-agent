@@ -122,6 +122,12 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
             {"text": i18n.tr(lang, "❌ Reject"),
              "callback_data": f"rv:reject:{review_id}:{nonce}"},
         ]]}
+        from allpath_trade import advisor
+
+        if advisor.is_act_row(queue, row):
+            # Act-prompt cards: Done @ price / Skipped / Discuss on the same
+            # rv: callbacks (Done = approve, Skipped = reject).
+            keyboard = advisor.act_keyboard(review_id, nonce, advisor.trigger_price(row), lang)
         recorder = getattr(queue, "telegram_card_recorder", None)
         if recorder is None:
             return bool(api.send_message(
@@ -137,6 +143,8 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
             # A compact card (allpath_trade/compact_cards.py): same hint,
             # one short line. Only ever printed here, where replies work.
             from allpath_trade.compact_cards import ORDER_THREAD_HINT as hint
+        if advisor.is_act_row(queue, row):
+            hint = ""  # the act line on the card already says what a reply does
         html = to_telegram_html(_prefixed_for_telegram(account, body + i18n.tr(lang, hint)))
         message_id = api.send_message_id(chat_id, html, reply_markup=keyboard)
         if message_id is not None:

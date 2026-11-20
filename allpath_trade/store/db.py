@@ -352,6 +352,26 @@ CREATE TABLE IF NOT EXISTS shadow_syncs (
     cash_changed INTEGER NOT NULL DEFAULT 0
 );
 
+-- Pre-trade consult (PRE_TRADE_CONSULT / SHADOW_PRE_TRADE_CONSULT,
+-- allpath_trade/advisor.py): one row per `pre_trade_check` the chat agent
+-- ran on a trade the owner said he wanted to make -- what, the impulse/risk
+-- flags the code raised, the verdict floor, and whether a real fill was
+-- recorded afterwards (`outcome`). No free text.
+CREATE TABLE IF NOT EXISTS trade_consults (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    account TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty TEXT,
+    price TEXT,
+    value TEXT,
+    flags TEXT NOT NULL DEFAULT '[]',
+    floor TEXT NOT NULL,
+    conversation_id INTEGER,
+    outcome TEXT
+);
+
 -- One row per ET calendar day, upserted both by get_account (every read,
 -- best-effort) and (eventually) a nightly job -- see ShadowLedger.
 CREATE TABLE IF NOT EXISTS shadow_equity_daily (
