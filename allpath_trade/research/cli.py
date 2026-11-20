@@ -74,6 +74,9 @@ def cmd_regime_metrics(args: argparse.Namespace) -> int:
               cut(rm.card_brief_drop_rows(conn, args.start, args.end)))
     write_csv(out / "card_formats.csv", rm.CARD_FORMAT_COLUMNS,
               cut(rm.card_format_rows(conn, args.start, args.end)))
+    # Advisory-period tables: not part of the study, so never cut.
+    write_csv(out / "shadow_syncs.csv", rm.SHADOW_SYNC_COLUMNS,
+              rm.shadow_sync_rows(conn, args.start, args.end))
     holds = cut(rm.hold_rows(conn, args.start, args.end))
     write_csv(out / "holds.csv", rm.HOLD_COLUMNS, holds)
     (out / "summary.md").write_text(rm.summary_markdown(

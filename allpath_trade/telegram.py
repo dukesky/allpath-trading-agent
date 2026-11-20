@@ -483,6 +483,13 @@ DOWNLOAD_FAILED_MESSAGE = "Couldn't download that image — try again."
 # `file_name`.
 _PHOTO_NAME = "photo"
 
+# Holdings sync: a .csv / .txt holdings file sent to the bot (shadow only).
+MAX_HOLDINGS_FILE_BYTES = 200_000
+HOLDINGS_FILE_FAILED_MESSAGE = ("Couldn't read that file — send a small UTF-8 .csv or "
+                                ".txt, or paste the list.")
+HOLDINGS_FILE_WRONG_ACCOUNT_MESSAGE = ("Holdings files are read on the Shadow account — "
+                                       "switch with /account and send it again.")
+
 
 def _image_ref(message: dict[str, Any]) -> tuple[str, str] | None:
     """`(file_id, name)` for a message carrying ONE importable image, else
@@ -805,10 +812,17 @@ class TelegramPoller:
         # `text` and `photo`/`document`), and an absent caption is a
         # legitimate images-only message, not a reason to ignore the update.
         image = _image_ref(message)
+        text_doc = None
         if image is None:
             text = message.get("text")
             if not isinstance(text, str):
-                return None
+                # Holdings sync (flag on for shadow only): a .csv / .txt file
+                # is read as a pasted holdings list. Otherwise ignored as before.
+                text_doc = self._text_document_ref(message)
+                if text_doc is None:
+                    return None
+                caption = message.get("caption")
+                text = caption if isinstance(caption, str) else ""
         else:
             caption = message.get("caption")
             text = caption if isinstance(caption, str) else ""
@@ -831,7 +845,7 @@ class TelegramPoller:
         # something the user wrote *about* the attached image -- treating
         # "/account" under a photo as the account command would pop the
         # switcher and silently swallow the image the user actually sent.
-        parts = text.split(maxsplit=1) if image is None else []
+        parts = text.split(maxsplit=1) if image is None and text_doc is None else []
         command = parts[0].split("@", 1)[0] if parts else ""
         if command == "/start":
             token = parts[1].strip() if len(parts) > 1 else ""
@@ -860,6 +874,10 @@ class TelegramPoller:
         # "@botname"-suffix stripping as "/start" above.
         if command == "/account":
             self._handle_account_command(chat_id)
+            return None
+
+        if text_doc is not None:
+            self._handle_text_document(chat_id, text_doc, text)
             return None
 
         if image is not None:
@@ -970,6 +988,55 @@ class TelegramPoller:
         # real sentence rather than an empty user turn, the same default the
         # web route applies.
         self._handle_chat_text(chat_id, text or IMAGES_ONLY_TEXT, images=images)
+
+    def _text_document_ref(self, message: dict[str, Any]) -> tuple[str, str] | None:
+        """`(file_id, name)` for a small .csv / .txt document while holdings
+        sync is on for the shadow account; None otherwise (the message is
+        then ignored exactly as before)."""
+        document = message.get("document")
+        if not isinstance(document, dict):
+            return None
+        name = document.get("file_name")
+        file_id = document.get("file_id")
+        if not (isinstance(name, str) and isinstance(file_id, str) and file_id
+                and name.lower().endswith((".csv", ".txt"))):
+            return None
+        try:
+            from allpath_trade.config import account_flag
+
+            if not account_flag(self.holder.get().settings, "holdings_sync", "shadow"):
+                return None
+        except Exception:  # noqa: BLE001 — a settings hiccup keeps the old path
+            return None
+        return file_id, " ".join(name.split())[:60]
+
+    def _handle_text_document(self, chat_id: str, ref: tuple[str, str], caption: str) -> None:
+        """A holdings file becomes one shadow chat turn carrying its text.
+        The bytes are never written to disk; the text is stored only as that
+        chat turn, like a pasted list would be."""
+        file_id, name = ref
+        if self._telegram_account() != "shadow":
+            self._refuse(chat_id, HOLDINGS_FILE_WRONG_ACCOUNT_MESSAGE)
+            return
+        file_path = self.api.get_file(file_id)
+        if file_path is None:
+            self._refuse(chat_id, HOLDINGS_FILE_FAILED_MESSAGE)
+            return
+        try:
+            data = self.api.download_file(file_path, MAX_HOLDINGS_FILE_BYTES)
+        except FileTooLarge:
+            self._refuse(chat_id, HOLDINGS_FILE_FAILED_MESSAGE)
+            return
+        try:
+            content = data.decode("utf-8-sig") if data is not None else None
+        except UnicodeDecodeError:
+            content = None
+        if not content or not content.strip():
+            self._refuse(chat_id, HOLDINGS_FILE_FAILED_MESSAGE)
+            return
+        lead = caption.strip() or "Here is a file with my real holdings."
+        self._handle_chat_text(chat_id, f"{lead}\n\n[file: {name}]\n{content}",
+                               account="shadow")
 
     def _refuse(self, chat_id: str, message: str) -> None:
         """A rejected attachment, prefixed for the account this chat is on.

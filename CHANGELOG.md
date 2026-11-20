@@ -48,6 +48,34 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
     of the same underlying's options).
   - Paper: no change. With no option rows and the flag off, shadow is
     unchanged too.
+## Holdings sync (unreleased)
+
+- **`HOLDINGS_SYNC` / `SHADOW_HOLDINGS_SYNC`** (off by default, shadow only;
+  `allpath_trade/holdings_sync.py`). Brings the shadow ledger in line with
+  the owner's real brokerage account from something the owner sends: a
+  screenshot of the positions screen, a `.csv` / `.txt` file sent to the
+  Telegram bot, or a typed list. The app never connects to a brokerage.
+  - New chat tool `propose_holdings_sync`. It never writes the ledger. Rows
+    it cannot read, duplicates, and new symbols without a cost basis are
+    returned as questions and nothing is queued. Otherwise it queues one
+    `shadow_edit` review (op `sync`) whose card shows the parsed table and
+    the diff; `complete=false` only updates the listed symbols and never
+    closes a position. A symbol without a cost in the input keeps its
+    ledger cost.
+  - Confirming applies everything in one transaction and writes a row to
+    the new table `shadow_syncs` (ts, source, mode, review id, the book
+    before and after, counts). The audit rows are `adjust`, never a buy or
+    a sell. Strategies and rule states are not touched; held symbols with no
+    active strategy are listed as "no plan".
+  - `SHADOW_SYNC_STALE_DAYS` (default 7): the evening check-in adds a line
+    asking for a fresh screenshot when the last sync is older, and is sent
+    for that line alone when there are no questions.
+  - Research: `shadow_syncs.csv` (counts only, `first_sync` marks the first
+    one) and a `shadow_segment` column (`pre_sync` / `synced`) at the end of
+    `regime_metrics_daily.csv`. Shadow history before the first sync is not
+    comparable with history after it.
+  - With the flag off the tool is not registered, a non-image document sent
+    to the bot is ignored as before, and no message changes.
 ## Shadow memory isolation (unreleased)
 
 - **The shadow account no longer writes the shared user profile** (TDSC

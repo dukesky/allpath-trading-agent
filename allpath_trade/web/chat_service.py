@@ -189,6 +189,20 @@ class ChatService:
                 app_state=c.app_state,
                 telegram_bot_token=c.settings.telegram_bot_token)
 
+        holdings_sync = (self.account == "shadow"
+                         and account_flag(c.settings, "holdings_sync", self.account))
+        if holdings_sync:
+            # Holdings sync: one tool that compares what the owner sent with
+            # the ledger and queues a reconciliation for his confirmation.
+            from allpath_trade.holdings_sync import register_holdings_sync_tool
+
+            register_holdings_sync_tool(
+                registry, ledger=b.broker, queue=b.queue, strategies=b.strategies,
+                conversation_id_fn=lambda: conversation_id,
+                notifier=c.notifier, web_base_url=c.settings.web_base_url,
+                app_state=c.app_state,
+                telegram_bot_token=c.settings.telegram_bot_token)
+
         checkin = self.account == "shadow" and c.settings.shadow_daily_checkin
         if checkin:
             # Shadow check-in pilot (spec 2026-11-06-shadow-checkin-design.md):
@@ -217,6 +231,10 @@ class ChatService:
             from allpath_trade.shadow_options import OPTION_HOLDINGS_CHAT_NOTE
 
             prompt = f"{prompt}\n{OPTION_HOLDINGS_CHAT_NOTE}"
+        if holdings_sync:
+            from allpath_trade.holdings_sync import HOLDINGS_SYNC_CHAT_NOTE
+
+            prompt = f"{prompt}\n{HOLDINGS_SYNC_CHAT_NOTE}"
         if account_flag(c.settings, "telegram_order_threads", self.account):
             from allpath_trade.order_threads import ORDER_THREAD_CHAT_NOTE
 

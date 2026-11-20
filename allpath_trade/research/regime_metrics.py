@@ -78,7 +78,13 @@ DAILY_COLUMNS = [
     "models_chat", "models_review", "models_memory",
     "reflection_tokens_in", "reflection_tokens_out",
     "order_thread_msgs",
+    # shadow only: "pre_sync" until the day of the first holdings sync
+    # (shadow_syncs), "synced" from that day on; "" for paper.
+    "shadow_segment",
 ]
+
+
+_UNSET: Any = object()
 
 
 def window_for(day: str) -> str:
@@ -217,6 +223,7 @@ def _breaker_state(trips: list[str], resets: tuple[str, ...], eod: str) -> str:
 
 
 def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    first_sync: Any = _UNSET
     revisions = load_revisions(conn)
     orders, order_reviews = load_orders(conn)
     skips = regime_skips(conn)
@@ -254,6 +261,8 @@ def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str,
             last_model[tier] = model
         models = {tier: "|".join(sorted(seen[tier])) if tier in seen
                   else last_model.get(tier, "") for tier in ("chat", "review", "memory")}
+        if first_sync is _UNSET:
+            first_sync = first_shadow_sync_date(conn)
         for account in ACCOUNTS:
             row = _account_day(
                 day, account, eod, revisions=revisions, orders=orders,
@@ -263,6 +272,9 @@ def daily_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str,
             row["weekday"] = int(weekday)
             row["order_thread_msgs"] = sum(1 for m in thread_msgs if m["account"] == account
                                            and et_date(m["ts"]) == day)
+            row["shadow_segment"] = ("" if account != "shadow" else
+                                     "synced" if first_sync and day >= first_sync
+                                     else "pre_sync")
             row.update({f"models_{t}": m for t, m in models.items()})
             active = (row["report_status"] != "none" or row["breaker_trips"]
                       or any(row[c] for _, _, c in PROPOSAL_TYPES) or row["prop_other"]
@@ -365,6 +377,59 @@ def card_format_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dic
                      "card_format": r["card_format"] or "classic",
                      "card_lang": r["card_lang"] or "en"})
     return rows
+
+
+SHADOW_SYNC_COLUMNS = [
+    "sync_id", "ts", "date_et", "window", "source", "mode", "review_id", "first_sync",
+    "n_new", "n_closed", "n_qty_changed", "n_cost_changed", "cash_changed",
+    "positions_before", "positions_after",
+]
+
+
+def shadow_sync_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict[str, Any]]:
+    """One row per applied holdings sync of the shadow ledger (HOLDINGS_SYNC,
+    allpath_trade/holdings_sync.py): the marker that separates shadow history
+    into "paper-style mirror" (before the row with first_sync = 1) and
+    "ledger reconciled with the real account" (from it on); the two are not
+    comparable. Counts only: no tickers, quantities or amounts. Empty for a
+    database without the table."""
+    try:
+        found = list(conn.execute(
+            "SELECT id, ts, source, mode, review_id, before, after, n_new, n_closed,"
+            " n_qty_changed, n_cost_changed, cash_changed FROM shadow_syncs ORDER BY id"))
+    except sqlite3.OperationalError:
+        return []
+    rows = []
+    for index, r in enumerate(found):
+        day = et_date(r["ts"])
+        if day is None or not (start <= day <= end):
+            continue
+
+        def held(raw: str) -> int | str:
+            try:
+                return len(json.loads(raw).get("positions") or {})
+            except (ValueError, AttributeError):
+                return ""
+
+        rows.append({"sync_id": r["id"], "ts": r["ts"], "date_et": day,
+                     "window": window_for(day), "source": r["source"], "mode": r["mode"],
+                     "review_id": r["review_id"], "first_sync": int(index == 0),
+                     "n_new": r["n_new"], "n_closed": r["n_closed"],
+                     "n_qty_changed": r["n_qty_changed"],
+                     "n_cost_changed": r["n_cost_changed"],
+                     "cash_changed": r["cash_changed"],
+                     "positions_before": held(r["before"]),
+                     "positions_after": held(r["after"])})
+    return rows
+
+
+def first_shadow_sync_date(conn: sqlite3.Connection) -> str | None:
+    """ET date of the first applied holdings sync, or None."""
+    try:
+        row = conn.execute("SELECT ts FROM shadow_syncs ORDER BY id LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return et_date(row["ts"]) if row is not None else None
 
 
 CARD_BRIEF_DROP_COLUMNS = [

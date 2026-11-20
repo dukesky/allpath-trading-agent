@@ -200,7 +200,7 @@ def current_shadow_state(ledger: ShadowLedger, op: str, args: dict) -> object:
         return cash_snapshot(ledger)
     if op == "record_fill":
         return order_snapshot(ledger, args.get("order_id", ""))
-    if op in ("import", "reset"):
+    if op in ("import", "reset", "sync"):
         return full_snapshot(ledger)
     if op in ("set_option", "remove_option", "mark_option"):
         return option_snapshot(ledger, args.get("symbol", ""))
@@ -499,6 +499,13 @@ def apply_shadow_edit_factory(
                 with conn.transaction():
                     ledger.record_option_fill(args["symbol"], args["side"], contracts_d,
                                               price_d)
+            elif op == "sync":
+                # Holdings sync (allpath_trade/holdings_sync.py): the whole
+                # book reconciled with the owner's real account.
+                from allpath_trade.holdings_sync import apply_sync
+
+                _stale_check(full_snapshot(ledger), before)
+                apply_sync(ledger, conn, args, before)
             elif op == "reset":
                 current = full_snapshot(ledger)
                 _stale_check(current, before)

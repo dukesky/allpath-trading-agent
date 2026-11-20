@@ -329,6 +329,29 @@ CREATE TABLE IF NOT EXISTS shadow_option_positions (
     updated_ts TEXT NOT NULL
 );
 
+-- Holdings sync (HOLDINGS_SYNC / SHADOW_HOLDINGS_SYNC, allpath_trade/
+-- holdings_sync.py): one row per applied reconciliation of the shadow ledger
+-- with the owner's real account -- when, by whom, from what input, and the
+-- whole book before and after. This is what tells a sync apart from a trade
+-- and marks, for the research exports, where "ledger = real account" starts.
+CREATE TABLE IF NOT EXISTS shadow_syncs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    account TEXT NOT NULL DEFAULT 'shadow',
+    source TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'full',
+    by TEXT NOT NULL DEFAULT 'owner',
+    review_id INTEGER,
+    token TEXT NOT NULL DEFAULT '',
+    before TEXT NOT NULL,
+    after TEXT NOT NULL,
+    n_new INTEGER NOT NULL DEFAULT 0,
+    n_closed INTEGER NOT NULL DEFAULT 0,
+    n_qty_changed INTEGER NOT NULL DEFAULT 0,
+    n_cost_changed INTEGER NOT NULL DEFAULT 0,
+    cash_changed INTEGER NOT NULL DEFAULT 0
+);
+
 -- One row per ET calendar day, upserted both by get_account (every read,
 -- best-effort) and (eventually) a nightly job -- see ShadowLedger.
 CREATE TABLE IF NOT EXISTS shadow_equity_daily (
