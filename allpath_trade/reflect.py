@@ -522,7 +522,12 @@ class Reflector:
             # Decision brief on review cards (allpath_trade/card_brief.py):
             # optional brief_* tool arguments, only with the flag on.
             **({"card_brief": True}
-               if account_flag(self.settings, "card_reason_brief", c.account) else {}))
+               if account_flag(self.settings, "card_reason_brief", c.account) else {}),
+            # Compact cards on as well: the same arguments in their compact
+            # wording (one sentence each, the reason rather than the numbers).
+            **({"compact_brief": True}
+               if account_flag(self.settings, "card_reason_brief", c.account)
+               and account_flag(self.settings, "compact_cards", c.account) else {}))
 
         identity = load_identity()
         base_prompt = build_system_prompt(

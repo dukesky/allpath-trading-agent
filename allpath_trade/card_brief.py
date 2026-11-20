@@ -106,6 +106,32 @@ TOOL_PROPERTIES: dict[str, dict[str, str]] = {
                        "or the strategy's thesis. Leave it out if neither is known."},
 }
 
+# The same three arguments on `propose_strategy_revision` for an account
+# that also has COMPACT_CARDS on (allpath_trade/compact_cards.py). Its card
+# already lists what changes (computed from the YAML, with the numbers) and
+# what approving would do now, so Why must be the reason for the change in
+# plain words, and each line one short sentence. The card cuts each line to
+# its first sentence and a hard word cap whatever comes back; the grounding
+# check on any figure that is still used is the same.
+COMPACT_REVISION_TOOL_PROPERTIES: dict[str, dict[str, str]] = {
+    "brief_why": {
+        "type": "string",
+        "description": "Shown on the approval card under a list of the changes. ONE "
+                       "sentence, at most 20 words, plain words: the reason for this "
+                       "change (what you saw that makes the current rules wrong). The "
+                       "card already lists each changed rule with its old and new "
+                       "numbers, so do not restate them or describe the edit itself. "
+                       + _TOOL_RULES},
+    "brief_risk": {
+        "type": "string",
+        "description": "ONE sentence, at most 20 words: the main risk of approving "
+                       "this change, or what would make it wrong."},
+    "brief_plan": {
+        "type": "string",
+        "description": "One sentence: how this fits the owner's recorded view "
+                       "or the strategy's thesis. Leave it out if neither is known."},
+}
+
 # ---------------------------------------------------------------------------
 # Grounding. A brief must not introduce a figure the stored review does not
 # support. What counts as supported (fix/card-brief-drops, after the first

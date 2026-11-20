@@ -1068,3 +1068,195 @@ def test_pending_page_survives_a_compact_view_that_raises(tmp_path, monkeypatch)
     card = _card(response.text, 1)
     assert "compact-card" not in response.text and "Agent recommends:" in card
     client.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# nightly reflection revisions: compact brief wording, compact card recorded
+# ---------------------------------------------------------------------------
+
+# The long classic-wording brief of a real shadow reflection revision, as
+# reported (one sentence, 33 words).
+LONG_WHY = ("Replace CRDO's obsolete entry assumptions with one $500 proposal at or below "
+            "$110, guarded by 2.8% pre-trade weight, because the owner's new $100-110 zone "
+            "does not override the existing 3% target.")
+
+
+class _ToolRecordingLLM(ScriptedLLM):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.tools = []
+
+    def complete(self, messages, tools=None):
+        self.tools.append([t.model_dump() for t in tools or []])
+        return super().complete(messages, tools)
+
+
+def _reflection_run(tmp_path, account, **flags):
+    """One nightly reflection; returns (first-call messages, tool specs)."""
+    from allpath_trade.llm.base import LLMResponse
+    from allpath_trade.reflect import Reflector
+    from tests.test_reflect import NOW, REPORT_TEXT, make_components, make_settings
+
+    components = make_components(tmp_path, account=account)
+    llm = _ToolRecordingLLM([LLMResponse(text=REPORT_TEXT)])
+    Reflector(llm=llm, components=components, settings=make_settings(**flags)).run_daily(now=NOW)
+    return json.dumps(llm.seen[0], default=str), llm.tools[0]
+
+
+def _revision_tool(specs):
+    [spec] = [s for s in specs if s["name"] == "propose_strategy_revision"]
+    return json.dumps(spec)
+
+
+def test_paper_reflection_prompt_and_tools_ignore_the_shadow_flags(tmp_path):
+    runs = {}
+    for name, flags in (("off", {}),
+                        ("shadow_on", {"shadow_compact_cards": True,
+                                       "shadow_card_reason_brief": True})):
+        (tmp_path / name).mkdir()
+        runs[name] = _reflection_run(tmp_path / name, "paper", **flags)
+    assert runs["off"][0].replace(str(tmp_path / "off"), "") == \
+        runs["shadow_on"][0].replace(str(tmp_path / "shadow_on"), "")
+    assert runs["off"][1] == runs["shadow_on"][1]
+    assert "brief_" not in json.dumps(runs["off"][1])
+
+
+def test_shadow_reflection_gets_the_compact_wording_only_with_both_flags(tmp_path):
+    for name in ("brief", "both", "compact"):
+        (tmp_path / name).mkdir()
+    _, brief_only = _reflection_run(tmp_path / "brief", "shadow",
+                                    shadow_card_reason_brief=True)
+    messages, both = _reflection_run(tmp_path / "both", "shadow",
+                                     shadow_card_reason_brief=True,
+                                     shadow_compact_cards=True)
+    _, compact_only = _reflection_run(tmp_path / "compact", "shadow",
+                                      shadow_compact_cards=True)
+    classic = card_brief.TOOL_PROPERTIES["brief_why"]["description"]
+    compact = card_brief.COMPACT_REVISION_TOOL_PROPERTIES["brief_why"]["description"]
+    assert classic in json.loads(_revision_tool(brief_only))["parameters"]["properties"][
+        "brief_why"]["description"]
+    props = json.loads(_revision_tool(both))["parameters"]["properties"]
+    assert props["brief_why"]["description"] == compact
+    assert props["brief_risk"] == card_brief.COMPACT_REVISION_TOOL_PROPERTIES["brief_risk"]
+    assert "at most 20 words" in compact and "do not restate them" in compact
+    assert "the reason for this change" in compact
+    # Compact cards without the brief flag: no brief arguments at all.
+    assert "brief_" not in _revision_tool(compact_only)
+    # Only the argument descriptions differ; nothing else in the tool list.
+    def strip(specs):
+        specs = json.loads(json.dumps(specs))
+        for spec in specs:
+            for name in card_brief.TOOL_PROPERTIES:
+                spec["parameters"].get("properties", {}).pop(name, None)
+        return specs
+
+    assert strip(both) == strip(brief_only) == strip(compact_only)
+    assert_english_only(compact)
+
+
+def test_reflection_tool_schema_with_compact_brief_off_is_the_old_one(tmp_path):
+    from tests.test_card_brief import _reflection_tools, _specs
+
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    off = _specs(_reflection_tools(tmp_path / "a")[0])
+    # compact_brief alone does nothing: it needs card_brief.
+    assert _specs(_reflection_tools(tmp_path / "b", compact_brief=True)[0]) == off
+    on = _specs(_reflection_tools(tmp_path / "c", card_brief=True)[0])
+    assert card_brief.TOOL_PROPERTIES["brief_why"]["description"] in json.dumps(on)
+
+
+def test_reflection_revision_records_compact_only_for_a_compact_queue(tmp_path):
+    from tests.test_card_brief import PROPOSED, _reflection_tools
+
+    args = {"strategy_id": "s1", "new_yaml": PROPOSED,
+            "rationale": "The stop at 100 is too tight; widen it to 90.",
+            "brief_why": "Normal swings keep hitting the stop before the thesis can play out.",
+            "brief_risk": "A wider stop means a larger loss if it triggers."}
+    (tmp_path / "off").mkdir()
+    reg, queue = _reflection_tools(tmp_path / "off", card_brief=True, compact_brief=True)
+    assert "queued" in _call(reg, "propose_strategy_revision", **args)
+    assert queue.get(1)["card_format"] is None  # flag off for the queue: nothing written
+
+    (tmp_path / "on").mkdir()
+    reg, queue = _reflection_tools(tmp_path / "on", card_brief=True, compact_brief=True)
+    queue.compact_cards = True
+    assert "queued" in _call(reg, "propose_strategy_revision", **args)
+    row = queue.get(1)
+    assert row["card_format"] == "compact" and row["status"] == "pending"
+    assert row["source"] == "reflection"
+    # Same grounding check: this brief has no figures and is kept whole...
+    assert json.loads(row["decision_brief"])["why"] == args["brief_why"]
+    assert row["brief_drop"] is None
+    # ...and one with a figure the stored review does not back is still dropped.
+    out = _call(reg, "propose_strategy_revision", **{
+        **args, "new_yaml": PROPOSED.replace("version: 2", "version: 3"),
+        "brief_why": "Volatility rose 55% this month."})
+    assert "queued" in out
+    row = queue.get(2)
+    assert row["decision_brief"] is None and row["card_format"] == "compact"
+    assert json.loads(row["brief_drop"])["missing"] == ["55"]
+
+
+def test_recording_the_format_can_never_block_a_reflection_revision(tmp_path, capsys):
+    from tests.test_card_brief import PROPOSED, _reflection_tools
+
+    reg, queue = _reflection_tools(tmp_path)
+    queue.compact_cards = True
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    queue.record_card_format = boom
+    out = _call(reg, "propose_strategy_revision", strategy_id="s1", new_yaml=PROPOSED,
+                rationale="Widen the stop.")
+    assert "queued" in out and queue.get(1)["status"] == "pending"
+    assert "could not record card format" in capsys.readouterr().err
+
+
+def test_no_notification_is_sent_for_a_reflection_revision(tmp_path, monkeypatch):
+    """Routing is unchanged: a compact queue still pushes nothing here."""
+    from tests.test_card_brief import PROPOSED, _reflection_tools
+
+    def boom(*a, **k):
+        raise AssertionError("a reflection revision sent a notification")
+
+    monkeypatch.setattr(dispatch, "notify_review_queued", boom)
+    monkeypatch.setattr(dispatch, "push_telegram_review_queued", boom)
+    reg, queue = _reflection_tools(tmp_path)
+    queue.compact_cards = True
+    assert "queued" in _call(reg, "propose_strategy_revision", strategy_id="s1",
+                             new_yaml=PROPOSED, rationale="Widen the stop.")
+
+
+def test_pending_page_cuts_an_already_stored_long_reflection_brief(tmp_path, monkeypatch):
+    """Rows queued before the compact wording existed (long classic brief,
+    card_format NULL) render in the compact layout, lines cut by the cap."""
+    client, queue = _shadow_client(tmp_path, monkeypatch, shadow_card_reason_brief=True)
+    c = client.app.state.holder.get().accounts["shadow"]
+    (c.strategies.directory / "tsla-swing.yaml").write_text(OLD_TSLA)
+    rid = int(queue.add_strategy_revision(
+        strategy_id="tsla-swing", ticker="TSLA", old_yaml=OLD_TSLA, new_yaml=NEW_TSLA,
+        diff="", rationale="Long rationale. With a tail.", source="reflection"))
+    long_risk = "First risk sentence. Second risk sentence that must not show."
+    queue.attach_brief(rid, {"why": LONG_WHY, "risk": long_risk, "plan": "",
+                             "origin": "reflection"})
+    assert queue.get(rid)["card_format"] is None
+    card = _card(client.get("/reviews").text, rid)
+    assert "compact-card" in card or "Agent proposes 2 changes" in card
+    cut = compact_cards.one_sentence(LONG_WHY)
+    assert cut == ("Replace CRDO's obsolete entry assumptions with one $500 proposal at or "
+                   "below $110, guarded by 2.8% pre-trade weight, because the owner's new "
+                   "$100-110 zone does not override the…")
+    assert len(cut.split()) == compact_cards.MAX_WORDS
+    import html as html_lib
+
+    text = html_lib.unescape(card)
+    assert f"<strong>Why:</strong> {cut}</p>" in text
+    assert "<strong>Risk:</strong> First risk sentence.</p>" in text
+    assert "Second risk sentence" not in text and "existing 3% target" not in text
+    assert text.index("Agent proposes 2 changes") < text.index("Why:") < text.index("<details")
+    # The stored brief is not modified by rendering.
+    assert json.loads(queue.get(rid)["decision_brief"])["why"] == LONG_WHY
+    assert queue.get(rid)["card_format"] is None  # a page view writes nothing
+    client.__exit__(None, None, None)

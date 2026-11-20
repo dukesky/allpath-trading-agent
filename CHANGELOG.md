@@ -28,6 +28,14 @@ All notable changes to allpath-trade. Dates are merge dates to `main`.
   - `pending_reviews.card_format` records `compact` for a review whose
     notification used the new layout (NULL = classic); research export
     `card_formats.csv`.
+  - Nightly reflection revisions: with `CARD_REASON_BRIEF` and
+    `COMPACT_CARDS` both on for the account, `propose_strategy_revision`
+    describes its `brief_*` arguments in compact wording (one sentence
+    each, Why = the reason for the change, not the numbers the change list
+    already shows; same grounding check, same model call), and the revision
+    is recorded as `card_format = compact` when queued (it is shown with
+    the compact card on the Pending page; no Telegram/email is sent for a
+    reflection revision, as before).
 
 ## Pre-launch repo work: CI, Docker, templates (unreleased)
 
