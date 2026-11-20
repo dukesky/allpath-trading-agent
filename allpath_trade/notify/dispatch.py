@@ -80,7 +80,7 @@ def _telegram_target(app_state: AppState | None,
 
 def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | None,
                                 telegram_bot_token: str, review_id: int,
-                                body: str, account: str) -> None:
+                                body: str, account: str) -> bool:
     """Push a queued-review summary to the paired Telegram chat with inline
     Approve/Reject buttons. `body` is the same kind-specific summary text
     `events.review_queued(...)` already built for the email leg -- rendered
@@ -99,28 +99,30 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
     not the security boundary itself.
 
     Best-effort end to end: never raises, silently does nothing when
-    Telegram is off/unpaired or the review row can't be read back."""
+    Telegram is off/unpaired or the review row can't be read back. Returns
+    True when the card was sent, so a caller that wants to log a miss can
+    (every older caller ignores it)."""
     try:
         target = _telegram_target(app_state, telegram_bot_token)
         if target is None:
-            return
+            return False
         api, chat_id = target
         try:
             row = queue.get(review_id)
         except ReviewError:
-            return
+            return False
         nonce = (row["approval_token_hash"] or "")[:16]
         if not nonce:
-            return
+            return False
         keyboard = {"inline_keyboard": [[
             {"text": "✅ Approve", "callback_data": f"rv:approve:{review_id}:{nonce}"},
             {"text": "❌ Reject", "callback_data": f"rv:reject:{review_id}:{nonce}"},
         ]]}
         recorder = getattr(queue, "telegram_card_recorder", None)
         if recorder is None:
-            api.send_message(chat_id, to_telegram_html(_prefixed_for_telegram(account, body)),
-                             reply_markup=keyboard)
-            return
+            return bool(api.send_message(
+                chat_id, to_telegram_html(_prefixed_for_telegram(account, body)),
+                reply_markup=keyboard))
         # Telegram order threads (flag on for this account): send the same
         # card plus a reply hint, and remember its message id so a reply to
         # it reaches the agent with this review's context.
@@ -135,8 +137,9 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
         message_id = api.send_message_id(chat_id, html, reply_markup=keyboard)
         if message_id is not None:
             recorder(review_id, chat_id, message_id)
-    except Exception:  # noqa: BLE001, S110 — best-effort, never break the caller
-        pass
+        return message_id is not None
+    except Exception:  # noqa: BLE001 — best-effort, never break the caller
+        return False
 
 
 def push_telegram_receipt(*, app_state: AppState | None, telegram_bot_token: str,

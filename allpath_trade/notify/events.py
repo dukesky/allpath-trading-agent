@@ -312,7 +312,8 @@ def review_queued(*, account: str, review_id: int, ticker: str, action: str,
                     rationale=compact.get("rationale", ""), brief=brief,
                     effect=compact.get("effect", ""), approve_url=approve_url,
                     web_base_url=compact.get("web_base_url", ""),
-                    prefix=_prefix(account))
+                    prefix=_prefix(account),
+                    hold_reason=compact.get("hold_reason", ""))
             else:
                 # An option order's `price` is the underlying's: not shown
                 # next to an option action, where it reads as the premium.

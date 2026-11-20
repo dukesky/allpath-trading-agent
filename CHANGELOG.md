@@ -2,6 +2,19 @@
 
 All notable changes to allpath-trade. Dates are merge dates to `main`.
 
+## Reflection revision cards (unreleased)
+
+- **`REFLECTION_REVISION_CARDS` / `SHADOW_REFLECTION_REVISION_CARDS`**
+  (per-account, off by default). After a successful nightly reflection and
+  its auto-apply step, each revision that run proposed and that is still
+  pending gets one Telegram card with Approve / Reject buttons, in id order
+  (`Reflector._send_revision_cards`). Compact revision card with
+  `COMPACT_CARDS` on, classic text otherwise; a revision held by the
+  auto-apply allow-list leads with `⚠ Held for human: <reason>`. Telegram
+  only. A failed or missing send is logged to stderr and never stops the
+  other cards or the run. With the flag off nothing is sent, as before.
+  `push_telegram_review_queued` now returns whether the card was sent.
+
 ## Compact cards (unreleased)
 
 - **`COMPACT_CARDS` / `SHADOW_COMPACT_CARDS`** (per-account, off by default;
