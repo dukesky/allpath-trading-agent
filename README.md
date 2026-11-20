@@ -17,6 +17,7 @@
 [Architecture](#architecture) ·
 [Safety](#safety-model) ·
 [Paper](#paper) ·
+[Blog](https://trading.all-path.com/blog) ·
 [中文文档](README.zh-CN.md) ·
 [**Website →**](https://trading.all-path.com)
 
@@ -57,6 +58,10 @@ Ready for the real thing? `uv run allpath-trade serve` starts a setup wizard tha
 - **A gate the model cannot bypass.** A deterministic risk gate, a drawdown circuit breaker and market-hours guards sit in front of every order.
 
 <p align="center"><code>rule fires → risk gate → approval card → order → journal → notification → nightly reflection</code></p>
+
+## From the blog
+
+**[Heavy in semis through the NVDA slide: what the stops did](https://trading.all-path.com/blog/semis-slide-what-the-stops-did)**. From October 28 to November 20, 2026 the chip index fell 28% and NVDA fell 42%. The public paper account went in 99% invested, half of it in semiconductor swing trades, and finished down 11.2%, about what the S&P 500 lost. The post shows which stop rules fired and when, how much of the account was in cash afterwards, and two mistakes the exit rules did not cover. Paper trading, not financial advice.
 
 ## Paper
 
