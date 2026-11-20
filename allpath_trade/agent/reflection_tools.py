@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import difflib
+import sys
 from collections.abc import Callable
 from typing import Optional
 
 import yaml
 
+from allpath_trade import compact_cards
 from allpath_trade.agent.tools import ToolRegistry
 from allpath_trade.store.reviews import ReviewQueue
 from allpath_trade.strategy.apply import apply_revision_factory
@@ -34,6 +36,7 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
                               on_proposed: Optional[Callable[[int], None]] = None,
                               views_for: Callable[[str], list[dict]] | None = None,
                               card_brief: bool = False,
+                              compact_brief: bool = False,
                               ) -> None:
     """Registers the one tool a reflection session gets for changing a
     strategy: `propose_strategy_revision`. There is deliberately no
@@ -53,7 +56,20 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
     allpath_trade/card_brief.py): the tool also takes optional `brief_*`
     arguments, checked against the rationale and the proposed YAML and
     stored on the queued review. False leaves the schema as before and
-    ignores the arguments."""
+    ignores the arguments.
+
+    `compact_brief` (COMPACT_CARDS on for the account as well, see
+    allpath_trade/compact_cards.py): the `brief_*` arguments are described
+    in their compact wording (one sentence each, Why = the reason for the
+    change, not the numbers the card's change list already shows). Same
+    arguments, same grounding check, same model call; only used with
+    `card_brief`.
+
+    Separately, a queue whose account has COMPACT_CARDS on
+    (`ReviewQueue.compact_cards`) gets `card_format = 'compact'` recorded on
+    each revision queued here: no notification is sent for a reflection
+    revision, so the Pending page's compact card is the card it is shown
+    with. With the flag off nothing is written."""
 
     def propose_strategy_revision(strategy_id: str, new_yaml: str, rationale: str,
                                   view_alignment: str | None = None,
@@ -204,6 +220,12 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
                 sources=[rationale, old_yaml, new_yaml, doc.position.ticker])
             if checked.brief or checked.drop:
                 _brief.store(queue, int(rid), checked, log="reflection")
+        if compact_cards.enabled(queue):
+            try:
+                queue.record_card_format(int(rid), compact_cards.FORMAT)
+            except Exception as exc:  # noqa: BLE001 — bookkeeping only
+                print(f"[reflection] could not record card format for #{rid}: {exc}",
+                      file=sys.stderr)
         if on_proposed is not None:
             on_proposed(int(rid))
         return (f"Revision queued for user approval (#{rid}). It will not "
@@ -219,9 +241,10 @@ def register_reflection_tools(registry: ToolRegistry, *, strategies: StrategySto
                            "ticker or on MARKET: 'agree: ...', 'extend: ...' or "
                            "'contradict: ...' with one line of why."}
     if card_brief:
-        from allpath_trade.card_brief import TOOL_PROPERTIES
+        from allpath_trade.card_brief import COMPACT_REVISION_TOOL_PROPERTIES, TOOL_PROPERTIES
 
-        properties.update(TOOL_PROPERTIES)
+        properties.update(COMPACT_REVISION_TOOL_PROPERTIES if compact_brief
+                          else TOOL_PROPERTIES)
     registry.register(
         "propose_strategy_revision",
         "Propose a revision to an existing strategy's YAML, based on "
