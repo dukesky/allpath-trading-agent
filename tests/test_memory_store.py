@@ -121,18 +121,54 @@ def test_memory_store_error_is_raised_for_an_unknown_layer(store):
 
 # --- shadow-dual-active T2: per-account layers, shared profile -----------
 
-def test_profile_is_shared_across_accounts(tmp_path):
+def test_shadow_reads_the_shared_profile_but_writes_its_own(tmp_path):
+    """TDSC F5/M6: nothing shadow writes to the profile may reach paper."""
     conn = connect(tmp_path / "db.sqlite")
     paper = MemoryStore(tmp_path / "memory", conn)
     shadow = MemoryStore(tmp_path / "memory", conn, account="shadow")
 
     paper.apply("profile", None, "add", text="Risk tolerance: moderate")
+    shared_before = paper.read("profile")
+    # Shadow still sees what paper (or the owner) put in the shared profile.
+    assert shadow.read("profile") == shared_before
+    assert shadow.render_for_context("profile") == paper.render_for_context("profile")
 
-    # Written via the paper instance, visible via the shadow instance --
-    # both resolve to the exact same file (memory/user_profile.md).
-    assert shadow.read("profile") == paper.read("profile")
-    assert "moderate" in shadow.read("profile")
-    assert paper.path_for("profile", None) == shadow.path_for("profile", None)
+    shadow.apply("profile", None, "add", text="Holds 40 ZZZ at the real broker")
+    assert paper.read("profile") == shared_before
+    assert paper.render_for_context("profile") == shared_before
+    assert (tmp_path / "memory" / "user_profile.md").read_text() == shared_before
+    assert (tmp_path / "memory" / "shadow" / "user_profile.md").read_text() == (
+        "- Holds 40 ZZZ at the real broker\n")
+    assert shadow.read("profile") == shared_before.rstrip() + (
+        "\n\n- Holds 40 ZZZ at the real broker\n")
+    assert "moderate" in shadow.render_for_context("profile")
+    assert "40 ZZZ" in shadow.render_for_context("profile")
+    assert shadow.entries("profile") == ["- Risk tolerance: moderate",
+                                         "- Holds 40 ZZZ at the real broker"]
+
+    # Shadow can change its own entries, never a shared one.
+    with pytest.raises(MemoryStoreError, match="shared profile"):
+        shadow.apply("profile", None, "replace", text="Risk: high", match="moderate")
+    with pytest.raises(MemoryStoreError, match="shared profile"):
+        shadow.apply("profile", None, "remove", match="moderate")
+    shadow.apply("profile", None, "replace", text="Holds 50 ZZZ", match="40 ZZZ")
+    shadow.apply("profile", None, "remove", match="50 ZZZ")
+    assert paper.read("profile") == shared_before
+    # Each account's change log has only its own writes.
+    assert all("ZZZ" not in (r["after"] or "") for r in paper.recent_log())
+    assert len(shadow.recent_log()) == 3 and len(paper.recent_log()) == 1
+
+
+def test_shadow_own_profile_is_not_crowded_out_by_a_full_shared_one(tmp_path):
+    conn = connect(tmp_path / "db.sqlite")
+    paper = MemoryStore(tmp_path / "memory", conn)
+    shadow = MemoryStore(tmp_path / "memory", conn, account="shadow")
+    (tmp_path / "memory").mkdir(exist_ok=True)
+    (tmp_path / "memory" / "user_profile.md").write_text("- " + "x" * 3000 + "\n")
+    shadow.apply("profile", None, "add", text="own entry")      # own file is under budget
+    rendered = shadow.render_for_context("profile")
+    assert rendered.endswith("- own entry\n") and "truncated" in rendered
+    assert "own entry" not in paper.render_for_context("profile")
 
 
 def test_stock_and_lesson_layers_are_isolated_per_account(tmp_path):

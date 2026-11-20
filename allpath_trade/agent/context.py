@@ -246,7 +246,7 @@ def read_live_positions(broker: Broker) -> tuple[dict[str, Position] | None,
 def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
                         strategies: StrategyStore, queue: ReviewQueue,
                         memory: MemoryStore | None = None,
-                        account: str | None = None) -> str:
+                        account: str | None = None, lang: str = "en") -> str:
     """Frozen snapshot, assembled once per session (stable prompt prefix).
 
     `account` is optional (None omits the section entirely) so every
@@ -255,8 +255,12 @@ def build_system_prompt(*, identity: str, broker: Broker, journal: TradeJournal,
     before; only callers that already know which account they're running
     against (the Reflector, per shadow-dual-active T4) pass it.
     """
-    parts = [identity, OUTPUT_LANGUAGE_NOTE, MARKET_MECHANICS_NOTE, SCREENSHOT_NOTE,
-             OPTIONS_ACTIONS_NOTE, REARM_NOTE]
+    # AGENT_LANGUAGE (allpath_trade/i18n.py): a non-English account gets its
+    # own language note in place of the English-only one.
+    from allpath_trade.i18n import language_note
+
+    parts = [identity, language_note(lang) or OUTPUT_LANGUAGE_NOTE, MARKET_MECHANICS_NOTE,
+             SCREENSHOT_NOTE, OPTIONS_ACTIONS_NOTE, REARM_NOTE]
     if account is not None:
         parts.append(_account_section(account))
     parts.append("\n## Current snapshot (as of session start)\n")

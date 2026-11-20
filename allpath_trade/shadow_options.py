@@ -11,14 +11,14 @@ long option positions and mark them. It never trades them:
   their value.
 - Marking: the app has no option quotes. A position is valued at the last
   price the owner supplied (with its date, shown as stale when old), or at
-  cost until he gives one. A price is never invented. An expired contract
-  is flagged for him to close out, never dropped.
+  cost until they give one. A price is never invented. An expired contract
+  is flagged for them to close out, never dropped.
 - Never proposed: option positions are NOT part of `Broker.get_positions()`
   (they are read with `ShadowLedger.get_option_positions()`), so no rule,
   expiry sweep, risk check or order path ever sees them, and no tool here
   can queue an order. The agent is told not to propose option trades.
-- Owner-reported trades: `shadow_record_option_trade` books the fill he
-  reports (after his confirmation) and returns the facts for an evaluation:
+- Owner-reported trades: `shadow_record_option_trade` books the fill they
+  report (after their confirmation) and returns the facts for an evaluation:
   plan for the underlying, exposure including shares (contracts x 100, not
   delta-adjusted), premium at risk as a share of equity, days to expiry,
   distance from strike.
@@ -47,11 +47,11 @@ ledger tracks them as holdings (shown as "option:" lines; one contract = 100
 shares). Rules for you:
 - Never propose, suggest queuing, or draft a rule for buying or selling an
   option. There is no tool that trades options here, and you must not ask
-  for one. Options come up only when HE brings them up.
-- When he tells you he bought or sold an option, record it with
-  shadow_record_option_trade (his contracts and his fill price per share),
-  then give him an honest evaluation from the facts the tool returns: does
-  it fit his plan for the underlying, total exposure to that name including
+  for one. Options come up only when THEY bring them up.
+- When they tell you they bought or sold an option, record it with
+  shadow_record_option_trade (their contracts and their fill price per share),
+  then give them an honest evaluation from the facts the tool returns: does
+  it fit their plan for the underlying, total exposure to that name including
   shares (say "N contracts control N x 100 shares, not delta-adjusted"),
   premium at risk as a share of equity, days to expiry, how far the stock is
   from the strike, and whether it looks like an impulse or a gamble. Say it
@@ -59,10 +59,10 @@ shares). Rules for you:
 - To enter or correct a holding without a trade (first import, a transfer),
   use shadow_set_option_position; to remove one that expired or was closed
   earlier, shadow_remove_option_position.
-- The ledger has no option quotes. A position is valued at the last price he
+- The ledger has no option quotes. A position is valued at the last price they
   gave (shadow_mark_option) or at cost. Never make up an option price; when
-  a mark is marked STALE, ask him for the current price instead of guessing.
-- An option marked EXPIRED is still in the ledger on purpose: ask him what
+  a mark is marked STALE, ask them for the current price instead of guessing.
+- An option marked EXPIRED is still in the ledger on purpose: ask them what
   happened (expired worthless, exercised, sold) and record that; do not
   remove it on your own.
 """
@@ -275,6 +275,6 @@ def evaluation_facts(ledger: Any, data: Any, strategies: Any, symbol: str, *,
     out.append("PLAN FOR THE UNDERLYING: " + (" | ".join(plans) if plans else
                "no strategy on file for this name (no written plan)"))
     out.append("IMPULSE CHECK (yours to make): is there a written plan this fits; is the "
-               "size one he can lose entirely; is this chasing a move or making back a "
+               "size one they can lose entirely; is this chasing a move or making back a "
                "loss. Say what you see.")
     return "\n".join(out)

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from typing import Any
 
-from allpath_trade import card_brief, compact_cards
+from allpath_trade import card_brief, compact_cards, i18n
 from allpath_trade.agent.compact import Compactor
 from allpath_trade.agent.context import build_system_prompt, load_identity
 from allpath_trade.agent.loop import AgentSession
@@ -549,8 +549,12 @@ class Reflector:
             # paper/shadow section (agent/context.py's ACCOUNT_NOTES),
             # never omitted here the way an as-yet-unwired chat caller
             # might leave it.
-            account=c.account)
+            account=c.account, **i18n.lang_kw(c.queue))
         system_prompt = f"{base_prompt}\n{REFLECTION_INSTRUCTIONS}"
+        # AGENT_LANGUAGE: the report and SUMMARY of a non-English account are
+        # written in its language (it overrides the English line above; the
+        # public journal only ever publishes the paper account).
+        system_prompt += i18n.language_note(i18n.of(c.queue))
         if views is not None:
             from allpath_trade.checkin import VIEWS_REFLECTION_NOTE
 
@@ -656,7 +660,8 @@ class Reflector:
             # actionable for the user to act on at 4am, and paging them for
             # a broken-LLM night would just be noise they'd learn to ignore.
             subject, full_body = events.daily_report(
-                account=c.account, date=et_date, summary=summary, body=body)
+                account=c.account, date=et_date, summary=summary, body=body,
+                **i18n.lang_kw(c.queue))
             # Push failure must never fail the *run* -- the report is
             # already durably stored above; a dead notification channel is
             # a notify-layer problem, not a reflection-layer one. The bool
@@ -734,7 +739,7 @@ class Reflector:
         return events.review_queued(
             account=c.account, review_id=int(row["id"]), ticker=row["ticker"],
             action=action, strategy_id=strategy_id, kind="strategy_revision",
-            brief=brief, **compact_kwargs)
+            brief=brief, **compact_kwargs, **i18n.lang_kw(c.queue))
 
     def _fail(self, et_date: str, conversation_id: int, reason: str,
               tokens_used: int = 0) -> str:

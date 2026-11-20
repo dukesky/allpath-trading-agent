@@ -11,6 +11,9 @@ from allpath_trade.store.accounts import DEFAULT_ACCOUNT, is_valid_account
 LAYER_BUDGETS: dict[str, int] = {
     "profile": 2000, "strategy": 2000, "stock": 3000, "lesson": 2000,
 }
+# Accounts whose profile WRITES go to their own file (`<root>/<account>/
+# user_profile.md`) instead of the shared one at the root. See `path_for`.
+PRIVATE_PROFILE_ACCOUNTS = ("shadow",)
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 TRUNCATION_MARKER = "\n…(truncated — use session_search)"
 
@@ -34,11 +37,16 @@ class MemoryStore:
 
     def path_for(self, layer: str, key: str | None) -> Path:
         if layer == "profile":
-            # Shared across every account by design (shadow-dual-active
-            # spec §②) -- profile.md/user_profile.md lives at the memory
-            # root, never under an account subdirectory. A MemoryStore
-            # built for "shadow" reads/writes the exact same file as one
-            # built for "paper".
+            # The profile at the memory root is the SHARED one: paper reads
+            # and writes it, and it is the only profile paper ever sees.
+            # An account in PRIVATE_PROFILE_ACCOUNTS (shadow) reads it too
+            # but never writes it: its own profile entries go to a file
+            # under its account directory, which no other account reads
+            # (TDSC red-team F5/M6: what the shadow account learns about the
+            # owner's real holdings and trades must not reach paper's
+            # prompts through shared memory).
+            if self.account in PRIVATE_PROFILE_ACCOUNTS:
+                return self.root / self.account / "user_profile.md"
             return self.root / "user_profile.md"
         subdir = {"strategy": "strategies", "stock": "stocks",
                   "lesson": "lessons"}.get(layer)
@@ -50,9 +58,29 @@ class MemoryStore:
             key = key.upper()
         return self.root / self.account / subdir / f"{key}.md"
 
-    def read(self, layer: str, key: str | None = None) -> str:
+    def _own(self, layer: str, key: str | None = None) -> str:
+        """The text of the one file this store WRITES for `layer`/`key`."""
         path = self.path_for(layer, key)
         return path.read_text() if path.exists() else ""
+
+    def shared_profile(self) -> str:
+        """The shared profile at the memory root; "" for an account whose
+        own profile IS that file (it is then just `read("profile")`)."""
+        if self.account not in PRIVATE_PROFILE_ACCOUNTS:
+            return ""
+        path = self.root / "user_profile.md"
+        return path.read_text() if path.exists() else ""
+
+    def read(self, layer: str, key: str | None = None) -> str:
+        own = self._own(layer, key)
+        if layer != "profile":
+            return own
+        shared = self.shared_profile()
+        if not shared.strip():
+            return own
+        if not own.strip():
+            return shared
+        return shared.rstrip() + "\n\n" + own
 
     def entries(self, layer: str, key: str | None = None) -> list[str]:
         blocks = [b.strip() for b in self.read(layer, key).split("\n\n")]
@@ -63,7 +91,7 @@ class MemoryStore:
         if action in ("add", "replace") and text is not None:
             scan_entry(text)
         path = self.path_for(layer, key)
-        before = self.read(layer, key)
+        before = self._own(layer, key)
         budget = LAYER_BUDGETS[layer]
 
         if action == "add":
@@ -83,6 +111,11 @@ class MemoryStore:
             hits = [i for i, b in enumerate(blocks)
                     if b.strip().startswith("- ") and match in b]
             if not hits:
+                if layer == "profile" and match in self.shared_profile():
+                    raise MemoryStoreError(
+                        f"the entry matching {match!r} is in the shared profile, which "
+                        f"the {self.account} account can read but not change; add this "
+                        "account's own entry instead")
                 raise MemoryStoreError(f"no entry matches {match!r}")
             if len(hits) > 1:
                 raise MemoryStoreError(
@@ -128,8 +161,18 @@ class MemoryStore:
 
     def render_for_context(self, layer: str, key: str | None = None,
                            budget: int | None = None) -> str:
-        text = self.read(layer, key)
         budget = budget or LAYER_BUDGETS[layer]
-        if len(text) <= budget:
-            return text
-        return text[:budget] + TRUNCATION_MARKER
+
+        def cut(text: str) -> str:
+            return text if len(text) <= budget else text[:budget] + TRUNCATION_MARKER
+
+        if layer == "profile" and self.account in PRIVATE_PROFILE_ACCOUNTS:
+            # Each part gets the layer budget: this account's own entries
+            # must not be crowded out by a full shared profile.
+            shared, own = self.shared_profile(), self._own(layer, key)
+            if not own.strip():
+                return cut(shared)
+            if not shared.strip():
+                return cut(own)
+            return cut(shared).rstrip() + "\n\n" + cut(own)
+        return cut(self.read(layer, key))

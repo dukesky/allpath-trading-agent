@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS shadow_orders (
 
 -- Option holdings of the shadow ledger (OPTION_HOLDINGS / SHADOW_OPTION_
 -- HOLDINGS, allpath_trade/shadow_options.py): long option lines the owner
--- holds at his real broker. Holdings and marks only -- nothing here is ever
+-- holds at their real broker. Holdings and marks only -- nothing here is ever
 -- traded by the app. `symbol` is the OCC symbol; `avg_cost` and `last_price`
 -- are per share (x100 per contract); `last_price` is the last price the
 -- owner supplied (NULL = none yet: valued at cost), never a quote.
@@ -408,6 +408,9 @@ _MIGRATIONS = [
     # (allpath_trade/compact_cards.py, COMPACT_CARDS on for the account) or
     # NULL for the classic card. For the research exports.
     "ALTER TABLE pending_reviews ADD COLUMN card_format TEXT",
+    # AGENT_LANGUAGE (allpath_trade/i18n.py): the language of the card that
+    # was sent for this review, recorded like card_format. NULL = English.
+    "ALTER TABLE pending_reviews ADD COLUMN card_lang TEXT",
 ]
 
 # LOUD REMINDER for whoever adds the next account-scoped (or any other)

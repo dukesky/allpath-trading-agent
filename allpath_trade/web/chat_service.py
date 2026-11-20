@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
 
+from allpath_trade import i18n
 from allpath_trade.agent.action_tools import register_action_tools
 from allpath_trade.agent.attachments import (
     IMAGE_UNSUPPORTED_REPLY,
@@ -75,6 +76,7 @@ class ChatService:
         self._built_at = 0.0
         self.activity: list[str] = []
         self._mirror: Callable[[str, str, str], None] | None = None
+        self._lang = "en"
 
     def _stale(self) -> bool:
         age = datetime.now(UTC).timestamp() - self._built_at
@@ -200,7 +202,10 @@ class ChatService:
         prompt = build_system_prompt(
             identity=load_identity(), broker=b.broker, journal=b.journal,
             strategies=b.strategies, queue=b.queue, memory=b.memory,
-            account=self.account)
+            account=self.account, **i18n.lang_kw(b.queue))
+        # AGENT_LANGUAGE: recorded on each stored turn (like card_format on a
+        # review), so the research exports can separate the conditions.
+        self._lang = i18n.of(b.queue)
         if checkin:
             from allpath_trade.checkin import CHECKIN_CHAT_NOTE
 
@@ -266,8 +271,10 @@ class ChatService:
             self.activity = []
             session = self.session()
             try:
-                reply = session.run_turn(text, extra={"source": source},
-                                         images=images)
+                extra = {"source": source}
+                if self._lang != "en":
+                    extra["lang"] = self._lang
+                reply = session.run_turn(text, extra=extra, images=images)
             except LLMImageUnsupported:
                 reply = IMAGE_UNSUPPORTED_REPLY
                 session._append({"role": "assistant", "content": reply})

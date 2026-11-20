@@ -33,6 +33,8 @@ from typing import Any, Self
 
 import yaml
 
+from allpath_trade.i18n import first_sentence, has_cjk, tr, word
+
 FLAG = "compact_cards"
 
 # What `pending_reviews.card_format` holds for a card built here. NULL means
@@ -60,11 +62,13 @@ class CardBody(str):
 
     email: str
     card_format: str
+    lang: str
 
-    def __new__(cls, text: str, *, footer: str = "") -> Self:
+    def __new__(cls, text: str, *, footer: str = "", lang: str = "en") -> Self:
         obj = super().__new__(cls, text)
         obj.email = f"{text}\n\n{footer}" if footer else text
         obj.card_format = FORMAT
+        obj.lang = lang
         return obj
 
 
@@ -94,6 +98,8 @@ def one_sentence(text: Any, max_words: int = MAX_WORDS) -> str:
     flat = " ".join(_MARKDOWN.sub("", str(text or "")).split())
     if not flat:
         return ""
+    if has_cjk(flat):
+        return first_sentence(flat, max_words)
     end = len(flat)
     for match in _SENTENCE_END.finditer(flat):
         head = flat[:match.start() + 1]
@@ -218,25 +224,25 @@ def _comparisons(text: str) -> list[tuple[str, str, Decimal]] | None:
     return out
 
 
-def _operand_text(node: ast.AST, var: str) -> str | None:
+def _operand_text(node: ast.AST, var: str, lang: str = "en") -> str | None:
     if isinstance(node, ast.Name):
-        return _VAR_LABEL.get(node.id, node.id)
+        return word(lang, _VAR_LABEL.get(node.id, node.id))
     number = _constant(node)
     return None if number is None else _number_for(var, number)
 
 
-def _plain_node(node: ast.AST) -> str | None:
+def _plain_node(node: ast.AST, lang: str = "en") -> str | None:
     if isinstance(node, ast.BoolOp):
-        parts = [_plain_node(v) for v in node.values]
+        parts = [_plain_node(v, lang) for v in node.values]
         if any(p is None for p in parts):
             return None
-        joiner = " and " if isinstance(node.op, ast.And) else " or "
+        joiner = tr(lang, " and " if isinstance(node.op, ast.And) else " or ")
         # A nested and/or group keeps its brackets, whichever way round.
         return joiner.join(f"({p})" if isinstance(v, ast.BoolOp) else p
                            for p, v in zip(parts, node.values, strict=True))
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        inner = _plain_node(node.operand)
-        return None if inner is None else f"not ({inner})"
+        inner = _plain_node(node.operand, lang)
+        return None if inner is None else tr(lang, "not ({inner})", inner=inner)
     if isinstance(node, ast.Compare):
         names = [n.id for n in [node.left, *node.comparators] if isinstance(n, ast.Name)]
         var = names[0] if names else ""
@@ -245,23 +251,23 @@ def _plain_node(node: ast.AST) -> str | None:
                 and _constant(node.comparators[0]) == 0):
             # `position_weight > 0` is how a rule says "only while held".
             if isinstance(node.ops[0], ast.Gt):
-                return "you hold shares"
+                return tr(lang, "you hold shares")
             if isinstance(node.ops[0], (ast.Eq, ast.LtE)):
-                return "you hold none"
-        parts = [_operand_text(node.left, var)]
+                return tr(lang, "you hold none")
+        parts = [_operand_text(node.left, var, lang)]
         for op, comparator in zip(node.ops, node.comparators, strict=True):
             if type(op) not in _OPS:
                 return None
-            parts += [_OPS[type(op)], _operand_text(comparator, var)]
+            parts += [_OPS[type(op)], _operand_text(comparator, var, lang)]
         return None if any(p is None for p in parts) else " ".join(parts)
     return None
 
 
-def plain_condition(text: str) -> str:
+def plain_condition(text: str, lang: str = "en") -> str:
     """`price <= 20 and position_weight < 0.12` -> `price ≤ $20 and weight
     < 12%`. Anything this cannot read comes back unchanged."""
     try:
-        plain = _plain_node(ast.parse(str(text), mode="eval").body)
+        plain = _plain_node(ast.parse(str(text), mode="eval").body, lang)
     except (SyntaxError, ValueError, RecursionError):
         return str(text)
     return plain or str(text)
@@ -281,10 +287,10 @@ def _price_direction(condition: str) -> str:
 # ---------------------------------------------------------------------------
 
 def order_headline(*, ticker: str, side: str = "", notional: Any = None, qty: Any = None,
-                   price: Any = None, action: str = "") -> str:
+                   price: Any = None, action: str = "", lang: str = "en") -> str:
     """`CRDO · Buy $1,500 (~11 sh @ $135.35)`. Falls back to the stored
     action text when the order's side and size are not known."""
-    side_word = str(side or "").capitalize()
+    side_word = word(lang, str(side or "").capitalize())
     amount, count, at = _decimal(notional), _decimal(qty), _decimal(price)
     if not side_word or (amount is None and count is None):
         what = " ".join(str(action or "").split()) or "order"
@@ -292,13 +298,14 @@ def order_headline(*, ticker: str, side: str = "", notional: Any = None, qty: An
         if at is not None and at > 0:
             what += f" (@ {money(at)})"
     elif count is not None:
-        what = f"{side_word} {shares(count)} sh"
+        what = tr(lang, "{side} {count} sh", side=side_word, count=shares(count))
         if at is not None and at > 0:
             what += f" @ {money(at)} (~{money((count * at).quantize(Decimal(1)))})"
     else:
         what = f"{side_word} {money(amount)}"
         if at is not None and at > 0:
-            what += f" ({_approx(shares(amount / at))} sh @ {money(at)})"
+            what += tr(lang, " ({count} sh @ {price})",
+                       count=_approx(shares(amount / at)), price=money(at))
     return f"{ticker} · {what}" if ticker else what
 
 
@@ -306,12 +313,14 @@ def _approx(text: str) -> str:
     return text if text.startswith("~") else f"~{text}"
 
 
-def _order_subject_what(ticker: str, side: str, notional: Any, qty: Any, action: str) -> str:
+def _order_subject_what(ticker: str, side: str, notional: Any, qty: Any, action: str,
+                        lang: str = "en") -> str:
     amount, count = _decimal(notional), _decimal(qty)
     if side and amount is not None:
-        what = f"{side.lower()} {money(amount)}"
+        what = f"{word(lang, side.lower())} {money(amount)}"
     elif side and count is not None:
-        what = f"{side.lower()} {shares(count)} sh"
+        what = tr(lang, "{side} {count} sh", side=word(lang, side.lower()),
+                  count=shares(count))
     else:
         what = one_sentence(action, 8) or "order"
     return f"{ticker} {what}".strip()
@@ -338,7 +347,7 @@ def order_card(*, account: str, review_id: int, ticker: str, action: str,
                kind: str = "order", source: str = "", option_preview: str = "",
                no_analysis_reason: str = "", stop_warning: str = "",
                approve_url: str = "", event: dict | None = None,
-               prefix: str = "") -> tuple[str, CardBody]:
+               prefix: str = "", lang: str = "en") -> tuple[str, CardBody]:
     """Subject text and body of a compact order card. `source` is "chat"
     for an order proposed in conversation: it has no agent verdict, and its
     `action` is the proposal's free-text reason (used as the Why fallback,
@@ -349,42 +358,46 @@ def order_card(*, account: str, review_id: int, ticker: str, action: str,
     verdict = verdict_word(recommendation)
     excerpt = recommendation.split(" — ", 1)[1] if " — " in recommendation else ""
     headline = order_headline(ticker=ticker, side=side, notional=notional, qty=qty,
-                              price=price, action="" if chat else action)
+                              price=price, action="" if chat else action, lang=lang)
     lines = []
     if no_analysis_reason:
-        lines.append(f"⚠ No agent analysis: {no_analysis_reason}. Check this order yourself.")
+        lines.append(tr(lang, "⚠ No agent analysis: {reason}. Check this order yourself.",
+                        reason=tr(lang, no_analysis_reason)))
     if stop_warning:
         lines.append(f"⚠ {stop_warning}")
     lines.append(headline)
     if verdict and not no_analysis_reason:
-        lines.append(f"Agent: {verdict.upper()}")
+        lines.append(tr(lang, "Agent: {verdict}",
+                        verdict=verdict.upper() if lang == "en" else word(lang, verdict)))
     elif chat:
-        lines.append("Proposed in chat")
+        lines.append(tr(lang, "Proposed in chat"))
     if option_preview:
-        lines.append(f"Option at trigger: {option_preview} (re-priced when you approve)")
+        lines.append(tr(lang, "Option at trigger: {preview} (re-priced when you approve)",
+                        preview=option_preview))
     why, risk = why_risk(brief, action if chat else excerpt)
     if why or risk:
         lines.append("")
         if why:
-            lines.append(f"Why: {why}")
+            lines.append(tr(lang, "Why: {text}", text=why))
         if risk:
-            lines.append(f"Risk: {risk}")
+            lines.append(tr(lang, "Risk: {text}", text=risk))
     tail = []
     if account == "shadow" and kind == "order":
-        tail.append(SHADOW_ORDER_LINE)
+        tail.append(tr(lang, SHADOW_ORDER_LINE))
     if approve_url:
-        tail.append(f"Review & approve: {approve_url}")
+        tail.append(tr(lang, "Review & approve: {url}", url=approve_url))
     if tail:
         lines += ["", *tail]
 
-    what = _order_subject_what(ticker, side, notional, qty, "" if chat else action)
+    what = _order_subject_what(ticker, side, notional, qty, "" if chat else action, lang)
     if no_analysis_reason:
-        outcome = "no agent analysis"
+        outcome = tr(lang, "no agent analysis")
     elif verdict:
-        outcome = f"agent says {verdict.lower()}"
+        outcome = tr(lang, "agent says {verdict}", verdict=word(lang, verdict.lower()))
     else:
-        outcome = "waiting for your approval"
-    return f"{prefix}{what} — {outcome}", CardBody("\n".join(lines), footer=EMAIL_FOOTER)
+        outcome = tr(lang, "waiting for your approval")
+    return f"{prefix}{what} — {outcome}", CardBody(
+        "\n".join(lines), footer=tr(lang, EMAIL_FOOTER), lang=lang)
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +405,8 @@ def order_card(*, account: str, review_id: int, ticker: str, action: str,
 # ---------------------------------------------------------------------------
 
 def rule_message(*, ticker: str, rule_id: str, condition: str, disposition: str,
-                 price: Any = None, reason: str = "", prefix: str = "") -> tuple[str, str]:
+                 price: Any = None, reason: str = "", prefix: str = "",
+                 lang: str = "en") -> tuple[str, str]:
     """Subject text and body for a rule that fired without leaving anything
     to approve. `disposition` is the sentinel's own word ("notified" for an
     alert-only strategy, "skipped" when nothing was proposed). `reason` is a
@@ -400,22 +414,31 @@ def rule_message(*, ticker: str, rule_id: str, condition: str, disposition: str,
     "the agent decided not to trade: ..."); empty means the code does not
     know why, and the message then gives no reason."""
     at = _decimal(price)
-    rule = plain_condition(condition)
+    rule = plain_condition(condition, lang)
     if disposition == "notified":
-        where = (f"{ticker} {_price_direction(condition)} {money(at)}"
-                 if at is not None else f"{ticker}: your alert {rule_id} triggered")
-        body = f"{where} (your alert: {rule}). Nothing to approve."
-        subject = (f"{prefix}{ticker} alert: {money(at)} ({rule})" if at is not None
-                   else f"{prefix}{ticker} alert: {rule}")
+        where = (tr(lang, "{ticker} {direction} {price}", ticker=ticker,
+                    direction=word(lang, _price_direction(condition)), price=money(at))
+                 if at is not None else
+                 tr(lang, "{ticker}: your alert {rule_id} triggered", ticker=ticker,
+                    rule_id=rule_id))
+        body = tr(lang, "{where} (your alert: {rule}). Nothing to approve.",
+                  where=where, rule=rule)
+        subject = (tr(lang, "{prefix}{ticker} alert: {price} ({rule})", prefix=prefix,
+                      ticker=ticker, price=money(at), rule=rule) if at is not None
+                   else tr(lang, "{prefix}{ticker} alert: {rule}", prefix=prefix,
+                           ticker=ticker, rule=rule))
         return subject, body
-    at_text = f" at {money(at)}" if at is not None else ""
-    fired = f"{ticker}: rule {rule_id} triggered{at_text} ({rule})"
-    clause = " ".join(str(reason or "").split()).rstrip(".")
+    at_text = tr(lang, " at {price}", price=money(at)) if at is not None else ""
+    fired = tr(lang, "{ticker}: rule {rule_id} triggered{at} ({rule})", ticker=ticker,
+               rule_id=rule_id, at=at_text, rule=rule)
+    clause = " ".join(str(reason or "").split()).rstrip(".。")
     if clause:
-        body = f"{fired}, but no order was made: {clause}. Nothing to approve."
+        body = tr(lang, "{fired}, but no order was made: {clause}. Nothing to approve.",
+                  fired=fired, clause=clause)
     else:
-        body = f"{fired}. No order was made. Nothing to approve."
-    return f"{prefix}{ticker}: rule {rule_id} triggered, no order", body
+        body = tr(lang, "{fired}. No order was made. Nothing to approve.", fired=fired)
+    return tr(lang, "{prefix}{ticker}: rule {rule_id} triggered, no order", prefix=prefix,
+              ticker=ticker, rule_id=rule_id), body
 
 
 # ---------------------------------------------------------------------------
@@ -467,16 +490,16 @@ def _fraction(value: Any) -> Decimal | None:
     return _decimal(value)
 
 
-def _show(value: Any, *, kind: str = "") -> str:
+def _show(value: Any, *, kind: str = "", lang: str = "en") -> str:
     if value is None or value == "":
-        return "none"
+        return word(lang, "none")
     if kind == "weight":
         number = _fraction(value)
         return str(value) if number is None else percent(number)
     if kind == "value":
         return money(value) if _decimal(value) is not None else str(value)
     if isinstance(value, bool):
-        return "on" if value else "off"
+        return word(lang, "on" if value else "off")
     return " ".join(str(value).split())
 
 
@@ -489,24 +512,25 @@ def _rules_by_id(doc: dict) -> dict[str, dict]:
     return out
 
 
-def _rule_brief(rule: dict) -> str:
-    action = _show(rule.get("action"))
-    condition = plain_condition(str(rule.get("condition", "")))
-    return f"{action} when {condition}"
+def _rule_brief(rule: dict, lang: str = "en") -> str:
+    action = _show(rule.get("action"), lang=lang)
+    condition = plain_condition(str(rule.get("condition", "")), lang)
+    return tr(lang, "{action} when {condition}", action=action, condition=condition)
 
 
-def _condition_change(old: str, new: str) -> str:
+def _condition_change(old: str, new: str, lang: str = "en") -> str:
     """A threshold move as `trigger weight > 14% → 12%`; anything else as
     the two conditions in plain form."""
     before, after = _comparisons(old), _comparisons(new)
     if (before and after and len(before) == len(after)
             and all(b[:2] == a[:2] for b, a in zip(before, after, strict=True))):
-        moved = [f"{_VAR_LABEL.get(b[0], b[0])} {b[1]} {_number_for(b[0], b[2])} → "
+        moved = [f"{word(lang, _VAR_LABEL.get(b[0], b[0]))} {b[1]} {_number_for(b[0], b[2])} → "
                  f"{_number_for(a[0], a[2])}"
                  for b, a in zip(before, after, strict=True) if b[2] != a[2]]
         if moved:
-            return "trigger " + ", ".join(moved)
-    return f"trigger {plain_condition(old)} → {plain_condition(new)}"
+            return tr(lang, "trigger {moved}", moved=", ".join(moved))
+    return tr(lang, "trigger {old} → {new}", old=plain_condition(old, lang),
+              new=plain_condition(new, lang))
 
 
 class Change(str):
@@ -538,10 +562,10 @@ def _minutes(value: Any) -> Any:
         return value
 
 
-def _duration(value: Any) -> str:
+def _duration(value: Any, lang: str = "en") -> str:
     minutes = _minutes(value)
     if not isinstance(minutes, int) or isinstance(minutes, bool):
-        return _show(value)
+        return _show(value, lang=lang)
     return f"{minutes // 60}h" if minutes % 60 == 0 else f"{minutes}m"
 
 
@@ -551,31 +575,44 @@ _STATE_CHANGE = {("armed", "disabled"): "turned off", ("triggered", "disabled"):
                  ("disabled", "triggered"): "marked as already triggered"}
 
 
-def _rule_changes(rule_id: str, old: dict, new: dict) -> list[str]:
-    parts = []
+def _rule_changes(rule_id: str, old: dict, new: dict, lang: str = "en") -> list[str]:
+    # (text, key). Turning a rule on or off, or changing what it does, is a
+    # key change.
+    parts: list[tuple[str, bool]] = []
+
+    def pair(template: str, before: Any, after: Any, *, key: bool = False) -> None:
+        parts.append((tr(lang, template, old=before, new=after), key))
+
     before, after = str(old.get("state", "armed")), str(new.get("state", "armed"))
     if before != after:
-        parts.append(_STATE_CHANGE.get((before, after), f"state {before} → {after}"))
+        named = _STATE_CHANGE.get((before, after))
+        if named:
+            parts.append((word(lang, named), True))
+        else:
+            pair("state {old} → {new}", before, after, key=True)
     if not _same_condition(old.get("condition"), new.get("condition")):
-        parts.append(_condition_change(str(old.get("condition", "")),
-                                       str(new.get("condition", ""))))
+        parts.append((_condition_change(str(old.get("condition", "")),
+                                        str(new.get("condition", "")), lang), False))
     if not _same(old.get("action"), new.get("action")):
-        parts.append(f"action {_show(old.get('action'))} → {_show(new.get('action'))}")
+        pair("action {old} → {new}", _show(old.get("action"), lang=lang),
+             _show(new.get("action"), lang=lang), key=True)
     if not _same(old.get("type"), new.get("type")):
-        parts.append(f"type {_show(old.get('type'))} → {_show(new.get('type'))}")
+        pair("type {old} → {new}", _show(old.get("type"), lang=lang),
+             _show(new.get("type"), lang=lang))
     if _minutes(old.get("rearm")) != _minutes(new.get("rearm")):
-        parts.append(f"re-arm {_duration(old.get('rearm'))} → {_duration(new.get('rearm'))}")
+        pair("re-arm {old} → {new}", _duration(old.get("rearm"), lang),
+             _duration(new.get("rearm"), lang))
     if not _same(old.get("max_fires_per_day"), new.get("max_fires_per_day")):
-        parts.append(f"max fires per day {_show(old.get('max_fires_per_day'))} → "
-                     f"{_show(new.get('max_fires_per_day'))}")
+        pair("max fires per day {old} → {new}", _show(old.get("max_fires_per_day"), lang=lang),
+             _show(new.get("max_fires_per_day"), lang=lang))
     known = {"id", "state", "condition", "action", "type", "rearm", "max_fires_per_day"}
     for key in sorted((set(old) | set(new)) - known, key=str):
         if not _same(old.get(key), new.get(key)):
-            parts.append(f"{key} {_show(old.get(key))} → {_show(new.get(key))}")
-    # Turning a rule on or off, or changing what it does, is a key change.
-    return [Change(f"{rule_id}: {part}",
-                   key=part in _STATE_CHANGE.values() or part.startswith(("state ", "action ")))
-            for part in parts]
+            parts.append((tr(lang, "{key} {old} → {new}", key=key,
+                             old=_show(old.get(key), lang=lang),
+                             new=_show(new.get(key), lang=lang)), False))
+    return [Change(tr(lang, "{rule_id}: {part}", rule_id=rule_id, part=part), key=key)
+            for part, key in parts]
 
 
 _AUTH_NOTE = {"auto": " (hard rules place orders without asking)",
@@ -588,7 +625,13 @@ _POSITION_FIELDS = (("target_weight", "target weight", "weight"),
 _PLAIN_FIELDS = (("name", "name"), ("horizon", "horizon"), ("bias", "bias"))
 
 
-def revision_changes(old_yaml: str, new_yaml: str, *, is_new: bool = False) -> list[str] | None:
+def _auth_note(auth: str, lang: str) -> str:
+    note = _AUTH_NOTE.get(auth, "")
+    return tr(lang, note) if note else ""
+
+
+def revision_changes(old_yaml: str, new_yaml: str, *, is_new: bool = False,
+                     lang: str = "en") -> list[str] | None:
     """Every change between two strategy YAML texts, one plain line each,
     most consequential first: authorization and status, then rules (added,
     removed, turned on/off, each changed field as old → new), position
@@ -601,68 +644,86 @@ def revision_changes(old_yaml: str, new_yaml: str, *, is_new: bool = False) -> l
     new = _mapping(new_yaml)
     if new is None:
         return None
+
+    def show(value: Any, *, kind: str = "") -> str:
+        return _show(value, kind=kind, lang=lang)
+
+    def arrow(template: str, before: Any, after: Any, **kw: Any) -> str:
+        return tr(lang, template, old=before, new=after, **kw)
+
     old = None if is_new else _mapping(old_yaml)
     if old is None:
         position = new.get("position") if isinstance(new.get("position"), dict) else {}
         auth = str(new.get("authorization", "confirm"))
-        lines = [f"authorization: {auth}{_AUTH_NOTE.get(auth, '')}",
-                 f"status after approval: {_show(new.get('status', 'draft'))}"]
+        lines = [tr(lang, "authorization: {auth}{note}", auth=auth,
+                    note=_auth_note(auth, lang)),
+                 tr(lang, "status after approval: {status}",
+                    status=show(new.get("status", "draft")))]
         for key, label, kind in _POSITION_FIELDS:
             if position.get(key) is not None:
-                lines.append(f"{label}: {_show(position[key], kind=kind)}")
-        lines += [f"rule {rule_id}: {_rule_brief(rule)}"
+                lines.append(tr(lang, "{label}: {value}", label=word(lang, label),
+                                value=show(position[key], kind=kind)))
+        lines += [tr(lang, "rule {rule_id}: {brief}", rule_id=rule_id,
+                     brief=_rule_brief(rule, lang))
                   for rule_id, rule in _rules_by_id(new).items()]
         return lines
 
     lines = []
     if not _same(old.get("authorization", "confirm"), new.get("authorization", "confirm")):
         after = str(new.get("authorization", "confirm"))
-        lines.append(Change(f"authorization: {_show(old.get('authorization', 'confirm'))} → "
-                            f"{after}{_AUTH_NOTE.get(after, '')}", key=True))
+        lines.append(Change(arrow("authorization: {old} → {new}{note}",
+                                  show(old.get("authorization", "confirm")), after,
+                                  note=_auth_note(after, lang)), key=True))
     if not _same(old.get("status", "draft"), new.get("status", "draft")):
-        lines.append(Change(f"status: {_show(old.get('status', 'draft'))} → "
-                            f"{_show(new.get('status', 'draft'))}", key=True))
+        lines.append(Change(arrow("status: {old} → {new}", show(old.get("status", "draft")),
+                                  show(new.get("status", "draft"))), key=True))
 
     old_rules, new_rules = _rules_by_id(old), _rules_by_id(new)
     for rule_id, rule in new_rules.items():
         if rule_id not in old_rules:
-            lines.append(Change(f"{rule_id}: new rule, {_rule_brief(rule)}", key=True))
+            lines.append(Change(tr(lang, "{rule_id}: new rule, {brief}", rule_id=rule_id,
+                                   brief=_rule_brief(rule, lang)), key=True))
         else:
-            lines += _rule_changes(rule_id, old_rules[rule_id], rule)
-    lines += [Change(f"{rule_id}: removed", key=True)
+            lines += _rule_changes(rule_id, old_rules[rule_id], rule, lang)
+    lines += [Change(tr(lang, "{rule_id}: removed", rule_id=rule_id), key=True)
               for rule_id in old_rules if rule_id not in new_rules]
 
     old_pos = old.get("position") if isinstance(old.get("position"), dict) else {}
     new_pos = new.get("position") if isinstance(new.get("position"), dict) else {}
     if not _same(old_pos.get("ticker"), new_pos.get("ticker")):
-        lines.append(Change(f"ticker: {_show(old_pos.get('ticker'))} → "
-                            f"{_show(new_pos.get('ticker'))}", key=True))
+        lines.append(Change(arrow("ticker: {old} → {new}", show(old_pos.get("ticker")),
+                                  show(new_pos.get("ticker"))), key=True))
     for key, label, kind in _POSITION_FIELDS:
         if not _same(old_pos.get(key), new_pos.get(key)):
-            lines.append(Change(f"{label}: {_show(old_pos.get(key), kind=kind)} → "
-                                f"{_show(new_pos.get(key), kind=kind)}", key=True))
+            lines.append(Change(arrow("{label}: {old} → {new}",
+                                      show(old_pos.get(key), kind=kind),
+                                      show(new_pos.get(key), kind=kind),
+                                      label=word(lang, label)), key=True))
     if " ".join(str(old.get("thesis", "")).split()) != " ".join(
             str(new.get("thesis", "")).split()):
-        lines.append("thesis rewritten")
+        lines.append(tr(lang, "thesis rewritten"))
     for key, label in _PLAIN_FIELDS:
         if not _same(old.get(key), new.get(key)):
-            lines.append(f"{label}: {_show(old.get(key))} → {_show(new.get(key))}")
+            lines.append(arrow("{label}: {old} → {new}", show(old.get(key)),
+                               show(new.get(key)), label=word(lang, label)))
     old_review = old.get("review") if isinstance(old.get("review"), dict) else {}
     new_review = new.get("review") if isinstance(new.get("review"), dict) else {}
     if not _same(old_review.get("cadence", "daily"), new_review.get("cadence", "daily")):
-        lines.append(f"review cadence: {_show(old_review.get('cadence', 'daily'))} → "
-                     f"{_show(new_review.get('cadence', 'daily'))}")
+        lines.append(arrow("review cadence: {old} → {new}",
+                           show(old_review.get("cadence", "daily")),
+                           show(new_review.get("cadence", "daily"))))
     if " ".join(str(old_review.get("invalidation", "")).split()) != " ".join(
             str(new_review.get("invalidation", "")).split()):
-        lines.append("invalidation text rewritten")
+        lines.append(tr(lang, "invalidation text rewritten"))
     if not _same(old.get("notify_email", True), new.get("notify_email", True)):
-        lines.append(f"email notifications: {_show(bool(old.get('notify_email', True)))} → "
-                     f"{_show(bool(new.get('notify_email', True)))}")
+        lines.append(arrow("email notifications: {old} → {new}",
+                           show(bool(old.get("notify_email", True))),
+                           show(bool(new.get("notify_email", True)))))
     handled = {"authorization", "status", "rules", "position", "thesis", "review",
                "notify_email", "version", "id", *(key for key, _label in _PLAIN_FIELDS)}
     for key in sorted((set(old) | set(new)) - handled, key=str):
         if not _same(old.get(key), new.get(key)):
-            lines.append(f"{key} changed")
+            lines.append(tr(lang, "{key} changed", key=key))
     # Key changes first (stable), so the cap can only cut the minor ones.
     return ([line for line in lines if getattr(line, "key", False)]
             + [line for line in lines if not getattr(line, "key", False)])
@@ -675,62 +736,67 @@ def capped(changes: list[str], limit: int = MAX_BULLETS) -> tuple[list[str], int
     return changes[:keep], max(0, len(changes) - keep)
 
 
-def revision_title(*, ticker: str, strategy_id: str, is_new: bool) -> str:
-    what = "new strategy" if is_new else "strategy change"
+def revision_title(*, ticker: str, strategy_id: str, is_new: bool, lang: str = "en") -> str:
+    what = word(lang, "new strategy" if is_new else "strategy change")
     return " · ".join(part for part in (ticker, strategy_id, what) if part)
 
 
-def changes_header(count: int, *, is_new: bool) -> str:
+def changes_header(count: int, *, is_new: bool, lang: str = "en") -> str:
     if is_new:
-        return "Agent proposes a new strategy:"
+        return tr(lang, "Agent proposes a new strategy:")
     if count == 0:
-        return "Agent proposes no change to the rules or settings."
-    return f"Agent proposes {count} change{'' if count == 1 else 's'}:"
+        return tr(lang, "Agent proposes no change to the rules or settings.")
+    return tr(lang, "Agent proposes {count} change:" if count == 1
+              else "Agent proposes {count} changes:", count=count)
 
 
 def revision_card(*, account: str, review_id: int, ticker: str, strategy_id: str,
                   old_yaml: str, new_yaml: str, is_new: bool = False,
                   rationale: str = "", brief: dict | None = None, effect: str = "",
                   approve_url: str = "", web_base_url: str = "",
-                  prefix: str = "", hold_reason: str = "") -> tuple[str, CardBody]:
+                  prefix: str = "", hold_reason: str = "",
+                  lang: str = "en") -> tuple[str, CardBody]:
     """Subject text and body of a compact strategy-revision card. `effect`
     is `revision_effect`'s sentence, or "" to leave the line out."""
     del account
-    changes = revision_changes(old_yaml, new_yaml, is_new=is_new)
-    lines = [revision_title(ticker=ticker, strategy_id=strategy_id, is_new=is_new)]
+    changes = revision_changes(old_yaml, new_yaml, is_new=is_new, lang=lang)
+    lines = [revision_title(ticker=ticker, strategy_id=strategy_id, is_new=is_new, lang=lang)]
     if hold_reason:
-        # The auto regime did not apply this one on its own (reflect.py).
-        lines.insert(0, f"⚠ Held for human: {' '.join(hold_reason.split())}")
+        lines.insert(0, tr(lang, "⚠ Held for human: {reason}",
+                           reason=" ".join(hold_reason.split())))
     if changes is None:
-        lines.append("Agent proposes a change (it could not be summarised; see the diff).")
+        lines.append(tr(lang, "Agent proposes a change (it could not be summarised; "
+                              "see the diff)."))
         count = 0
     else:
         count = len(changes)
         shown, more = capped(changes)
-        lines.append(changes_header(count, is_new=is_new))
+        lines.append(changes_header(count, is_new=is_new, lang=lang))
         lines += [f"• {change}" for change in shown]
         if more:
-            lines.append(f"+{more} smaller changes on the web")
+            lines.append(tr(lang, "+{more} smaller changes on the web", more=more))
     if effect:
-        lines.append(f"Effect now: {effect}")
+        lines.append(tr(lang, "Effect now: {effect}", effect=effect))
     why, risk = why_risk(brief, rationale)
     if why:
-        lines.append(f"Why: {why}")
+        lines.append(tr(lang, "Why: {text}", text=why))
     if risk:
-        lines.append(f"Risk: {risk}")
+        lines.append(tr(lang, "Risk: {text}", text=risk))
     lines.append("")
     if approve_url:
-        lines.append(f"Full diff & approve: {approve_url}")
+        lines.append(tr(lang, "Full diff & approve: {url}", url=approve_url))
     elif web_base_url:
-        lines.append(f"Full diff: {web_base_url}/reviews#review-{int(review_id)}")
+        lines.append(tr(lang, "Full diff: {url}",
+                        url=f"{web_base_url}/reviews#review-{int(review_id)}"))
     else:
-        lines.append("Full diff: Pending page in the dashboard.")
+        lines.append(tr(lang, "Full diff: Pending page in the dashboard."))
     if is_new:
-        outcome = "new strategy proposed"
+        outcome = tr(lang, "new strategy proposed")
     else:
-        outcome = f"{count} strategy change{'' if count == 1 else 's'} proposed"
+        outcome = tr(lang, "{count} strategy change proposed" if count == 1
+                     else "{count} strategy changes proposed", count=count)
     subject = f"{prefix}{strategy_id or ticker} — {outcome}"
-    return subject, CardBody("\n".join(lines), footer=EMAIL_FOOTER)
+    return subject, CardBody("\n".join(lines), footer=tr(lang, EMAIL_FOOTER), lang=lang)
 
 
 # ---------------------------------------------------------------------------
@@ -739,7 +805,7 @@ def revision_card(*, account: str, review_id: int, ticker: str, strategy_id: str
 
 def revision_effect(doc: Any, *, price: Decimal, ctx: dict[str, Decimal],
                     position: Any = None, equity: Decimal | None = None,
-                    confirm_only: bool = False) -> str:
+                    confirm_only: bool = False, lang: str = "en") -> str:
     """What the sentinel's next pass would do with the proposed strategy
     `doc` (a parsed StrategyDoc) at `price`: which armed rules are true
     right now, and what each would lead to under the proposed
@@ -758,41 +824,42 @@ def revision_effect(doc: Any, *, price: Decimal, ctx: dict[str, Decimal],
     )
 
     if confirm_only and doc.authorization == Authorization.AUTO:
-        # The paper regime demotes auto to confirm for the pass (run_once).
         doc = doc.model_copy(update={"authorization": Authorization.CONFIRM})
     if doc.status != StrategyStatus.ACTIVE:
-        return (f"nothing, the strategy would be {doc.status.value} "
-                "(rules are only checked while it is active).")
+        return tr(lang, "nothing, the strategy would be {status} "
+                        "(rules are only checked while it is active).",
+                  status=doc.status.value)
     firing = [rule for rule in doc.rules
               if rule.state == RuleState.ARMED and evaluate_condition(rule.condition, ctx)]
     if not firing:
-        return f"no armed rule fires at the current price ({money(price)})."
+        return tr(lang, "no armed rule fires at the current price ({price}).",
+                  price=money(price))
     parts = []
     for rule in firing:
         spec = parse_action(rule.action)
         if is_option_action(spec):
-            # Option rules depend on market hours, the options backend and
-            # contract selection, none of which a dry run can know.
-            parts.append(f"{rule.id} is true now (option rule: {rule.action}; "
-                         "what it does depends on market hours)")
+            parts.append(tr(lang, "{rule_id} is true now (option rule: {action}; "
+                                  "what it does depends on market hours)",
+                            rule_id=rule.id, action=rule.action))
             continue
         no_order = (equity is not None
                     and to_order_intent(spec, strategy=doc, rule_id=rule.id, price=price,
                                         position=position, equity=equity,
                                         reason="dry run") is None)
         if no_order:
-            outcome = "makes no order (nothing to trade)"
+            outcome = tr(lang, "makes no order (nothing to trade)")
         elif doc.authorization == Authorization.NOTIFY:
-            outcome = "sends an alert, no order"
+            outcome = tr(lang, "sends an alert, no order")
         elif doc.authorization == Authorization.AUTO and rule.type == RuleType.HARD:
-            outcome = f"runs without asking: {rule.action}"
+            outcome = tr(lang, "runs without asking: {action}", action=rule.action)
         elif doc.authorization == Authorization.AUTO:
-            outcome = f"goes to the agent to decide: {rule.action}"
+            outcome = tr(lang, "goes to the agent to decide: {action}", action=rule.action)
         else:
-            outcome = f"asks you to approve: {rule.action}"
-        parts.append(f"{rule.id} fires and {outcome}")
-    return (f"at the current price ({money(price)}) the next check: "
-            + "; ".join(parts) + ".")
+            outcome = tr(lang, "asks you to approve: {action}", action=rule.action)
+        parts.append(tr(lang, "{rule_id} fires and {outcome}", rule_id=rule.id,
+                        outcome=outcome))
+    return tr(lang, "at the current price ({price}) the next check: {parts}.",
+              price=money(price), parts="; ".join(parts))
 
 
 # ---------------------------------------------------------------------------

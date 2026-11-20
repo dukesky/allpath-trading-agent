@@ -4,7 +4,7 @@ import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from allpath_trade import compact_cards
+from allpath_trade import compact_cards, i18n
 from allpath_trade.broker.base import Broker, OrderIntent
 from allpath_trade.data.base import DataSource
 from allpath_trade.notify import events
@@ -100,7 +100,8 @@ class QueueingOrderSink:
                 brief=brief,
                 **({"compact": {"side": intent.side.value, "notional": intent.notional,
                                 "qty": intent.qty, "source": "chat"}}
-                   if compact_cards.enabled(self.queue) else {}))
+                   if compact_cards.enabled(self.queue) else {}),
+                **i18n.lang_kw(self.queue))
             notify_review_queued(
                 queue=self.queue, notifier=self.notifier, app_state=self.app_state,
                 telegram_bot_token=self.telegram_bot_token, review_id=review_id,

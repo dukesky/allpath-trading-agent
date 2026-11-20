@@ -340,7 +340,7 @@ def card_brief_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dict
 
 CARD_FORMAT_COLUMNS = [
     "review_id", "account", "ts", "date_et", "window", "kind", "source", "status",
-    "card_format",
+    "card_format", "card_lang",
 ]
 
 
@@ -351,6 +351,7 @@ def card_format_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dic
     column existed and reviews that sent no card). No card text."""
     columns = {r[1] for r in conn.execute("PRAGMA table_info(pending_reviews)")}
     select = "card_format" if "card_format" in columns else "NULL AS card_format"
+    select += ", card_lang" if "card_lang" in columns else ", NULL AS card_lang"
     rows = []
     for r in conn.execute(
             f"SELECT id, account, ts, kind, source, status, {select}"
@@ -361,7 +362,8 @@ def card_format_rows(conn: sqlite3.Connection, start: str, end: str) -> list[dic
         rows.append({"review_id": r["id"], "account": r["account"], "ts": r["ts"],
                      "date_et": day, "window": window_for(day), "kind": r["kind"],
                      "source": r["source"], "status": r["status"],
-                     "card_format": r["card_format"] or "classic"})
+                     "card_format": r["card_format"] or "classic",
+                     "card_lang": r["card_lang"] or "en"})
     return rows
 
 

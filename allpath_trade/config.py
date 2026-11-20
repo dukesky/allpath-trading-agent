@@ -227,12 +227,31 @@ class Settings(BaseSettings):
     shadow_reflection_revision_cards: bool | None = None
     # Option holdings in the shadow ledger (allpath_trade/shadow_options.py):
     # the shadow chat agent gets tools to enter, mark and close out the long
-    # options the owner holds at his real broker, and to record an option
-    # trade he reports. Holdings and marks only: the app never proposes or
+    # options the owner holds at their real broker, and to record an option
+    # trade they report. Holdings and marks only: the app never proposes or
     # queues an option order for shadow. Same bare/shadow_ pattern, off by
     # default; only meaningful for shadow (paper has no option ledger).
     option_holdings: bool = False
     shadow_option_holdings: bool | None = None
+    # Language of what the agent sends the owner (allpath_trade/i18n.py):
+    # chat replies, card text, rule messages, receipts, digest, check-in.
+    # `en` (default) or `zh`. Tickers, numbers, rule ids, strategy YAML,
+    # memory files and the web pages are never translated. The shadow_ one
+    # (None = inherit) overrides it for shadow; paper must stay `en` while
+    # its experiment runs. .env-only. (Named AGENT_LANGUAGE, not LANGUAGE:
+    # that is a locale variable on most systems.)
+    agent_language: str = "en"
+    shadow_agent_language: str | None = None
+
+    @field_validator("agent_language", "shadow_agent_language")
+    @classmethod
+    def _known_language(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return v
+        value = v.strip().lower()
+        if value not in ("en", "zh"):
+            raise ValueError("must be en or zh")
+        return value
     # Options trading gate: enable options trading when set. .env-only by
     # design -- options trading is an opt-in feature requiring deliberate
     # configuration, not a settings-page toggle.

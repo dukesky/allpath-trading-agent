@@ -36,7 +36,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from allpath_trade import market_hours
+from allpath_trade import i18n, market_hours
 from allpath_trade.agent.attachments import (
     ALLOWED_MIMES,
     IMAGES_ONLY_TEXT,
@@ -1189,18 +1189,24 @@ class TelegramPoller:
         # of an account label is derived, here as everywhere else -- an
         # unknown account degrades to no prefix rather than inventing one.
         prefix = _prefix(account)
+        # AGENT_LANGUAGE (allpath_trade/i18n.py): outcome lines and toasts in
+        # the row's account's language; English builds the same text as before.
+        lang = i18n.of(queue)
+
+        def _t(text: str, **kw: Any) -> str:
+            return i18n.tr(lang, text, **kw)
 
         def _toast(text: str) -> str:
-            return (prefix + text)[:TELEGRAM_TOAST_LIMIT]
+            return (prefix + _t(text))[:TELEGRAM_TOAST_LIMIT]
 
         try:
             row = queue.get(review_id)
         except ReviewError:
-            return "That review no longer exists.", _toast("Not found"), False
+            return _t("That review no longer exists."), _toast("Not found"), False
 
         stored_nonce = (row["approval_token_hash"] or "")[:16]
         if row["status"] != "pending" or not hmac.compare_digest(stored_nonce, nonce):
-            message = "That item is no longer pending, or this button has expired."
+            message = _t("That item is no longer pending, or this button has expired.")
             return message, _toast("Already resolved"), False
 
         row_source = row["source"]
@@ -1246,9 +1252,11 @@ class TelegramPoller:
             try:
                 queue.reject(review_id, note="rejected via Telegram")
             except ReviewError as exc:
-                return f"{prefix}Not processed: {exc}", _toast("Not processed"), True
+                return (_t("{prefix}Not processed: {error}", prefix=prefix, error=exc),
+                        _toast("Not processed"), True)
             _echo("rejected (rejected via Telegram)")
-            return f"{prefix}❌ Rejected #{review_id}.", _toast("Rejected"), True
+            return (_t("{prefix}❌ Rejected #{review_id}.", prefix=prefix,
+                       review_id=review_id), _toast("Rejected"), True)
 
         # action == "approve"
         if row["kind"] == "option_order" and not market_hours.is_us_market_open():
@@ -1274,28 +1282,35 @@ class TelegramPoller:
             # so explicitly, rather than just "left pending", is the honest
             # version -- a bare "left pending" with no live buttons and no
             # explanation reads as a stuck bot, not a stuck review.
-            message = (f"{prefix}⚠️ {noun} #{review_id} failed re-validation "
-                      f"({exc}) and stayed pending — reopen from the app.")
+            message = _t("{prefix}⚠️ {noun} #{review_id} failed re-validation "
+                         "({error}) and stayed pending — reopen from the app.",
+                         prefix=prefix, noun=_t(noun), review_id=review_id, error=exc)
             return message, _toast("Left pending: re-validation failed"), True
         except ReviewError as exc:
-            return f"{prefix}Not processed: {exc}", _toast("Not processed"), True
+            return (_t("{prefix}Not processed: {error}", prefix=prefix, error=exc),
+                    _toast("Not processed"), True)
         except ExecutionError as exc:
             _echo(f"execution failed: {exc}")
-            message = f"{prefix}⚠️ Review #{review_id} claimed, but execution failed: {exc}"
+            message = _t("{prefix}⚠️ Review #{review_id} claimed, but execution failed: "
+                         "{error}", prefix=prefix, review_id=review_id, error=exc)
             return message, _toast("Execution failed"), True
 
         if row["kind"] == "strategy_revision":
-            message = (f"Revision applied to {row['strategy_id']}."
+            message = (_t("Revision applied to {strategy_id}.",
+                          strategy_id=row['strategy_id'])
                       + bundle.strategies.rearm_warning(row['strategy_id']))
             _echo(f"revision applied to {row['strategy_id']}")
-            return f"{prefix}✅ Approved #{review_id} — {message}", _toast("Approved"), True
+            return (_t("{prefix}✅ Approved #{review_id} — {message}", prefix=prefix,
+                       review_id=review_id, message=message), _toast("Approved"), True)
 
         if row["kind"] == "shadow_edit":
             # shadow-dual-active T6: mirrors the strategy_revision branch
             # above -- approve() returns None here too, just the ledger
             # write the applier already made.
             _echo(f"{row['action']} applied")
-            message = f"{prefix}✅ Approved #{review_id} — {row['action']} applied to the shadow ledger."
+            message = _t("{prefix}✅ Approved #{review_id} — {action} applied to the "
+                         "shadow ledger.", prefix=prefix, review_id=review_id,
+                         action=row['action'])
             return message, _toast("Approved"), True
 
         if row["kind"] == "option_order":
@@ -1310,7 +1325,8 @@ class TelegramPoller:
         if not result.submitted:
             reasons = "; ".join(result.decision.reasons)
             _echo(f"blocked by the risk gate ({reasons})")
-            return (f"{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
+            return (_t("{prefix}⚠️ #{review_id} rejected by the risk gate: {reasons}",
+                       prefix=prefix, review_id=review_id, reasons=reasons),
                     _toast("Blocked by risk gate"), True)
         if account == "shadow":
             # C3: approving a shadow order writes a ledger row -- nothing was
@@ -1321,8 +1337,9 @@ class TelegramPoller:
             summary = ("order recorded in your shadow ledger — place it in "
                        "your brokerage now")
             _echo(summary)
-            message = (f"{prefix}✅ Approved #{review_id} — order recorded in "
-                       f"your shadow ledger. Place it in your brokerage now.")
+            message = _t("{prefix}✅ Approved #{review_id} — order recorded in "
+                         "your shadow ledger. Place it in your brokerage now.",
+                         prefix=prefix, review_id=review_id)
             return message, _toast("Recorded"), True
         _echo("order submitted")
         return (f"{prefix}✅ Approved #{review_id} — order submitted.",

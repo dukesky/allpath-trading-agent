@@ -129,6 +129,9 @@ class ReviewQueue:
         # places that build a card for one of this queue's reviews read it
         # here, since they all already hold the queue. Card text only.
         self.compact_cards: bool = False
+        # AGENT_LANGUAGE (allpath_trade/i18n.py): app.py sets this account's
+        # card language once at startup; "en" builds every card as before.
+        self.language: str = "en"
         # `fn(new_yaml, strategy_id) -> str`: the sentinel's dry run of what
         # approving a strategy revision would do right now (compact cards
         # only; wired in app.py with the flag). None = the line is left out.
@@ -963,6 +966,15 @@ class ReviewQueue:
         self._conn.execute(
             "UPDATE pending_reviews SET card_format = ? WHERE id = ? AND account = ?",
             (card_format, review_id, self._account))
+        self._conn.commit()
+
+    def record_card_lang(self, review_id: int, lang: str) -> None:
+        """The language of the card sent for this review (AGENT_LANGUAGE,
+        allpath_trade/i18n.py), recorded like `card_format`. Only written
+        for a non-English card; NULL means English."""
+        self._conn.execute(
+            "UPDATE pending_reviews SET card_lang=? WHERE id=? AND account=?",
+            (lang, review_id, self._account))
         self._conn.commit()
 
     def set_hold_reason(self, review_id: int, reason: str) -> None:

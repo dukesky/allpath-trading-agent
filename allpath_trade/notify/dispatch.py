@@ -28,6 +28,7 @@ has already committed."""
 
 from __future__ import annotations
 
+from allpath_trade import i18n
 from allpath_trade.notify.agent import send_agent_only
 from allpath_trade.notify.base import Notifier
 from allpath_trade.notify.events import _prefix
@@ -114,9 +115,12 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
         nonce = (row["approval_token_hash"] or "")[:16]
         if not nonce:
             return False
+        lang = i18n.of(queue)
         keyboard = {"inline_keyboard": [[
-            {"text": "✅ Approve", "callback_data": f"rv:approve:{review_id}:{nonce}"},
-            {"text": "❌ Reject", "callback_data": f"rv:reject:{review_id}:{nonce}"},
+            {"text": i18n.tr(lang, "✅ Approve"),
+             "callback_data": f"rv:approve:{review_id}:{nonce}"},
+            {"text": i18n.tr(lang, "❌ Reject"),
+             "callback_data": f"rv:reject:{review_id}:{nonce}"},
         ]]}
         recorder = getattr(queue, "telegram_card_recorder", None)
         if recorder is None:
@@ -133,7 +137,7 @@ def push_telegram_review_queued(*, queue: ReviewQueue, app_state: AppState | Non
             # A compact card (allpath_trade/compact_cards.py): same hint,
             # one short line. Only ever printed here, where replies work.
             from allpath_trade.compact_cards import ORDER_THREAD_HINT as hint
-        html = to_telegram_html(_prefixed_for_telegram(account, body + hint))
+        html = to_telegram_html(_prefixed_for_telegram(account, body + i18n.tr(lang, hint)))
         message_id = api.send_message_id(chat_id, html, reply_markup=keyboard)
         if message_id is not None:
             recorder(review_id, chat_id, message_id)
@@ -201,6 +205,12 @@ def notify_review_queued(*, queue: ReviewQueue, notifier: Notifier | None,
     if card_format:
         try:
             queue.record_card_format(int(review_id), card_format)
+        except Exception:  # noqa: BLE001, S110 — bookkeeping, never block the send
+            pass
+    card_lang = getattr(body, "lang", None)
+    if card_lang and card_lang != i18n.DEFAULT_LANGUAGE:
+        try:
+            queue.record_card_lang(int(review_id), card_lang)
         except Exception:  # noqa: BLE001, S110 — bookkeeping, never block the send
             pass
     if notify_email and notifier is not None:
